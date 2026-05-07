@@ -205,6 +205,13 @@ db.exec(`
 		model                    TEXT NOT NULL,
 		system_prompt            TEXT NOT NULL DEFAULT '',
 		context_window           INTEGER NOT NULL DEFAULT 20,
+		-- JSON array of trigger phrases.  When any phrase in the
+		-- list appears in a room message (word-boundary, case-
+		-- insensitive), the bot reacts as if it had been
+		-- @-mentioned.  Empty array means "only respond to
+		-- explicit mentions / replies / DMs" -- same behaviour the
+		-- bot platform shipped with.
+		triggers                 TEXT NOT NULL DEFAULT '[]',
 		-- Synapse-side credentials so the engine can act as the bot.
 		access_token_enc         TEXT NOT NULL,        -- sealed via secret_box.ts
 		device_id                TEXT NOT NULL,
@@ -263,6 +270,10 @@ function ensureColumns(table: string, columns: Array<{ name: string; ddl: string
 ensureColumns("flags", [
 	{ name: "retracted_at", ddl: "retracted_at INTEGER" },
 	{ name: "retracted_by", ddl: "retracted_by TEXT" },
+]);
+ensureColumns("bots", [
+	// JSON array of trigger phrases — see CREATE TABLE comment above.
+	{ name: "triggers", ddl: "triggers TEXT NOT NULL DEFAULT '[]'" },
 ]);
 
 export type PostRow = {
@@ -995,6 +1006,12 @@ export interface BotRow {
 	model: string;
 	system_prompt: string;
 	context_window: number;
+	/** Trigger phrases.  Stored on disk as a JSON array (column
+	 * type TEXT); helpers below parse on read so callers see a
+	 * native string[].  Empty array = "respond only to explicit
+	 * mentions / replies / DMs," which is the platform's original
+	 * behaviour and the default for newly-created bots. */
+	triggers: string[];
 	access_token_enc: string;
 	device_id: string;
 	enabled: number;
@@ -1005,12 +1022,35 @@ export interface BotRow {
 	last_used_at: number | null;
 }
 
+/** Raw shape coming back from the bots table.  Internal helper —
+ * `mapBotRow` runs every column through the sanitiser the public
+ * helpers (`getBotById`, `listBotsByOwner`, etc.) hand callers. */
+interface RawBotRow extends Omit<BotRow, "triggers"> {
+	triggers: string;
+}
+
+function mapBotRow(raw: RawBotRow | undefined): BotRow | null {
+	if (!raw) return null;
+	let triggers: string[] = [];
+	try {
+		const parsed = JSON.parse(raw.triggers ?? "[]");
+		if (Array.isArray(parsed)) {
+			triggers = parsed.filter((s): s is string => typeof s === "string" && s.length > 0);
+		}
+	} catch {
+		// Corrupt JSON — log and fall back to empty.  The next save
+		// will rewrite the column with valid JSON.
+		console.warn(`engine: bot ${raw.id} has malformed triggers JSON; treating as empty`);
+	}
+	return { ...raw, triggers };
+}
+
 const insertBotStmt = db.prepare(`
 	INSERT INTO bots
 		(mxid, owner_id, display_name, avatar_mxc, provider, api_base,
 		 api_key_enc, model, system_prompt, context_window,
-		 access_token_enc, device_id, enabled, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+		 access_token_enc, device_id, enabled, created_at, triggers)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
 `);
 const listBotsByOwnerStmt = db.prepare(
 	`SELECT * FROM bots WHERE owner_id = ? ORDER BY created_at ASC`,
@@ -1036,7 +1076,8 @@ const updateBotStmt = db.prepare(`
 		model          = COALESCE(?, model),
 		system_prompt  = COALESCE(?, system_prompt),
 		context_window = COALESCE(?, context_window),
-		enabled        = COALESCE(?, enabled)
+		enabled        = COALESCE(?, enabled),
+		triggers       = COALESCE(?, triggers)
 	WHERE id = ?
 `);
 const deleteBotStmt = db.prepare(`DELETE FROM bots WHERE id = ?`);
@@ -1061,6 +1102,7 @@ export function createBot(opts: {
 	context_window: number;
 	access_token_enc: string;
 	device_id: string;
+	triggers?: string[];
 }): BotRow {
 	const r = insertBotStmt.run(
 		opts.mxid,
@@ -1076,13 +1118,17 @@ export function createBot(opts: {
 		opts.access_token_enc,
 		opts.device_id,
 		Date.now(),
+		JSON.stringify(opts.triggers ?? []),
 	);
-	const row = getBotByIdStmt.get(Number(r.lastInsertRowid)) as BotRow;
+	const row = mapBotRow(getBotByIdStmt.get(Number(r.lastInsertRowid)) as RawBotRow);
+	if (!row) throw new Error(`createBot: failed to read back inserted row ${r.lastInsertRowid}`);
 	return row;
 }
 
 export function listBotsByOwner(ownerId: string): BotRow[] {
-	return listBotsByOwnerStmt.all(ownerId) as BotRow[];
+	return (listBotsByOwnerStmt.all(ownerId) as RawBotRow[])
+		.map(r => mapBotRow(r))
+		.filter((r): r is BotRow => r !== null);
 }
 
 export function listAllBotMxids(): string[] {
@@ -1090,15 +1136,17 @@ export function listAllBotMxids(): string[] {
 }
 
 export function listAllEnabledBots(): BotRow[] {
-	return listAllEnabledBotsStmt.all() as BotRow[];
+	return (listAllEnabledBotsStmt.all() as RawBotRow[])
+		.map(r => mapBotRow(r))
+		.filter((r): r is BotRow => r !== null);
 }
 
 export function getBotById(id: number): BotRow | null {
-	return (getBotByIdStmt.get(id) as BotRow | undefined) ?? null;
+	return mapBotRow(getBotByIdStmt.get(id) as RawBotRow | undefined);
 }
 
 export function getBotByMxid(mxid: string): BotRow | null {
-	return (getBotByMxidStmt.get(mxid) as BotRow | undefined) ?? null;
+	return mapBotRow(getBotByMxidStmt.get(mxid) as RawBotRow | undefined);
 }
 
 export function countBotsByOwner(ownerId: string): number {
@@ -1120,6 +1168,10 @@ export function updateBot(id: number, patch: {
 	system_prompt?: string;
 	context_window?: number;
 	enabled?: 0 | 1;
+	/** When provided, replaces the whole list (atomic — there's no
+	 * "add one" / "remove one" granularity at this layer; the
+	 * client always sends the full set). */
+	triggers?: string[];
 }): BotRow | null {
 	updateBotStmt.run(
 		patch.display_name ?? null,
@@ -1131,6 +1183,7 @@ export function updateBot(id: number, patch: {
 		patch.system_prompt ?? null,
 		patch.context_window ?? null,
 		patch.enabled ?? null,
+		patch.triggers === undefined ? null : JSON.stringify(patch.triggers),
 		id,
 	);
 	return getBotById(id);

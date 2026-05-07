@@ -56,6 +56,7 @@ interface FormState {
 	model: string;
 	systemPrompt: string;
 	contextWindow: number;
+	triggers: string[];
 }
 
 function freshFormState(): FormState {
@@ -69,6 +70,7 @@ function freshFormState(): FormState {
 		model: PROVIDER_DEFAULTS.openrouter.model,
 		systemPrompt: "",
 		contextWindow: 20,
+		triggers: [],
 	};
 }
 
@@ -83,6 +85,7 @@ function formStateFromBot(bot: BotSummary): FormState {
 		model: bot.model,
 		systemPrompt: bot.system_prompt,
 		contextWindow: bot.context_window,
+		triggers: bot.triggers ?? [],
 	};
 }
 
@@ -256,6 +259,7 @@ export function BotEditForm({
 					model: form.model.trim(),
 					system_prompt: form.systemPrompt,
 					context_window: form.contextWindow,
+					triggers: form.triggers,
 				});
 			} else if (bot) {
 				const patch: Record<string, unknown> = {
@@ -265,6 +269,7 @@ export function BotEditForm({
 					model: form.model.trim(),
 					system_prompt: form.systemPrompt,
 					context_window: form.contextWindow,
+					triggers: form.triggers,
 				};
 				// Only send api_key if the user replaced it (mask was
 				// off and a non-empty value entered).
@@ -683,6 +688,17 @@ export function BotEditForm({
 						</p>
 
 						<div className="space-y-1.5">
+							<Label>Trigger phrases <span className="text-muted-foreground font-normal">(optional)</span></Label>
+							<TriggerInput
+								triggers={form.triggers}
+								onChange={next => update("triggers", next)}
+							/>
+							<p className="text-xs text-muted-foreground">
+								Phrases that wake the bot up the same way an @mention does. Type a phrase and press <kbd className="px-1 py-0.5 rounded border border-border bg-muted text-[10px] font-mono">Enter</kbd> or <kbd className="px-1 py-0.5 rounded border border-border bg-muted text-[10px] font-mono">,</kbd> to add it. Matched word-by-word, case-insensitive — "vessel" matches "Vessel" but not "vessels."
+							</p>
+						</div>
+
+						<div className="space-y-1.5">
 							<Label htmlFor="bot-system-prompt">System prompt <span className="text-muted-foreground font-normal">(optional)</span></Label>
 							<textarea
 								ref={systemPromptRef}
@@ -905,6 +921,88 @@ function KnowledgeList({
 				</li>
 			))}
 		</ul>
+	);
+}
+
+// Chip-style multi-value input.  Existing entries render as pills
+// with an X to remove; a single trailing input takes new entries.
+// Enter or `,` commits the typed value as a chip; Backspace on an
+// empty field removes the last chip.  Trims, dedupes case-
+// insensitively, caps to 50 (matches the server-side sanitiser),
+// matches per-phrase length cap of 100.
+function TriggerInput({
+	triggers,
+	onChange,
+}: {
+	triggers: string[];
+	onChange(next: string[]): void;
+}) {
+	const [draft, setDraft] = useState("");
+	const inputRef = useRef<HTMLInputElement | null>(null);
+
+	function commit(raw: string) {
+		const trimmed = raw.trim().slice(0, 100);
+		if (!trimmed) return;
+		const lower = trimmed.toLowerCase();
+		if (triggers.some(t => t.toLowerCase() === lower)) return;
+		if (triggers.length >= 50) return;
+		onChange([...triggers, trimmed]);
+		setDraft("");
+	}
+
+	function remove(idx: number) {
+		onChange(triggers.filter((_, i) => i !== idx));
+	}
+
+	return (
+		<div
+			className="flex flex-wrap items-center gap-1.5 min-h-9 rounded-md border border-foreground/15 bg-background px-2 py-1.5 focus-within:ring-1 focus-within:ring-ring focus-within:border-ring"
+			onClick={() => inputRef.current?.focus()}
+		>
+			{triggers.map((t, i) => (
+				<span
+					key={`${t}-${i}`}
+					className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded bg-primary/15 text-primary text-xs"
+				>
+					<span>{t}</span>
+					<button
+						type="button"
+						onClick={e => { e.stopPropagation(); remove(i); }}
+						aria-label={`Remove ${t}`}
+						className="hover:text-destructive"
+					>
+						<X className="h-3 w-3" />
+					</button>
+				</span>
+			))}
+			<input
+				ref={inputRef}
+				type="text"
+				value={draft}
+				onChange={e => {
+					const v = e.target.value;
+					// Treat a typed comma as a chip-commit too — matches
+					// the spec the user asked for ("tag separated").
+					if (v.endsWith(",")) {
+						commit(v.slice(0, -1));
+					} else {
+						setDraft(v);
+					}
+				}}
+				onKeyDown={e => {
+					if (e.key === "Enter") {
+						e.preventDefault();
+						commit(draft);
+					} else if (e.key === "Backspace" && draft === "" && triggers.length > 0) {
+						e.preventDefault();
+						remove(triggers.length - 1);
+					}
+				}}
+				onBlur={() => commit(draft)}
+				placeholder={triggers.length === 0 ? "i need help, vessel, on-call" : ""}
+				className="flex-1 min-w-[8ch] bg-transparent outline-none text-sm py-0.5"
+			/>
+		</div>
 	);
 }
 

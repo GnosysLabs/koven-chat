@@ -52,7 +52,7 @@ export interface PipelineDeps {
  */
 export async function maybeHandleMention(deps: PipelineDeps): Promise<void> {
 	const { bot, event, room } = deps;
-	if (!isMentionOf(event, bot.mxid, room)) return;
+	if (!isMentionOf(event, bot.mxid, room) && !matchesTrigger(event, bot.triggers)) return;
 
 	const flightKey = `${bot.id}:${room.roomId}`;
 	if (inFlight.has(flightKey)) {
@@ -220,6 +220,27 @@ function isDmWithBot(room: SdkRoom, botMxid: string): boolean {
 
 function escapeRegex(s: string): string {
 	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** True if any of the bot's configured trigger phrases appears in
+ * the message body.  Word-boundary, case-insensitive — "vessel"
+ * matches "Vessel" and "the vessel sailed" but not "vessels" or
+ * "revesseling."  Multi-word phrases work the same way ("i need
+ * help" matches "I need help with this", not "I need helpful
+ * advice").  Empty trigger list short-circuits to false. */
+export function matchesTrigger(event: MatrixEvent, triggers: string[]): boolean {
+	if (triggers.length === 0) return false;
+	if (event.getType() !== "m.room.message") return false;
+	const content = event.getContent() as { body?: unknown };
+	const body = typeof content.body === "string" ? content.body : "";
+	if (!body) return false;
+	for (const phrase of triggers) {
+		const trimmed = phrase.trim();
+		if (!trimmed) continue;
+		const re = new RegExp(`\\b${escapeRegex(trimmed)}\\b`, "i");
+		if (re.test(body)) return true;
+	}
+	return false;
 }
 
 // ─── Context gathering ─────────────────────────────────────────────

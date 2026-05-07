@@ -31,6 +31,11 @@ export interface BotSummary {
 	model: string;
 	system_prompt: string;
 	context_window: number;
+	/** Trigger phrases — non-mention words/phrases that, when seen
+	 * in any room message, make the bot reply.  Case-insensitive,
+	 * word-boundary matching server-side.  Empty array = explicit-
+	 * mention-only (the original behaviour). */
+	triggers: string[];
 	enabled: boolean;
 	created_at: number;
 	total_prompt_tokens: number;
@@ -49,6 +54,7 @@ export interface BotCreateRequest {
 	model: string;
 	system_prompt?: string;
 	context_window?: number;
+	triggers?: string[];
 }
 
 export interface BotPatchRequest {
@@ -62,6 +68,8 @@ export interface BotPatchRequest {
 	system_prompt?: string;
 	context_window?: number;
 	enabled?: boolean;
+	/** Replaces the whole list atomically.  Send `[]` to clear. */
+	triggers?: string[];
 }
 
 export interface BotsListResponse {

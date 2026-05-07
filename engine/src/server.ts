@@ -252,6 +252,7 @@ function toBotSummary(row: import("./db").BotRow) {
 		model: row.model,
 		system_prompt: row.system_prompt,
 		context_window: row.context_window,
+		triggers: row.triggers,
 		enabled: row.enabled === 1,
 		created_at: row.created_at,
 		// Usage stats are operator-/owner-readable.
@@ -264,6 +265,27 @@ function toBotSummary(row: import("./db").BotRow) {
 		// empty string (or omitted field) as "leave the key alone".
 		has_api_key: true,
 	};
+}
+
+/** Coerce arbitrary JSON into a clean trigger array.  Trims, drops
+ * empties + duplicates, caps each phrase length + total count, so a
+ * malicious or sloppy client can't fill the column with megabytes of
+ * junk that the pipeline then has to scan against every message. */
+function sanitiseTriggers(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	const out: string[] = [];
+	const seen = new Set<string>();
+	for (const item of value) {
+		if (typeof item !== "string") continue;
+		const trimmed = item.trim().slice(0, 100);
+		if (!trimmed) continue;
+		const lower = trimmed.toLowerCase();
+		if (seen.has(lower)) continue;
+		seen.add(lower);
+		out.push(trimmed);
+		if (out.length >= 50) break;
+	}
+	return out;
 }
 
 // 32-byte URL-safe base64 password used for Synapse's stored password
@@ -627,6 +649,7 @@ export function startServer(): void {
 				const contextWindow = Number.isFinite(body.context_window)
 					? Math.max(1, Math.min(100, Math.floor(body.context_window as number)))
 					: 20;
+				const triggers = sanitiseTriggers(body.triggers);
 
 				if (!isValidBotName(name)) {
 					return json({ error: "invalid_name", detail: "Use lowercase a-z, 0-9, and -; up to 21 chars." }, { status: 400 });
@@ -697,6 +720,7 @@ export function startServer(): void {
 					context_window: contextWindow,
 					access_token_enc: accessTokenEnc,
 					device_id: token.device_id,
+					triggers,
 				});
 				// Boot the runtime in the background — sync + crypto
 				// init takes seconds; the API call returns immediately
@@ -759,6 +783,9 @@ export function startServer(): void {
 					}
 					if (typeof body.enabled === "boolean") {
 						patch.enabled = body.enabled ? 1 : 0;
+					}
+					if (Array.isArray(body.triggers)) {
+						patch.triggers = sanitiseTriggers(body.triggers);
 					}
 
 					const updated = updateBot(id, patch);
