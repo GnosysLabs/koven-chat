@@ -15,14 +15,24 @@ use tauri_plugin_updater::UpdaterExt;
 
 /// JS injected into every page before the SPA scripts run.  Catches
 /// `<a target="_blank">` clicks and `window.open()` calls and routes
-/// external URLs through the `opener` plugin (the capabilities config
-/// permits `opener:allow-open-url` for the main window).
+/// the URL through the WebView's top-level navigation, where the Rust
+/// `on_navigation` handler picks it up and dispatches external links
+/// to the OS browser via the opener plugin.
 ///
 /// Why a JS interceptor on top of Rust's `on_navigation`?  WKWebView
 /// (macOS) and WebKitGTK (Linux) treat target=_blank / window.open as
 /// pop-up requests, not top-level navigations — without a native
 /// new-window handler the click is silently dropped and `on_navigation`
-/// never fires.  This script catches them on the way out.
+/// never fires.  This script rewrites those into top-level navigations
+/// so they reach the navigation hook.
+///
+/// Why not call `window.__TAURI_INTERNALS__.invoke('plugin:opener|...')`
+/// directly?  In dev mode and any time we navigate to client.koven.chat,
+/// the SPA runs from a remote origin — Tauri 2 doesn't inject the IPC
+/// bridge into remote URLs by default (security feature), so the
+/// internals object is undefined and `invoke` throws.  Going through
+/// `window.location.href` instead keeps everything driven from the
+/// trusted Rust side.
 ///
 /// The internal-host list mirrors `is_internal` in Rust; they need to
 /// stay in sync if either set of origins changes.
@@ -39,18 +49,15 @@ const LINK_INTERCEPTOR_JS: &str = r#"
 			return false;
 		} catch (_) {
 			// Non-URL-parseable href (mailto:, tel:, javascript:, etc.) —
-			// let the default handler take it; the opener plugin can
-			// route mailto:/tel: through the OS too via the navigation
-			// path below.
+			// fall through and let the navigation hook handle it.
 			return false;
 		}
 	}
-	function openExternal(url) {
-		try {
-			window.__TAURI_INTERNALS__.invoke('plugin:opener|open_url', { url: url });
-		} catch (e) {
-			console.warn('koven-desktop: opener invoke failed', e);
-		}
+	function dispatch(url) {
+		// Top-level navigation triggers the Rust on_navigation hook.
+		// External URLs get cancelled there and handed to the OS
+		// browser; internal URLs proceed normally.
+		window.location.href = url;
 	}
 	document.addEventListener('click', function (e) {
 		if (e.defaultPrevented) return;
@@ -70,24 +77,17 @@ const LINK_INTERCEPTOR_JS: &str = r#"
 		if (href.startsWith('#') || href.startsWith('javascript:')) return;
 		const blank = a.target === '_blank';
 		const external = !isInternal(a.href);
+		// We only need to step in when the WebView would otherwise
+		// drop the click silently — that's any _blank link, plus any
+		// link the SPA explicitly marks for external opening.
 		if (!blank && !external) return;
 		e.preventDefault();
-		if (external) {
-			openExternal(a.href);
-		} else {
-			// Internal but with target=_blank — keep it in the single
-			// window we have rather than dropping the click.
-			window.location.assign(a.href);
-		}
+		dispatch(a.href);
 	}, true);
 	const origOpen = window.open;
 	window.open = function (url, target, features) {
 		if (typeof url === 'string') {
-			if (isInternal(url)) {
-				window.location.assign(url);
-			} else {
-				openExternal(url);
-			}
+			dispatch(url);
 			return null;
 		}
 		return origOpen ? origOpen.call(window, url, target, features) : null;
