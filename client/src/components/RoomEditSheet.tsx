@@ -20,11 +20,12 @@ import { Label } from "@/components/ui/label";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { cn } from "@/lib/utils";
 import { EmojiPicker } from "@/components/EmojiPicker";
-import { Camera, EyeOff, Globe, Smile, Trash2 } from "lucide-react";
+import { Camera, DoorOpen, EyeOff, Globe, Smile, Trash2 } from "lucide-react";
 import type { Room } from "@koven/shared";
 
 export interface RoomEditSheetProps {
 	room: Room | null;              // null keeps the dialog closed
+	currentUserId: string | null;   // viewer's mxid; drives creator check
 	onClose(): void;
 	onSave(opts: {
 		roomId: string;
@@ -35,9 +36,23 @@ export interface RoomEditSheetProps {
 		iconEmoji?: string;
 		visibility?: "public" | "private";
 	}): Promise<void>;
+	// Membership exit handlers.  The dialog shows EXACTLY ONE of
+	// these based on whether the viewer is the room's creator:
+	//
+	//   - Non-creators see Leave only.  The room continues without
+	//     them; other members keep their power levels.
+	//   - The creator sees Delete only.  Leaving without picking a
+	//     successor would orphan the room with no founder, so we
+	//     don't offer that gesture — the creator must wind the room
+	//     down (kicks everyone, leaves + forgets self) instead.
+	//
+	// Both are still optional because the parent might omit them in
+	// contexts where membership changes don't apply.
+	onLeave?(roomId: string): Promise<void>;
+	onDelete?(roomId: string): Promise<void>;
 }
 
-export function RoomEditSheet({ room, onClose, onSave }: RoomEditSheetProps) {
+export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, onDelete }: RoomEditSheetProps) {
 	const [name, setName] = useState("");
 	const [topic, setTopic] = useState("");
 	const [visibility, setVisibility] = useState<"public" | "private">("public");
@@ -48,6 +63,19 @@ export function RoomEditSheet({ room, onClose, onSave }: RoomEditSheetProps) {
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
+	// Two-step inline confirms for destructive actions.  Click "Leave"
+	// once → button morphs into "Confirm leave" + a Cancel; click
+	// again to fire.  Modal-on-modal would be clunky, the inline
+	// reveal keeps everything in this dialog.
+	const [confirmingLeave, setConfirmingLeave] = useState(false);
+	const [confirmingDelete, setConfirmingDelete] = useState(false);
+	// Creator → Delete only (Leave would orphan the room).  Everyone
+	// else → Leave only.  No middle ground; if the creator wants to
+	// step away while keeping the room alive, they need to promote a
+	// successor first (separate flow we'll add when there's demand).
+	const isCreator = !!room && !!currentUserId && room.creatorId === currentUserId;
+	const showLeave = !isCreator && !!onLeave;
+	const showDelete = isCreator && !!onDelete;
 
 	// DMs aren't editable as rooms; the parent gates this, but if a
 	// DM somehow lands here we treat it as closed.
@@ -66,7 +94,33 @@ export function RoomEditSheet({ room, onClose, onSave }: RoomEditSheetProps) {
 		setIconEmoji(room.iconEmoji ?? "");
 		setError(null);
 		setPending(false);
+		setConfirmingLeave(false);
+		setConfirmingDelete(false);
 	}, [room]);
+
+	async function doLeave() {
+		if (!room || !onLeave) return;
+		setPending(true);
+		setError(null);
+		try {
+			await onLeave(room.id);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : String(err));
+			setPending(false);
+		}
+	}
+
+	async function doDelete() {
+		if (!room || !onDelete) return;
+		setPending(true);
+		setError(null);
+		try {
+			await onDelete(room.id);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : String(err));
+			setPending(false);
+		}
+	}
 
 	// Clean up object URLs when the preview changes or the dialog
 	// unmounts so we don't leak.
@@ -302,13 +356,69 @@ export function RoomEditSheet({ room, onClose, onSave }: RoomEditSheetProps) {
 						</div>
 					)}
 
-					<DialogFooter>
-						<Button type="button" variant="ghost" onClick={onClose} disabled={pending}>
-							Cancel
-						</Button>
-						<Button type="submit" disabled={!name.trim() || pending}>
-							{pending ? "Saving…" : "Save"}
-						</Button>
+					<DialogFooter className="sm:justify-between">
+						{/* Destructive actions on the left, separated from
+						    the Save / Cancel pair.  Two-step inline
+						    confirms — first click morphs the button
+						    into a Confirm + Cancel pair. */}
+						<div className="flex items-center gap-2 flex-wrap">
+							{showLeave && !confirmingLeave && !confirmingDelete && (
+								<Button
+									type="button"
+									variant="ghost"
+									size="sm"
+									onClick={() => setConfirmingLeave(true)}
+									disabled={pending}
+									className="text-muted-foreground hover:text-destructive hover:bg-destructive/10 gap-1.5"
+								>
+									<DoorOpen className="h-3.5 w-3.5" />
+									Leave
+								</Button>
+							)}
+							{showDelete && !confirmingLeave && !confirmingDelete && (
+								<Button
+									type="button"
+									variant="ghost"
+									size="sm"
+									onClick={() => setConfirmingDelete(true)}
+									disabled={pending}
+									className="text-muted-foreground hover:text-destructive hover:bg-destructive/10 gap-1.5"
+								>
+									<Trash2 className="h-3.5 w-3.5" />
+									Delete
+								</Button>
+							)}
+							{confirmingLeave && (
+								<>
+									<span className="text-xs text-muted-foreground">Leave this room?</span>
+									<Button type="button" variant="ghost" size="sm" onClick={() => setConfirmingLeave(false)} disabled={pending}>
+										Cancel
+									</Button>
+									<Button type="button" variant="destructive" size="sm" onClick={doLeave} disabled={pending}>
+										{pending ? "Leaving…" : "Confirm leave"}
+									</Button>
+								</>
+							)}
+							{confirmingDelete && (
+								<>
+									<span className="text-xs text-muted-foreground">Kick everyone and delete?</span>
+									<Button type="button" variant="ghost" size="sm" onClick={() => setConfirmingDelete(false)} disabled={pending}>
+										Cancel
+									</Button>
+									<Button type="button" variant="destructive" size="sm" onClick={doDelete} disabled={pending}>
+										{pending ? "Deleting…" : "Confirm delete"}
+									</Button>
+								</>
+							)}
+						</div>
+						<div className="flex items-center gap-2">
+							<Button type="button" variant="ghost" onClick={onClose} disabled={pending}>
+								Cancel
+							</Button>
+							<Button type="submit" disabled={!name.trim() || pending}>
+								{pending ? "Saving…" : "Save"}
+							</Button>
+						</div>
 					</DialogFooter>
 				</form>
 			</DialogContent>

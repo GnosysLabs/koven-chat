@@ -928,6 +928,7 @@ export default function App() {
 			/>
 			<SpaceEditSheet
 				space={editingSpaceId ? state.spaces.find(s => s.id === editingSpaceId) ?? null : null}
+				currentUserId={creds.user_id}
 				onClose={() => setEditingSpaceId(null)}
 				onSave={async (opts) => {
 					if (!transport) throw new Error("Not connected");
@@ -941,9 +942,26 @@ export default function App() {
 						visibility: opts.visibility,
 					});
 				}}
+				onLeave={async (spaceId) => {
+					if (!transport) throw new Error("Not connected");
+					await transport.leaveRoom(spaceId as RoomId);
+					// Close the sheet + bounce out of the now-gone
+					// space.  Rooms tile is the safest landing place
+					// since it always exists and never depends on a
+					// specific space membership.
+					setEditingSpaceId(null);
+					dispatch({ type: "set_active_space", space: { kind: "rooms" } });
+				}}
+				onDelete={async (spaceId) => {
+					if (!transport) throw new Error("Not connected");
+					await transport.deleteRoom(spaceId as RoomId);
+					setEditingSpaceId(null);
+					dispatch({ type: "set_active_space", space: { kind: "rooms" } });
+				}}
 			/>
 			<RoomEditSheet
 				room={editingRoomId ? state.rooms.find(r => r.id === editingRoomId) ?? null : null}
+				currentUserId={creds.user_id}
 				onClose={() => setEditingRoomId(null)}
 				onSave={async (opts) => {
 					if (!transport) throw new Error("Not connected");
@@ -956,6 +974,20 @@ export default function App() {
 						iconEmoji: opts.iconEmoji,
 						visibility: opts.visibility,
 					});
+				}}
+				onLeave={async (roomId) => {
+					if (!transport) throw new Error("Not connected");
+					await transport.leaveRoom(roomId as RoomId);
+					setEditingRoomId(null);
+					// Drop the active room — RoomList will pick a new
+					// one (or render the empty state) on next render.
+					dispatch({ type: "set_active_room", roomId: null });
+				}}
+				onDelete={async (roomId) => {
+					if (!transport) throw new Error("Not connected");
+					await transport.deleteRoom(roomId as RoomId);
+					setEditingRoomId(null);
+					dispatch({ type: "set_active_room", roomId: null });
 				}}
 			/>
 			<InviteSheet

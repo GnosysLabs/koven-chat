@@ -1772,6 +1772,69 @@ export class MatrixTransport {
 	}
 
 	/**
+	 * Leave a room or space.  The user's membership is dropped (so the
+	 * room disappears from their list and they stop receiving events
+	 * from it) and the server-side memory of their membership is
+	 * forgotten.  Other members are unaffected — the room continues
+	 * without them.  This is the symmetric "I want out" action; for
+	 * "destroy this room" creators have `deleteRoom` below.
+	 *
+	 * Spaces work identically (Matrix treats them as rooms with
+	 * `type: m.space`).  No special handling for child rooms — leaving
+	 * a space doesn't leave its children; the user keeps anything
+	 * they joined directly.
+	 */
+	async leaveRoom(roomId: RoomId): Promise<void> {
+		const c = this.requireClient();
+		await c.leave(roomId);
+		await c.forget(roomId).catch(() => {/* ok if not supported */});
+		this.emitRoomList();
+	}
+
+	/**
+	 * Destroy a room or space the user created.  Matrix has no
+	 * "delete room" primitive — rooms are eternal once created.  The
+	 * closest gesture: kick every other member, then leave + forget
+	 * yourself.  The room becomes a tomb on the homeserver, no live
+	 * members, no future activity, but the event history persists in
+	 * server storage.  Functionally equivalent to delete from every
+	 * user's POV.
+	 *
+	 * Caller must have kick + invite power-level on the room (default
+	 * for the creator at PL 100).  Member kicks are best-effort: a
+	 * single kick failure is logged but doesn't block the rest, since
+	 * abandoning the operation half-way leaves a worse state than
+	 * pressing on.
+	 */
+	async deleteRoom(roomId: RoomId): Promise<void> {
+		const c = this.requireClient();
+		const me = c.getUserId();
+		if (!me) throw new Error("deleteRoom: client has no user id");
+		const room = c.getRoom(roomId);
+		if (!room) throw new Error(`deleteRoom: room ${roomId} not in store`);
+
+		// Kick everyone except self.  matrix-js-sdk's `kick` takes the
+		// reason as an optional second arg; we pass a short marker so
+		// kicked members understand why they're seeing a kick event.
+		const others = room
+			.getMembers()
+			.filter(m => m.userId !== me && (m.membership === "join" || m.membership === "invite"));
+		for (const m of others) {
+			try {
+				await c.kick(roomId, m.userId, "Room deleted by creator");
+			} catch (err) {
+				console.warn(`deleteRoom: failed to kick ${m.userId}`, err);
+			}
+		}
+
+		// Leave self last so the kicks happen while we still have
+		// power-level to issue them.
+		await c.leave(roomId);
+		await c.forget(roomId).catch(() => {/* ok if not supported */});
+		this.emitRoomList();
+	}
+
+	/**
 	 * Delete a DM from this user's side — the Matrix-native gesture for
 	 * "I'm done with this conversation."  Three steps, in order:
 	 *
@@ -1810,6 +1873,13 @@ export class MatrixTransport {
 		if (!this.client) return [];
 		return this.client.getRooms()
 			.filter(r => !this.isSpace(r))
+			// Drop rooms we've already left.  matrix-js-sdk keeps the
+			// SdkRoom object in its store after `client.leave()` until
+			// `client.forget()` completes (and even then, sometimes
+			// briefly).  Without this filter, a deleted/left room
+			// lingers in the user's list as a member-less ghost
+			// until the next page reload.
+			.filter(r => isLiveMembership(r.getMyMembership()))
 			.map(r => this.sdkRoomToRoom(r))
 			.sort((a, b) => {
 				const ta = this.client!.getRoom(a.id)?.getLastActiveTimestamp() ?? 0;
@@ -1824,6 +1894,7 @@ export class MatrixTransport {
 		if (!this.client) return [];
 		return this.client.getRooms()
 			.filter(r => this.isSpace(r))
+			.filter(r => isLiveMembership(r.getMyMembership()))
 			.map(r => this.sdkRoomToSpace(r))
 			.sort((a, b) => a.name.localeCompare(b.name));
 	}
@@ -1852,6 +1923,8 @@ export class MatrixTransport {
 		let myPowerLevel: number | undefined;
 		const myUserId = this.creds?.user_id;
 		if (myUserId) myPowerLevel = r.getMember(myUserId)?.powerLevel ?? 0;
+		const createEvent = r.currentState.getStateEvents("m.room.create", "");
+		const creatorId = (createEvent?.getSender() ?? undefined) as UserId | undefined;
 		return {
 			id: r.roomId as SpaceId,
 			name: r.name || r.roomId,
@@ -1861,6 +1934,7 @@ export class MatrixTransport {
 			kind: joinRule === "public" ? "public" : "private",
 			childRoomIds,
 			myPowerLevel,
+			creatorId,
 		};
 	}
 
@@ -2271,6 +2345,14 @@ export class MatrixTransport {
 			myPowerLevel = r.getMember(myUserId)?.powerLevel ?? 0;
 		}
 
+		// Sender of the m.room.create event — the canonical "creator."
+		// Drives the Leave-vs-Delete affordance: creators must Delete,
+		// everyone else Leaves.  matrix-js-sdk has `getCreator()` but
+		// some older versions don't, so read the state event directly
+		// for portability.
+		const createEvent = r.currentState.getStateEvents("m.room.create", "");
+		const creatorId = (createEvent?.getSender() ?? undefined) as UserId | undefined;
+
 		return {
 			id: r.roomId as RoomId,
 			name: r.name || dmUserId || r.roomId,
@@ -2290,6 +2372,7 @@ export class MatrixTransport {
 			homeserver,
 			isFederated,
 			myPowerLevel,
+			creatorId,
 		};
 	}
 
@@ -2551,6 +2634,14 @@ function stripReplyFallback(body: string): string {
  * sequences like 👨‍👩‍👧‍👦) so a malicious sender can't dump prose into
  * the field.
  */
+/** True for membership states that should keep the room visible in
+ * the user's list.  "leave" / "ban" rooms still live in matrix-js-sdk's
+ * store after a leave + forget cycle for a brief window; this gate
+ * makes sure they don't render as ghost rooms with no members. */
+function isLiveMembership(m: string | null): boolean {
+	return m === "join" || m === "invite";
+}
+
 function readKovenIconEmoji(r: SdkRoom): string | undefined {
 	const ev = r.currentState.getStateEvents("chat.koven.room_icon", "");
 	if (!ev) return undefined;

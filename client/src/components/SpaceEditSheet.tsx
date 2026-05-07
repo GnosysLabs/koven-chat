@@ -18,11 +18,12 @@ import { Label } from "@/components/ui/label";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { cn } from "@/lib/utils";
 import { EmojiPicker } from "@/components/EmojiPicker";
-import { Camera, EyeOff, Globe, Smile, Trash2 } from "lucide-react";
+import { Camera, DoorOpen, EyeOff, Globe, Smile, Trash2 } from "lucide-react";
 import type { Space } from "@koven/shared";
 
 export interface SpaceEditSheetProps {
 	space: Space | null;            // null keeps the dialog closed
+	currentUserId: string | null;
 	onClose(): void;
 	onSave(opts: {
 		spaceId: string;
@@ -33,9 +34,12 @@ export interface SpaceEditSheetProps {
 		iconEmoji?: string;
 		visibility?: "public" | "private";
 	}): Promise<void>;
+	// See RoomEditSheet for the Leave-vs-Delete creator rule.
+	onLeave?(spaceId: string): Promise<void>;
+	onDelete?(spaceId: string): Promise<void>;
 }
 
-export function SpaceEditSheet({ space, onClose, onSave }: SpaceEditSheetProps) {
+export function SpaceEditSheet({ space, currentUserId, onClose, onSave, onLeave, onDelete }: SpaceEditSheetProps) {
 	const [name, setName] = useState("");
 	const [topic, setTopic] = useState("");
 	const [visibility, setVisibility] = useState<"public" | "private">("public");
@@ -48,6 +52,11 @@ export function SpaceEditSheet({ space, onClose, onSave }: SpaceEditSheetProps) 
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
+	const [confirmingLeave, setConfirmingLeave] = useState(false);
+	const [confirmingDelete, setConfirmingDelete] = useState(false);
+	const isCreator = !!space && !!currentUserId && space.creatorId === currentUserId;
+	const showLeave = !isCreator && !!onLeave;
+	const showDelete = isCreator && !!onDelete;
 
 	const open = !!space;
 
@@ -64,7 +73,33 @@ export function SpaceEditSheet({ space, onClose, onSave }: SpaceEditSheetProps) 
 		setIconEmoji(space.iconEmoji ?? "");
 		setError(null);
 		setPending(false);
+		setConfirmingLeave(false);
+		setConfirmingDelete(false);
 	}, [space]);
+
+	async function doLeave() {
+		if (!space || !onLeave) return;
+		setPending(true);
+		setError(null);
+		try {
+			await onLeave(space.id);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : String(err));
+			setPending(false);
+		}
+	}
+
+	async function doDelete() {
+		if (!space || !onDelete) return;
+		setPending(true);
+		setError(null);
+		try {
+			await onDelete(space.id);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : String(err));
+			setPending(false);
+		}
+	}
 
 	// Clean up object URLs when the preview changes or the dialog
 	// unmounts so we don't leak.
@@ -288,13 +323,65 @@ export function SpaceEditSheet({ space, onClose, onSave }: SpaceEditSheetProps) 
 						</div>
 					)}
 
-					<DialogFooter>
-						<Button type="button" variant="ghost" onClick={onClose} disabled={pending}>
-							Cancel
-						</Button>
-						<Button type="submit" disabled={!name.trim() || pending}>
-							{pending ? "Saving…" : "Save"}
-						</Button>
+					<DialogFooter className="sm:justify-between">
+						<div className="flex items-center gap-2 flex-wrap">
+							{showLeave && !confirmingLeave && !confirmingDelete && (
+								<Button
+									type="button"
+									variant="ghost"
+									size="sm"
+									onClick={() => setConfirmingLeave(true)}
+									disabled={pending}
+									className="text-muted-foreground hover:text-destructive hover:bg-destructive/10 gap-1.5"
+								>
+									<DoorOpen className="h-3.5 w-3.5" />
+									Leave
+								</Button>
+							)}
+							{showDelete && !confirmingLeave && !confirmingDelete && (
+								<Button
+									type="button"
+									variant="ghost"
+									size="sm"
+									onClick={() => setConfirmingDelete(true)}
+									disabled={pending}
+									className="text-muted-foreground hover:text-destructive hover:bg-destructive/10 gap-1.5"
+								>
+									<Trash2 className="h-3.5 w-3.5" />
+									Delete
+								</Button>
+							)}
+							{confirmingLeave && (
+								<>
+									<span className="text-xs text-muted-foreground">Leave this space?</span>
+									<Button type="button" variant="ghost" size="sm" onClick={() => setConfirmingLeave(false)} disabled={pending}>
+										Cancel
+									</Button>
+									<Button type="button" variant="destructive" size="sm" onClick={doLeave} disabled={pending}>
+										{pending ? "Leaving…" : "Confirm leave"}
+									</Button>
+								</>
+							)}
+							{confirmingDelete && (
+								<>
+									<span className="text-xs text-muted-foreground">Kick everyone and delete?</span>
+									<Button type="button" variant="ghost" size="sm" onClick={() => setConfirmingDelete(false)} disabled={pending}>
+										Cancel
+									</Button>
+									<Button type="button" variant="destructive" size="sm" onClick={doDelete} disabled={pending}>
+										{pending ? "Deleting…" : "Confirm delete"}
+									</Button>
+								</>
+							)}
+						</div>
+						<div className="flex items-center gap-2">
+							<Button type="button" variant="ghost" onClick={onClose} disabled={pending}>
+								Cancel
+							</Button>
+							<Button type="submit" disabled={!name.trim() || pending}>
+								{pending ? "Saving…" : "Save"}
+							</Button>
+						</div>
 					</DialogFooter>
 				</form>
 			</DialogContent>

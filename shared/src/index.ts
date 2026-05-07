@@ -56,6 +56,11 @@ export interface Room {
 	// for DMs where it's irrelevant.  Used to gate room-settings UI:
 	// editing name/topic/avatar/visibility requires PL ≥ 50 by default.
 	myPowerLevel?: number;
+	// Sender of the original m.room.create event.  The creator can
+	// only Delete the room, never Leave it — leaving without
+	// promoting a successor would orphan the room with no founder.
+	// Other PL-100 admins (delegates) are exempt; they Leave normally.
+	creatorId?: UserId;
 }
 
 // Spaces are Matrix rooms with `type: "m.space"`.  They don't have
@@ -79,6 +84,8 @@ export interface Space {
 	// affordances (Add room, Settings).  Default is 0 for joined-but-
 	// not-promoted members; founder is 100.
 	myPowerLevel?: number;
+	// Sender of the original m.room.create event.  See Room.creatorId.
+	creatorId?: UserId;
 }
 
 export interface Member {
