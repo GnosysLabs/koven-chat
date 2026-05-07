@@ -2,15 +2,21 @@
 #
 # Triggered by pushing a `desktop-v*` tag.  Branch pushes that touch
 # apps/desktop/ run the same matrix as a sanity build but skip the
-# release upload + signing.  Each runner builds one platform, signs
-# the artifact with the minisign keypair (used by Tauri's updater),
-# and uploads to a draft GitHub Release.  A final "publish" job
-# constructs the updater manifest from each platform's .sig and
-# flips the release to public.
+# release upload.  Each runner builds one platform, signs the
+# artifact with the minisign keypair (used by Tauri's updater), and
+# uploads to a draft GitHub Release.  A final "publish" job promotes
+# the draft to public.
 #
-# Versioning is independent from the web client and the engine.  The
-# tag IS the version: `desktop-v0.1.0` → version 0.1.0.  The version
-# in `apps/desktop/src-tauri/tauri.conf.json` and `Cargo.toml` must
+# Mac:     Apple Silicon only.  Output is the `.app` bundle and its
+#          `.app.tar.gz` updater artifact (Sparkle-style zip flow —
+#          no .dmg).  Code-signed + notarized by tauri-action when
+#          the Apple secrets are set; falls through unsigned otherwise.
+# Linux:   x86_64 .AppImage + .deb (WebKitGTK).
+# Windows: x86_64 NSIS installer (WebView2).
+#
+# Versioning is independent from the web client + engine.  The tag
+# IS the version: `desktop-v0.1.0` → version 0.1.0.  The version in
+# `apps/desktop/src-tauri/tauri.conf.json` and `Cargo.toml` must
 # match the tag — `tauri-action` reads them at build time and bakes
 # them into Info.plist / .nsh / .desktop.
 
@@ -42,16 +48,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Mac Apple Silicon — primary target for Mac users.
+          # Apple Silicon only — explicitly opted out of Intel.
           - platform: macos-latest
             args: "--target aarch64-apple-darwin"
             display: macOS-arm64
-          # Mac Intel — for older hardware.  Builds independently
-          # rather than as a universal binary so the .dmg footprint
-          # stays smaller per download.
-          - platform: macos-latest
-            args: "--target x86_64-apple-darwin"
-            display: macOS-x64
           - platform: ubuntu-22.04
             args: ""
             display: linux-x64
@@ -72,9 +72,7 @@ jobs:
       - name: Install rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          # Mac: both Apple Silicon and Intel triples installed so a
-          # single runner can cross-compile via the matrix `args`.
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -103,8 +101,8 @@ jobs:
 
       # `tauri-action` runs `tauri build`, signs each updater artifact
       # with TAURI_SIGNING_PRIVATE_KEY, uploads the bundles + .sig
-      # files as release assets to the draft release named below.  The
-      # `tagName` and `releaseName` are evaluated only on tag pushes;
+      # files as release assets to the draft release named below.
+      # `tagName`/`releaseName` are evaluated only on tag pushes;
       # branch / dispatch runs skip the upload step entirely.
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -115,8 +113,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # macOS code signing + notarization.  Without these the
-          # build still succeeds, but the .dmg / .app is unsigned and
-          # users see Gatekeeper warnings on first launch.
+          # build still succeeds, but the .app is unsigned and users
+          # see Gatekeeper warnings on first launch.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -128,9 +126,7 @@ jobs:
           tagName: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && github.ref_name || '' }}
           releaseName: "Koven Desktop ${{ github.ref_name }}"
           releaseBody: |
-            See the [changelog](https://github.com/GnosysLabs/koven-chat/blob/main/CHANGELOG.md) for what's new.
-
-            **macOS:** download the `.dmg`, open it, drag Koven into Applications.
+            **macOS:** download the `.app.tar.gz`, expand it, drag Koven into Applications.  First launch right-click → Open if you see a Gatekeeper warning.
             **Windows:** download the `.exe` setup, run it.  First launch may trip SmartScreen — click "More info → Run anyway".
             **Linux:** download the `.AppImage`, `chmod +x`, run.  Or use the `.deb`.
           releaseDraft: true

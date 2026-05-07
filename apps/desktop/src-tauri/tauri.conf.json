@@ -16,7 +16,7 @@
 	},
 	"bundle": {
 		"active": true,
-		"targets": ["dmg", "app", "msi", "nsis", "appimage", "deb"],
+		"targets": ["app", "msi", "nsis", "appimage", "deb"],
 		"icon": [
 			"icons/32x32.png",
 			"icons/128x128.png",
@@ -32,8 +32,9 @@
 		"longDescription": "Koven is a chat platform where censorship requires consensus, not authority.  Every visibility decision is a community vote, weighted by reputation.  Every action is logged forever.",
 		"createUpdaterArtifacts": true,
 		"macOS": {
-			"minimumSystemVersion": "11.0",
-			"frameworks": []
+			"minimumSystemVersion": "13.0",
+			"frameworks": [],
+			"entitlements": null
 		},
 		"windows": {},
 		"linux": {

@@ -17,10 +17,12 @@ use tauri_plugin_updater::UpdaterExt;
 /// WebView) iff it lands on one of these origins.  Everything else is
 /// dispatched to the user's default browser via the opener plugin.
 ///
-/// - `tauri://localhost`        → bundled SPA on macOS / Linux
+/// - `tauri://localhost`        → bundled SPA on macOS / Linux (WKWebView,
+///                                WebKitGTK).  Custom protocol scheme.
 /// - `https://tauri.localhost`  → bundled SPA on Windows (WebView2
 ///                                serves the same assets via the
-///                                `https` protocol).
+///                                `https` protocol — no custom-scheme
+///                                support).
 /// - `https://client.koven.chat` → the live homeserver itself; matters
 ///                                in dev mode (`devUrl`) and as a
 ///                                fallback if the SPA hard-navigates.
@@ -75,8 +77,8 @@ pub fn run() {
 				WebviewUrl::External("https://client.koven.chat".parse().unwrap())
 			} else {
 				// Production: bundled `client/dist/` — Tauri serves
-				// it from `tauri://localhost/` (or `tauri.localhost`
-				// on Windows).
+				// it from `tauri://localhost/` on macOS / Linux and
+				// `https://tauri.localhost/` on Windows.
 				WebviewUrl::App("index.html".into())
 			};
 

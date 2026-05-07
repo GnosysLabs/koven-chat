@@ -49,7 +49,10 @@ bun run desktop:build
 
 Outputs go to `apps/desktop/src-tauri/target/release/bundle/`:
 
-- macOS → `dmg/Koven_<version>_<arch>.dmg`
+- macOS → `macos/Koven.app` (the bundle directory) plus the
+  `Koven.app.tar.gz` updater artifact in `bundle/macos/`.  The
+  `.tar.gz` is the user-facing download — Sparkle-style zip flow,
+  no `.dmg`.
 - Windows → `nsis/Koven_<version>_x64-setup.exe`
 - Linux → `appimage/Koven_<version>_amd64.AppImage`, `deb/koven-desktop_<version>_amd64.deb`
 
