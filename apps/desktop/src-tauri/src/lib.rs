@@ -237,7 +237,7 @@ pub fn run() {
 			// Sync`, which the `on_navigation` closure requires.
 			let opener_app = app.handle().clone();
 
-			let _win = WebviewWindowBuilder::new(app, "main", url)
+			let builder = WebviewWindowBuilder::new(app, "main", url)
 				.title("Koven")
 				.inner_size(1280.0, 800.0)
 				.min_inner_size(720.0, 480.0)
@@ -271,8 +271,22 @@ pub fn run() {
 						log::warn!("opener failed for {url}: {err}");
 					}
 					false
-				})
-				.build()?;
+				});
+
+			// macOS: use the Overlay title-bar style so the WebView
+			// content paints all the way to the top of the window and
+			// the traffic lights float over the SPA's chat-themed
+			// background — matching what `tauri dev` renders.  In the
+			// default `Visible` style the OS draws a separate solid
+			// strip at the top, which produces a hard cut between the
+			// title bar and the login background image (and breaks the
+			// brand feel everywhere else).  Tauri's CLI seems to apply
+			// Overlay implicitly during `tauri dev` but not during
+			// `tauri build`, so pin it explicitly here for parity.
+			#[cfg(target_os = "macos")]
+			let builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay);
+
+			let _win = builder.build()?;
 
 			// Kick off an update check after the window is up.
 			// Best-effort — failures (no network, no new release,
