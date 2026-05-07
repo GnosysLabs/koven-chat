@@ -92,11 +92,21 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 	useEffect(() => {
 		if (!open || !transport || !viewedUserId) return;
 		let cancelled = false;
-		setLoading(true);
 		setError(null);
 		setPendingAvatar(null);
 		setPendingAvatarPreview(null);
 		setClearAvatar(false);
+
+		// Stale-while-revalidate: only flip into the loading state if
+		// we don't already have data for THIS user.  When the sheet
+		// is reopened for a profile we've fetched before (most often
+		// the user's own profile), `profile` is still in state from
+		// the previous open and matches `viewedUserId` — keep showing
+		// it while we silently refetch in the background.  Otherwise
+		// (first open, or switching to a different user) we genuinely
+		// have nothing to render and the loading state is correct.
+		const haveFreshDataForThisUser = profile?.userId === viewedUserId;
+		if (!haveFreshDataForThisUser) setLoading(true);
 
 		// Matrix profile (display name, avatar) and engine bio fetched
 		// in parallel — bio lives on the engine since Matrix has no
@@ -120,6 +130,11 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 				setLoading(false);
 			});
 		return () => { cancelled = true; };
+		// `profile` intentionally not in deps — including it would re-
+		// run the fetch every time the fetch resolves (we just set
+		// profile in there), creating a loop.  We only want this to
+		// fire when the SHEET opens or the target user changes.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open, transport, viewedUserId, isSelf]);
 
 	// Clean up object URLs we made for previews.
@@ -191,7 +206,13 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 					</DialogDescription>
 				</DialogHeader>
 
-				{loading || !profile ? (
+				{/* Show loading only when we genuinely don't have the
+				    right user's data — first open, or while switching
+				    to a different user.  Don't gate on the `loading`
+				    flag itself: a background re-fetch (same user, after
+				    sheet reopen) shouldn't flash the loading state
+				    over already-rendered data. */}
+				{!profile || profile.userId !== viewedUserId ? (
 					<div className="py-8 text-center text-sm text-muted-foreground">Loading…</div>
 				) : isSelf ? (
 					// ─── Self-edit layout ──────────────────────────────────
