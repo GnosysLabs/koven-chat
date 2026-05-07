@@ -158,40 +158,52 @@ export function ChatPane({
 		el.scrollTop = el.scrollHeight;
 	}, [messages.length, room?.id]);
 
-	// Global hover tracking for the message-action toolbar.  Per-row
-	// onMouseEnter/onMouseLeave (and even onPointerEnter/onPointerLeave)
-	// drop events unreliably in WKWebView when sibling rows are
-	// adjacent and the mouse moves quickly between them — React's
-	// synthetic-event layer doesn't fire `leave` on the previous row.
-	// Result: action toolbars accumulate visible across multiple
-	// messages.
+	// Global hover tracking for the message-action toolbar.
 	//
-	// Robust fix: a single native `pointermove` listener on the chat
-	// scroll container.  On every move we walk up from `e.target` to
-	// the nearest element with `data-message-id` and that becomes the
-	// authoritatively-hovered message.  When the pointer leaves the
-	// container, no message is hovered.  ChatPane owns this state and
-	// passes `isHovered` down, so each MessageRow renders without any
-	// hover events of its own.  Bypasses React's synthetic-event
-	// indirection entirely.
+	// Failed approaches and why:
+	//   - CSS `:hover` (Tailwind group-hover): unreliable in WKWebView
+	//     when a Radix Popover opens/closes inside the row — the
+	//     underlying `:hover` state stays sticky on close.
+	//   - React onMouseEnter / onMouseLeave: React synthetic events
+	//     drop `leave` events unreliably in WKWebView when the cursor
+	//     moves quickly between sibling rows.
+	//   - React onPointerEnter / onPointerLeave: same React-synthetic
+	//     indirection, same failure mode.  Plus pointer events have
+	//     documented WKWebView reliability problems (WebKit bug
+	//     #187545, Tauri WRY #175 — events fire when window is
+	//     backgrounded, miss when window is focused, etc.)
+	//   - Native pointermove on the scroll container: still missed
+	//     events when cursor crossed out of the container quickly.
+	//
+	// What works: native `mousemove` listener on `document`.  Document-
+	// level events fire most reliably in every WKWebView build because
+	// they're the lowest-level mouse handler the browser exposes — the
+	// quirks above are about per-element bubbling/capture, not about
+	// document seeing mousemove at all.  On every move we hit-test
+	// `e.target` for the nearest `[data-message-id]` ancestor; if
+	// none, the cursor is outside any message and we clear the state.
+	// `mouseleave` on the document handles the "cursor left the window
+	// entirely" case (e.g. moved to the macOS title bar).
+	//
+	// `mousemove` instead of `pointermove`: mouse events are the OG
+	// and are more universally implemented in older WebKit branches
+	// than pointer events.
 	const [hoveredMessageId, setHoveredMessageId] = useState<EventId | null>(null);
 	useEffect(() => {
-		const el = scrollRef.current;
-		if (!el) return;
-		const onMove = (e: PointerEvent) => {
+		const onMove = (e: MouseEvent) => {
 			const t = e.target as HTMLElement | null;
 			const msgEl = t?.closest("[data-message-id]");
 			const id = (msgEl?.getAttribute("data-message-id") ?? null) as EventId | null;
 			setHoveredMessageId(prev => (prev === id ? prev : id));
 		};
 		const onLeave = () => setHoveredMessageId(null);
-		el.addEventListener("pointermove", onMove);
-		el.addEventListener("pointerleave", onLeave);
+		document.addEventListener("mousemove", onMove);
+		document.addEventListener("mouseleave", onLeave);
 		return () => {
-			el.removeEventListener("pointermove", onMove);
-			el.removeEventListener("pointerleave", onLeave);
+			document.removeEventListener("mousemove", onMove);
+			document.removeEventListener("mouseleave", onLeave);
 		};
-	}, [room?.id]);
+	}, []);
 
 	// Clear the reply target + any pending attachment when the user
 	// switches rooms — those are scoped to the previous conversation.
