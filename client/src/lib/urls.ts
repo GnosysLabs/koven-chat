@@ -22,14 +22,42 @@
 // Production builds can override either via VITE_ENGINE_URL /
 // VITE_HOMESERVER_URL — typical setup is a reverse proxy that
 // terminates TLS and routes by path, same shape as the dev proxy.
+//
+// Tauri desktop bundle: the SPA is served from `tauri://localhost`
+// (macOS/Linux) or `https://tauri.localhost` (Windows) by Tauri's
+// custom protocol handler.  Relative `/api/...` paths there hit
+// Tauri's protocol 404 (which it serves as the SPA's index.html for
+// SPA fallback routing), making fetch silently succeed with an HTML
+// body — the calling code sees `r.ok === true`, parses {} from the
+// HTML, and proceeds as if everything worked.  Two visible symptoms
+// when this is misconfigured: instance config (login background,
+// logo, tagline) loads as empty defaults, and the email-code login
+// "succeeds" without ever calling the engine.  Detect the bundle at
+// runtime and point both URLs at the canonical homeserver.
+
+const KOVEN_BUNDLED_HOST = "https://client.koven.chat";
 
 function pageOrigin(): string {
 	if (typeof window === "undefined") return "";
 	return window.location.origin;
 }
 
+/** True when the SPA is running inside a Tauri-bundled production
+ * build (the `tauri build` output, served from Tauri's custom
+ * protocol scheme).  False in `tauri dev` mode (where `devUrl` loads
+ * `https://client.koven.chat` directly), false in browsers, false
+ * during SSR. */
+function isTauriBundle(): boolean {
+	if (typeof window === "undefined") return false;
+	const o = window.location.origin;
+	// macOS / Linux: tauri://localhost ; Windows: https://tauri.localhost
+	return o.startsWith("tauri://") || o === "https://tauri.localhost";
+}
+
 export const HOMESERVER_URL =
-	(import.meta.env.VITE_HOMESERVER_URL as string | undefined) ?? pageOrigin();
+	(import.meta.env.VITE_HOMESERVER_URL as string | undefined)
+	?? (isTauriBundle() ? KOVEN_BUNDLED_HOST : pageOrigin());
 
 export const ENGINE_URL =
-	(import.meta.env.VITE_ENGINE_URL as string | undefined) ?? "";
+	(import.meta.env.VITE_ENGINE_URL as string | undefined)
+	?? (isTauriBundle() ? KOVEN_BUNDLED_HOST : "");

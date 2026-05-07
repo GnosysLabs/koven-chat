@@ -91,6 +91,39 @@ jobs:
             libssl-dev \
             patchelf
 
+      # Mac-only guard: refuse to build unless ALL four notarization
+      # prerequisites are populated.  We deliberately don't ship
+      # unnotarized macOS builds — first-launch Gatekeeper warnings on
+      # an "officially-released" binary are an unacceptable user-
+      # experience regression.  If any secret is missing the job fails
+      # here with a clear message rather than silently producing a
+      # signed-but-not-notarized artifact downstream.  Linux + Windows
+      # are unaffected by Apple secrets and ignore this step.
+      - name: Verify Apple notarization prerequisites
+        if: matrix.platform == 'macos-latest'
+        env:
+          APPLE_CERTIFICATE:          ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY:     ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID:              ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID:                   ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD:             ${{ secrets.APPLE_PASSWORD }}
+        run: |
+          missing=()
+          [ -z "$APPLE_CERTIFICATE" ]          && missing+=("APPLE_CERTIFICATE")
+          [ -z "$APPLE_CERTIFICATE_PASSWORD" ] && missing+=("APPLE_CERTIFICATE_PASSWORD")
+          [ -z "$APPLE_SIGNING_IDENTITY" ]     && missing+=("APPLE_SIGNING_IDENTITY")
+          [ -z "$APPLE_TEAM_ID" ]              && missing+=("APPLE_TEAM_ID")
+          [ -z "$APPLE_ID" ]                   && missing+=("APPLE_ID")
+          [ -z "$APPLE_PASSWORD" ]             && missing+=("APPLE_PASSWORD")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Refusing to build: required Apple secrets are missing: ${missing[*]}"
+            echo "Set these via gh secret set on GnosysLabs/koven-chat to unblock Mac builds."
+            echo "See .agents/skills/koven-release for the full setup walkthrough."
+            exit 1
+          fi
+          echo "All six Apple notarization prerequisites are populated."
+
       - name: Install JS deps (root + apps/desktop)
         run: |
           bun install
