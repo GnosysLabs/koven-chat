@@ -76,7 +76,10 @@ export async function purgeMyEngineState(accessToken: string): Promise<{ ok: boo
 
 // ─── Suspension state ────────────────────────────────────────────────
 
-export type SuspensionReason = "floor_violation" | "repeated_false_floor_flags";
+export type SuspensionReason =
+	| "floor_violation"
+	| "repeated_false_floor_flags"
+	| "repeated_room_collapses";
 export type SuspensionStatus = "pending" | "confirmed" | "reversed";
 
 export interface SuspensionSummary {

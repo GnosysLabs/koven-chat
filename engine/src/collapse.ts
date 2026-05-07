@@ -11,14 +11,22 @@
 
 import { config } from "./config";
 import {
+	countRoomCollapsesByCreator,
+	createSuspension,
 	flagsForTarget,
+	getActiveSuspension,
 	hasCollapse,
 	insertCollapse,
 	listFlaggedTargets,
 	readWeight,
 	roomActiveWeight,
 } from "./db";
-import { getRoomNameAndCreator, joinRoomIfNeeded, sendBotEvent } from "./synapse";
+import {
+	getRoomNameAndCreator,
+	joinRoomIfNeeded,
+	sendBotEvent,
+	setRoomDirectoryVisibility,
+} from "./synapse";
 
 // Hard floor on number of distinct flaggers.  Independent of room
 // size — fewer than 3 doesn't read as "the room agrees" anywhere.
@@ -46,6 +54,23 @@ const THRESHOLD_PERCENT = 0.10;
 const THRESHOLD_FLOOR = 3.0;
 const THRESHOLD_CEIL = 33.0;
 const ACTIVE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+// ─── Repeated-room-collapses accumulator ────────────────────────────
+//
+// One bad room is a mistake; multiple bad rooms is a pattern.  After a
+// room collapse fires, we count how many room collapses the creator
+// has accumulated overall and within a rolling window — if either
+// crosses the threshold, the engine opens a suspension on the creator
+// in the shared admin floor queue.  Admin still reviews; nothing is
+// auto-suspended permanently.
+//
+// Mirrors the false-flag accumulator's shape (FALSE_FLAG_*_THRESHOLD
+// in server.ts) so the two tools have parallel semantics — one bad
+// flag is a mistake, two within a month is a pattern; same here for
+// rooms.  Tunable later if either threshold proves too eager.
+const REPEATED_ROOM_COLLAPSE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+const REPEATED_ROOM_COLLAPSE_WINDOW_THRESHOLD = 2;
+const REPEATED_ROOM_COLLAPSE_TOTAL_THRESHOLD = 3;
 
 function thresholdWeightFor(roomId: string): number {
 	const active = roomActiveWeight(roomId, Date.now() - ACTIVE_WINDOW_MS);
@@ -127,6 +152,7 @@ export async function evaluateCollapses(): Promise<number> {
 			// name via the homeserver event log if they need to.
 			const state = await getRoomNameAndCreator(t.target_event_id);
 			const originalName = state?.name ?? "";
+			const creatorId = state?.creator;
 			const content = {
 				...baseContent,
 				target_kind: "room" as const,
@@ -148,13 +174,59 @@ export async function evaluateCollapses(): Promise<number> {
 				target_kind: "room",
 				original_name: originalName,
 				fast_track: tally.hasFloor,
+				creator_id: creatorId ?? null,
 			});
 			emitted++;
 			console.log(
 				`engine: collapsed ROOM ${t.target_event_id} ` +
 				`(${tally.flaggers.size} flaggers, ${baseContent.weighted_score} weight, ` +
-				`floor=${tally.hasFloor}, original_name="${originalName}")`,
+				`floor=${tally.hasFloor}, original_name="${originalName}", creator="${creatorId ?? "?"}")`,
 			);
+
+			// Layer 4 — federation-aware: pull the room from the
+			// public-rooms directory so federation peers stop seeing
+			// it in their Explore.  Best-effort; failures are logged
+			// but don't block the rest of the collapse pipeline.
+			void setRoomDirectoryVisibility(t.target_event_id, "private")
+				.catch(err => console.warn(
+					`engine: directory hide for ${t.target_event_id} threw`, err,
+				));
+
+			// Pattern accumulator: if this creator has now had enough
+			// room collapses to look like a pattern rather than a
+			// one-off, open a suspension on them in the shared admin
+			// floor queue.  Admin still reviews + decides; the engine
+			// only surfaces the signal.  Skip when:
+			//   - we don't know the creator (couldn't read state)
+			//   - they're already in a pending/confirmed suspension
+			//     (a user can only have one open case at a time)
+			//   - this collapse was already floor-fast-tracked, in
+			//     which case a suspension was created at flag time
+			//     and queueing another would double-stack the case
+			if (creatorId && !tally.hasFloor && !getActiveSuspension(creatorId)) {
+				const totalCollapses = countRoomCollapsesByCreator(creatorId);
+				const recentCollapses = countRoomCollapsesByCreator(
+					creatorId,
+					Date.now() - REPEATED_ROOM_COLLAPSE_WINDOW_MS,
+				);
+				const tripped =
+					recentCollapses >= REPEATED_ROOM_COLLAPSE_WINDOW_THRESHOLD ||
+					totalCollapses >= REPEATED_ROOM_COLLAPSE_TOTAL_THRESHOLD;
+				if (tripped) {
+					createSuspension({
+						user_id: creatorId,
+						reason: "repeated_room_collapses",
+						flag_event_id: null,
+						target_event_id: null,
+						target_room_id: t.target_event_id,
+						flagger: null,
+					});
+					console.log(
+						`engine: opened repeated-room-collapses suspension on ${creatorId} ` +
+						`(total=${totalCollapses}, 30d=${recentCollapses})`,
+					);
+				}
+			}
 			continue;
 		}
 

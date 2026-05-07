@@ -140,7 +140,7 @@ db.exec(`
 	CREATE TABLE IF NOT EXISTS suspensions (
 		id              INTEGER PRIMARY KEY AUTOINCREMENT,
 		user_id         TEXT NOT NULL,             -- the suspended account
-		reason          TEXT NOT NULL,             -- 'floor_violation' | 'repeated_false_floor_flags'
+		reason          TEXT NOT NULL,             -- 'floor_violation' | 'repeated_false_floor_flags' | 'repeated_room_collapses'
 		flag_event_id   TEXT,                      -- the m.room flag event that triggered this (NULL for repeat-flagger cases)
 		target_event_id TEXT,                      -- the message that was floor-flagged
 		target_room_id  TEXT,                      -- where it happened
@@ -293,6 +293,13 @@ ensureColumns("collapses", [
 	// the collapse (single-flag fast-track), false if it crossed the
 	// distinct-flagger + weighted-score thresholds.
 	{ name: "fast_track", ddl: "fast_track INTEGER NOT NULL DEFAULT 0" },
+	// For room collapses, the room's creator (sender of m.room.create)
+	// at collapse time.  Stored so the engine can count "how many
+	// rooms this user has had collapsed against them" without a
+	// per-evaluation network round-trip back to Synapse — pattern
+	// signal for the auto-suspend accumulator.  NULL for message
+	// collapses + for legacy rows where we couldn't read state.
+	{ name: "creator_id", ddl: "creator_id TEXT" },
 ]);
 ensureColumns("bots", [
 	// JSON array of trigger phrases — see CREATE TABLE comment above.
@@ -571,12 +578,18 @@ export type CollapseRow = {
 	// flag fast-track) rather than the distinct-flagger + weighted-
 	// score thresholds.  Mirrors the wire field.
 	fast_track?: boolean;
+	// For target_kind='room' only: the room's creator at collapse
+	// time.  Drives the per-creator collapse count for the
+	// auto-suspend accumulator — counted via countRoomCollapsesByCreator
+	// below.  NULL for message rows + for legacy rows where state
+	// wasn't readable.
+	creator_id?: string | null;
 };
 
 const insertCollapseStmt = db.prepare(`
 	INSERT OR IGNORE INTO collapses
-	(target_event_id, room_id, collapsed_at, flagger_count, weighted_score, categories, target_kind, original_name, fast_track)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	(target_event_id, room_id, collapsed_at, flagger_count, weighted_score, categories, target_kind, original_name, fast_track, creator_id)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const hasCollapseStmt = db.prepare(`SELECT 1 FROM collapses WHERE target_event_id = ?`);
 
@@ -591,7 +604,30 @@ export function insertCollapse(row: CollapseRow): void {
 		row.target_kind ?? "message",
 		row.original_name ?? null,
 		row.fast_track ? 1 : 0,
+		row.creator_id ?? null,
 	);
+}
+
+// Count how many room-target collapses the engine has recorded
+// against `creatorId`.  When `sinceTs` is set, only collapses on or
+// after that timestamp count — used to pair a "rolling window" check
+// alongside the "ever" total in the auto-suspend accumulator.  Excludes
+// rows where creator_id is null (couldn't read state at collapse time)
+// so the count never inflates from data we're not sure about.
+const countRoomCollapsesByCreatorEverStmt = db.prepare(`
+	SELECT COUNT(*) AS n FROM collapses
+	WHERE target_kind = 'room' AND creator_id = ?
+`);
+const countRoomCollapsesByCreatorSinceStmt = db.prepare(`
+	SELECT COUNT(*) AS n FROM collapses
+	WHERE target_kind = 'room' AND creator_id = ? AND collapsed_at >= ?
+`);
+export function countRoomCollapsesByCreator(creatorId: string, sinceTs?: number): number {
+	const row = (sinceTs === undefined
+		? countRoomCollapsesByCreatorEverStmt.get(creatorId)
+		: countRoomCollapsesByCreatorSinceStmt.get(creatorId, sinceTs)
+	) as { n: number } | undefined;
+	return row?.n ?? 0;
 }
 
 export function hasCollapse(targetEventId: string): boolean {
@@ -790,7 +826,10 @@ export function deleteBio(userId: string): void {
 // ─── Suspensions ────────────────────────────────────────────────────
 
 export type SuspensionStatus = "pending" | "confirmed" | "reversed";
-export type SuspensionReason = "floor_violation" | "repeated_false_floor_flags";
+export type SuspensionReason =
+	| "floor_violation"
+	| "repeated_false_floor_flags"
+	| "repeated_room_collapses";
 
 export interface SuspensionRow {
 	id: number;

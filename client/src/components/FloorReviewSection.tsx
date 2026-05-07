@@ -146,6 +146,10 @@ function CaseCard({
 }) {
 	const isFloor = c.reason === "floor_violation";
 	const created = new Date(c.created_at);
+	const headlineLabel =
+		c.reason === "floor_violation" ? "Floor-violation report"
+		: c.reason === "repeated_room_collapses" ? "Repeat room collapses"
+		: "Repeat false flagger";
 
 	return (
 		<li className="border border-border rounded-md p-3 space-y-2 bg-card">
@@ -158,7 +162,7 @@ function CaseCard({
 				</div>
 				<div className="flex-1 min-w-0">
 					<div className="text-sm font-medium">
-						{isFloor ? "Floor-violation report" : "Repeat false flagger"}
+						{headlineLabel}
 					</div>
 					<div className="text-[10px] text-muted-foreground tabular-nums">
 						Filed {created.toLocaleString()}

@@ -84,6 +84,7 @@ import {
 	getSpaceChildRoomIds,
 	loginAsUser,
 	setProfileAvatar,
+	setRoomDirectoryVisibility,
 	uploadMedia,
 } from "./synapse";
 import { openSecret, sealSecret } from "./secret_box";
@@ -1149,7 +1150,9 @@ export function startServer(): void {
 					// that here so the SPA stops overriding the name
 					// and Explore re-includes the room.  Flag rows
 					// stay in place — append-only audit trail — only
-					// the collapse decision is reversed.
+					// the collapse decision is reversed.  The Layer 4
+					// directory hide is undone in lockstep so the
+					// room is rediscoverable via federation again.
 					let restoredRoom: string | null = null;
 					if (
 						susp.reason === "floor_violation" &&
@@ -1157,7 +1160,13 @@ export function startServer(): void {
 						!susp.target_event_id
 					) {
 						const removed = deleteRoomCollapse(susp.target_room_id);
-						if (removed) restoredRoom = susp.target_room_id;
+						if (removed) {
+							restoredRoom = susp.target_room_id;
+							void setRoomDirectoryVisibility(susp.target_room_id, "public")
+								.catch(err => console.warn(
+									`engine: directory restore for ${susp.target_room_id} threw`, err,
+								));
+						}
 					}
 
 					// Skip the false-flag cascade for repeated_false_flag

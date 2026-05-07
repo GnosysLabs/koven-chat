@@ -289,6 +289,47 @@ export async function getRoomNameAndCreator(roomId: string): Promise<{
 }
 
 /**
+ * Set a room's listing in the homeserver's public-rooms directory.
+ * `'public'` makes it discoverable in Explore + via federation peers'
+ * directory queries; `'private'` removes it from both surfaces (the
+ * room still works for existing members, just stops being broadcast).
+ *
+ * Used by the offensive-room-name pipeline:
+ *   - On room collapse, the engine sets visibility='private' so the
+ *     name stops being advertised — federation peers no longer see
+ *     it in their Explore-equivalent, completing the local-SPA
+ *     filter as a defense-in-depth pair.
+ *   - On admin reverse, the engine sets visibility='public' to
+ *     re-list the room.  Edge case: rooms that were already private
+ *     before being flagged get re-published to public on reverse —
+ *     acceptable for v1 since offensive-name attacks land on
+ *     publicly-discoverable rooms by definition.
+ *
+ * Auth uses the admin token rather than the appservice as_token
+ * because the directory endpoint is owned by the room (not appservice
+ * namespace) — the admin can act on any room.
+ */
+export async function setRoomDirectoryVisibility(
+	roomId: string,
+	visibility: "public" | "private",
+): Promise<boolean> {
+	const path = `/_matrix/client/v3/directory/list/room/${encodeURIComponent(roomId)}`;
+	const r = await adminFetch(path, {
+		method: "PUT",
+		body: JSON.stringify({ visibility }),
+	});
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		console.warn(
+			`engine: setRoomDirectoryVisibility ${roomId} → ${visibility} failed: ` +
+			`${r.status} ${txt.slice(0, 200)}`,
+		);
+		return false;
+	}
+	return true;
+}
+
+/**
  * Read a room's m.room.join_rules state event.  Returns the
  * `join_rule` string ("public", "invite", "knock", "restricted") or
  * null on error / missing.  Used to skip private children when
