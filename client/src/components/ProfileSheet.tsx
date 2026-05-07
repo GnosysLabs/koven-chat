@@ -364,9 +364,6 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 							)}
 						</Button>
 					)}
-					<Button type="button" variant="ghost" onClick={onClose} disabled={pending}>
-						{isSelf ? "Cancel" : "Close"}
-					</Button>
 					{!isSelf && viewedUserId && onStartDm && !isBlocked && (
 						<Button
 							type="button"
@@ -378,10 +375,19 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 							Message
 						</Button>
 					)}
+					{/* Self-edit mode keeps an explicit Cancel because
+					    the dialog has unsaved-edit state — the X
+					    closes too, but Cancel reads as "discard
+					    these changes" alongside the Save button. */}
 					{isSelf && (
-						<Button type="button" onClick={save} disabled={loading || pending}>
-							{pending ? "Saving…" : "Save"}
-						</Button>
+						<>
+							<Button type="button" variant="ghost" onClick={onClose} disabled={pending}>
+								Cancel
+							</Button>
+							<Button type="button" onClick={save} disabled={loading || pending}>
+								{pending ? "Saving…" : "Save"}
+							</Button>
+						</>
 					)}
 				</DialogFooter>
 			</DialogContent>
