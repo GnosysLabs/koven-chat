@@ -112,15 +112,21 @@ jobs:
           # public.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # macOS code signing + notarization.  Without these the
-          # build still succeeds, but the .app is unsigned and users
-          # see Gatekeeper warnings on first launch.
+          # macOS code signing + notarization.  These are gated on
+          # APPLE_CERTIFICATE being set: passing only the *identity*
+          # (without the .p12 cert bytes) makes Tauri's bundler attempt
+          # `security import` against an empty keychain entry and fail
+          # the whole build, so until the .p12 is wired up we ship
+          # unsigned Mac builds (Gatekeeper warning on first launch,
+          # right-click → Open works).  Set APPLE_CERTIFICATE etc. per
+          # the koven-release skill to flip every future build to
+          # signed + notarized.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_CERTIFICATE && secrets.APPLE_SIGNING_IDENTITY || '' }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_CERTIFICATE && secrets.APPLE_TEAM_ID || '' }}
         with:
           projectPath: apps/desktop
           tagName: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && github.ref_name || '' }}
