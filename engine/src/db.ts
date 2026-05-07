@@ -244,6 +244,75 @@ db.exec(`
 	);
 	CREATE INDEX IF NOT EXISTS idx_bots_owner ON bots(owner_id);
 
+	-- User-initiated message deletions.  Append-only audit row written
+	-- whenever someone redacts a message that they sent themselves, OR
+	-- redacts a bot's message because they own that bot.  Distinct from
+	-- the consensus collapse pipeline:
+	--
+	--   * collapses records community-driven hides: a flag tally
+	--     crossed the threshold, the engine emitted a public collapse
+	--     event, the message stays attributed to its sender.
+	--   * self_deletions records voluntary takedowns: the sender (or
+	--     a bot owner) chose to redact their own content.  No flags
+	--     were involved; the audit row exists purely so the room
+	--     mod log can show '@alice deleted a message' as a transparency
+	--     measure.
+	--
+	-- We don't store the message text — Matrix already deleted it from
+	-- the federated history via the redaction event.  The mod log only
+	-- needs to surface the who / when / why-kind so other room members
+	-- can see that a particular deletion happened.
+	CREATE TABLE IF NOT EXISTS self_deletions (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		room_id         TEXT NOT NULL,
+		target_event_id TEXT NOT NULL,
+		-- Who issued the redaction.  Always the human Matrix user who
+		-- clicked the trash button — never the bot itself, because the
+		-- engine performs the redaction on the bot's behalf when kind
+		-- = 'bot_owner'.  Used for "who's accountable" in the mod log.
+		redacted_by     TEXT NOT NULL,
+		-- The original message's sender mxid.  For kind='self' this
+		-- equals redacted_by; for kind='bot_owner' this is the bot's
+		-- mxid.  Stored explicitly so the mod log doesn't have to
+		-- re-derive it from the bots table at render time (and so the
+		-- entry stays meaningful even if the bot is later deleted).
+		target_sender   TEXT NOT NULL,
+		kind            TEXT NOT NULL,        -- 'self' | 'bot_owner'
+		-- For kind='bot_owner': the bots.id at deletion time.  Lets a
+		-- future "deletions per bot" stat join cleanly back to the bot
+		-- row.  NULL for kind='self'.
+		bot_id          INTEGER,
+		created_at      INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_self_deletions_room_ts
+		ON self_deletions(room_id, created_at DESC);
+
+	-- Founder-initiated kick/ban of a bot member.  The free-speech
+	-- protections that block founders from unilaterally removing humans
+	-- (rooms enforce kick/ban PL=100 + the consensus pipeline routes
+	-- around it) deliberately don't extend to bots: bots aren't people,
+	-- a misbehaving bot doesn't have a free-speech interest, and the
+	-- room's founder is the right authority to silence it without
+	-- spinning up the consensus machinery.  This table records every
+	-- such action so the audit trail still exists — the founder can
+	-- do it without permission, but the room can see they did.
+	CREATE TABLE IF NOT EXISTS bot_membership_actions (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		room_id     TEXT NOT NULL,
+		bot_mxid    TEXT NOT NULL,
+		-- Bot's owner at the time of the action — captured here so the
+		-- mod log can attribute it to "@alice's bot" even after the bot
+		-- is later deleted (which would orphan the row from the bots
+		-- table).  May be NULL for legacy / orphan cases where the
+		-- bot record was already gone when the founder acted.
+		bot_owner   TEXT,
+		action      TEXT NOT NULL,           -- 'kick' | 'ban'
+		founder     TEXT NOT NULL,           -- mxid that issued the action
+		created_at  INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_bot_membership_actions_room_ts
+		ON bot_membership_actions(room_id, created_at DESC);
+
 	-- Per-bot knowledge files.  Plain-text reference material the
 	-- bot owner uploads (FAQs, character bios, project docs).  Each
 	-- file's full content is concatenated into the system prompt at
@@ -1015,6 +1084,110 @@ const suspensionsForRoomStmt = db.prepare(`
 `);
 export function suspensionsForRoom(roomId: string): SuspensionRow[] {
 	return suspensionsForRoomStmt.all(roomId) as SuspensionRow[];
+}
+
+// ─── User-initiated message deletions ──────────────────────────────
+// Audit rows for the trash-button flow.  Row gets inserted from
+// /api/rooms/:room_id/messages/:event_id/delete after the engine has
+// successfully redacted the underlying Matrix event.  Append-only —
+// the mod log surfaces it forever; nothing else reads from this table.
+
+export type SelfDeletionKind = "self" | "bot_owner";
+
+export interface SelfDeletionRow {
+	id: number;
+	room_id: string;
+	target_event_id: string;
+	redacted_by: string;
+	target_sender: string;
+	kind: SelfDeletionKind;
+	bot_id: number | null;
+	created_at: number;
+}
+
+const insertSelfDeletionStmt = db.prepare(`
+	INSERT INTO self_deletions
+	(room_id, target_event_id, redacted_by, target_sender, kind, bot_id, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?)
+`);
+
+export function recordSelfDeletion(opts: {
+	roomId: string;
+	targetEventId: string;
+	redactedBy: string;
+	targetSender: string;
+	kind: SelfDeletionKind;
+	botId: number | null;
+}): void {
+	insertSelfDeletionStmt.run(
+		opts.roomId,
+		opts.targetEventId,
+		opts.redactedBy,
+		opts.targetSender,
+		opts.kind,
+		opts.botId,
+		Date.now(),
+	);
+}
+
+const selfDeletionsForRoomStmt = db.prepare(`
+	SELECT * FROM self_deletions
+	WHERE room_id = ?
+	ORDER BY created_at DESC
+`);
+export function selfDeletionsForRoom(roomId: string): SelfDeletionRow[] {
+	return selfDeletionsForRoomStmt.all(roomId) as SelfDeletionRow[];
+}
+
+// ─── Founder bot kick/ban ───────────────────────────────────────────
+// Audit rows for the bot kick/ban flow on a room's profile sheet.
+// Same shape as self_deletions: append-only, one row per action,
+// rendered into the per-room mod log.  The actual Matrix membership
+// transition happens via the founder's own access token (PL 100 →
+// kick/ban allowed); this table just records that it happened.
+
+export type BotMembershipAction = "kick" | "ban";
+
+export interface BotMembershipActionRow {
+	id: number;
+	room_id: string;
+	bot_mxid: string;
+	bot_owner: string | null;
+	action: BotMembershipAction;
+	founder: string;
+	created_at: number;
+}
+
+const insertBotMembershipActionStmt = db.prepare(`
+	INSERT INTO bot_membership_actions
+	(room_id, bot_mxid, bot_owner, action, founder, created_at)
+	VALUES (?, ?, ?, ?, ?, ?)
+`);
+
+export function recordBotMembershipAction(opts: {
+	roomId: string;
+	botMxid: string;
+	botOwner: string | null;
+	action: BotMembershipAction;
+	founder: string;
+}): void {
+	insertBotMembershipActionStmt.run(
+		opts.roomId,
+		opts.botMxid,
+		opts.botOwner,
+		opts.action,
+		opts.founder,
+		Date.now(),
+	);
+}
+
+const botMembershipActionsForRoomStmt = db.prepare(`
+	SELECT * FROM bot_membership_actions
+	WHERE room_id = ?
+	ORDER BY created_at DESC
+`);
+export function botMembershipActionsForRoom(roomId: string): BotMembershipActionRow[] {
+	return botMembershipActionsForRoomStmt.all(roomId) as BotMembershipActionRow[];
 }
 
 // ─── User self-deactivation cleanup ─────────────────────────────────

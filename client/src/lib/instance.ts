@@ -218,6 +218,38 @@ export type ModLogEntry =
 		status: SuspensionStatus;
 		reviewed_at: number | null;
 		reviewed_by: string | null;
+	}
+	| {
+		// Voluntary takedown — sender redacted their own message, or
+		// a bot's owner redacted the bot's message.  Distinct from
+		// `collapse` (community-driven) and from `flag_retracted`
+		// (which targets the FLAG event, not the message).
+		kind: "self_deletion";
+		ts: number;
+		target_event_id: string;
+		// Always the human Matrix user who clicked the trash button.
+		// For deletion_kind='bot_owner' this is the bot owner, not
+		// the bot itself.
+		redacted_by: string;
+		// The original message's sender.  For deletion_kind='self'
+		// this equals redacted_by; for 'bot_owner' this is the
+		// bot's mxid.
+		target_sender: string;
+		deletion_kind: "self" | "bot_owner";
+	}
+	| {
+		// Founder kicked or banned a bot from their room.  Carved
+		// out of the consensus model: bots aren't people.  Only the
+		// room founder can issue this; only registered bots can
+		// be the target.
+		kind: "bot_membership";
+		ts: number;
+		bot_mxid: string;
+		// Bot's owner at action time; null only for orphan rows
+		// where the bot was already deleted before the founder acted.
+		bot_owner: string | null;
+		action: "kick" | "ban";
+		founder: string;
 	};
 
 export async function fetchRoomModLog(roomId: string): Promise<ModLogEntry[]> {
@@ -225,6 +257,69 @@ export async function fetchRoomModLog(roomId: string): Promise<ModLogEntry[]> {
 	if (!r.ok) return [];
 	const body = (await r.json()) as { entries: ModLogEntry[] };
 	return body.entries ?? [];
+}
+
+/**
+ * Self-delete a message.  The engine validates that the caller is
+ * either the message's sender or the owner of the sending bot, then
+ * performs the redaction under the right access token (caller's for
+ * self, bot's stored token for bot-owner) and records a
+ * `self_deletion` row in the room's mod log.
+ *
+ * Throws on 4xx/5xx so callers can show a toast — the most common
+ * failure is the engine refusing because the caller doesn't own the
+ * target bot.
+ */
+export async function deleteOwnMessage(
+	accessToken: string,
+	roomId: string,
+	eventId: string,
+): Promise<{ ok: true; kind: "self" | "bot_owner" }> {
+	const r = await fetch(
+		`${ENGINE_URL}/api/rooms/${encodeURIComponent(roomId)}/messages/${encodeURIComponent(eventId)}/delete`,
+		{
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${accessToken}`,
+				"Content-Type": "application/json",
+			},
+		},
+	);
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		throw new Error(`delete failed: ${r.status} ${txt.slice(0, 200)}`);
+	}
+	return await r.json() as { ok: true; kind: "self" | "bot_owner" };
+}
+
+/**
+ * Founder-only: kick or ban a bot from a room.  The engine verifies
+ * that the caller is the room creator AND the target mxid is a bot
+ * registered on this instance.  Either failure returns 403; a Matrix-
+ * side rejection (e.g. unusual PL config) returns 502.  On success,
+ * the action is recorded as a `bot_membership` mod-log entry.
+ */
+export async function botKickBan(
+	accessToken: string,
+	roomId: string,
+	botMxid: string,
+	action: "kick" | "ban",
+): Promise<{ ok: true; action: "kick" | "ban" }> {
+	const r = await fetch(
+		`${ENGINE_URL}/api/rooms/${encodeURIComponent(roomId)}/bots/${encodeURIComponent(botMxid)}/${action}`,
+		{
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${accessToken}`,
+				"Content-Type": "application/json",
+			},
+		},
+	);
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		throw new Error(`${action} failed: ${r.status} ${txt.slice(0, 200)}`);
+	}
+	return await r.json() as { ok: true; action: "kick" | "ban" };
 }
 
 // ─── Room-target flagging (offensive room name pipeline) ─────────────

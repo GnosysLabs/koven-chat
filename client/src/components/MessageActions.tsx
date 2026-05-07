@@ -11,7 +11,7 @@ import {
 	PopoverTrigger,
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-import { Flag, Reply, SmilePlus } from "lucide-react";
+import { Flag, Reply, SmilePlus, Trash2 } from "lucide-react";
 
 const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "🔥", "😮", "🙏", "👀"];
 
@@ -23,6 +23,13 @@ export interface MessageActionsProps {
 	// false in DM rooms where the consensus-flag mechanism doesn't
 	// apply (a 1-on-1 chat has no community to vote with you).
 	showFlag?: boolean;
+	// Self-delete affordance.  When provided, a trash icon appears at
+	// the end of the toolbar — clicking it invokes onDelete.  Shown
+	// for messages the caller is allowed to redact: their own, or
+	// their owned bot's.  The chat pane decides eligibility and only
+	// passes a handler when applicable; everyone else sees the
+	// toolbar without a trash button at all.
+	onDelete?(): void;
 	className?: string;
 	// Optional controlled popover state for the React picker.  Lifted
 	// up to the parent message row so the parent can keep the action
@@ -35,7 +42,7 @@ export interface MessageActionsProps {
 }
 
 export function MessageActions({
-	onReact, onReply, onFlagClick, showFlag = true, className,
+	onReact, onReply, onFlagClick, showFlag = true, onDelete, className,
 	reactOpen: reactOpenProp, onReactOpenChange,
 }: MessageActionsProps) {
 	const [internalReactOpen, setInternalReactOpen] = useState(false);
@@ -102,6 +109,18 @@ export function MessageActions({
 					aria-label="Flag"
 				>
 					<Flag className="h-3.5 w-3.5" />
+				</button>
+			)}
+
+			{onDelete && (
+				<button
+					type="button"
+					onClick={onDelete}
+					className="p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+					title="Delete"
+					aria-label="Delete"
+				>
+					<Trash2 className="h-3.5 w-3.5" />
 				</button>
 			)}
 		</div>

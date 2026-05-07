@@ -20,7 +20,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Ban, Camera, MessageSquare, Trash2, UserCheck } from "lucide-react";
+import { Ban, Camera, MessageSquare, Trash2, UserCheck, UserX } from "lucide-react";
 import type { MatrixTransport } from "@/lib/matrix";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { BotBadge } from "@/components/BotBadge";
@@ -55,6 +55,20 @@ export interface ProfileSheetProps {
 	// responsible for closing this sheet + navigating to the new
 	// room — we just hand back the target id.
 	onStartDm?(userId: UserId): void | Promise<void>;
+	// True iff the viewer is the founder of the room from which this
+	// sheet was opened.  Combined with `isBot` it gates the
+	// Kick / Ban affordance: bots aren't people, so the room founder
+	// can silence one without the consensus pipeline.  Anyone else
+	// (regular members, founders viewing humans) sees no kick/ban
+	// buttons.  When omitted, defaults to false — read-only views
+	// outside a room context (DMs, member-of-no-particular-room) skip
+	// the affordance entirely.
+	canKickBanBots?: boolean;
+	// Kick/ban handler.  Receives the action + the bot's mxid (the
+	// `viewedUserId` at click time) so the parent can pick the right
+	// engine endpoint.  Not invoked unless `canKickBanBots && isBot`,
+	// so callers don't need to re-validate.
+	onBotMembership?(action: "kick" | "ban", botMxid: UserId): void | Promise<void>;
 }
 
 interface BaseProfile {
@@ -64,7 +78,7 @@ interface BaseProfile {
 	homeserver: string;
 }
 
-export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ignoredUsers, onSelfProfileSaved, isBot, onStartDm }: ProfileSheetProps) {
+export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ignoredUsers, onSelfProfileSaved, isBot, onStartDm, canKickBanBots, onBotMembership }: ProfileSheetProps) {
 	const isSelf = useMemo(() => {
 		if (!viewedUserId || !transport) return false;
 		return transport.currentUserId === viewedUserId;
@@ -74,7 +88,36 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [blocking, setBlocking] = useState(false);
+	// In-flight Kick / Ban state.  Single state machine — only one
+	// action can be running at a time, and the buttons disable
+	// themselves while pending so a double-click can't fire two
+	// kicks back-to-back.
+	const [botActionPending, setBotActionPending] = useState<"kick" | "ban" | null>(null);
 	const isBlocked = !!(viewedUserId && ignoredUsers?.has(viewedUserId));
+	const showBotControls = !!(isBot && canKickBanBots && onBotMembership && viewedUserId && !isSelf);
+
+	async function handleBotAction(action: "kick" | "ban") {
+		if (!viewedUserId || !onBotMembership || botActionPending) return;
+		// Friction proportional to consequence: kick is reversible
+		// (bot can rejoin if reinvited), ban is sticky.  Both still
+		// route through window.confirm so a misclick on hover doesn't
+		// silently silence a bot.
+		const verb = action === "kick" ? "Kick" : "Ban";
+		if (!window.confirm(`${verb} this bot from the room?`)) return;
+		setBotActionPending(action);
+		setError(null);
+		try {
+			await onBotMembership(action, viewedUserId);
+			// On success, close the sheet — the bot's no longer in the
+			// room, so a profile-sheet view of them within this room is
+			// stale by definition.
+			onClose();
+		} catch (e) {
+			setError(e instanceof Error ? e.message : String(e));
+		} finally {
+			setBotActionPending(null);
+		}
+	}
 
 	const [profile, setProfile] = useState<BaseProfile | null>(null);
 	const [displayName, setDisplayName] = useState("");
@@ -384,6 +427,40 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 								<><Ban className="h-3.5 w-3.5 mr-1.5" />{blocking ? "Blocking…" : "Block"}</>
 							)}
 						</Button>
+					)}
+					{showBotControls && (
+						// Founder-only bot controls.  Bots aren't covered
+						// by the consensus protections that gate
+						// human kick/ban — a misbehaving bot can be
+						// silenced by the room's founder unilaterally.
+						// Two buttons rather than a single dropdown
+						// because the affordance is rare enough that
+						// signposting both options inline is clearer
+						// than a hidden menu.
+						<>
+							<Button
+								type="button"
+								variant="ghost"
+								onClick={() => handleBotAction("kick")}
+								disabled={!!botActionPending || loading}
+								className="text-amber-500 hover:text-amber-500"
+								title="Kick this bot from the room (it can rejoin if reinvited)"
+							>
+								<UserX className="h-3.5 w-3.5 mr-1.5" />
+								{botActionPending === "kick" ? "Kicking…" : "Kick bot"}
+							</Button>
+							<Button
+								type="button"
+								variant="ghost"
+								onClick={() => handleBotAction("ban")}
+								disabled={!!botActionPending || loading}
+								className="text-destructive hover:text-destructive"
+								title="Ban this bot from the room (it cannot rejoin until unbanned)"
+							>
+								<Ban className="h-3.5 w-3.5 mr-1.5" />
+								{botActionPending === "ban" ? "Banning…" : "Ban bot"}
+							</Button>
+						</>
 					)}
 					{!isSelf && viewedUserId && onStartDm && !isBlocked && (
 						<Button

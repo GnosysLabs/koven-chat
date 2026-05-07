@@ -516,3 +516,122 @@ export async function loginAsUser(userId: string, password: string): Promise<
 		user_id: body.user_id,
 	};
 }
+
+// ─── Helpers acting under a user's bearer token ─────────────────────
+//
+// These mirror the appservice helpers above but authenticate as a
+// specific human user, using the bearer token they sent us.  The user
+// has whatever Matrix-side power level they actually possess — we're
+// just relaying their action to Synapse rather than running our own
+// admin override.  Two upshots:
+//
+//   * Authorization is enforced by Synapse, not by us.  If the
+//     caller doesn't have the redact/kick/ban PL, Synapse rejects.
+//   * The resulting state event is signed by the caller, so the room's
+//     timeline correctly attributes the action to them rather than to
+//     `@engine`.
+
+async function userFetch(
+	bearerToken: string,
+	path: string,
+	init: RequestInit = {},
+): Promise<Response> {
+	return fetch(`${config.homeserverUrl}${path}`, {
+		...init,
+		headers: {
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${bearerToken}`,
+			...(init.headers ?? {}),
+		},
+	});
+}
+
+/**
+ * Redact a message in `roomId` using the caller's access token.  The
+ * caller must satisfy Matrix's redaction rules: either be the original
+ * sender (always allowed) or hold a power level ≥ the room's
+ * `events.m.room.redaction` PL (Koven sets that to 100, so non-senders
+ * are effectively excluded — which is the intended behaviour for the
+ * trash-button flow: only the sender or a bot's owner-via-bot-token
+ * should be redacting their own content).
+ *
+ * Returns true on 2xx, false on any error (logs a warning).
+ */
+export async function redactEventAs(opts: {
+	bearerToken: string;
+	roomId: string;
+	eventId: string;
+	reason?: string;
+}): Promise<boolean> {
+	const txnId = `koven-${Date.now()}-${++txnCounter}`;
+	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(opts.roomId)}/redact/${encodeURIComponent(opts.eventId)}/${encodeURIComponent(txnId)}`;
+	const r = await userFetch(opts.bearerToken, path, {
+		method: "PUT",
+		body: JSON.stringify(opts.reason ? { reason: opts.reason } : {}),
+	});
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		console.warn(`engine: redactEventAs ${opts.roomId}/${opts.eventId} → ${r.status} ${txt.slice(0, 200)}`);
+		return false;
+	}
+	return true;
+}
+
+/**
+ * Kick or ban a member from a room as the calling user.  Used by the
+ * founder bot kick/ban flow — we don't gate it ourselves because
+ * Synapse already enforces the room's PL: founder has 100, kick/ban
+ * PL is 100 in Koven rooms, so it just works.  If a non-founder calls
+ * this, Synapse returns 403.
+ *
+ * `kind` decides which Matrix endpoint to hit; semantics match the
+ * spec: kick removes the user but they can rejoin; ban removes them
+ * and prevents rejoin until unbanned.
+ */
+export async function kickOrBanAs(opts: {
+	bearerToken: string;
+	roomId: string;
+	targetUserId: string;
+	kind: "kick" | "ban";
+	reason?: string;
+}): Promise<boolean> {
+	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(opts.roomId)}/${opts.kind}`;
+	const r = await userFetch(opts.bearerToken, path, {
+		method: "POST",
+		body: JSON.stringify({
+			user_id: opts.targetUserId,
+			...(opts.reason ? { reason: opts.reason } : {}),
+		}),
+	});
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		console.warn(`engine: ${opts.kind} ${opts.targetUserId} from ${opts.roomId} → ${r.status} ${txt.slice(0, 200)}`);
+		return false;
+	}
+	return true;
+}
+
+/**
+ * Read a single timeline event's sender + minimal metadata.  Used by
+ * the self-delete authorization check: the engine needs to know who
+ * originally sent a message before it'll let someone redact it.
+ *
+ * Authenticated as the appservice (via the as_token / engine user_id
+ * — same channel as `sendBotEvent` etc.).  The engine bot is a member
+ * of every room the appservice is monitoring, so /event lookups
+ * succeed for any timeline message the engine could otherwise observe.
+ *
+ * Returns null on any error (event not found, room not joinable, etc.)
+ * so callers can convert to a 404 / 403.
+ */
+export async function getEventSender(
+	roomId: string,
+	eventId: string,
+): Promise<{ sender: string; type: string } | null> {
+	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`;
+	const r = await asFetch(path);
+	if (!r.ok) return null;
+	const body = (await r.json().catch(() => null)) as { sender?: string; type?: string } | null;
+	if (!body || typeof body.sender !== "string" || typeof body.type !== "string") return null;
+	return { sender: body.sender, type: body.type };
+}

@@ -28,6 +28,7 @@ import {
 	adminCount,
 	bindEmailToUser,
 	bootstrapEmailBinding,
+	botMembershipActionsForRoom,
 	collapsesForRoom,
 	countBotsByOwner,
 	countFalseFlagsByUser,
@@ -60,6 +61,9 @@ import {
 	readBio,
 	readInstanceConfig,
 	readWeight,
+	recordBotMembershipAction,
+	recordSelfDeletion,
+	selfDeletionsForRoom,
 	setBotAvatarMxc,
 	suspensionsForRoom,
 	addBotKnowledge,
@@ -80,10 +84,13 @@ import {
 	adminResetPassword,
 	adminSetUserEmail,
 	deactivateUser,
+	getEventSender,
 	getRoomJoinRule,
 	getRoomNameAndCreator,
 	getSpaceChildRoomIds,
+	kickOrBanAs,
 	loginAsUser,
+	redactEventAs,
 	setProfileAvatar,
 	setRoomDirectoryVisibility,
 	uploadMedia,
@@ -1554,9 +1561,204 @@ export function startServer(): void {
 						reviewed_at: s.reviewed_at,
 						reviewed_by: s.reviewed_by,
 					}));
-					const merged = [...flags, ...collapses, ...suspensions]
+					// Voluntary takedowns: trash-button deletions of own
+					// or owned-bot messages.  Distinct from collapses
+					// (community-driven) and from flag retractions
+					// (which target the FLAG event, not the message).
+					const selfDeletions = selfDeletionsForRoom(roomId).map(d => ({
+						kind: "self_deletion" as const,
+						ts: d.created_at,
+						target_event_id: d.target_event_id,
+						redacted_by: d.redacted_by,
+						target_sender: d.target_sender,
+						deletion_kind: d.kind,
+					}));
+					// Founder-initiated bot removals.  Carved out of the
+					// consensus model on principle (bots aren't people)
+					// but logged here so the room can see who silenced
+					// what.
+					const botActions = botMembershipActionsForRoom(roomId).map(a => ({
+						kind: "bot_membership" as const,
+						ts: a.created_at,
+						bot_mxid: a.bot_mxid,
+						bot_owner: a.bot_owner,
+						action: a.action,
+						founder: a.founder,
+					}));
+					const merged = [...flags, ...collapses, ...suspensions, ...selfDeletions, ...botActions]
 						.sort((a, b) => b.ts - a.ts);
 					return json({ room_id: roomId, entries: merged });
+				}
+			}
+
+			// ─── Self-delete a message ──────────────────────────────
+			// POST /api/rooms/:roomId/messages/:eventId/delete
+			// Lets the caller redact a message they sent, OR a bot's
+			// message if they own that bot.  Anything else (someone
+			// else's message, a bot they don't own) is 403.
+			//
+			// The actual redaction is performed by Synapse under the
+			// authorizing token — caller's bearer for self, the bot's
+			// stored token for bot-owner — so the redaction event is
+			// signed by the entity that's allowed to do it.  We never
+			// elevate via the appservice as_token here; that would let
+			// us redact anything in the room and bypass the room's PL
+			// model entirely.
+			//
+			// On success we write a `self_deletions` row so the room
+			// mod log can show "@alice deleted a message" — content
+			// stays gone (Matrix's redaction handles that), but the
+			// fact a deletion happened stays auditable forever.
+			{
+				const m = path.match(/^\/api\/rooms\/([^/]+)\/messages\/([^/]+)\/delete$/);
+				if (req.method === "POST" && m) {
+					const token = extractToken(req);
+					const userId = await whoami(token);
+					if (!userId || !token) {
+						return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+					}
+					const roomId = decodeURIComponent(m[1]!);
+					const eventId = decodeURIComponent(m[2]!);
+
+					const ev = await getEventSender(roomId, eventId);
+					if (!ev) {
+						return json({ errcode: "M_NOT_FOUND", error: "event not found" }, { status: 404 });
+					}
+					// Refuse to redact non-message events.  Reactions,
+					// flags, redactions themselves all have their own
+					// retract paths; routing them through the trash
+					// button would let a user retract a flag they
+					// didn't submit, etc.
+					if (ev.type !== "m.room.message") {
+						return json({
+							errcode: "M_FORBIDDEN",
+							error: "only m.room.message events can be deleted via this endpoint",
+						}, { status: 403 });
+					}
+
+					// Authorization branch.  `kind` distinguishes which
+					// access token performs the redaction and goes into
+					// the audit row.
+					let kind: "self" | "bot_owner";
+					let bearerForRedact: string;
+					let botId: number | null = null;
+					if (ev.sender === userId) {
+						kind = "self";
+						bearerForRedact = token;
+					} else {
+						const bot = getBotByMxid(ev.sender);
+						if (!bot || bot.owner_id !== userId) {
+							return json({
+								errcode: "M_FORBIDDEN",
+								error: "you can only delete your own messages or messages from bots you own",
+							}, { status: 403 });
+						}
+						kind = "bot_owner";
+						botId = bot.id;
+						// Bot tokens are sealed at rest; decrypt only
+						// long enough to authorize this one redaction.
+						bearerForRedact = openSecret(bot.access_token_enc);
+					}
+
+					const ok = await redactEventAs({
+						bearerToken: bearerForRedact,
+						roomId,
+						eventId,
+						reason: kind === "self" ? "self_delete" : "bot_owner_delete",
+					});
+					if (!ok) {
+						return json({ errcode: "M_UNKNOWN", error: "redaction failed" }, { status: 502 });
+					}
+
+					recordSelfDeletion({
+						roomId,
+						targetEventId: eventId,
+						redactedBy: userId,
+						targetSender: ev.sender,
+						kind,
+						botId,
+					});
+					return json({ ok: true, kind });
+				}
+			}
+
+			// ─── Founder bot kick/ban ───────────────────────────────
+			// POST /api/rooms/:roomId/bots/:botMxid/kick
+			// POST /api/rooms/:roomId/bots/:botMxid/ban
+			//
+			// Carved out of the consensus model: bots aren't people,
+			// so a misbehaving / spammy bot doesn't get the same
+			// flag-and-vote protection humans do.  The room's
+			// founder can silence one unilaterally.
+			//
+			// Authorization is double-gated:
+			//   1. We resolve the room's m.room.create.creator and
+			//      compare against the caller — only the founder
+			//      passes.
+			//   2. We resolve the target mxid against our `bots` table
+			//      — only registered bots are eligible.  Humans (or
+			//      federated bots from other instances) are rejected
+			//      with 403 even if the founder calls this endpoint.
+			// Synapse-side, the actual kick/ban is performed by the
+			// founder's bearer token (PL 100 → kick/ban PL 100 → OK).
+			// If the room's PL has been customised so the founder is
+			// no longer creator-equivalent, Synapse rejects and we
+			// return 502.
+			{
+				const m = path.match(/^\/api\/rooms\/([^/]+)\/bots\/([^/]+)\/(kick|ban)$/);
+				if (req.method === "POST" && m) {
+					const token = extractToken(req);
+					const userId = await whoami(token);
+					if (!userId || !token) {
+						return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+					}
+					const roomId = decodeURIComponent(m[1]!);
+					const botMxid = decodeURIComponent(m[2]!);
+					const action = m[3] as "kick" | "ban";
+
+					const state = await getRoomNameAndCreator(roomId);
+					if (!state || !state.creator) {
+						return json({ errcode: "M_NOT_FOUND", error: "room not found" }, { status: 404 });
+					}
+					if (state.creator !== userId) {
+						return json({
+							errcode: "M_FORBIDDEN",
+							error: "only the room founder can kick/ban bots",
+						}, { status: 403 });
+					}
+
+					const bot = getBotByMxid(botMxid);
+					if (!bot) {
+						// Refuse on non-bot targets even from the
+						// founder — humans go through the consensus
+						// flag flow, full stop.
+						return json({
+							errcode: "M_FORBIDDEN",
+							error: "target is not a bot on this instance",
+						}, { status: 403 });
+					}
+
+					const ok = await kickOrBanAs({
+						bearerToken: token,
+						roomId,
+						targetUserId: botMxid,
+						kind: action,
+						reason: action === "kick"
+							? "founder_kick_bot"
+							: "founder_ban_bot",
+					});
+					if (!ok) {
+						return json({ errcode: "M_UNKNOWN", error: `${action} failed` }, { status: 502 });
+					}
+
+					recordBotMembershipAction({
+						roomId,
+						botMxid,
+						botOwner: bot.owner_id,
+						action,
+						founder: userId,
+					});
+					return json({ ok: true, action });
 				}
 			}
 

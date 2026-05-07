@@ -23,7 +23,7 @@ import {
 } from "@/components/ui/dialog";
 import { fetchRoomModLog, type ModLogEntry } from "@/lib/instance";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
-import { Flag, FlagOff, Hammer, ShieldAlert } from "lucide-react";
+import { Ban, Flag, FlagOff, Hammer, ShieldAlert, Trash2, UserX } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export interface ModLogSheetProps {
@@ -158,6 +158,91 @@ function Entry({ e }: { e: ModLogEntry }) {
 					</div>
 					<div className="text-muted-foreground">
 						Categories: {e.categories.map(labelForCategory).join(", ")}
+					</div>
+					<div className="text-[10px] text-muted-foreground/70 mt-1 tabular-nums">{time}</div>
+				</div>
+			</li>
+		);
+	}
+
+	if (e.kind === "self_deletion") {
+		// Voluntary takedown.  Two sub-cases distinguished by
+		// deletion_kind: 'self' (sender deleted their own message)
+		// or 'bot_owner' (a bot's owner deleted the bot's message).
+		// In both cases we surface the deletion as a distinct row
+		// — visibly different from a community collapse — so the
+		// audit log makes clear nothing community-driven happened
+		// here.  Background uses a neutral muted tone rather than
+		// the amber/red of consensus actions.
+		const isBotOwnerDelete = e.deletion_kind === "bot_owner";
+		return (
+			<li className="flex items-start gap-3 px-3 py-2 rounded border border-border bg-muted/30">
+				<Trash2 className="h-4 w-4 shrink-0 mt-0.5 text-muted-foreground" />
+				<div className="flex-1 min-w-0 text-xs leading-snug">
+					<div className="font-medium">
+						{isBotOwnerDelete ? "Bot message deleted by owner" : "Message deleted by sender"}
+					</div>
+					{isBotOwnerDelete ? (
+						<>
+							<div className="flex items-center gap-1 mt-0.5">
+								<span className="text-muted-foreground">Bot:</span>
+								<UserInline userId={e.target_sender} />
+							</div>
+							<div className="flex items-center gap-1 mt-0.5">
+								<span className="text-muted-foreground">Owner:</span>
+								<UserInline userId={e.redacted_by} />
+							</div>
+						</>
+					) : (
+						<div className="flex items-center gap-1 mt-0.5">
+							<span className="text-muted-foreground">By:</span>
+							<UserInline userId={e.redacted_by} />
+						</div>
+					)}
+					<div className="text-[10px] text-muted-foreground/70 mt-1 tabular-nums">{time}</div>
+				</div>
+			</li>
+		);
+	}
+
+	if (e.kind === "bot_membership") {
+		// Founder-only kick / ban of a bot.  Distinct visual from
+		// the suspension row (which is for humans + driven by floor
+		// flags) — bot-membership actions are unilateral by design,
+		// so framing them with the same destructive red would
+		// over-state what's actually happening.  Amber for kick
+		// (recoverable: bot can rejoin if reinvited), red for ban
+		// (sticky until a manual unban).
+		const isKick = e.action === "kick";
+		const Icon = isKick ? UserX : Ban;
+		return (
+			<li className={cn(
+				"flex items-start gap-3 px-3 py-2 rounded border",
+				isKick
+					? "border-amber-500/30 bg-amber-500/5"
+					: "border-destructive/30 bg-destructive/5",
+			)}>
+				<Icon className={cn(
+					"h-4 w-4 shrink-0 mt-0.5",
+					isKick ? "text-amber-500" : "text-destructive",
+				)} />
+				<div className="flex-1 min-w-0 text-xs leading-snug">
+					<div className="font-medium">
+						Bot {isKick ? "kicked" : "banned"} by founder
+					</div>
+					<div className="flex items-center gap-1 mt-0.5">
+						<span className="text-muted-foreground">Bot:</span>
+						<UserInline userId={e.bot_mxid} />
+					</div>
+					{e.bot_owner && (
+						<div className="flex items-center gap-1 mt-0.5">
+							<span className="text-muted-foreground">Owner:</span>
+							<UserInline userId={e.bot_owner} />
+						</div>
+					)}
+					<div className="flex items-center gap-1 mt-0.5">
+						<span className="text-muted-foreground">By:</span>
+						<UserInline userId={e.founder} />
 					</div>
 					<div className="text-[10px] text-muted-foreground/70 mt-1 tabular-nums">{time}</div>
 				</div>

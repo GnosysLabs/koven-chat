@@ -176,6 +176,38 @@ Mixing the two would create a perverse incentive: "block this person" would carr
 
 The blocked-users list is managed in Settings → Account, with a one-click block/unblock from any user's profile.
 
+## Deleting your own messages
+
+A trash icon appears on the message-action toolbar for any message you sent yourself, and for any message sent by a bot you own. Clicking it asks for confirmation, then redacts the underlying Matrix event — the message text disappears for everyone in the room and across federation, and the row renders as a redaction stub thereafter.
+
+The deletion is recorded in the room's public mod log as a `self_deletion` entry. The text is gone, but the fact that *something was deleted, by whom, when* stays auditable forever. This matches the consensus-collapse pipeline's ethos: the community can always see that an action happened, even when the content of that action is hidden.
+
+Two distinctions matter here:
+
+- **Self-deletion is not a community collapse.** A community collapse means *the room voted you down*; a self-deletion means *you walked it back yourself*. The mod log keeps them visually distinct so a casual reader can tell which is which. Self-deletion bypasses no consensus — it's just the speaker exercising authority over their own content, which they always had.
+- **Bot-owner deletion is voluntary on the owner's part, not on the bot's.** The owner of a bot is responsible for its output (they wrote the prompt, they configured the model, they pay for tokens). Letting them redact a message a bot they configured produced is the same authority a human has over their own typing — and gives them a way to fix problems without spinning up the consensus pipeline against a misconfigured bot they're trying to repair.
+
+Self-deletion does not reach back through reactions, reaction history, or anyone's quote of the message in another room — Matrix redaction is local to the original event. Quotes inside *this* room update to render the redacted stub on next reload; quotes someone else made by copy-pasting are theirs to manage.
+
+You can't delete other people's messages — that's the consensus pipeline's job. The engine re-checks server-side: even a tampered client can't redact a message the caller didn't send and doesn't own a bot for.
+
+## Bot moderation
+
+Bots are not people. The free-speech protections that govern this platform — consensus required to silence speech, no admin override on ordinary messages — exist to prevent any individual from suppressing another individual's voice. A bot has no voice in that sense; it's an automated process configured by a human to run an LLM against a prompt. A misbehaving or spammy bot is closer to a misbehaving script than a misbehaving person, and the right authority to stop it is whoever owns the venue it's running in.
+
+Two affordances follow from this:
+
+1. **The bot's owner can delete its messages** (described above). The owner caused the output to exist; they can take it back.
+2. **A room's founder can kick or ban a bot from their room.** The kick/ban affordance appears in the bot's profile sheet whenever the viewer is the room creator. It does not require flags, votes, or consensus; the founder presses the button and the bot leaves. The action is logged as a `bot_membership` entry in the room's public mod log (with the bot's mxid, the bot's owner, and the founder's mxid), so other members can see who silenced what.
+
+This is a deliberate carve-out, not a backdoor:
+
+- The founder cannot kick or ban a *human* this way. Human kick/ban requires the consensus pipeline (flags → collapse, or floor-violation → admin review). The kick/ban affordance in the profile sheet only appears for members the engine has registered as bots; trying to call the underlying engine endpoint with a non-bot target returns 403.
+- The carve-out is room-scoped. A founder can remove a bot from their own room; they cannot deactivate the bot account or remove it from someone else's room. To remove a bot platform-wide, the bot's owner deletes it from Settings → Bots (their authority over their own bot), or it works through the standard suspension flow if it's posted floor-violating content (the bot's owner gets the suspension, since they're accountable for what they configured).
+- Kick is recoverable; ban is not. A kicked bot can rejoin if reinvited; a banned bot is excluded until the founder unbans it. The two-tier choice mirrors how Matrix already works for any participant — we just expose the affordance on bots without the consensus gate.
+
+The mod log surfaces every bot kick and ban indefinitely. A founder who silences a bot pays for it in transparency: every member of the room can see that a particular bot was silenced by a particular person at a particular time. If the founder uses this aggressively or capriciously, the room can see the pattern and decide whether they want to keep using the room.
+
 ## Account deletion
 
 Users can permanently delete their own account from Settings → Account. The flow:
@@ -208,10 +240,12 @@ Admins can:
 - Set instance branding via Settings → Instance (server name, login tagline, login background, instance logo, default space for new signups)
 
 Admins explicitly **cannot**:
-- Hide ordinary messages without going through the community flag system. There is no admin "delete" button anywhere; the community-vote pipeline is the only path.
+- Hide ordinary messages from a *human* sender without going through the community flag system. There is no admin "delete" button for human content; the community-vote pipeline is the only path. (Senders can always delete their own messages, and a bot's owner can delete the bot's messages — see *Deleting your own messages* — but this is the speaker exercising authority over their own content, not the admin overriding it.)
 - Ban a user for any reason other than confirming a `floor_violation` suspension.
 - Override a community-vote collapse.
 - Edit the public mod log.
+
+Room **founders** have one additional, narrow carve-out beyond what regular members can do: they can kick or ban a *bot* from a room they founded, without the consensus pipeline. Bots aren't people; see *Bot moderation* for the rationale. Founders cannot kick or ban humans this way — that's still consensus-only.
 
 ## Encryption and visibility
 

@@ -93,6 +93,18 @@ export interface ChatPaneProps {
 	// (sender labels, reply-quote labels).  Default empty Set means
 	// no badges — safe pre-fetch state.
 	botMxids?: Set<string>;
+	// Subset of botMxids the viewer owns — used to gate the trash
+	// button on bot messages.  Empty Set means the viewer has no
+	// bots; non-empty means show Delete on rows whose sender is in
+	// here.  Always passed as a Set so MessageRow can do O(1) lookups
+	// without re-deriving from BotSummary[].
+	myOwnedBotMxids?: Set<string>;
+	// Self-delete a message.  Returns once the engine has redacted
+	// the underlying Matrix event AND written the audit row.  Errors
+	// bubble up to the parent error dispatcher.  Optional — when
+	// omitted, the trash icon is never shown (e.g. logged-out, DM
+	// with limited capabilities, etc.).
+	onDeleteMessage?(eventId: EventId): Promise<void>;
 	// Joined members of the active room.  Drives the @-mention
 	// autocomplete in the compose box.  Optional; when omitted only
 	// bot mxids are suggestible.
@@ -115,6 +127,8 @@ export function ChatPane({
 	onSendMessage, onSendAttachment, onReact, onUnreact, onFlag, onUnflag, onAcceptInvite, onDeclineInvite, onInvite, onEditRoom,
 	onPlaceCall, callInProgress, isSuspended, onOpenModLog, onFlagRoom, collapsedRoomIds,
 	botMxids,
+	myOwnedBotMxids,
+	onDeleteMessage,
 	members,
 	viewerServer,
 }: ChatPaneProps) {
@@ -539,6 +553,23 @@ export function ChatPane({
 									if (reaction.myReactionId) onUnreact(reaction);
 									else onReact(m.id, reaction.key);
 								}}
+								// Delete button is shown only when:
+								//   - parent supplied a handler, AND
+								//   - the message isn't already collapsed/redacted
+								//     (deleting an already-deleted message is a
+								//     no-op that errors at the engine), AND
+								//   - the viewer is the sender OR owns the bot
+								//     that sent it.
+								// Bot ownership comes from the App-level set; the
+								// engine re-checks server-side, so a tampered SPA
+								// can't actually delete other users' content.
+								onDelete={
+									onDeleteMessage && !collapsesByMessage.get(m.id) && (
+										m.isSelf || !!myOwnedBotMxids?.has(m.sender)
+									)
+										? () => { void onDeleteMessage(m.id); }
+										: undefined
+								}
 							/>
 						);
 					})
@@ -731,7 +762,7 @@ export function ChatPane({
 function MessageRow({
 	message, avatarMxc, continuesGroup, isFirst, flaggable, roomEncrypted,
 	reactions, flags, collapse, onReact, onReply, onFlag, onTogglePillFlag, onToggleReactionPill, isBot,
-	isHovered,
+	isHovered, onDelete,
 }: {
 	message: Message;
 	avatarMxc: string | undefined;
@@ -764,6 +795,10 @@ function MessageRow({
 	// on the scroll container.  See the comment there for why this
 	// has to live above the row instead of using per-row React events.
 	isHovered: boolean;
+	// Trash button handler.  Provided only for rows the viewer is
+	// allowed to delete (own message OR owned-bot message); the
+	// gating logic lives in ChatPane.  When omitted, no trash icon.
+	onDelete?(): void;
 }) {
 	const [flagDialogOpen, setFlagDialogOpen] = useState(false);
 	const [expanded, setExpanded] = useState(false);
@@ -774,6 +809,17 @@ function MessageRow({
 	// move the cursor up to the popover content).
 	const [reactOpen, setReactOpen] = useState(false);
 	const showActions = isHovered || reactOpen;
+	// Single-step confirm: native dialog.  No modal-component
+	// gymnastics — Matrix redaction is irreversible by Matrix design,
+	// and the row will visibly disappear (or render as a redacted
+	// stub) within a render or two of the engine acknowledging.  A
+	// confirm() is the right friction for "are you sure?" without
+	// adding component state machinery for a one-button surface.
+	const handleDelete = onDelete
+		? () => {
+			if (window.confirm("Delete this message?")) onDelete();
+		}
+		: undefined;
 	const myFlagId = flags?.myFlagId;
 	// You can't flag your own messages — both because the consensus
 	// vote is meaningless on yourself and because it'd let users
@@ -830,6 +876,7 @@ function MessageRow({
 							onReply={onReply}
 							onFlagClick={() => setFlagDialogOpen(true)}
 							showFlag={canFlag}
+							onDelete={handleDelete}
 							reactOpen={reactOpen}
 							onReactOpenChange={setReactOpen}
 						/>
@@ -894,6 +941,7 @@ function MessageRow({
 							onReply={onReply}
 							onFlagClick={() => setFlagDialogOpen(true)}
 							showFlag={canFlag}
+							onDelete={handleDelete}
 							reactOpen={reactOpen}
 							onReactOpenChange={setReactOpen}
 							className="shrink-0"

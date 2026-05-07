@@ -36,7 +36,7 @@ import { ActiveCallView } from "@/components/ActiveCallView";
 import { SuspendedBanner } from "@/components/SuspendedBanner";
 import { ModLogSheet } from "@/components/ModLogSheet";
 import { FloorReviewSheet } from "@/components/FloorReviewSheet";
-import { fetchAdminStatus, fetchFloorQueue, fetchMyStatus, flagRoom, type SuspensionSummary } from "@/lib/instance";
+import { botKickBan, deleteOwnMessage, fetchAdminStatus, fetchFloorQueue, fetchMyStatus, flagRoom, type SuspensionSummary } from "@/lib/instance";
 import { useCollapsedRooms } from "@/lib/collapsedRooms";
 import { fetchAllBotMxids } from "@/lib/bots-cache";
 import { fetchUiaPassword } from "@/lib/auth";
@@ -490,6 +490,16 @@ export default function App() {
 		() => state.rooms.find(r => r.id === state.activeRoomId) ?? null,
 		[state.rooms, state.activeRoomId],
 	);
+	// Set form of the viewer's owned-bot mxids, recomputed only when
+	// the bot roster changes.  ChatPane consults this to decide whether
+	// to show the trash icon on a bot's message: if the sender is in
+	// here, the viewer owns that bot and is allowed to redact its
+	// content.  The engine re-checks server-side so a tampered SPA
+	// can't actually exceed its rights.
+	const myOwnedBotMxids = useMemo(
+		() => new Set(myBots.map(b => b.mxid as UserId)),
+		[myBots],
+	);
 	const allMessages = state.activeRoomId
 		? state.messagesByRoom.get(state.activeRoomId) ?? []
 		: [];
@@ -813,6 +823,25 @@ export default function App() {
 					flagsByMessage={state.flagsByMessage}
 					collapsesByMessage={state.collapsesByMessage}
 					botMxids={botMxids}
+					myOwnedBotMxids={myOwnedBotMxids}
+					onDeleteMessage={async (eventId) => {
+						if (!creds?.access_token || !state.activeRoomId) return;
+						try {
+							await deleteOwnMessage(
+								creds.access_token,
+								state.activeRoomId,
+								eventId,
+							);
+							// Synapse emits the redaction back through sync,
+							// matrix-js-sdk applies it, and the row re-renders
+							// as a redacted stub on the next reducer pass —
+							// no manual state update needed here.  Errors
+							// (target gone, not authorized, network) bubble
+							// up to the global error dispatcher.
+						} catch (e) {
+							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+						}
+					}}
 					members={state.activeRoomId ? state.membersByRoom.get(state.activeRoomId) ?? [] : []}
 					viewerServer={creds.user_id ? creds.user_id.split(":")[1] ?? null : null}
 					onSendMessage={(text, replyTo) => {
@@ -1059,6 +1088,37 @@ export default function App() {
 				accessToken={creds.access_token}
 				ignoredUsers={ignoredUsers}
 				isBot={!!viewedUserId && botMxids.has(viewedUserId)}
+				// Bot kick/ban is a founder-only carve-out from the
+				// consensus model.  We expose the affordance in the
+				// profile sheet only when the viewer is the founder
+				// of the currently-active room (`creatorId` from the
+				// m.room.create event).  Anywhere else (DMs, federated
+				// rooms, viewing in a room you didn't create) the
+				// affordance stays hidden — including for instance
+				// admins; admin-delete is a separate capability.
+				canKickBanBots={!!(activeRoom?.creatorId && creds.user_id && activeRoom.creatorId === creds.user_id)}
+				onBotMembership={async (action, botMxid) => {
+					if (!creds?.access_token || !state.activeRoomId) return;
+					try {
+						await botKickBan(
+							creds.access_token,
+							state.activeRoomId,
+							botMxid,
+							action,
+						);
+						// Synapse emits the membership transition back
+						// through sync; the member list and chat header
+						// pick it up on the next reducer pass.  No
+						// manual state poke required.
+					} catch (e) {
+						// Re-throw so the sheet can show the error
+						// inline; App.tsx still receives it via the
+						// global error path if the user dismisses
+						// without retrying.
+						dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+						throw e;
+					}
+				}}
 				onSelfProfileSaved={(avatarMxc) => {
 					// undefined = avatar wasn't touched (e.g. only the
 					// display name changed); leave the cached mxc alone
