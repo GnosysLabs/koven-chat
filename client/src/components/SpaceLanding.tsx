@@ -1,0 +1,141 @@
+// Landing view rendered in the chat pane when a space is selected but
+// no room within it is active.  Mirrors Element's SpaceRoomView Landing
+// phase:
+//   - Big square avatar + welcome heading
+//   - Topic and member count
+//   - Action row: Add room, Invite (stubbed), Settings (stubbed)
+//   - Below: a directory of rooms in the space — each clickable to enter
+//
+// When the space has zero rooms we substitute a friendlier empty state
+// with prominent "Add rooms" / "Invite people" tiles instead of the
+// directory.
+
+import type { Room, RoomId, Space } from "@koven/shared";
+import { MatrixAvatar } from "@/components/MatrixAvatar";
+import { cn } from "@/lib/utils";
+import { Hash, Lock, Plus, Settings, User, UserPlus } from "lucide-react";
+
+// Which kind of "space" this landing is rendering for.  DMs and Rooms
+// are virtual (no real Matrix space behind them) and want different
+// chrome — different avatar, different action set.
+export type SpaceLandingVariant = "real" | "dms" | "rooms";
+
+export interface SpaceLandingProps {
+	space: Space;
+	rooms: Room[];                     // rooms in this space (already filtered)
+	variant?: SpaceLandingVariant;     // defaults to "real"
+	onAddRoom(): void;
+	onInvite(): void;
+	onOpenSettings(): void;
+	onSelectRoom(roomId: RoomId): void;
+	onStartDm?(): void;                // only used in the dms variant
+}
+
+export function SpaceLanding({
+	space, rooms, variant = "real", onAddRoom, onInvite, onOpenSettings, onSelectRoom, onStartDm,
+}: SpaceLandingProps) {
+	const heading = variant === "real" ? `Welcome to ${space.name}` : space.name;
+	// Founder / mod actions — gated on Matrix power level.  PL ≥ 50 is
+	// the standard threshold for sending state events (which is what
+	// "Add room" and "Settings" both end up doing under the hood); a
+	// regular member at PL 0 sees neither button.  Variants that
+	// aren't a real space (DMs, Rooms tile) ignore the power-level
+	// check since they aren't backed by a Matrix space at all.
+	const canModerateSpace = variant === "real" && (space.myPowerLevel ?? 0) >= 50;
+	const showAddRoom = variant === "rooms" || canModerateSpace;
+	const showInvite = variant === "real";
+	const showSettings = canModerateSpace;
+	const showStartDm = variant === "dms";
+	// onSelectRoom is unused since we no longer render a directory
+	// here — rooms are picked from the sidebar.  Reference it to keep
+	// the prop part of the contract without firing a TS unused warn.
+	void onSelectRoom;
+	void rooms;
+
+	return (
+		<div className="flex-1 overflow-y-auto flex items-center justify-center">
+			<div className="max-w-3xl mx-auto px-6 py-8 w-full flex items-center justify-center">
+				<header className="flex flex-col items-center text-center">
+					<LandingAvatar space={space} variant={variant} />
+					<h1 className="text-2xl font-semibold mb-1">{heading}</h1>
+					{space.topic && (
+						<p className="text-sm text-muted-foreground max-w-md">{space.topic}</p>
+					)}
+					{variant === "dms" && (
+						<div className="mt-2 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-500/5 text-emerald-500/90 text-[11px] font-medium">
+							<Lock className="h-3 w-3" />
+							End-to-end encrypted
+						</div>
+					)}
+					{(showAddRoom || showInvite || showSettings || showStartDm) && (
+						<div className="flex items-center gap-1.5 mt-3">
+							{showStartDm && onStartDm && (
+								<HeaderAction icon={<UserPlus className="h-4 w-4" />} label="Start a DM" onClick={onStartDm} />
+							)}
+							{showAddRoom && (
+								<HeaderAction icon={<Plus className="h-4 w-4" />} label="Add room" onClick={onAddRoom} />
+							)}
+							{showInvite && (
+								<HeaderAction icon={<UserPlus className="h-4 w-4" />} label="Invite" onClick={onInvite} />
+							)}
+							{showSettings && (
+								<HeaderAction icon={<Settings className="h-4 w-4" />} label="Settings" onClick={onOpenSettings} />
+							)}
+						</div>
+					)}
+				</header>
+			</div>
+		</div>
+	);
+}
+
+function HeaderAction({
+	icon, label, onClick, comingSoon,
+}: {
+	icon: React.ReactNode;
+	label: string;
+	onClick(): void;
+	comingSoon?: boolean;
+}) {
+	return (
+		<button
+			type="button"
+			onClick={onClick}
+			disabled={comingSoon}
+			title={comingSoon ? `${label} (coming soon)` : label}
+			className={cn(
+				"inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border border-border",
+				"bg-background hover:bg-accent transition-colors",
+				"disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-background"
+			)}
+		>
+			{icon}
+			{label}
+		</button>
+	);
+}
+
+function LandingAvatar({ space, variant }: { space: Space; variant: SpaceLandingVariant }) {
+	if (variant === "dms") {
+		return (
+			<div className="h-20 w-20 rounded-2xl bg-primary/15 flex items-center justify-center mb-4">
+				<User className="h-9 w-9 text-primary" />
+			</div>
+		);
+	}
+	if (variant === "rooms") {
+		return (
+			<div className="h-20 w-20 rounded-2xl bg-primary/15 flex items-center justify-center mb-4">
+				<Hash className="h-9 w-9 text-primary" />
+			</div>
+		);
+	}
+	return (
+		<MatrixAvatar
+			mxc={space.avatarUrl}
+			seed={space.id}
+			kind="space"
+			className="h-20 w-20 rounded-2xl mb-4"
+		/>
+	);
+}

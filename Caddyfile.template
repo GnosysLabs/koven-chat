@@ -1,0 +1,74 @@
+# Caddy config for Koven.  Auto-rendered by `bin/koven setup` from
+# this template into a real Caddyfile that compose mounts.  Two
+# possible shapes:
+#
+#   1. SERVER_NAME == KOVEN_HOSTNAME (single-domain install):
+#      Only the main site block runs.  Well-known handlers live
+#      inside it so federation discovery still works.
+#
+#   2. SERVER_NAME != KOVEN_HOSTNAME (apex + subdomain):
+#      Both blocks run.  Apex serves only /.well-known/* + redirects
+#      everything else to the main site; main site serves the app.
+#
+# Caddy fetches Let's Encrypt certs automatically for whichever
+# domains are listed, given a reachable HTTP/HTTPS port and DNS A
+# records pointing here.
+
+{
+	email {$ADMIN_EMAIL}
+}
+
+# ─── Main site: web client + matrix + engine ──────────────────────────
+{$KOVEN_HOSTNAME} {
+	# Well-known files (also served on the apex block below if
+	# SERVER_NAME differs).  Cheap to serve from both — federating
+	# peers and clients can hit either and the answer is the same.
+	handle /.well-known/matrix/server {
+		respond `{"m.server": "{$KOVEN_HOSTNAME}:443"}` 200
+		header Content-Type application/json
+	}
+	handle /.well-known/matrix/client {
+		respond `{"m.homeserver": {"base_url": "https://{$KOVEN_HOSTNAME}"}}` 200
+		header Content-Type application/json
+		header Access-Control-Allow-Origin "*"
+	}
+	handle /.well-known/koven {
+		respond `{"version": "0.1.0", "homeserver": "{$KOVEN_HOSTNAME}", "name": "{$SERVER_NAME}"}` 200
+		header Content-Type application/json
+		header Access-Control-Allow-Origin "*"
+	}
+
+	# Engine API + uploads.  Order matters: more specific paths
+	# before the SPA fallback below.
+	handle /api/* {
+		reverse_proxy engine:9000
+	}
+	handle /static/* {
+		reverse_proxy engine:9000
+	}
+
+	# Synapse — client-server API + federation traffic.  Federation
+	# port (8448 by spec) is exposed via this same 443 route per the
+	# .well-known/matrix/server hint above.
+	handle /_matrix/* {
+		reverse_proxy synapse:8008
+	}
+	handle /_synapse/* {
+		reverse_proxy synapse:8008
+	}
+
+	# Web client SPA.  Build output mounted at /srv/client; all
+	# non-API/non-matrix routes fall through to index.html so the
+	# client-side router handles them.
+	handle {
+		root * /srv/client
+		try_files {path} /index.html
+		file_server
+	}
+
+	encode gzip
+	log {
+		output stdout
+		format console
+	}
+}

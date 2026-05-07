@@ -1,0 +1,370 @@
+#!/usr/bin/env bash
+# Koven install / setup script.
+#
+# Subcommands:
+#   setup            — first-time setup or re-render config after .env
+#                      edits.  Idempotent; safe to re-run.
+#   bootstrap-admin  — provision the Synapse admin user + token the
+#                      engine needs for email-code account creation.
+#                      Run AFTER `docker compose up -d`, since Synapse
+#                      has to be reachable.  Idempotent; skips if
+#                      SYNAPSE_ADMIN_TOKEN is already set in .env.
+#   secrets          — print the auto-generated secrets in .env
+#                      (for ops use).
+#
+# Run from the repo root.  Reads/writes `.env`, `synapse-data/`,
+# `docker/coturn/turnserver.conf`, and `client/dist/`.
+#
+# This script is plain bash on purpose: it has to work on a fresh VPS
+# before any language toolchain is installed (Bun gets pulled in as
+# part of the docker build, not host-side).
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
+
+# ─── Helpers ────────────────────────────────────────────────────────
+
+log()  { printf "\033[1;36m%s\033[0m %s\n" "==>" "$*"; }
+warn() { printf "\033[1;33m%s\033[0m %s\n" "!!!" "$*"; }
+die()  { printf "\033[1;31m%s\033[0m %s\n" "ERR" "$*"; exit 1; }
+
+# Generate a 32-byte hex secret.  /dev/urandom is fine for these —
+# they're not used for crypto primitives directly, just as opaque
+# tokens (HMAC keys, Postgres password, etc.).
+gen_secret() {
+	if command -v openssl >/dev/null 2>&1; then
+		openssl rand -hex 32
+	else
+		head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
+	fi
+}
+
+# Set a key in .env if it's currently empty.  Preserves whatever's
+# already there (so re-runs don't rotate secrets).
+ensure_secret() {
+	local key="$1" current
+	current="$(grep -E "^${key}=" .env | cut -d= -f2- || true)"
+	if [[ -z "$current" ]]; then
+		local v
+		v="$(gen_secret)"
+		write_env_var "$key" "$v"
+		log "generated $key"
+	fi
+}
+
+# Write key=value into .env, replacing any existing line for that key
+# or appending if absent.  Unlike ensure_secret this overwrites; use
+# it for values we DO want to update on re-runs (e.g. the admin
+# token that has to match what Synapse currently knows).
+write_env_var() {
+	local key="$1" value="$2"
+	# Escape | for sed since we use | as the delimiter.
+	local escaped="${value//|/\\|}"
+	if grep -qE "^${key}=" .env; then
+		if sed --version >/dev/null 2>&1; then
+			sed -i "s|^${key}=.*|${key}=${escaped}|" .env
+		else
+			sed -i "" "s|^${key}=.*|${key}=${escaped}|" .env
+		fi
+	else
+		printf '%s=%s\n' "$key" "$value" >> .env
+	fi
+}
+
+# Render a template by substituting ${VAR} references with values from
+# .env.  We use `envsubst` which is part of GNU gettext — pre-installed
+# on Linux distros, available via `brew install gettext` on macOS.
+render_template() {
+	local src="$1" dst="$2"
+	# shellcheck disable=SC1091
+	set -a && source .env && set +a
+	envsubst < "$src" > "$dst"
+}
+
+require_cmd() {
+	command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1 (install it and re-run)"
+}
+
+# ─── Subcommands ────────────────────────────────────────────────────
+
+cmd_setup() {
+	require_cmd docker
+	require_cmd envsubst
+	require_cmd bun || die "bun is required to build the web client. Install from https://bun.sh"
+
+	# 1. .env from .env.example if missing.
+	if [[ ! -f .env ]]; then
+		[[ -f .env.example ]] || die ".env.example not found"
+		cp .env.example .env
+		log "copied .env.example → .env. Edit it now (KOVEN_HOSTNAME, SERVER_NAME, ADMIN_EMAIL) and re-run."
+		exit 0
+	fi
+
+	# 2. Validate required vars are set (not blank).  We don't try to
+	#    catch "still example default" — the user's domain might
+	#    legitimately match what's in .env.example.  Empty is the only
+	#    error; anything non-empty we trust.
+	# shellcheck disable=SC1091
+	source .env
+	for var in KOVEN_HOSTNAME SERVER_NAME ADMIN_EMAIL; do
+		[[ -n "${!var:-}" ]] || die "$var is empty in .env"
+	done
+	if [[ "$ADMIN_EMAIL" == "admin@example.com" ]]; then
+		warn "ADMIN_EMAIL is still admin@example.com — Let's Encrypt won't email you on cert issues"
+	fi
+
+	# 3. Generate any blank secrets.
+	ensure_secret POSTGRES_PASSWORD
+	ensure_secret SYNAPSE_REGISTRATION_SHARED_SECRET
+	ensure_secret SYNAPSE_MACAROON_SECRET_KEY
+	ensure_secret SYNAPSE_FORM_SECRET
+	ensure_secret ENGINE_AS_TOKEN
+	ensure_secret ENGINE_HS_TOKEN
+	ensure_secret TURN_SHARED_SECRET
+
+	# 4. Set up synapse-data/ — bootstrap signing key on first run, but
+	#    ALWAYS re-render homeserver.yaml + appservice from templates so
+	#    config changes propagate after .env edits.
+	mkdir -p synapse-data
+	if [[ ! -f synapse-data/signing.key ]]; then
+		log "generating Synapse signing key (one-time)"
+		# `synapse generate` writes signing.key + a default homeserver.yaml.
+		# We discard the default config and use our template instead, but
+		# keep the signing.key — losing that is irreversible (federating
+		# servers cache it).
+		docker run --rm \
+			-v "$ROOT/synapse-data:/data" \
+			-e SYNAPSE_SERVER_NAME="$SERVER_NAME" \
+			-e SYNAPSE_REPORT_STATS=no \
+			matrixdotorg/synapse:latest generate >/dev/null
+		# Synapse's auto-generated homeserver.yaml goes in the trash —
+		# we render our own from the template below.
+		rm -f synapse-data/homeserver.yaml
+	fi
+
+	# 5. Render Synapse + appservice config from templates.
+	log "rendering Synapse config"
+	render_template docker/synapse/homeserver.yaml.template synapse-data/homeserver.yaml
+	render_template docker/synapse/koven-engine.appservice.yaml.template synapse-data/koven-engine.appservice.yaml
+	# log.config is static — just copy it once if missing.
+	[[ -f synapse-data/log.config ]] || cp docker/synapse/log.config synapse-data/log.config
+
+	# 6. Render coturn config.
+	log "rendering coturn config"
+	# coturn's realm is conventionally the public hostname.
+	export TURN_REALM="$KOVEN_HOSTNAME"
+	render_template docker/coturn/turnserver.conf.template docker/coturn/turnserver.conf
+
+	# 7. Caddyfile.  We render `Caddyfile.template` → `Caddyfile.runtime`
+	#    so the repo stays clean after setup (Caddyfile.runtime is
+	#    .gitignored).  Caddy itself expands {$VAR} from the environment
+	#    compose passes in, so envsubst isn't needed for the file body —
+	#    we just copy the template and append the apex block when
+	#    SERVER_NAME differs from KOVEN_HOSTNAME.
+	log "rendering Caddyfile"
+	cp Caddyfile.template Caddyfile.runtime
+	if [[ "$SERVER_NAME" != "$KOVEN_HOSTNAME" ]]; then
+		log "  two-domain mode — appending apex block for $SERVER_NAME"
+		{
+			printf '\n# === apex block (auto-generated) ===\n'
+			cat docker/caddy/apex.snippet
+		} >> Caddyfile.runtime
+	fi
+
+	# 7b. nginx config — only useful when the host already runs nginx
+	#     (see docker-compose.nginx.yml).  Rendering it unconditionally
+	#     is cheap; operators on the Caddy path just ignore the output.
+	log "rendering nginx config"
+	render_template docker/nginx/koven.conf.template docker/nginx/koven.conf
+
+	# 8. Build the web client.  Vite output goes to client/dist; Caddy
+	#    serves from there via the volume mount in compose.
+	log "building web client (this takes a minute)"
+	bun install --frozen-lockfile
+	bun run --cwd client build
+
+	# 9. Engine data dir.
+	mkdir -p data/engine
+
+	log "setup complete."
+	echo
+	echo "Next:"
+	echo "  1. docker compose up -d"
+	echo "  2. bin/koven bootstrap-admin   # binds ADMIN_EMAIL to the admin user"
+	echo "  3. sign in at https://$KOVEN_HOSTNAME with $ADMIN_EMAIL"
+	echo
+	echo "Set up DNS:"
+	echo "  $KOVEN_HOSTNAME      A    <this server's public IP>"
+	if [[ "$SERVER_NAME" != "$KOVEN_HOSTNAME" ]]; then
+		echo "  $SERVER_NAME           A    <this server's public IP>"
+	fi
+}
+
+# Provision the Synapse admin user + access token used by the engine
+# for email-code account creation.  Idempotent: if SYNAPSE_ADMIN_TOKEN
+# is already set in .env we assume it's good and skip; pass --force to
+# rotate (handy after a synapse-data wipe).
+cmd_bootstrap_admin() {
+	require_cmd docker
+	[[ -f .env ]] || die "no .env yet — run \`bin/koven setup\` first"
+	# shellcheck disable=SC1091
+	source .env
+
+	local force=0
+	if [[ "${1:-}" == "--force" ]]; then force=1; fi
+
+	if [[ -n "${SYNAPSE_ADMIN_TOKEN:-}" && $force -eq 0 ]]; then
+		log "SYNAPSE_ADMIN_TOKEN already set in .env; skipping"
+		log "  re-run with --force to rotate (needed after a synapse-data wipe)"
+		return 0
+	fi
+
+	# Wait for Synapse's client API to come up.  Up to 60s; first run
+	# can take that long while Synapse runs DB migrations.  Container
+	# health alone isn't enough — the HTTP listener needs to be live.
+	log "waiting for Synapse to be reachable..."
+	local attempts=0
+	until docker compose exec -T synapse \
+		python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8008/_matrix/client/versions', timeout=2)" \
+		>/dev/null 2>&1
+	do
+		attempts=$((attempts + 1))
+		if [[ $attempts -gt 60 ]]; then
+			die "Synapse didn't become reachable after 60s. Check 'docker compose logs synapse'."
+		fi
+		sleep 1
+	done
+
+	# Reuse an existing admin user/password if .env already has them
+	# (re-runs after a partial failure should pick up where they left
+	# off, not generate a brand-new password we then have to reconcile).
+	local admin_user="${SYNAPSE_ADMIN_USER:-koven-admin}"
+	local admin_pw="${SYNAPSE_ADMIN_PASSWORD:-$(gen_secret)}"
+
+	# register_new_matrix_user fails noisily if the user already exists.
+	# We swallow that; the login step below is the actual proof we have
+	# valid credentials, and that'd fail loud if the password is wrong.
+	log "registering Synapse admin @${admin_user}:${SERVER_NAME} (idempotent)"
+	docker compose exec -T synapse register_new_matrix_user \
+		-u "$admin_user" -p "$admin_pw" --admin \
+		-c /data/homeserver.yaml http://localhost:8008 >/dev/null 2>&1 || true
+
+	# Mint an access token by logging in.  We use python3 inside the
+	# Synapse container — Synapse images all have it, and curl isn't
+	# guaranteed.  The script reads JSON from stdin so we don't have
+	# to template the password into the python source.
+	log "minting admin access token"
+	local token
+	token="$(printf '%s\n%s' "$admin_user" "$admin_pw" | docker compose exec -T synapse python3 -c '
+import json, sys, urllib.request
+user, pw = sys.stdin.read().splitlines()
+body = json.dumps({
+	"type": "m.login.password",
+	"identifier": {"type": "m.id.user", "user": user},
+	"password": pw,
+	"initial_device_display_name": "koven-engine-bootstrap",
+}).encode()
+req = urllib.request.Request(
+	"http://localhost:8008/_matrix/client/v3/login",
+	data=body,
+	headers={"Content-Type": "application/json"},
+)
+resp = urllib.request.urlopen(req)
+print(json.load(resp)["access_token"])
+')" || die "login failed for @${admin_user}:${SERVER_NAME}; check the password matches what Synapse has"
+
+	[[ -n "$token" ]] || die "Synapse returned an empty access token"
+
+	# Persist all three so a subsequent --force rotation knows the
+	# username + password to reuse.  Token is what the engine actually
+	# reads; user/password are operator-recovery data.
+	write_env_var SYNAPSE_ADMIN_USER     "$admin_user"
+	write_env_var SYNAPSE_ADMIN_PASSWORD "$admin_pw"
+	write_env_var SYNAPSE_ADMIN_TOKEN    "$token"
+	log "wrote SYNAPSE_ADMIN_USER, SYNAPSE_ADMIN_PASSWORD, SYNAPSE_ADMIN_TOKEN to .env"
+
+	# Bind ADMIN_EMAIL to the admin user.  Two writes:
+	#   - Synapse 3PID (informational; lives in Synapse's user record).
+	#   - Engine user_emails + admins rows (this is what email-code
+	#     login actually reads on /api/auth/verify-code).
+	# Skipped if ADMIN_EMAIL is blank; the operator can still sign
+	# in to Matrix clients with the password but not via Koven web.
+	local admin_mxid="@${admin_user}:${SERVER_NAME}"
+	if [[ -n "${ADMIN_EMAIL:-}" && "$ADMIN_EMAIL" != "admin@example.com" ]]; then
+		log "binding $ADMIN_EMAIL to $admin_mxid (Synapse 3PID)"
+		# Synapse admin API: PUT /admin/v2/users/<id>.  We use the
+		# admin token we just minted.  Failure is non-fatal — the
+		# 3PID isn't load-bearing for sign-in (the engine's
+		# user_emails table is); we just want them in sync.
+		printf '%s\n%s\n%s' "$admin_mxid" "$ADMIN_EMAIL" "$token" \
+		| docker compose exec -T synapse python3 -c '
+import json, sys, urllib.request, urllib.parse
+mxid, email, tok = sys.stdin.read().splitlines()
+req = urllib.request.Request(
+	"http://localhost:8008/_synapse/admin/v2/users/" + urllib.parse.quote(mxid, safe=""),
+	method="PUT",
+	data=json.dumps({"threepids":[{"medium":"email","address":email}]}).encode(),
+	headers={"Content-Type":"application/json","Authorization":"Bearer "+tok},
+)
+urllib.request.urlopen(req).read()
+' >/dev/null 2>&1 || warn "Synapse 3PID set failed; sign-in still works via engine binding below"
+
+		# Engine bootstrap: writes user_emails row + admins row.
+		# Auth is the appservice token (operator-level secret),
+		# not the user-level admin token; the engine's admins
+		# table is empty at this point so the admin token has no
+		# special privilege there yet.
+		log "binding $ADMIN_EMAIL to $admin_mxid (engine user_emails + admins)"
+		printf '%s\n%s\n%s' "$ADMIN_EMAIL" "$admin_mxid" "$ENGINE_AS_TOKEN" \
+		| docker compose exec -T engine bun -e '
+const [email, userId, asToken] = (await Bun.stdin.text()).trim().split("\n");
+const r = await fetch("http://localhost:9000/api/admin/bootstrap", {
+	method: "POST",
+	headers: { "Content-Type": "application/json", Authorization: "Bearer " + asToken },
+	body: JSON.stringify({ email, user_id: userId }),
+});
+if (!r.ok) {
+	console.error(await r.text());
+	process.exit(1);
+}
+' || die "engine bootstrap binding failed; check 'docker compose logs engine'"
+	else
+		warn "ADMIN_EMAIL not set (or still admin@example.com); skipping email binding."
+		warn "  fix: edit .env, set ADMIN_EMAIL, and re-run bin/koven bootstrap-admin --force"
+	fi
+
+	# Engine has the env baked at start — recreate so it sees the new
+	# token.  --force-recreate because compose's env-change detection
+	# is unreliable across versions.
+	log "recreating engine container so it picks up the new token"
+	docker compose up -d --force-recreate engine
+
+	echo
+	log "admin user is $admin_mxid"
+	log "  password stored in .env as SYNAPSE_ADMIN_PASSWORD (rarely needed)"
+	log "  token stored in .env as SYNAPSE_ADMIN_TOKEN"
+	if [[ -n "${ADMIN_EMAIL:-}" && "$ADMIN_EMAIL" != "admin@example.com" ]]; then
+		log "  sign in to Koven web with $ADMIN_EMAIL"
+	fi
+}
+
+cmd_secrets() {
+	[[ -f .env ]] || die "no .env yet — run \`bin/koven setup\` first"
+	# shellcheck disable=SC1091
+	source .env
+	for k in POSTGRES_PASSWORD SYNAPSE_REGISTRATION_SHARED_SECRET ENGINE_AS_TOKEN ENGINE_HS_TOKEN TURN_SHARED_SECRET; do
+		printf "%-40s %s\n" "$k" "${!k:-(unset)}"
+	done
+}
+
+# ─── Dispatch ───────────────────────────────────────────────────────
+
+case "${1:-}" in
+	setup)            shift; cmd_setup "$@"            ;;
+	bootstrap-admin)  shift; cmd_bootstrap_admin "$@"  ;;
+	secrets)          shift; cmd_secrets "$@"          ;;
+	"")               die "usage: bin/koven {setup|bootstrap-admin|secrets}" ;;
+	*)                die "unknown subcommand: $1 (try setup, bootstrap-admin, secrets)" ;;
+esac

@@ -1,0 +1,71 @@
+# coturn configuration — used by Synapse to hand TURN credentials to
+# WebRTC clients via /_matrix/client/v3/voip/turnServer.  Without TURN,
+# 1:1 calls fail when both peers are behind symmetric NATs (most home
+# networks).
+#
+# KOVEN_HOSTNAME, TURN_SHARED_SECRET, and TURN_REALM are substituted
+# by `bin/koven setup` from .env.  The shared secret is the SAME value
+# Synapse has in `turn_shared_secret`; coturn uses it to verify the
+# time-limited credentials Synapse issues to clients via /voip/turnServer.
+
+# --- Auth ---
+# Time-limited credentials authenticated via shared secret with Synapse.
+# Clients never see the secret directly — Synapse mints a username
+# (timestamp:user) and HMAC-derives a one-shot password from it.
+use-auth-secret
+static-auth-secret=${TURN_SHARED_SECRET}
+realm=${TURN_REALM}
+
+# --- Listeners ---
+# Standard TURN ports.  3478 is plain TURN (UDP+TCP); 5349 is TURNS
+# (TLS).  We don't bind 5349 here because Caddy fronts the public
+# domain with TLS — clients use plain TURN over the existing TLS
+# tunnel via the WebRTC stack.
+listening-port=3478
+# `fingerprint` and `lt-cred-mech` are required by most WebRTC clients.
+# coturn doesn't accept inline comments after a directive, so the
+# explanatory notes have to live on their own lines.
+fingerprint
+lt-cred-mech
+no-stdout-log
+log-file=stdout
+verbose
+
+# --- Network ---
+# Relay range — coturn opens a UDP port per active call from this
+# pool to forward media.  3000 ports is plenty for any reasonable
+# Koven instance.
+min-port=49152
+max-port=65535
+
+# Listen on all interfaces inside the container.  Docker maps these
+# to the host's public IP via compose's port mappings.
+listening-ip=0.0.0.0
+
+# Trust the Caddy / docker network for X-Forwarded-For so logs show
+# real client IPs.
+no-multicast-peers
+
+# --- Hardening ---
+# coturn's defaults allow it to relay TO arbitrary IPs — fine for a
+# public TURN server but means it can be used as an open relay.  Lock
+# it to public IP space only, blocking RFC1918 destinations.
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=::1
+denied-peer-ip=fe80::-fe80::ffff:ffff:ffff:ffff
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+# Everything not denied above is allowed (i.e. public IPs).
+allowed-peer-ip=0.0.0.0-255.255.255.255
+
+# No SSL termination — Caddy handles TLS for HTTPS endpoints; coturn
+# doesn't need its own cert because TURN-over-UDP/TCP is already
+# wrapped by DTLS at the WebRTC layer.
+
+# --- Resource limits ---
+total-quota=1200
+# 0 = unlimited; tune if your VPS has a strict bandwidth cap.
+bps-capacity=0

@@ -1,0 +1,117 @@
+# Koven nginx config — used when the host already runs nginx + certbot
+# instead of the bundled Caddy.  See docker-compose.nginx.yml for the
+# matching compose override.
+#
+# `bin/koven setup` renders this template into
+# `docker/nginx/koven.conf` (envsubst'd against .env).  Operator
+# installs it:
+#
+#   sudo cp docker/nginx/koven.conf /etc/nginx/sites-available/koven
+#   sudo ln -s /etc/nginx/sites-available/koven /etc/nginx/sites-enabled/koven
+#   sudo nginx -t && sudo systemctl reload nginx
+#   sudo certbot --nginx -d ${KOVEN_HOSTNAME} -d ${SERVER_NAME} \
+#        --redirect --agree-tos --email ${ADMIN_EMAIL} --non-interactive
+#
+# certbot rewrites this file in place to add TLS listen lines + cert
+# paths.  Re-running `bin/koven setup` won't overwrite the live
+# /etc/nginx/sites-available/koven (only the rendered file under
+# docker/nginx/), so certbot's edits stick.
+
+# ─── ${KOVEN_HOSTNAME} — web client + engine + matrix ───────────────
+server {
+    server_name ${KOVEN_HOSTNAME};
+
+    # Static SPA built by `bin/koven setup`.
+    root /opt/koven-web/client/dist;
+    index index.html;
+
+    # Match Synapse's max_upload_size for media uploads.
+    client_max_body_size 50M;
+
+    # Engine API (governance, profile, auth, admin).
+    location /api/ {
+        proxy_pass http://127.0.0.1:9000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Engine-served uploads (login background, instance logo).
+    location /static/ {
+        proxy_pass http://127.0.0.1:9000;
+        proxy_set_header Host $host;
+    }
+
+    # Matrix client API + federation share Synapse's :8008 listener.
+    # /sync long-polls for ~30s; bump read timeout + disable buffering
+    # so SSE/long-poll behaves.
+    location /_matrix/ {
+        proxy_pass http://127.0.0.1:8008;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        client_max_body_size 50M;
+    }
+
+    # Synapse admin endpoints (used by `bin/koven bootstrap-admin`
+    # and the engine for admin Synapse calls).
+    location /_synapse/ {
+        proxy_pass http://127.0.0.1:8008;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        client_max_body_size 50M;
+    }
+
+    # Everything else: SPA fallback so React Router handles deep links.
+    location / {
+        try_files $uri /index.html;
+    }
+
+    listen 80;
+    listen [::]:80;
+}
+
+# ─── ${SERVER_NAME} apex — Matrix .well-known + redirect to client ──
+server {
+    server_name ${SERVER_NAME};
+
+    # Federation server discovery: tells peers where the Matrix
+    # homeserver actually lives.  This is how a server_name on the
+    # apex resolves to a homeserver running on the subdomain.
+    location = /.well-known/matrix/server {
+        default_type application/json;
+        add_header Access-Control-Allow-Origin *;
+        return 200 '{"m.server":"${KOVEN_HOSTNAME}:443"}';
+    }
+
+    # Client well-known: tells Matrix clients which homeserver URL
+    # to use after they enter "@user:${SERVER_NAME}".
+    location = /.well-known/matrix/client {
+        default_type application/json;
+        add_header Access-Control-Allow-Origin *;
+        return 200 '{"m.homeserver":{"base_url":"https://${KOVEN_HOSTNAME}"}}';
+    }
+
+    # Koven federation gate: peers probe this to confirm the remote
+    # is a Koven instance before accepting events.
+    location = /.well-known/koven {
+        default_type application/json;
+        add_header Access-Control-Allow-Origin *;
+        return 200 '{"version":"1"}';
+    }
+
+    # Anything else on the apex → bounce to the client app.
+    location / {
+        return 301 https://${KOVEN_HOSTNAME}$request_uri;
+    }
+
+    listen 80;
+    listen [::]:80;
+}

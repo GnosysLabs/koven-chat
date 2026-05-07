@@ -1,0 +1,33 @@
+# Compose override for nginx-fronted production deploys.
+#
+# Use this when the host already runs nginx + certbot for other
+# services and you want nginx to terminate TLS instead of Caddy.
+# It disables the Caddy service via a profile (default `up` won't
+# start it) and binds Synapse + engine to 127.0.0.1 so nginx (on
+# the host) can proxy to them while the public internet can't reach
+# them directly.
+#
+# Activation: set COMPOSE_FILE in your .env so every `docker compose
+# ...` invocation merges this file automatically:
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.nginx.yml
+#
+# Or pass it explicitly each time:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.nginx.yml up -d
+#
+# nginx config lives at docker/nginx/koven.conf.template — `bin/koven
+# setup` renders it; operator drops it into /etc/nginx/sites-available
+# and runs `certbot --nginx`.
+
+services:
+  caddy:
+    profiles: ["disabled"]
+
+  synapse:
+    ports:
+      - "127.0.0.1:8008:8008"
+
+  engine:
+    ports:
+      - "127.0.0.1:9000:9000"

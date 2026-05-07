@@ -1,0 +1,879 @@
+// Top-level wiring.  Loads stored Matrix credentials (if any), shows
+// the login screen when absent, otherwise spins up a MatrixTransport
+// and renders the Sidebar + ChatPane.  Governance overlays go on top
+// of this in subsequent passes.
+
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import {
+	MatrixTransport,
+	loadStoredCredentials,
+	saveCredentials,
+	type MatrixCredentials,
+	type SyncState,
+} from "@/lib/matrix";
+import { Login } from "@/components/Login";
+import { SpaceBar } from "@/components/SpaceBar";
+import { RoomList } from "@/components/RoomList";
+import { ChatPane } from "@/components/ChatPane";
+import { SpaceLanding } from "@/components/SpaceLanding";
+import { ExplorePane } from "@/components/ExplorePane";
+import { MemberList } from "@/components/MemberList";
+import { DmProfilePanel } from "@/components/DmProfilePanel";
+import { CreateRoomSheet } from "@/components/CreateRoomSheet";
+import { StartDmSheet } from "@/components/StartDmSheet";
+import { SpaceEditSheet } from "@/components/SpaceEditSheet";
+import { RoomEditSheet } from "@/components/RoomEditSheet";
+import { InviteSheet } from "@/components/InviteSheet";
+import { ProfileSheet } from "@/components/ProfileSheet";
+import { AppSettingsSheet } from "@/components/AppSettingsSheet";
+import { EncryptionSetupSheet } from "@/components/EncryptionSetupSheet";
+import { EncryptionUnlockSheet } from "@/components/EncryptionUnlockSheet";
+import { IncomingCallSheet } from "@/components/IncomingCallSheet";
+import { ActiveCallView } from "@/components/ActiveCallView";
+import { SuspendedBanner } from "@/components/SuspendedBanner";
+import { ModLogSheet } from "@/components/ModLogSheet";
+import { FloorReviewSheet } from "@/components/FloorReviewSheet";
+import { fetchAdminStatus, fetchFloorQueue, fetchMyStatus, type SuspensionSummary } from "@/lib/instance";
+import { fetchUiaPassword } from "@/lib/auth";
+import { TransportContext } from "@/lib/transportContext";
+import { applyTheme, loadSettings, saveSettings, type Settings } from "@/state/settings";
+import type { UserId } from "@koven/shared";
+import { initialState, reduce } from "@/state/store";
+import type { RoomId, SpaceId } from "@koven/shared";
+
+/**
+ * Resolve a call's peer identity from the DM's room data.  Used to
+ * paint the right name/avatar in the call overlays immediately,
+ * without waiting for MatrixCall.getOpponentMember() to populate
+ * (which only happens after the answer arrives).  Returns undefined
+ * for non-DM rooms or unknown room ids — caller falls back to SDK
+ * getters.
+ */
+function peerForCall(roomId: string | undefined, rooms: import("@koven/shared").Room[]) {
+	if (!roomId) return undefined;
+	const room = rooms.find(r => r.id === roomId);
+	if (!room || room.kind !== "dm" || !room.dmUserId) return undefined;
+	return {
+		userId: room.dmUserId,
+		displayName: room.name,
+		avatarMxc: room.avatarUrl,
+	};
+}
+
+export default function App() {
+	const [creds, setCreds] = useState<MatrixCredentials | null>(loadStoredCredentials);
+	const [state, dispatch] = useReducer(reduce, initialState);
+	const [transport, setTransport] = useState<MatrixTransport | null>(null);
+	const [bootError, setBootError] = useState<string | null>(null);
+	const [createRoomOpen, setCreateRoomOpen] = useState(false);
+	const [startDmOpen, setStartDmOpen] = useState(false);
+	const [editingSpaceId, setEditingSpaceId] = useState<SpaceId | null>(null);
+	const [editingRoomId, setEditingRoomId] = useState<RoomId | null>(null);
+	// Target of the active invite dialog: a room or space id.  Null
+	// keeps the dialog closed.
+	const [invitingRoomId, setInvitingRoomId] = useState<RoomId | null>(null);
+	const [viewedUserId, setViewedUserId] = useState<UserId | null>(null);
+	const [settingsOpen, setSettingsOpen] = useState(false);
+	const [settings, setSettings] = useState<Settings>(loadSettings);
+	const [myAvatarMxc, setMyAvatarMxc] = useState<string | undefined>(undefined);
+	// Encryption gate.  Null = not yet probed.  "needs-setup" means the
+	// account has no SSSS yet (first-time signup or an old account
+	// pre-dating E2EE), "needs-unlock" means SSSS exists but this
+	// device hasn't fetched the cross-signing keys, "ready" means we
+	// can render the app.  The setup sheet collects the account
+	// password directly from the user (Synapse needs it for UIA on
+	// cross-signing key upload), so we don't have to thread it through
+	// from the login form — that means setup also works after a page
+	// refresh, not just immediately after a fresh sign-in.
+	const [encState, setEncState] = useState<"needs-setup" | "needs-unlock" | "ready" | null>(null);
+	// Suspension state, polled from the engine.  Null until the first
+	// poll completes; a populated value means the engine considers
+	// this account paused (status = "pending" or "confirmed") and the
+	// UI gates compose / DM / room creation.
+	const [suspension, setSuspension] = useState<SuspensionSummary | null>(null);
+	// Per-room mod log dialog target.  Null = closed.
+	const [modLogRoomId, setModLogRoomId] = useState<RoomId | null>(null);
+	// Ignored-user list (Matrix-native block).  Mirrors transport state
+	// for cheap render-time filtering of timeline messages and for
+	// driving the Settings → Account "Blocked users" section.  Stored
+	// as a Set for O(1) lookups; updated whenever account_data fires
+	// `m.ignored_user_list`.
+	const [ignoredUsers, setIgnoredUsers] = useState<Set<UserId>>(new Set());
+	// Admin status + pending-review queue length.  Drives the shield
+	// icon (admin-only) above Settings in the SpaceBar plus its red
+	// attention dot.  Polled on the same 60s cadence as other "rare
+	// event" surfaces; bumped immediately after the admin acts on a
+	// case via the FloorReviewSheet's onQueueChanged callback.
+	const [isAdmin, setIsAdmin] = useState(false);
+	const [pendingReviewCount, setPendingReviewCount] = useState(0);
+	const [reviewSheetOpen, setReviewSheetOpen] = useState(false);
+	// 1:1 call state.  At most one of these is non-null:
+	//   - incomingCall: a remote ringing us; renders the accept/decline sheet
+	//   - activeCall: we're in a call (just-placed outbound, or accepted inbound)
+	// Once a call ends (Hangup/Error/Replaced), the handler clears the
+	// matching slot.  MatrixCall objects are stored as-is so call-state
+	// listeners can attach to them; we keep them out of useReducer so
+	// React doesn't try to memoize them.
+	const [incomingCall, setIncomingCall] = useState<import("matrix-js-sdk/lib/webrtc/call").MatrixCall | null>(null);
+	const [activeCall, setActiveCall] = useState<import("matrix-js-sdk/lib/webrtc/call").MatrixCall | null>(null);
+	// Mirror the call state into refs so the transport's onIncomingCall
+	// closure (captured once per transport boot) reads current values
+	// when deciding whether to auto-reject an overlapping invite.
+	const incomingCallRef = useRef<import("matrix-js-sdk/lib/webrtc/call").MatrixCall | null>(null);
+	const activeCallRef = useRef<import("matrix-js-sdk/lib/webrtc/call").MatrixCall | null>(null);
+	// Holds the UIA password handed back by the engine on login so the
+	// transport can pick it up the moment it's constructed.  See
+	// handleLogin for the rationale.
+	const pendingUiaPasswordRef = useRef<string | null>(null);
+	useEffect(() => { incomingCallRef.current = incomingCall; }, [incomingCall]);
+	useEffect(() => { activeCallRef.current = activeCall; }, [activeCall]);
+
+	// Apply theme on mount and whenever it changes.  Persist on every
+	// settings update.
+	useEffect(() => {
+		applyTheme(settings.theme);
+		saveSettings(settings);
+	}, [settings]);
+
+	// Admin status + pending-review-queue length poll.  Cheap two-call
+	// fan-out on the same cadence as the suspension poll: first probe
+	// /api/instance/me to confirm we're an admin, and only then pull
+	// /api/admin/floor-queue (which would 403 for non-admins anyway).
+	// Listening on `creds` so the timer resets across sign-in / sign-out.
+	useEffect(() => {
+		if (!creds) {
+			setIsAdmin(false);
+			setPendingReviewCount(0);
+			return;
+		}
+		let cancelled = false;
+		const poll = async () => {
+			try {
+				const status = await fetchAdminStatus(creds.access_token);
+				if (cancelled) return;
+				setIsAdmin(status.is_admin);
+				if (!status.is_admin) {
+					setPendingReviewCount(0);
+					return;
+				}
+				const queue = await fetchFloorQueue(creds.access_token);
+				if (!cancelled) setPendingReviewCount(queue.length);
+			} catch {
+				// Transient network error; keep last-known values rather
+				// than thrash the badge.
+			}
+		};
+		poll();
+		const id = window.setInterval(poll, 60_000);
+		return () => {
+			cancelled = true;
+			window.clearInterval(id);
+		};
+	}, [creds]);
+
+	// Manual refresh hook — fired by the FloorReviewSheet after every
+	// confirm/reverse so the badge updates without waiting for the
+	// next poll tick.  Idempotent.
+	async function refreshPendingReviewCount() {
+		if (!creds || !isAdmin) return;
+		try {
+			const queue = await fetchFloorQueue(creds.access_token);
+			setPendingReviewCount(queue.length);
+		} catch {
+			/* ignore — next poll will catch it */
+		}
+	}
+
+	// Suspension state poll.  Hits /api/me/status on boot and every
+	// 60s thereafter so a freshly-applied suspension takes effect
+	// without a refresh.  Lighter than a websocket — the cadence
+	// matches "actually-pretty-rare event" timing.
+	useEffect(() => {
+		if (!creds) {
+			setSuspension(null);
+			return;
+		}
+		let cancelled = false;
+		const poll = async () => {
+			try {
+				const status = await fetchMyStatus(creds.access_token);
+				if (!cancelled) setSuspension(status?.suspension ?? null);
+			} catch {
+				// Transient network error — leave the previous state
+				// in place rather than thrash the UI on a flake.
+			}
+		};
+		poll();
+		const id = window.setInterval(poll, 60_000);
+		return () => {
+			cancelled = true;
+			window.clearInterval(id);
+		};
+	}, [creds]);
+
+	// Bootstrap (and re-bootstrap) the transport whenever creds change.
+	useEffect(() => {
+		if (!creds) return;
+		const t = new MatrixTransport({
+			onSyncState: (s: SyncState) => dispatch({ type: "sync_state", state: s }),
+			onRoomsUpdated: rooms => dispatch({ type: "rooms_updated", rooms }),
+			onSpacesUpdated: spaces => dispatch({ type: "spaces_updated", spaces }),
+			onMessage: (message, { live }) => dispatch({ type: "message_arrived", message, live }),
+			onReaction: (reaction) => dispatch({
+				type: "reaction_arrived",
+				reaction,
+				myUserId: creds.user_id as UserId,
+			}),
+			onReactionRedacted: (_roomId, reactionEventId) => dispatch({
+				type: "reaction_redacted",
+				reactionEventId,
+			}),
+			onFlag: (flag) => dispatch({
+				type: "flag_arrived",
+				flag,
+				myUserId: creds.user_id as UserId,
+			}),
+			onFlagRedacted: (_roomId, flagEventId) => dispatch({
+				type: "flag_redacted",
+				flagEventId,
+			}),
+			onCollapse: (collapse) => dispatch({
+				type: "collapse_arrived",
+				collapse,
+			}),
+			onMembersUpdated: roomId => {
+				const members = t.getRoomMembers(roomId);
+				dispatch({ type: "members_loaded", roomId, members });
+			},
+			onIncomingCall: (call) => {
+				// If we're already in a call, auto-reject overlapping
+				// invites.  Single-call semantics for v1; "call waiting"
+				// is a future-feature concern.  Read from refs because
+				// this closure was captured at transport-boot time and
+				// the state values it sees would otherwise be stale.
+				if (activeCallRef.current || incomingCallRef.current) {
+					call.reject();
+					return;
+				}
+				setIncomingCall(call);
+			},
+		});
+		// Hand the freshly-issued UIA password (from email-code login)
+		// to the transport before any UIA-protected op can fire.
+		// Cleared after read so a sign-out / re-login cycle picks up
+		// only the new value.
+		if (pendingUiaPasswordRef.current) {
+			t.setUiaPassword(pendingUiaPasswordRef.current);
+			pendingUiaPasswordRef.current = null;
+		}
+		setTransport(t);
+		setBootError(null);
+		setEncState(null);
+		// Capture this transport instance so the .then/.catch below can
+		// confirm they belong to the still-current run.  React's
+		// <StrictMode> double-invokes this effect in dev: the first
+		// transport gets stop()'d during cleanup, but its in-flight
+		// start() promise still resolves and would otherwise race the
+		// second transport's state writes.
+		let cancelled = false;
+		t.start(creds).then(async () => {
+			if (cancelled) return;
+			// Pull my avatar mxc once so the SpaceBar tile resolves to my
+			// real avatar instead of the DiceBear fallback.
+			t.getMyProfile().then(p => { if (!cancelled) setMyAvatarMxc(p.avatarUrl); }).catch(() => {});
+			// Encryption probe — gates app rendering.  See encState above.
+			try {
+				const status = await t.encryptionStatus();
+				if (!cancelled) setEncState(status);
+			} catch (err) {
+				if (cancelled) return;
+				console.warn("encryptionStatus probe failed", err);
+				setEncState("needs-unlock");
+			}
+		}).catch(e => {
+			if (cancelled) return;
+			setBootError(e instanceof Error ? e.message : String(e));
+		});
+		// Subscribe to ignore-list changes so block/unblock takes effect
+		// across the app without a refresh.  Initial pull happens once
+		// here too; the listener only fires on subsequent updates.
+		const unsubscribe = t.onIgnoredUsersChanged(() => {
+			if (cancelled) return;
+			setIgnoredUsers(new Set(t.getIgnoredUsers()));
+		});
+		// Pull the initial list slightly after sync settles.  We can
+		// read it earlier, but account_data sometimes arrives a beat
+		// after PREPARED, and re-reading on the first
+		// onIgnoredUsersChanged catches us up regardless.
+		setIgnoredUsers(new Set(t.getIgnoredUsers()));
+		return () => {
+			cancelled = true;
+			unsubscribe();
+			t.stop();
+			setTransport(null);
+			setIgnoredUsers(new Set());
+		};
+	}, [creds]);
+
+	// When the active room changes, load its existing timeline + members
+	// + reactions from the matrix-js-sdk's in-memory state.
+	useEffect(() => {
+		if (!state.activeRoomId || !transport || !creds) return;
+		// Mark the room read on entry so the unread dot clears.  Fire
+		// and forget — the receipt round-trips to Synapse but we don't
+		// gate the room render on it.
+		transport.markAsRead(state.activeRoomId).catch(() => {});
+		dispatch({
+			type: "messages_loaded",
+			roomId: state.activeRoomId,
+			messages: transport.getRoomMessages(state.activeRoomId),
+		});
+		dispatch({
+			type: "members_loaded",
+			roomId: state.activeRoomId,
+			members: transport.getRoomMembers(state.activeRoomId),
+		});
+		dispatch({
+			type: "reactions_loaded",
+			reactions: transport.getRoomReactions(state.activeRoomId),
+			myUserId: creds.user_id as UserId,
+		});
+		dispatch({
+			type: "flags_loaded",
+			flags: transport.getRoomFlags(state.activeRoomId),
+			myUserId: creds.user_id as UserId,
+		});
+		dispatch({
+			type: "collapses_loaded",
+			collapses: transport.getRoomCollapses(state.activeRoomId),
+		});
+	}, [state.activeRoomId, transport, creds]);
+
+	function handleLogin(newCreds: MatrixCredentials, uiaPassword: string) {
+		saveCredentials(newCreds);
+		// Stash the engine-issued UIA password in a ref so we can hand
+		// it to the transport once it's instantiated by the cred-driven
+		// effect below.  Memory-only by design: never written to
+		// localStorage, never sent back to the engine, never persisted.
+		// On every page refresh the UIA password is gone — any UIA op
+		// that fires later this session calls fetchUiaPassword() to
+		// rotate fresh.
+		pendingUiaPasswordRef.current = uiaPassword;
+		setCreds(newCreds);
+	}
+
+	function handleSignOut() {
+		saveCredentials(null);
+		setCreds(null);
+		setEncState(null);
+		dispatch({ type: "set_active_room", roomId: null });
+	}
+
+	const activeRoom = useMemo(
+		() => state.rooms.find(r => r.id === state.activeRoomId) ?? null,
+		[state.rooms, state.activeRoomId],
+	);
+	const allMessages = state.activeRoomId
+		? state.messagesByRoom.get(state.activeRoomId) ?? []
+		: [];
+	// Drop messages from ignored users at render time.  Messages stay in
+	// the reducer state so unblocking re-shows them without a re-sync.
+	const messages = useMemo(
+		() => ignoredUsers.size === 0
+			? allMessages
+			: allMessages.filter(m => !ignoredUsers.has(m.sender as UserId)),
+		[allMessages, ignoredUsers],
+	);
+
+	// What the chat pane shows when no room is active depends on the
+	// SpaceBar selection.  Real spaces show the existing landing; the
+	// two virtual selections (DMs, Rooms) get a synthesized space-like
+	// object so SpaceLanding can render them with the same shell.
+	const activeSpaceObj = useMemo(() => {
+		if (!state.activeSpace) return null;
+		if (state.activeSpace.kind === "explore") return null;
+		if (state.activeSpace.kind === "dms") {
+			return {
+				id: "__dms__",
+				name: "Direct messages",
+				topic: "Your one-on-one conversations.",
+				avatarUrl: undefined,
+				kind: "private" as const,
+				childRoomIds: [],
+			};
+		}
+		if (state.activeSpace.kind === "rooms") {
+			return {
+				id: "__rooms__",
+				name: "Rooms",
+				topic: "Joined rooms not assigned to any space.",
+				avatarUrl: undefined,
+				kind: "public" as const,
+				childRoomIds: [],
+			};
+		}
+		const id = state.activeSpace.id;
+		return state.spaces.find(s => s.id === id) ?? null;
+	}, [state.activeSpace, state.spaces]);
+	const roomsInActiveSpace = useMemo(() => {
+		if (!state.activeSpace) return [];
+		if (state.activeSpace.kind === "explore") return [];
+		if (state.activeSpace.kind === "dms") return state.rooms.filter(r => r.kind === "dm");
+		if (state.activeSpace.kind === "rooms") {
+			return state.rooms.filter(r => r.kind !== "dm" && r.parentSpaceIds.length === 0);
+		}
+		const id = state.activeSpace.id;
+		return state.rooms.filter(r => r.parentSpaceIds.includes(id));
+	}, [state.activeSpace, state.rooms]);
+	const landingVariant: "real" | "dms" | "rooms" =
+		state.activeSpace?.kind === "dms" ? "dms"
+		: state.activeSpace?.kind === "rooms" ? "rooms"
+		: "real";
+	const showSpaceLanding = !!activeSpaceObj && !activeRoom;
+
+	// Build a userId → avatar-mxc lookup for the active room so each
+	// message can render its sender's avatar without the row component
+	// having to know about Matrix internals.
+	const memberAvatars = useMemo(() => {
+		const m = new Map<string, string | undefined>();
+		const list = state.activeRoomId ? state.membersByRoom.get(state.activeRoomId) : undefined;
+		for (const member of list ?? []) {
+			m.set(member.userId, member.avatarUrl);
+		}
+		return m;
+	}, [state.activeRoomId, state.membersByRoom]);
+
+	if (!creds) {
+		return <Login onLoggedIn={handleLogin} />;
+	}
+
+	// If transport boot failed (most commonly: rust-crypto WASM
+	// failing to initialize), render a hard error instead of letting
+	// the user into a half-broken app.  Without this gate a crypto
+	// init failure silently produces an app that can't send DMs and
+	// won't surface the encryption setup sheet.
+	if (bootError) {
+		return (
+			<div className="h-full flex items-center justify-center p-8 bg-background">
+				<div className="max-w-md text-center space-y-4">
+					<div className="text-sm font-semibold">Couldn't start the client</div>
+					<div className="text-xs text-muted-foreground leading-relaxed border border-destructive/40 bg-destructive/10 rounded px-3 py-2 text-left">
+						{bootError}
+					</div>
+					<button
+						type="button"
+						className="text-xs text-muted-foreground hover:text-foreground underline"
+						onClick={handleSignOut}
+					>
+						Sign out and try again
+					</button>
+				</div>
+			</div>
+		);
+	}
+
+	// Block the app while the encryption probe is in flight.  encState
+	// is null until t.start() resolves and we read the SSSS state — if
+	// we let the rest of the app render here, a slow start would flash
+	// an unprotected UI (no setup sheet, no unlock sheet) for a beat.
+	if (!transport || encState === null) {
+		return (
+			<div className="h-full flex items-center justify-center p-8 bg-background text-xs text-muted-foreground">
+				Connecting…
+			</div>
+		);
+	}
+
+	// Encryption gate — block the app behind setup or unlock until the
+	// device has cross-signing keys cached locally.  We render the
+	// chrome (sync banner, etc.) but the dialog is non-dismissible so
+	// the user must finish or sign out.
+	if (transport && encState === "needs-setup") {
+		return (
+			<EncryptionSetupSheet
+				open
+				onSetup={async (passphrase) => {
+					// Use the engine-issued UIA password the transport
+					// already has cached (handed to it right after login).
+					// If somehow missing — page refresh on a half-set-up
+					// account — fetch a fresh one which rotates the
+					// Synapse password to a new value.
+					if (!transport.getUiaPassword()) {
+						const fresh = await fetchUiaPassword(creds.access_token);
+						transport.setUiaPassword(fresh);
+					}
+					const { recoveryKey } = await transport.setupEncryption(passphrase);
+					// Setup succeeded; we don't need this password again
+					// in the immediate flow — clear it and let any later
+					// UIA op fetch fresh.
+					transport.setUiaPassword(null);
+					return recoveryKey;
+				}}
+				onComplete={() => setEncState("ready")}
+				onSignOut={handleSignOut}
+			/>
+		);
+	}
+	if (transport && encState === "needs-unlock") {
+		return (
+			<EncryptionUnlockSheet
+				open
+				onUnlock={async (input) => transport.unlockEncryption(input)}
+				onUnlocked={() => setEncState("ready")}
+				onSignOut={handleSignOut}
+			/>
+		);
+	}
+
+	return (
+		<TransportContext.Provider value={transport}>
+		<div className="h-full flex flex-col">
+			{suspension && <SuspendedBanner suspension={suspension} />}
+			{state.syncState !== "ready" && state.syncState !== "syncing" && (
+				<div className="text-xs px-3 py-1 bg-muted text-muted-foreground border-b border-border">
+					{bootError ? `Connection error: ${bootError}` : `Sync: ${state.syncState}`}
+				</div>
+			)}
+			<div className="flex-1 flex min-h-0">
+				<SpaceBar
+					currentUserId={creds.user_id}
+					currentUserAvatarMxc={myAvatarMxc}
+					spaces={state.spaces}
+					rooms={state.rooms}
+					activeSpace={state.activeSpace}
+					onSelectExplore={() => dispatch({ type: "set_active_space", space: { kind: "explore" } })}
+					onSelectDms={() => dispatch({ type: "set_active_space", space: { kind: "dms" } })}
+					onSelectRooms={() => dispatch({ type: "set_active_space", space: { kind: "rooms" } })}
+					onSelectSpace={(id: SpaceId) => dispatch({ type: "set_active_space", space: { kind: "space", id } })}
+					onCreateSpace={async (opts) => {
+						if (!transport) throw new Error("Not connected");
+						const spaceId = await transport.createSpace(opts);
+						dispatch({ type: "set_active_space", space: { kind: "space", id: spaceId } });
+					}}
+					onOpenProfile={() => setViewedUserId(creds.user_id as UserId)}
+					onOpenSettings={() => setSettingsOpen(true)}
+					onSignOut={handleSignOut}
+					onOpenReview={isAdmin ? () => setReviewSheetOpen(true) : undefined}
+					pendingReviewCount={pendingReviewCount}
+				/>
+				{state.activeSpace?.kind !== "explore" && (
+				<RoomList
+					rooms={state.rooms}
+					spaces={state.spaces}
+					activeSpace={state.activeSpace}
+					activeRoomId={state.activeRoomId}
+					onSelectRoom={(roomId: RoomId) => dispatch({ type: "set_active_room", roomId })}
+					onCreateRoom={() => {
+						// "+" in the list header is context-aware: DMs
+						// opens the start-a-DM dialog, every other view
+						// opens the create-room dialog.
+						if (state.activeSpace?.kind === "dms") setStartDmOpen(true);
+						else setCreateRoomOpen(true);
+					}}
+					onAcceptInvite={async (roomId) => {
+						if (!transport) return;
+						try {
+							await transport.acceptInvite(roomId);
+							dispatch({ type: "set_active_room", roomId });
+						} catch (e) {
+							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+						}
+					}}
+					onDeclineInvite={async (roomId) => {
+						if (!transport) return;
+						try {
+							await transport.declineInvite(roomId);
+						} catch (e) {
+							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+						}
+					}}
+				/>
+				)}
+				{state.activeSpace?.kind === "explore" ? (
+					<ExplorePane
+						transport={transport}
+						rooms={state.rooms}
+						spaces={state.spaces}
+						onJoined={(roomId, isSpace) => {
+							// Joining a room → switch to Rooms view + open
+							// it.  Joining a space → switch to that space.
+							if (isSpace) {
+								dispatch({ type: "set_active_space", space: { kind: "space", id: roomId } });
+							} else {
+								dispatch({ type: "set_active_room", roomId });
+							}
+						}}
+					/>
+				) : showSpaceLanding && activeSpaceObj ? (
+					<SpaceLanding
+						space={activeSpaceObj}
+						rooms={roomsInActiveSpace}
+						variant={landingVariant}
+						onAddRoom={() => setCreateRoomOpen(true)}
+						onInvite={() => {
+							if (state.activeSpace?.kind === "space") setInvitingRoomId(state.activeSpace.id as unknown as RoomId);
+						}}
+						onOpenSettings={() => {
+							if (state.activeSpace?.kind === "space") setEditingSpaceId(state.activeSpace.id);
+						}}
+						onStartDm={() => setStartDmOpen(true)}
+						onSelectRoom={(roomId: RoomId) => dispatch({ type: "set_active_room", roomId })}
+					/>
+				) : (
+				<ChatPane
+					room={activeRoom}
+					messages={messages}
+					memberAvatars={memberAvatars}
+					reactionsByMessage={state.reactionsByMessage}
+					flagsByMessage={state.flagsByMessage}
+					collapsesByMessage={state.collapsesByMessage}
+					onSendMessage={(text, replyTo) => {
+						if (!state.activeRoomId || !transport) return;
+						const send = replyTo
+							? transport.replyTo(state.activeRoomId, replyTo, text)
+							: transport.sendText(state.activeRoomId, text);
+						send.catch(e => dispatch({ type: "error", message: e.message }));
+					}}
+					onSendAttachment={async (file) => {
+						if (!state.activeRoomId || !transport) return;
+						try {
+							await transport.uploadAndSendAttachment(state.activeRoomId, file);
+						} catch (e) {
+							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+							throw e;
+						}
+					}}
+					onReact={(eventId, emoji) => {
+						if (!state.activeRoomId || !transport) return;
+						transport.react(state.activeRoomId, eventId, emoji)
+							.catch(e => dispatch({ type: "error", message: e.message }));
+					}}
+					onUnreact={(reaction) => {
+						if (!state.activeRoomId || !transport || !reaction.myReactionId) return;
+						transport.unreact(state.activeRoomId, reaction.myReactionId)
+							.catch(e => dispatch({ type: "error", message: e.message }));
+					}}
+					onFlag={async (eventId, category, rationale) => {
+						if (!state.activeRoomId || !transport) return;
+						try {
+							await transport.flag(state.activeRoomId, eventId, category, rationale);
+						} catch (e) {
+							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+							throw e;
+						}
+					}}
+					onUnflag={async (flagEventId) => {
+						if (!state.activeRoomId || !transport) return;
+						try {
+							await transport.unflag(state.activeRoomId, flagEventId);
+						} catch (e) {
+							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+							throw e;
+						}
+					}}
+					onAcceptInvite={async (roomId) => {
+						if (!transport) return;
+						try {
+							await transport.acceptInvite(roomId as RoomId);
+						} catch (e) {
+							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+						}
+					}}
+					onDeclineInvite={async (roomId) => {
+						if (!transport) return;
+						try {
+							await transport.declineInvite(roomId as RoomId);
+							dispatch({ type: "set_active_room", roomId: null });
+						} catch (e) {
+							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+						}
+					}}
+					onInvite={(roomId) => setInvitingRoomId(roomId as RoomId)}
+					onEditRoom={(roomId) => setEditingRoomId(roomId as RoomId)}
+					onPlaceCall={async (roomId, video) => {
+						if (!transport) return;
+						try {
+							const call = await transport.placeCall(roomId as RoomId, video);
+							if (call) setActiveCall(call);
+						} catch (err) {
+							// Most placeCall failures are media-access related;
+							// translate DOMException names into something the
+							// user can actually act on instead of dumping
+							// "NotAllowedError" into the banner.
+							const e = err as { name?: string; message?: string };
+							const friendly =
+								e.name === "NotAllowedError"  ? "Microphone or camera access was denied. Allow access in your browser and try again." :
+								e.name === "NotFoundError"    ? "No microphone or camera found on this device." :
+								e.name === "NotReadableError" ? "Another app or tab is using your microphone or camera. Close it and try again." :
+								(e.message ?? "Couldn't start the call.");
+							dispatch({ type: "error", message: friendly });
+						}
+					}}
+					callInProgress={!!activeCall || !!incomingCall}
+					isSuspended={!!suspension}
+					onOpenModLog={(roomId) => setModLogRoomId(roomId as RoomId)}
+				/>
+				)}
+				{activeRoom && (
+					activeRoom.kind === "dm" && activeRoom.dmUserId ? (
+						<DmProfilePanel
+							otherUserId={activeRoom.dmUserId as UserId}
+							transport={transport}
+							ignoredUsers={ignoredUsers}
+							onOpenProfile={(userId) => setViewedUserId(userId)}
+							onDeleteDm={async () => {
+								if (!transport || !state.activeRoomId) return;
+								try {
+									await transport.deleteDm(state.activeRoomId);
+									dispatch({ type: "set_active_room", roomId: null });
+								} catch (e) {
+									dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+								}
+							}}
+						/>
+					) : (
+						<MemberList
+							members={state.activeRoomId ? state.membersByRoom.get(state.activeRoomId) ?? [] : []}
+							currentUserId={creds.user_id}
+							onSelectMember={(userId) => setViewedUserId(userId as UserId)}
+						/>
+					)
+				)}
+			</div>
+			<CreateRoomSheet
+				open={createRoomOpen}
+				onOpenChange={setCreateRoomOpen}
+				onCreate={async (opts) => {
+					if (!transport) throw new Error("Not connected");
+					// If a space is currently selected, the new room joins
+					// it automatically — saves an extra step that almost
+					// always immediately follows room creation.
+					const parentSpaceId = state.activeSpace?.kind === "space"
+						? state.activeSpace.id
+						: undefined;
+					const roomId = await transport.createRoom({ ...opts, parentSpaceId });
+					dispatch({ type: "set_active_room", roomId });
+				}}
+			/>
+			<StartDmSheet
+				open={startDmOpen}
+				onOpenChange={setStartDmOpen}
+				transport={transport}
+				onStarted={(roomId) => {
+					dispatch({ type: "set_active_space", space: { kind: "dms" } });
+					dispatch({ type: "set_active_room", roomId: roomId as RoomId });
+				}}
+			/>
+			<SpaceEditSheet
+				space={editingSpaceId ? state.spaces.find(s => s.id === editingSpaceId) ?? null : null}
+				onClose={() => setEditingSpaceId(null)}
+				onSave={async (opts) => {
+					if (!transport) throw new Error("Not connected");
+					await transport.updateSpace({
+						spaceId: opts.spaceId as SpaceId,
+						name: opts.name,
+						topic: opts.topic,
+						avatarFile: opts.avatarFile,
+						clearAvatar: opts.clearAvatar,
+						iconEmoji: opts.iconEmoji,
+						visibility: opts.visibility,
+					});
+				}}
+			/>
+			<RoomEditSheet
+				room={editingRoomId ? state.rooms.find(r => r.id === editingRoomId) ?? null : null}
+				onClose={() => setEditingRoomId(null)}
+				onSave={async (opts) => {
+					if (!transport) throw new Error("Not connected");
+					await transport.updateRoom({
+						roomId: opts.roomId as RoomId,
+						name: opts.name,
+						topic: opts.topic,
+						avatarFile: opts.avatarFile,
+						clearAvatar: opts.clearAvatar,
+						iconEmoji: opts.iconEmoji,
+						visibility: opts.visibility,
+					});
+				}}
+			/>
+			<InviteSheet
+				open={!!invitingRoomId}
+				onOpenChange={(o) => { if (!o) setInvitingRoomId(null); }}
+				transport={transport}
+				roomId={invitingRoomId}
+				roomName={
+					invitingRoomId
+						? state.spaces.find(s => s.id === invitingRoomId)?.name
+							?? state.rooms.find(r => r.id === invitingRoomId)?.name
+							?? "this room"
+						: ""
+				}
+				isSpace={!!invitingRoomId && state.spaces.some(s => s.id === invitingRoomId)}
+			/>
+			<ProfileSheet
+				viewedUserId={viewedUserId}
+				onClose={() => setViewedUserId(null)}
+				transport={transport}
+				accessToken={creds.access_token}
+				ignoredUsers={ignoredUsers}
+				onSelfProfileSaved={(avatarMxc) => {
+					// undefined = avatar wasn't touched (e.g. only the
+					// display name changed); leave the cached mxc alone
+					// so we don't blow away a known-good URL.
+					if (avatarMxc === undefined) return;
+					setMyAvatarMxc(avatarMxc ?? undefined);
+				}}
+			/>
+			<AppSettingsSheet
+				open={settingsOpen}
+				onOpenChange={setSettingsOpen}
+				settings={settings}
+				onSettingsChange={setSettings}
+				accessToken={creds.access_token}
+				transport={transport}
+				ignoredUsers={ignoredUsers}
+				onSignedOut={handleSignOut}
+			/>
+			{/* Call overlays — top-level so they survive room navigation.
+			    Peer info is resolved from the DM's known partner data so
+			    the right name/avatar paint immediately, even before the
+			    MatrixCall has populated getOpponentMember() (which only
+			    happens after the answer comes back). */}
+			{incomingCall && (
+				<IncomingCallSheet
+					call={incomingCall}
+					peer={peerForCall(incomingCall.roomId, state.rooms)}
+					onAccept={(call) => {
+						setIncomingCall(null);
+						setActiveCall(call);
+					}}
+					onDismiss={() => setIncomingCall(null)}
+				/>
+			)}
+			{activeCall && (
+				<ActiveCallView
+					call={activeCall}
+					peer={peerForCall(activeCall.roomId, state.rooms)}
+					onEnded={() => setActiveCall(null)}
+				/>
+			)}
+			{modLogRoomId && (
+				<ModLogSheet
+					open
+					onOpenChange={(o) => { if (!o) setModLogRoomId(null); }}
+					roomId={modLogRoomId}
+				/>
+			)}
+			{isAdmin && (
+				<FloorReviewSheet
+					open={reviewSheetOpen}
+					onOpenChange={setReviewSheetOpen}
+					accessToken={creds.access_token}
+					transport={transport}
+					onQueueChanged={refreshPendingReviewCount}
+				/>
+			)}
+		</div>
+		</TransportContext.Provider>
+	);
+}

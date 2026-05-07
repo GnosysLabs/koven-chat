@@ -1,0 +1,24 @@
+# Apex-domain Caddy block.  Appended to Caddyfile by `bin/koven setup`
+# when SERVER_NAME differs from KOVEN_HOSTNAME (the standard "matrix
+# server_name lives on the apex; client + Synapse on a subdomain"
+# layout).  Serves the discovery files at the apex and redirects
+# everything else to the app.
+
+{$SERVER_NAME} {
+	handle /.well-known/matrix/server {
+		respond `{"m.server": "{$KOVEN_HOSTNAME}:443"}` 200
+		header Content-Type application/json
+	}
+	handle /.well-known/matrix/client {
+		respond `{"m.homeserver": {"base_url": "https://{$KOVEN_HOSTNAME}"}}` 200
+		header Content-Type application/json
+		header Access-Control-Allow-Origin "*"
+	}
+	handle /.well-known/koven {
+		respond `{"version": "0.1.0", "homeserver": "{$KOVEN_HOSTNAME}", "name": "{$SERVER_NAME}"}` 200
+		header Content-Type application/json
+		header Access-Control-Allow-Origin "*"
+	}
+	# Anything else — toss them at the actual app.
+	redir / https://{$KOVEN_HOSTNAME}{uri} permanent
+}

@@ -1,0 +1,117 @@
+# Koven — production compose stack.
+#
+# What's here:
+#   caddy      — TLS terminator + reverse proxy + static SPA host
+#   synapse    — Matrix homeserver, custom-built with federation gate
+#   postgres   — Synapse's database
+#   engine     — Koven's governance / admin / profile service
+#   coturn     — TURN server for WebRTC NAT traversal in calls
+#
+# All variables come from .env at the repo root.  `bin/koven setup`
+# fills any blank ones with cryptographically-random secrets.  Run
+# that once before `docker compose up`.
+
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"     # ACME HTTP-01 challenge + redirect-to-HTTPS
+      - "443:443"   # The actual app
+    volumes:
+      # Caddyfile.runtime is rendered by `bin/koven setup` from
+      # Caddyfile.template — keeps the repo clean across re-runs.
+      - ./Caddyfile.runtime:/etc/caddy/Caddyfile:ro
+      - ./client/dist:/srv/client:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      KOVEN_HOSTNAME: ${KOVEN_HOSTNAME}
+      SERVER_NAME: ${SERVER_NAME}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+    depends_on:
+      - synapse
+      - engine
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: synapse
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: synapse
+      # Synapse needs the UTF8/C locale combo specifically — its
+      # collations break with anything else.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synapse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  synapse:
+    build:
+      context: ./docker/synapse
+      dockerfile: Dockerfile
+    image: koven/synapse:latest
+    restart: unless-stopped
+    volumes:
+      - ./synapse-data:/data
+    environment:
+      SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Federation port 8448 is reachable via 443 + .well-known.  No
+    # ports: declared here — Caddy is the public face.
+
+  engine:
+    build:
+      context: .
+      dockerfile: engine/Dockerfile
+    image: koven/engine:latest
+    restart: unless-stopped
+    volumes:
+      - ./data/engine:/data
+      # The engine reads the appservice token out of the same YAML
+      # Synapse loads, so we mount the synapse-data dir read-only.
+      - ./synapse-data:/synapse-data:ro
+    environment:
+      HOMESERVER_URL: http://synapse:8008
+      HOMESERVER_NAME: ${SERVER_NAME}
+      ENGINE_REGISTRATION: /synapse-data/koven-engine.appservice.yaml
+      ENGINE_DB: /data/engine.sqlite
+      ENGINE_PORT: "9000"
+      # Email-code auth.  Operator picks one transport; the empty one
+      # is a no-op.  See .env.example for the full set.
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      EMAIL_FROM: ${EMAIL_FROM:-Koven <noreply@koven.chat>}
+      EMAIL_CODE_TTL_MS: ${EMAIL_CODE_TTL_MS:-600000}
+      # Real admin user token, used by /api/auth/* to admin-create
+      # accounts and mint per-session login tokens.  Provisioned by
+      # `bin/koven setup` on first install.
+      SYNAPSE_ADMIN_TOKEN: ${SYNAPSE_ADMIN_TOKEN:-}
+    depends_on:
+      - synapse
+
+  coturn:
+    image: coturn/coturn:latest
+    restart: unless-stopped
+    network_mode: host          # TURN needs the real public IP for the
+                                # SDP it advertises; running on the host
+                                # network avoids Docker NAT tangles.
+    volumes:
+      - ./docker/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+
+volumes:
+  caddy_data:
+  caddy_config:
+  postgres_data:

@@ -1,0 +1,1074 @@
+// Chat pane — messages of the active room + send input.  Bubble-style
+// layout: avatar + display name shown once per consecutive group of
+// messages from the same sender (within 5 minutes); each message
+// renders in its own rounded bubble.  Self messages use the primary
+// bubble color; everyone else uses the muted card color.
+
+import { useEffect, useRef, useState } from "react";
+import type { CollapseAggregate, EventId, FlagAggregate, FlagCategory, Message, ReactionAggregate, Room } from "@koven/shared";
+import { cn } from "@/lib/utils";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { MatrixAvatar } from "@/components/MatrixAvatar";
+import { ReactionPills } from "@/components/ReactionPills";
+import { MessageActions } from "@/components/MessageActions";
+import { FlagDialog } from "@/components/FlagDialog";
+import { useMatrixAttachment } from "@/lib/useMatrixAttachment";
+import { useMatrixMedia } from "@/lib/useMatrixMedia";
+import { extractFirstUrl, useUrlPreview } from "@/lib/useUrlPreview";
+import { CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Lock, Network, Paperclip, Phone, Scale, Settings, UserPlus, Video, X } from "lucide-react";
+
+export interface ChatPaneProps {
+	room: Room | null;
+	messages: Message[];
+	memberAvatars: Map<string, string | undefined>;   // userId → mxc URL
+	reactionsByMessage: Map<EventId, ReactionAggregate[]>;
+	flagsByMessage: Map<EventId, FlagAggregate>;
+	collapsesByMessage: Map<EventId, CollapseAggregate>;
+	onSendMessage(text: string, replyTo: EventId | null): void;
+	// Upload + send a file attachment.  Returns once the event has been
+	// dispatched; the parent handles errors via the global error
+	// dispatcher.  Optional — when omitted the attach button is hidden.
+	onSendAttachment?(file: File, replyTo: EventId | null): Promise<void>;
+	onReact(eventId: EventId, emoji: string): void;
+	onUnreact(reaction: ReactionAggregate): void;
+	onFlag(eventId: EventId, category: FlagCategory, rationale?: string): void | Promise<void>;
+	onUnflag(flagEventId: EventId): void | Promise<void>;
+	onAcceptInvite(roomId: EventId): void | Promise<void>;
+	onDeclineInvite(roomId: EventId): void | Promise<void>;
+	onInvite(roomId: EventId): void;
+	onEditRoom(roomId: EventId): void;
+	// Place a 1:1 voice or video call into the active room.  Only
+	// surfaced for DMs in the header — the parent decides whether to
+	// pass a no-op (e.g. while another call is already in progress).
+	onPlaceCall(roomId: EventId, video: boolean): void;
+	// True when a call is in progress anywhere in the app — the
+	// header hides the Call buttons so we can't double-place.
+	callInProgress: boolean;
+	// Engine-reported suspension state for the current user.  When
+	// true, the compose row, call buttons, and invite affordance are
+	// disabled.  Read remains allowed.  The full-width banner above
+	// the app explains the situation.
+	isSuspended: boolean;
+	// Open the per-room public mod log dialog.
+	onOpenModLog(roomId: EventId): void;
+}
+
+// Threshold for "this message is part of the same group as the
+// previous one" — same sender + this many ms or less since the prior
+// message.  Five minutes feels right for chat; longer than typical
+// rapid-fire bursts, shorter than separate sessions.
+const GROUP_WINDOW_MS = 5 * 60 * 1000;
+
+export function ChatPane({
+	room, messages, memberAvatars, reactionsByMessage, flagsByMessage, collapsesByMessage,
+	onSendMessage, onSendAttachment, onReact, onUnreact, onFlag, onUnflag, onAcceptInvite, onDeclineInvite, onInvite, onEditRoom,
+	onPlaceCall, callInProgress, isSuspended, onOpenModLog,
+}: ChatPaneProps) {
+	// Consensus flagging only works where the local engine can act:
+	//   - DMs are 1-on-1 — no quorum to gather, no consensus to reach.
+	//   - Federated rooms live on a different homeserver; our engine
+	//     bot can't join them, so flags pile up visually but no
+	//     collapse ever fires.
+	//   - Encrypted rooms hide message content from the engine (and
+	//     from any admin reviewing a floor case), so the moderation
+	//     pipeline is hollow there — the admin queue would surface
+	//     reports they can't read.  Better to not offer the affordance
+	//     than to let users believe they took action that won't
+	//     produce a real review.
+	// Hiding the affordance everywhere it can't bite avoids misleading
+	// users into thinking they took action.
+	const flaggable = !!room && room.kind !== "dm" && !room.isFederated && !room.encrypted;
+	const [draft, setDraft] = useState("");
+	const [replyTarget, setReplyTarget] = useState<Message | null>(null);
+	// Pending attachment: the user picked a file but hasn't hit send yet.
+	// We don't auto-send on pick so they can pair the attachment with a
+	// caption, change their mind, or attach a different file.
+	const [pendingAttachment, setPendingAttachment] = useState<File | null>(null);
+	const [uploading, setUploading] = useState(false);
+	const fileInputRef = useRef<HTMLInputElement | null>(null);
+	const scrollRef = useRef<HTMLDivElement | null>(null);
+
+	useEffect(() => {
+		const el = scrollRef.current;
+		if (!el) return;
+		el.scrollTop = el.scrollHeight;
+	}, [messages.length, room?.id]);
+
+	// Clear the reply target + any pending attachment when the user
+	// switches rooms — those are scoped to the previous conversation.
+	useEffect(() => {
+		setReplyTarget(null);
+		setPendingAttachment(null);
+		setUploading(false);
+	}, [room?.id]);
+
+	if (!room) {
+		return (
+			<div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
+				Pick a room from the sidebar.
+			</div>
+		);
+	}
+
+	function send() {
+		// Attachment send: ignores draft text for now (Matrix carries
+		// the filename as the body of an m.image/m.file event; supporting
+		// a separate caption would mean two events per send, which we
+		// can layer on later).  Plain text path stays as it was.
+		if (pendingAttachment && onSendAttachment) {
+			const file = pendingAttachment;
+			const replyToId = replyTarget?.id ?? null;
+			setUploading(true);
+			onSendAttachment(file, replyToId)
+				.then(() => {
+					setPendingAttachment(null);
+					setReplyTarget(null);
+				})
+				.finally(() => setUploading(false));
+			return;
+		}
+		const text = draft.trim();
+		if (!text) return;
+		onSendMessage(text, replyTarget?.id ?? null);
+		setDraft("");
+		setReplyTarget(null);
+	}
+
+	function pickAttachment(file: File) {
+		setPendingAttachment(file);
+	}
+
+	function toggleReaction(message: Message, key: string) {
+		const list = reactionsByMessage.get(message.id) ?? [];
+		const existing = list.find(a => a.key === key);
+		if (existing?.myReactionId) {
+			onUnreact(existing);
+		} else {
+			onReact(message.id, key);
+		}
+	}
+
+	return (
+		<div className="flex-1 flex flex-col min-w-0">
+			<header className="h-12 px-4 flex items-center justify-between gap-3 border-b border-border bg-muted/30">
+				<div className="flex items-center gap-2 min-w-0">
+					<MatrixAvatar
+						mxc={room.avatarUrl}
+						emoji={room.kind !== "dm" ? room.iconEmoji : undefined}
+						seed={room.kind === "dm" ? (room.dmUserId ?? room.id) : room.id}
+						kind={room.kind === "dm" ? "user" : "room"}
+						className={cn(
+							"h-7 w-7 shrink-0",
+							room.kind === "dm" ? "rounded-full" : "rounded-md",
+						)}
+					/>
+					<div className="flex flex-col min-w-0">
+						<span className="text-sm font-semibold truncate">{room.name}</span>
+						{room.topic && (
+							<span className="text-xs text-muted-foreground truncate max-w-[60ch]">{room.topic}</span>
+						)}
+					</div>
+				</div>
+				<div className="flex items-center gap-2 shrink-0">
+					{room.kind === "public" && (
+						<RoomBadge
+							icon={<Globe className="h-3 w-3" />}
+							label="Public"
+							tone="default"
+							title="Anyone on the homeserver can find and join."
+						/>
+					)}
+					{room.kind === "private" && (
+						<RoomBadge
+							icon={<EyeOff className="h-3 w-3" />}
+							label="Private"
+							tone="default"
+							title="Invite-only. Won't appear in room directories."
+						/>
+					)}
+					{room.encrypted && (
+						<RoomBadge
+							icon={<Lock className="h-3 w-3" />}
+							label="Encrypted"
+							tone="success"
+							title="End-to-end encrypted. Koven moderation does not apply in this room."
+						/>
+					)}
+					{room.isFederated && (
+						<RoomBadge
+							icon={<Network className="h-3 w-3" />}
+							label={`On ${room.homeserver}`}
+							tone="warn"
+							title={`This room is hosted on ${room.homeserver}, not your home server. The local moderation engine does not apply here — flags and reputation are local-only.`}
+						/>
+					)}
+					{room.kind === "dm" && !room.isInvite && !callInProgress && (
+						<>
+							<button
+								type="button"
+								onClick={() => onPlaceCall(room.id as EventId, false)}
+								className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+								title="Voice call"
+								aria-label="Voice call"
+							>
+								<Phone className="h-4 w-4" />
+							</button>
+							<button
+								type="button"
+								onClick={() => onPlaceCall(room.id as EventId, true)}
+								className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+								title="Video call"
+								aria-label="Video call"
+							>
+								<Video className="h-4 w-4" />
+							</button>
+						</>
+					)}
+					{room.kind !== "dm" && !room.isInvite && (
+						<button
+							type="button"
+							onClick={() => onInvite(room.id as EventId)}
+							className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+							title="Invite people"
+							aria-label="Invite people"
+						>
+							<UserPlus className="h-4 w-4" />
+						</button>
+					)}
+					{room.kind !== "dm" && !room.isInvite && !room.encrypted && (
+						// Mod log is public — anyone in the room can audit.
+						// Hidden in encrypted rooms because the engine
+						// can't see message content there, so the log
+						// would only ever show empty / metadata noise.
+						<button
+							type="button"
+							onClick={() => onOpenModLog(room.id as EventId)}
+							className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+							title="Public mod log"
+							aria-label="Public mod log"
+						>
+							<Scale className="h-4 w-4" />
+						</button>
+					)}
+					{room.kind !== "dm" && !room.isInvite && (room.myPowerLevel ?? 0) >= 50 && (
+						<button
+							type="button"
+							onClick={() => onEditRoom(room.id as EventId)}
+							className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+							title="Room settings"
+							aria-label="Room settings"
+						>
+							<Settings className="h-4 w-4" />
+						</button>
+					)}
+				</div>
+			</header>
+
+			<div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4">
+				{messages.length === 0 ? (
+					<div className="text-xs text-muted-foreground italic mt-8 text-center">No messages yet.</div>
+				) : (
+					messages.map((m, i) => {
+						const prev = messages[i - 1];
+						const sameGroup =
+							!!prev &&
+							prev.sender === m.sender &&
+							m.timestamp - prev.timestamp <= GROUP_WINDOW_MS &&
+							!m.replyTo; // a reply is always its own visual group
+						return (
+							<MessageRow
+								key={m.id}
+								message={m}
+								avatarMxc={memberAvatars.get(m.sender)}
+								continuesGroup={sameGroup}
+								isFirst={i === 0}
+								flaggable={flaggable}
+								reactions={reactionsByMessage.get(m.id) ?? []}
+								flags={flagsByMessage.get(m.id)}
+								collapse={collapsesByMessage.get(m.id)}
+								onReact={(emoji) => toggleReaction(m, emoji)}
+								onReply={() => setReplyTarget(m)}
+								onFlag={(category, rationale) => onFlag(m.id, category, rationale)}
+								onTogglePillFlag={() => {
+									const cur = flagsByMessage.get(m.id);
+									if (cur?.myFlagId) onUnflag(cur.myFlagId);
+									// If the user hasn't flagged yet, the pill click
+									// is handled inline (opens the flag dialog) — see
+									// MessageRow below.
+								}}
+								onToggleReactionPill={(reaction) => {
+									if (reaction.myReactionId) onUnreact(reaction);
+									else onReact(m.id, reaction.key);
+								}}
+							/>
+						);
+					})
+				)}
+			</div>
+
+			{room.isInvite ? (
+				<div className="border-t border-border p-4 flex items-center gap-3">
+					<div className="flex-1 text-xs text-muted-foreground leading-snug">
+						<span className="text-foreground font-medium">
+							{room.inviter ?? room.dmUserId ?? "Someone"}
+						</span>{" "}
+						{room.kind === "dm" ? "wants to chat with you." : `invited you to ${room.name}.`}{" "}
+						Accept to view and reply.
+					</div>
+					<div className="flex gap-2 shrink-0">
+						<Button
+							type="button"
+							variant="ghost"
+							size="sm"
+							onClick={() => onDeclineInvite(room.id as EventId)}
+						>
+							Decline
+						</Button>
+						<Button
+							type="button"
+							size="sm"
+							onClick={() => onAcceptInvite(room.id as EventId)}
+						>
+							Accept
+						</Button>
+					</div>
+				</div>
+			) : (
+			<div className="border-t border-border p-3">
+				{replyTarget && (
+					<div className="mb-2 flex items-start gap-2 px-3 py-1.5 rounded-md bg-muted/60 border border-border text-xs">
+						<CornerDownRight className="h-3.5 w-3.5 mt-0.5 text-muted-foreground shrink-0" />
+						<div className="flex-1 min-w-0">
+							<div className="text-muted-foreground">
+								Replying to <span className="text-foreground font-medium">{replyTarget.senderDisplayName}</span>
+							</div>
+							<div className="text-muted-foreground truncate">{replyTarget.text || "(media)"}</div>
+						</div>
+						<button
+							type="button"
+							onClick={() => setReplyTarget(null)}
+							className="p-0.5 rounded text-muted-foreground hover:text-foreground hover:bg-accent shrink-0"
+							aria-label="Cancel reply"
+							title="Cancel reply"
+						>
+							<X className="h-3.5 w-3.5" />
+						</button>
+					</div>
+				)}
+				{pendingAttachment && (
+					<PendingAttachmentChip
+						file={pendingAttachment}
+						uploading={uploading}
+						onRemove={() => setPendingAttachment(null)}
+					/>
+				)}
+				<form
+					onSubmit={e => { e.preventDefault(); if (!isSuspended) send(); }}
+					className="flex gap-2 items-center"
+				>
+					{onSendAttachment && (
+						<>
+							<input
+								ref={fileInputRef}
+								type="file"
+								className="hidden"
+								onChange={e => {
+									const file = e.target.files?.[0];
+									if (file) pickAttachment(file);
+									// Reset so the same file can be re-picked
+									// after a remove + re-attach.
+									e.target.value = "";
+								}}
+								disabled={isSuspended || uploading}
+							/>
+							<button
+								type="button"
+								onClick={() => fileInputRef.current?.click()}
+								disabled={isSuspended || uploading || !!pendingAttachment}
+								className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+								title="Attach a file"
+								aria-label="Attach a file"
+							>
+								<Paperclip className="h-4 w-4" />
+							</button>
+						</>
+					)}
+					<Input
+						type="text"
+						value={draft}
+						onChange={e => setDraft(e.target.value)}
+						placeholder={
+							isSuspended
+								? "Posting paused while your account is under review"
+								: pendingAttachment
+									? "Press send to share the file"
+									: replyTarget
+										? `Reply to ${replyTarget.senderDisplayName}`
+										: `Message ${room.name}`
+						}
+						disabled={isSuspended || !!pendingAttachment}
+						autoFocus={!isSuspended}
+					/>
+					<Button
+						type="submit"
+						disabled={
+							isSuspended || uploading ||
+							(!pendingAttachment && !draft.trim())
+						}
+					>
+						{uploading ? "Sending…" : "Send"}
+					</Button>
+				</form>
+			</div>
+			)}
+		</div>
+	);
+}
+
+function MessageRow({
+	message, avatarMxc, continuesGroup, isFirst, flaggable,
+	reactions, flags, collapse, onReact, onReply, onFlag, onTogglePillFlag, onToggleReactionPill,
+}: {
+	message: Message;
+	avatarMxc: string | undefined;
+	continuesGroup: boolean;
+	isFirst: boolean;
+	flaggable: boolean;
+	reactions: ReactionAggregate[];
+	flags: FlagAggregate | undefined;
+	collapse: CollapseAggregate | undefined;
+	onReact(emoji: string): void;
+	onReply(): void;
+	onFlag(category: FlagCategory, rationale?: string): void | Promise<void>;
+	onTogglePillFlag(): void;
+	onToggleReactionPill(reaction: ReactionAggregate): void;
+}) {
+	const [flagDialogOpen, setFlagDialogOpen] = useState(false);
+	const [expanded, setExpanded] = useState(false);
+	const myFlagId = flags?.myFlagId;
+	// You can't flag your own messages — both because the consensus
+	// vote is meaningless on yourself and because it'd let users
+	// silence themselves accidentally.  We still render the flag pill
+	// (count of flags FROM others) so a user can see they've been
+	// reported, but the action surface (hover button + click-to-open
+	// dialog from the pill) is gated.
+	const canFlag = flaggable && !message.isSelf;
+	function handlePillClick() {
+		if (!canFlag) return;
+		// Click on the flag pill: if you've already flagged, withdraw
+		// (immediate); otherwise open the flag dialog so you can pick
+		// a category and "+1" the existing flag.
+		if (myFlagId) onTogglePillFlag();
+		else setFlagDialogOpen(true);
+	}
+	// Floor-violation (fastTrack) collapses are hard-hidden — these are
+	// CSAM / threats / doxx by classifier, and the whole point of the
+	// floor pipeline is that this content is never re-served.  No
+	// click-to-view affordance, no way for `expanded` to flip true.
+	const isCollapsed = !!collapse && (collapse.fastTrack || !expanded);
+	// Spacing rules:
+	//   - First row in the scroll: no top margin.
+	//   - Same-sender continuation: small (4px) — bubbles read as a unit.
+	//   - New sender / new group: generous (16px) for visual separation.
+	const topMargin = isFirst ? "" : continuesGroup ? "mt-1" : "mt-4";
+
+	// Emotes (`/me`) render as a single italic line with no bubble — same
+	// shape as Matrix m.emote.  Avatar still gutters them so the layout
+	// doesn't shift.
+	if (message.kind === "emote") {
+		return (
+			<div className={cn("group flex gap-3 items-start", topMargin)}>
+				<AvatarSlot mxc={avatarMxc} seed={message.sender} hidden={continuesGroup} />
+				<div className="flex-1 min-w-0 pt-1 text-sm italic text-muted-foreground flex items-center gap-2">
+					{isCollapsed ? (
+						<CollapsedBubble collapse={collapse!} onExpand={() => setExpanded(true)} />
+					) : (
+						<span>* <span className="text-foreground/80">{message.senderDisplayName}</span> {message.text}</span>
+					)}
+					{flaggable && flags && flags.count > 0 && (
+						<FlagPill
+							count={flags.count}
+							hasFlagged={!!myFlagId}
+							onClick={handlePillClick}
+						/>
+					)}
+					<MessageActions
+						onReact={onReact}
+						onReply={onReply}
+						onFlagClick={() => setFlagDialogOpen(true)}
+						showFlag={canFlag}
+						className="opacity-0 group-hover:opacity-100 transition-opacity"
+					/>
+				</div>
+				{canFlag && (
+					<FlagDialog
+						open={flagDialogOpen}
+						onOpenChange={setFlagDialogOpen}
+						onSubmit={onFlag}
+					/>
+				)}
+			</div>
+		);
+	}
+
+	return (
+		<div className={cn("group flex gap-3 items-start", topMargin)}>
+			<AvatarSlot mxc={avatarMxc} seed={message.sender} hidden={continuesGroup} />
+			<div className="flex-1 min-w-0">
+				{!continuesGroup && (
+					<div className={cn(
+						"text-xs font-medium mb-1.5",
+						message.isSelf ? "text-primary" : "text-foreground"
+					)}>
+						{message.senderDisplayName}
+					</div>
+				)}
+				{message.replyTo && <ReplyQuote replyTo={message.replyTo} />}
+				{/* Bubble + actions sit on a single line — actions appear
+				    just to the right of the bubble on hover, vertically
+				    centered against it. */}
+				<div className="flex items-center gap-2">
+					{isCollapsed ? (
+						<CollapsedBubble collapse={collapse!} onExpand={() => setExpanded(true)} />
+					) : (
+						<MessageBubble message={message} />
+					)}
+					{flaggable && flags && flags.count > 0 && (
+						<FlagPill
+							count={flags.count}
+							hasFlagged={!!myFlagId}
+							onClick={handlePillClick}
+						/>
+					)}
+					{collapse && expanded && (
+						<button
+							type="button"
+							onClick={() => setExpanded(false)}
+							className="text-[10px] text-muted-foreground hover:text-foreground underline"
+						>
+							hide
+						</button>
+					)}
+					<MessageActions
+						onReact={onReact}
+						onReply={onReply}
+						onFlagClick={() => setFlagDialogOpen(true)}
+						showFlag={canFlag}
+						className="opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+					/>
+				</div>
+				{!isCollapsed && message.kind === "text" && (
+					// Link preview rides under the bubble for plain text
+					// messages only.  Skipped on attachments / collapses /
+					// emotes to keep those layouts clean.
+					<UrlPreviewSlot text={message.text} />
+				)}
+				{!isCollapsed && (
+					<ReactionPills reactions={reactions} onToggle={onToggleReactionPill} />
+				)}
+			</div>
+			{canFlag && (
+				<FlagDialog
+					open={flagDialogOpen}
+					onOpenChange={setFlagDialogOpen}
+					onSubmit={onFlag}
+				/>
+			)}
+		</div>
+	);
+}
+
+function CollapsedBubble({ collapse, onExpand }: { collapse: CollapseAggregate; onExpand(): void }) {
+	// Floor-violation collapses are non-revealable.  Render a static
+	// banner — no onClick, no "click to view" hint, no hover affordance.
+	if (collapse.fastTrack) {
+		return (
+			<div
+				className="inline-flex items-center gap-2 px-3 py-2 rounded-xl text-xs italic text-muted-foreground bg-muted/50 border border-dashed border-destructive/40"
+				title="This message was hidden by the platform's floor-violation rules and cannot be revealed."
+			>
+				<Flag className="h-3 w-3 text-destructive/70" />
+				<span>Hidden — flagged as a serious violation</span>
+			</div>
+		);
+	}
+	return (
+		<button
+			type="button"
+			onClick={onExpand}
+			className="inline-flex items-center gap-2 px-3 py-2 rounded-xl text-xs italic text-muted-foreground bg-muted/50 border border-dashed border-border hover:bg-muted transition-colors"
+			title="Click to view the original content"
+		>
+			<Flag className="h-3 w-3" />
+			<span>{`Collapsed by community review · ${collapse.flaggerCount} flaggers · weight ${collapse.weightedScore.toFixed(2)}`}</span>
+			<span className="not-italic text-[10px] opacity-70">(click to view)</span>
+		</button>
+	);
+}
+
+function FlagPill({ count, hasFlagged, onClick }: { count: number; hasFlagged: boolean; onClick(): void }) {
+	return (
+		<button
+			type="button"
+			onClick={onClick}
+			title={hasFlagged ? "You flagged this · click to withdraw" : `${count} ${count === 1 ? "flag" : "flags"} · click to add yours`}
+			className={cn(
+				"shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-xs transition-colors",
+				hasFlagged
+					? "border-destructive/60 bg-destructive/10 text-destructive hover:bg-destructive/15"
+					: "border-border bg-muted/40 text-muted-foreground hover:bg-accent"
+			)}
+		>
+			<Flag className="h-3 w-3" />
+			<span className="tabular-nums">{count}</span>
+		</button>
+	);
+}
+
+function ReplyQuote({ replyTo }: { replyTo: NonNullable<Message["replyTo"]> }) {
+	return (
+		<div className="mb-1 flex items-start gap-2 max-w-[60ch] pl-3 border-l-2 border-primary/40 text-xs text-muted-foreground">
+			<div className="min-w-0 flex-1 py-0.5">
+				<div className="text-foreground/80 font-medium leading-tight">
+					{replyTo.senderDisplayName}
+				</div>
+				<div className="truncate leading-tight">
+					{replyTo.snippet || "(message)"}
+				</div>
+			</div>
+		</div>
+	);
+}
+
+function AvatarSlot({ mxc, seed, hidden }: { mxc?: string; seed: string; hidden: boolean }) {
+	// Reserve the avatar gutter even when collapsed so subsequent
+	// messages line up under the avatar above.  Saves a layout shift
+	// and gives a clean indented column for grouped runs.
+	if (hidden) return <div className="w-8 shrink-0" />;
+	return (
+		<MatrixAvatar
+			mxc={mxc}
+			seed={seed}
+			className="h-8 w-8 mt-0.5"
+		/>
+	);
+}
+
+
+function RoomBadge({ icon, label, tone, title }: {
+	icon: React.ReactNode;
+	label: string;
+	tone: "default" | "success" | "warn";
+	title?: string;
+}) {
+	return (
+		<span
+			title={title ?? label}
+			className={cn(
+				"inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border",
+				tone === "success"
+					? "border-emerald-500/30 text-emerald-500/90 bg-emerald-500/5"
+				: tone === "warn"
+					? "border-amber-500/30 text-amber-500/90 bg-amber-500/5"
+				: "border-border text-muted-foreground bg-background/40"
+			)}
+		>
+			{icon}
+			{label}
+		</span>
+	);
+}
+
+function MessageBubble({ message }: { message: Message }) {
+	const baseBubble = "inline-block max-w-[60ch] px-3 py-2 rounded-xl text-sm leading-snug break-words whitespace-pre-wrap";
+	const selfBubble = "bg-primary text-primary-foreground";
+	const otherBubble = "bg-muted text-foreground";
+
+	if (message.kind === "image" && message.mediaMxc) {
+		return (
+			<div className={cn(baseBubble, "p-1", message.isSelf ? selfBubble : otherBubble)}>
+				<AttachmentImage message={message} />
+			</div>
+		);
+	}
+
+	if (message.kind === "video" && message.mediaMxc) {
+		return (
+			<div className={cn(baseBubble, "p-1", message.isSelf ? selfBubble : otherBubble)}>
+				<AttachmentVideo message={message} />
+			</div>
+		);
+	}
+
+	if (message.kind === "audio" && message.mediaMxc) {
+		return (
+			<div className={cn(baseBubble, "p-1.5", message.isSelf ? selfBubble : otherBubble)}>
+				<AttachmentAudio message={message} />
+			</div>
+		);
+	}
+
+	if (message.kind === "file" && message.mediaMxc) {
+		// Files render as a thumbnail card (no surrounding bubble) so a
+		// wall of mixed attachments has consistent footprint with images.
+		return <AttachmentFileCard message={message} />;
+	}
+
+	return (
+		<div className={cn(baseBubble, message.isSelf ? selfBubble : otherBubble)}>
+			{linkify(message.text, !!message.isSelf)}
+			{message.edited && (
+				<span className={cn(
+					"ml-1.5 text-[10px]",
+					message.isSelf ? "text-primary-foreground/60" : "text-muted-foreground"
+				)}>
+					(edited)
+				</span>
+			)}
+		</div>
+	);
+}
+
+// Split a body into text + clickable links.  Plain text by default;
+// any http(s):// span becomes an <a target="_blank" rel="noopener
+// noreferrer">.  Trailing sentence-final punctuation is left out of
+// the link target (so "see https://example.com." doesn't link the
+// trailing period as part of the URL).
+//
+// Mirrors the URL detection in extractFirstUrl so the preview card
+// targets the same URL we surface as a clickable link.
+function linkify(text: string, isSelf: boolean): React.ReactNode[] {
+	const parts: React.ReactNode[] = [];
+	const regex = /https?:\/\/[^\s<>]+/g;
+	let lastIndex = 0;
+	let key = 0;
+	let match: RegExpExecArray | null;
+	while ((match = regex.exec(text)) !== null) {
+		if (match.index > lastIndex) {
+			parts.push(text.slice(lastIndex, match.index));
+		}
+		let url = match[0];
+		let trailing = "";
+		const tail = url.match(/[),.;:!?"'>\]]+$/);
+		if (tail) {
+			trailing = tail[0];
+			url = url.slice(0, url.length - trailing.length);
+		}
+		// Balance unmatched closing parens (Wikipedia-style URLs).
+		const opens = (url.match(/\(/g) ?? []).length;
+		const closes = (url.match(/\)/g) ?? []).length;
+		if (closes > opens) {
+			const extra = closes - opens;
+			trailing = ")".repeat(extra) + trailing;
+			url = url.slice(0, url.length - extra);
+		}
+		parts.push(
+			<a
+				key={key++}
+				href={url}
+				target="_blank"
+				rel="noopener noreferrer"
+				className={cn(
+					"underline underline-offset-2 hover:no-underline break-all",
+					isSelf ? "text-primary-foreground" : "text-primary",
+				)}
+			>
+				{url}
+			</a>,
+		);
+		if (trailing) parts.push(trailing);
+		lastIndex = match.index + match[0].length;
+	}
+	if (lastIndex < text.length) {
+		parts.push(text.slice(lastIndex));
+	}
+	return parts.length === 0 ? [text] : parts;
+}
+
+// ─── Attachment renderers ────────────────────────────────────────────
+// All four use useMatrixAttachment to get an authenticated + (when
+// needed) decrypted blob: URL.  While the fetch is in flight they
+// render a tiny placeholder so the layout doesn't jump.
+
+function AttachmentImage({ message }: { message: Message }) {
+	const url = useMatrixAttachment(message);
+	if (!url) {
+		return (
+			<div className="w-64 h-40 rounded-lg bg-muted-foreground/10 animate-pulse" />
+		);
+	}
+	return (
+		<img
+			src={url}
+			alt={message.mediaName ?? "attachment"}
+			className="max-w-md max-h-80 rounded-lg block"
+		/>
+	);
+}
+
+function AttachmentVideo({ message }: { message: Message }) {
+	const url = useMatrixAttachment(message);
+	if (!url) {
+		return (
+			<div className="w-72 h-44 rounded-lg bg-muted-foreground/10 animate-pulse" />
+		);
+	}
+	return (
+		<video
+			src={url}
+			controls
+			className="max-w-md max-h-80 rounded-lg block"
+		/>
+	);
+}
+
+function AttachmentAudio({ message }: { message: Message }) {
+	const url = useMatrixAttachment(message);
+	return (
+		<div className="flex flex-col gap-1 min-w-[14rem] max-w-xs">
+			<div className="text-[11px] font-medium truncate px-1">
+				{message.mediaName ?? "Audio"}
+			</div>
+			{url ? (
+				<audio src={url} controls className="w-full h-10" />
+			) : (
+				<div className="h-10 rounded bg-muted-foreground/10 animate-pulse" />
+			)}
+		</div>
+	);
+}
+
+// Thumbnail-style card for non-image/video/audio files.  Matches the
+// visual footprint of an image attachment (~14rem wide) so a mixed
+// stack of attachments doesn't look ragged.  Whole card is one tap
+// target: clicking downloads.
+function AttachmentFileCard({ message }: { message: Message }) {
+	const url = useMatrixAttachment(message);
+	const name = message.mediaName ?? "Attachment";
+	const sizeLabel = message.mediaSize ? formatBytes(message.mediaSize) : "";
+	// Pull a 3-or-4-letter extension out of the filename for the badge.
+	// Fallbacks: top-level mime ("audio", "text") then a generic glyph.
+	const ext =
+		(name.match(/\.([A-Za-z0-9]{1,5})$/)?.[1] ??
+			message.mediaMimeType?.split("/")?.[0] ??
+			"FILE")
+			.toUpperCase()
+			.slice(0, 4);
+	const containerCn = cn(
+		"group relative flex flex-col w-56 rounded-xl overflow-hidden border transition-colors",
+		message.isSelf
+			? "border-primary-foreground/20 bg-primary text-primary-foreground hover:bg-primary/90"
+			: "border-border bg-muted text-foreground hover:bg-muted/80",
+	);
+	const inner = (
+		<>
+			{/* Preview area: file glyph + extension badge.  Fixed aspect
+			    so this lines up next to image thumbnails. */}
+			<div
+				className={cn(
+					"relative aspect-[4/3] flex items-center justify-center",
+					message.isSelf ? "bg-primary-foreground/10" : "bg-muted-foreground/10",
+				)}
+			>
+				<FileIcon
+					className={cn(
+						"h-10 w-10",
+						message.isSelf ? "text-primary-foreground/70" : "text-muted-foreground",
+					)}
+				/>
+				<span
+					className={cn(
+						"absolute bottom-2 right-2 text-[9px] font-semibold tracking-wider px-1.5 py-0.5 rounded",
+						message.isSelf
+							? "bg-primary-foreground/20 text-primary-foreground"
+							: "bg-card/90 text-foreground border border-border",
+					)}
+				>
+					{ext}
+				</span>
+				{url && (
+					<span
+						className={cn(
+							"absolute inset-0 flex items-center justify-center",
+							"opacity-0 group-hover:opacity-100 transition-opacity",
+							message.isSelf ? "bg-primary/40" : "bg-foreground/10",
+						)}
+					>
+						<Download className="h-5 w-5" />
+					</span>
+				)}
+			</div>
+			{/* Filename + size strip. */}
+			<div className="px-2.5 py-1.5 min-w-0">
+				<div className="text-xs font-medium truncate">{name}</div>
+				{sizeLabel && (
+					<div
+						className={cn(
+							"text-[10px] tabular-nums",
+							message.isSelf ? "text-primary-foreground/70" : "text-muted-foreground",
+						)}
+					>
+						{sizeLabel}
+					</div>
+				)}
+			</div>
+		</>
+	);
+	if (!url) {
+		// Pre-fetch placeholder.  Same shape so layout is stable.
+		return <div className={containerCn}>{inner}</div>;
+	}
+	return (
+		<a
+			href={url}
+			download={name}
+			className={containerCn}
+			title={`Download ${name}`}
+			aria-label={`Download ${name}`}
+		>
+			{inner}
+		</a>
+	);
+}
+
+// Compose-row preview for a file the user has selected but hasn't
+// sent yet.  Image files render as a small square thumbnail (object-
+// URL preview); everything else gets a file glyph + extension badge
+// in the same square footprint.  Filename + size live to the right.
+function PendingAttachmentChip({
+	file, uploading, onRemove,
+}: {
+	file: File;
+	uploading: boolean;
+	onRemove(): void;
+}) {
+	const isImage = file.type.startsWith("image/");
+	// Object URL is created once per file and revoked when the chip
+	// unmounts (or the file changes).  Skipped for non-images to avoid
+	// pinning the bytes for nothing.
+	const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+	useEffect(() => {
+		if (!isImage) {
+			setPreviewUrl(null);
+			return;
+		}
+		const url = URL.createObjectURL(file);
+		setPreviewUrl(url);
+		return () => URL.revokeObjectURL(url);
+	}, [file, isImage]);
+
+	const ext =
+		(file.name.match(/\.([A-Za-z0-9]{1,5})$/)?.[1] ??
+			file.type.split("/")[0] ??
+			"FILE")
+			.toUpperCase()
+			.slice(0, 4);
+
+	return (
+		<div className="mb-2 flex items-center gap-3 px-2 py-2 rounded-md bg-muted/60 border border-border text-xs">
+			<div className="relative h-12 w-12 shrink-0 rounded-md overflow-hidden bg-muted-foreground/10 flex items-center justify-center">
+				{previewUrl ? (
+					<img
+						src={previewUrl}
+						alt=""
+						className="h-full w-full object-cover"
+					/>
+				) : (
+					<>
+						<FileIcon className="h-5 w-5 text-muted-foreground" />
+						<span className="absolute bottom-0.5 right-0.5 text-[8px] font-semibold tracking-wider px-1 py-px rounded bg-card/90 text-foreground border border-border leading-none">
+							{ext}
+						</span>
+					</>
+				)}
+			</div>
+			<div className="flex-1 min-w-0">
+				<div className="text-foreground font-medium truncate">
+					{file.name}
+				</div>
+				<div className="text-muted-foreground tabular-nums">
+					{formatBytes(file.size)}
+					{file.type ? ` · ${file.type}` : ""}
+				</div>
+			</div>
+			<button
+				type="button"
+				onClick={onRemove}
+				disabled={uploading}
+				className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent shrink-0 disabled:opacity-50"
+				aria-label="Remove attachment"
+				title="Remove attachment"
+			>
+				<X className="h-4 w-4" />
+			</button>
+		</div>
+	);
+}
+
+// Detect a URL in a message body and, if Synapse returns OG metadata
+// for it, render a Discord-style preview card under the bubble.  Skips
+// rendering entirely when there's no URL or no preview was returned —
+// no flicker, no empty cards.
+function UrlPreviewSlot({ text }: { text: string }) {
+	const url = extractFirstUrl(text);
+	const preview = useUrlPreview(url);
+	const imageUrl = useMatrixMedia(preview?.imageMxc);
+	if (!url || !preview) return null;
+
+	const host = (() => {
+		try { return new URL(preview.url).hostname.replace(/^www\./, ""); }
+		catch { return preview.siteName ?? ""; }
+	})();
+
+	// Two-column card when there's a thumbnail; full-width when there
+	// isn't.  The accent border on the left mirrors Discord/Slack and
+	// signals "this is metadata about a link, not a message itself."
+	const hasImage = !!imageUrl;
+	return (
+		<a
+			href={preview.url}
+			target="_blank"
+			rel="noopener noreferrer"
+			className={cn(
+				"mt-1.5 block max-w-md rounded-md overflow-hidden bg-muted/40 border border-border",
+				"border-l-2 border-l-primary/70",
+				"hover:bg-muted/60 transition-colors",
+			)}
+		>
+			<div className={cn("flex", hasImage ? "gap-3" : "")}>
+				<div className="flex-1 min-w-0 px-3 py-2 space-y-0.5">
+					{(preview.siteName ?? host) && (
+						<div className="text-[10px] uppercase tracking-wider text-muted-foreground truncate">
+							{preview.siteName ?? host}
+						</div>
+					)}
+					<div className="text-sm font-medium leading-snug line-clamp-2">
+						{preview.title}
+					</div>
+					{preview.description && (
+						<div className="text-xs text-muted-foreground leading-snug line-clamp-2">
+							{preview.description}
+						</div>
+					)}
+				</div>
+				{hasImage && (
+					<div className="shrink-0 w-24 h-24 bg-muted-foreground/10">
+						<img
+							src={imageUrl}
+							alt=""
+							className="w-full h-full object-cover"
+						/>
+					</div>
+				)}
+			</div>
+		</a>
+	);
+}
+
+function formatBytes(bytes: number): string {
+	if (bytes < 1024) return `${bytes} B`;
+	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+	if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+	return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}

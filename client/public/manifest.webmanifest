@@ -1,0 +1,17 @@
+{
+	"name": "Koven",
+	"short_name": "Koven",
+	"description": "Consensus-governed chat.",
+	"start_url": "/",
+	"display": "standalone",
+	"background_color": "#0a0a0c",
+	"theme_color": "#0a0a0c",
+	"icons": [
+		{
+			"src": "/favicon.png",
+			"sizes": "1024x1024",
+			"type": "image/png",
+			"purpose": "any maskable"
+		}
+	]
+}

@@ -1,0 +1,35 @@
+# Appservice registration for the Koven engine.  Synapse loads this at
+# startup (via app_service_config_files in homeserver.yaml) and
+# forwards every event in every room to the engine over HTTP.  The
+# engine uses that stream to compute weights, run consensus collapses,
+# and publish the public mod log.
+#
+# Tokens are random 64-byte hex strings, generated once at install
+# time by `bin/koven setup`.  Synapse and the engine both need to
+# agree on them; we keep the YAML as the single source of truth and
+# the engine reads its own tokens out of this file at startup
+# (engine/src/config.ts).
+
+id: koven-engine
+url: http://engine:9000           # compose service DNS — engine listens on 9000
+as_token: ${ENGINE_AS_TOKEN}
+hs_token: ${ENGINE_HS_TOKEN}
+
+# Synapse auto-creates this localpart on first contact; the engine
+# uses it as its own identity for events it sends (censures,
+# weight publications).
+sender_localpart: engine
+
+# We don't claim any user namespaces — the engine doesn't impersonate
+# users, it only observes and acts as itself.  The wildcard rooms
+# regex means we receive every event in every room.
+namespaces:
+  users: []
+  aliases: []
+  rooms:
+    - exclusive: false
+      regex: ".*"
+
+# When the engine sends events (rare — only governance actions), we
+# don't want Synapse rate-limiting it.
+rate_limited: false

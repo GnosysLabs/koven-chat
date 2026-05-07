@@ -1,0 +1,351 @@
+// Login / sign-up screen.  Single email-code flow: user enters their
+// email, the engine sends a 6-digit code via Resend, user enters the
+// code, engine returns a Matrix access token (creating the account on
+// first contact for that email).  No passwords ever surface to the
+// user.
+//
+// The UIA password we get back in the verify response gets handed to
+// the parent so it can be stashed in the transport for the immediate
+// follow-on UIA challenge (encryption setup at signup).  Subsequent
+// UIA challenges call /api/auth/uia-password to rotate fresh.
+
+import { useEffect, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { cn } from "@/lib/utils";
+import type { MatrixCredentials } from "@/lib/matrix";
+import { fetchInstanceConfig, resolveAssetUrl, type InstanceConfig } from "@/lib/instance";
+import {
+	requestEmailCode,
+	verifyEmailCode,
+	type RequestCodeError,
+	type VerifyCodeError,
+} from "@/lib/auth";
+import { HOMESERVER_URL } from "@/lib/urls";
+
+export interface LoginProps {
+	onLoggedIn(creds: MatrixCredentials, uiaPassword: string): void;
+}
+
+type Step = "email" | "code";
+
+export function Login({ onLoggedIn }: LoginProps) {
+	const [step, setStep] = useState<Step>("email");
+	const [email, setEmail] = useState("");
+	const [code, setCode] = useState("");
+	const [username, setUsername] = useState("");
+	const [isNewAccount, setIsNewAccount] = useState(false);
+	const [pending, setPending] = useState(false);
+	const [error, setError] = useState<string | null>(null);
+	const [info, setInfo] = useState<string | null>(null);
+	const [instance, setInstance] = useState<InstanceConfig>({});
+
+	useEffect(() => {
+		// Best-effort. If the engine is offline, we render the
+		// hard-coded defaults rather than blocking the form.
+		fetchInstanceConfig()
+			.then(setInstance)
+			.catch(() => setInstance({}));
+	}, []);
+
+	const brandName = instance.name?.trim() || "Koven";
+	const tagline = instance.login_tagline?.trim();
+	const bgUrl = resolveAssetUrl(instance.login_background_url);
+	const logoUrl = resolveAssetUrl(instance.logo_url);
+
+	function reset() {
+		setStep("email");
+		setCode("");
+		setUsername("");
+		setError(null);
+		setInfo(null);
+		setIsNewAccount(false);
+	}
+
+	async function submitEmail(e: React.FormEvent) {
+		e.preventDefault();
+		const trimmed = email.trim().toLowerCase();
+		if (!trimmed) return;
+		setError(null);
+		setInfo(null);
+		setPending(true);
+		const r = await requestEmailCode(trimmed);
+		setPending(false);
+		if (!r.ok) {
+			setError(requestErrorMessage(r.error));
+			return;
+		}
+		setIsNewAccount(r.isNewAccount);
+		setInfo(r.isNewAccount
+			? "Check your inbox for a 6-digit code. Pick a username below to finish creating your account."
+			: "Check your inbox for a 6-digit code.");
+		setStep("code");
+	}
+
+	async function submitCode(e: React.FormEvent) {
+		e.preventDefault();
+		const trimmedCode = code.trim();
+		const trimmedUser = username.trim().toLowerCase();
+		if (!trimmedCode) return;
+		if (isNewAccount) {
+			if (!trimmedUser) {
+				setError("Pick a username to finish creating your account.");
+				return;
+			}
+			if (!isValidLocalpart(trimmedUser)) {
+				setError("Username can only contain lowercase letters, numbers, and hyphens.");
+				return;
+			}
+		}
+		setError(null);
+		setPending(true);
+		const r = await verifyEmailCode({
+			email: email.trim().toLowerCase(),
+			code: trimmedCode,
+			username: isNewAccount ? trimmedUser : undefined,
+			homeserver: HOMESERVER_URL,
+		});
+		setPending(false);
+		if (!r.ok) {
+			if (r.error === "needs_username") {
+				// Engine learned this is a new email after we asked.
+				// Reveal the username field and let the user retry.
+				setIsNewAccount(true);
+				setError("This email is new here. Pick a username to finish creating your account.");
+				return;
+			}
+			setError(verifyErrorMessage(r.error, r.detail));
+			return;
+		}
+		onLoggedIn(r.creds, r.uiaPassword);
+	}
+
+	const continueDisabled = pending || (step === "email"
+		? !email.trim()
+		: !code.trim() || (isNewAccount && !username.trim()));
+
+	return (
+		<div
+			className="h-full flex items-center justify-center p-8 bg-background bg-cover bg-center relative"
+			style={bgUrl ? { backgroundImage: `url(${cssUrl(bgUrl)})` } : undefined}
+		>
+			{bgUrl && (
+				// Two-layer scrim: opaque dark wash + subtle vignette
+				// gradient.  Brand image stays visible but text contrast
+				// stays readable.
+				<>
+					<div className="absolute inset-0 bg-black/55" aria-hidden />
+					<div
+						className="absolute inset-0"
+						style={{
+							background:
+								"radial-gradient(ellipse at center, rgba(0,0,0,0) 0%, rgba(0,0,0,0.35) 75%, rgba(0,0,0,0.6) 100%)",
+						}}
+						aria-hidden
+					/>
+				</>
+			)}
+			<div className="relative w-full max-w-sm space-y-4">
+				<div className="text-center space-y-1 flex flex-col items-center">
+					{logoUrl ? (
+						<img
+							src={logoUrl}
+							alt={brandName}
+							className="max-h-16 max-w-full object-contain"
+						/>
+					) : (
+						<h1 className="text-2xl font-semibold tracking-tight">{brandName}</h1>
+					)}
+					{tagline ? (
+						<p className="text-xs text-muted-foreground italic">{tagline}</p>
+					) : null}
+				</div>
+
+				<div className={cn(
+					"rounded-lg overflow-hidden",
+					bgUrl
+						? "bg-card/30 backdrop-blur-xl border border-white/10 shadow-2xl"
+						: "bg-card border border-border",
+				)}>
+					{step === "email" ? (
+						<form onSubmit={submitEmail} className="p-5 space-y-3">
+							<div className="space-y-1">
+								<div className="text-sm font-medium">Sign in or create your account</div>
+								<p className="text-xs text-muted-foreground leading-snug">
+									We'll email you a 6-digit code. No password needed.
+								</p>
+							</div>
+							<div className="space-y-1.5">
+								<Label htmlFor="login-email">Email</Label>
+								<Input
+									id="login-email"
+									type="email"
+									value={email}
+									onChange={(e) => setEmail(e.target.value)}
+									required
+									autoComplete="email"
+									placeholder="you@example.com"
+									autoFocus
+								/>
+							</div>
+
+							{error && (
+								<div className="text-xs text-destructive border border-destructive/40 bg-destructive/10 rounded px-3 py-2">
+									{error}
+								</div>
+							)}
+
+							<Button type="submit" disabled={continueDisabled} className="w-full">
+								{pending ? "Sending code…" : "Send code"}
+							</Button>
+						</form>
+					) : (
+						<form onSubmit={submitCode} className="p-5 space-y-3">
+							<div className="space-y-1">
+								<div className="text-sm font-medium">
+									{isNewAccount ? "Create your account" : "Enter your sign-in code"}
+								</div>
+								<p className="text-xs text-muted-foreground leading-snug">
+									Code sent to <span className="font-medium text-foreground">{email}</span>.
+									{" "}
+									<button
+										type="button"
+										onClick={reset}
+										className="underline hover:text-foreground"
+									>
+										Use a different email
+									</button>
+								</p>
+							</div>
+
+							<div className="space-y-1.5">
+								<Label htmlFor="login-code">6-digit code</Label>
+								<Input
+									id="login-code"
+									type="text"
+									inputMode="numeric"
+									pattern="[0-9]*"
+									value={code}
+									onChange={(e) => setCode(e.target.value.replace(/\D+/g, "").slice(0, 6))}
+									required
+									autoComplete="one-time-code"
+									placeholder="123456"
+									autoFocus
+									maxLength={6}
+									className="font-mono tracking-[0.4em] text-center"
+								/>
+							</div>
+
+							{isNewAccount && (
+								<div className="space-y-1.5">
+									<Label htmlFor="login-username">Pick a username</Label>
+									<Input
+										id="login-username"
+										type="text"
+										value={username}
+										onChange={(e) => setUsername(
+											// Strip anything outside the allowed set on input so the
+											// field can't even hold an invalid character.  Same rule
+											// as isValidLocalpart, applied as you type.
+											e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 21),
+										)}
+										required
+										autoComplete="off"
+										placeholder="pick-a-username"
+										maxLength={21}
+									/>
+									<p className="text-[10px] text-muted-foreground leading-snug">
+										Lowercase letters, numbers, and hyphens only, up to 21 characters. This becomes part of your address: <span className="font-mono">@username:{deriveServerName()}</span>
+									</p>
+								</div>
+							)}
+
+							{info && !error && (
+								<div className="text-xs text-muted-foreground border border-border bg-muted/40 rounded px-3 py-2 leading-snug">
+									{info}
+								</div>
+							)}
+							{error && (
+								<div className="text-xs text-destructive border border-destructive/40 bg-destructive/10 rounded px-3 py-2">
+									{error}
+								</div>
+							)}
+
+							<Button type="submit" disabled={continueDisabled} className="w-full">
+								{pending
+									? (isNewAccount ? "Creating account…" : "Signing in…")
+									: (isNewAccount ? "Create account" : "Sign in")}
+							</Button>
+						</form>
+					)}
+				</div>
+			</div>
+
+			{/* Koven attribution footer.  Pinned to the bottom of the
+			    viewport regardless of where the form ends up. */}
+			<p className={cn(
+				"absolute bottom-4 left-0 right-0 text-center text-[11px] tracking-wide",
+				bgUrl ? "text-white/70" : "text-muted-foreground",
+			)}>
+				Chat powered by{" "}
+				<a
+					href="https://koven.chat"
+					target="_blank"
+					rel="noopener noreferrer"
+					className="font-medium hover:underline underline-offset-2"
+				>
+					Koven
+				</a>
+			</p>
+		</div>
+	);
+}
+
+function cssUrl(u: string): string {
+	return `'${u.replace(/'/g, "\\'")}'`;
+}
+
+// Tighter than Matrix's full localpart spec — see engine/src/server.ts
+// for rationale.  Lowercase letters, digits, and hyphens only, max 21.
+function isValidLocalpart(s: string): boolean {
+	return s.length >= 1 && s.length <= 21 && /^[a-z0-9-]+$/.test(s);
+}
+
+// Best-effort homeserver-name extract for the username preview.  We
+// don't want to depend on the engine for this; it's just a UI hint.
+// Strips protocol + port, picks the host portion.
+function deriveServerName(): string {
+	try {
+		const u = new URL(HOMESERVER_URL);
+		return u.hostname || "koven";
+	} catch {
+		return "koven";
+	}
+}
+
+function requestErrorMessage(err: RequestCodeError): string {
+	switch (err) {
+		case "invalid_email":  return "That doesn't look like a valid email address.";
+		case "rate_limited":   return "Too many codes requested. Wait an hour and try again.";
+		case "email_disabled": return "Email sign-in isn't configured on this instance. Ask the operator to set RESEND_API_KEY.";
+		case "send_failed":    return "Couldn't deliver the email. Try again, or use a different address.";
+		case "network":        return "Can't reach the server. Check your connection and try again.";
+		default:               return "Something went wrong sending your code.";
+	}
+}
+
+function verifyErrorMessage(err: VerifyCodeError, detail?: string): string {
+	switch (err) {
+		case "invalid_request":     return "Couldn't read your submission. Try again.";
+		case "no_active_code":      return "Code expired or never issued. Request a fresh one.";
+		case "wrong_code":          return "That code doesn't match. Check your email and try again.";
+		case "too_many_attempts":   return "Too many wrong attempts on that code. Request a fresh one.";
+		case "invalid_username":    return "Username can only contain lowercase letters, numbers, and hyphens.";
+		case "username_unavailable":return "That username is taken. Pick another.";
+		case "password_rotate_failed": return "Server hiccup minting your session. Try again in a moment.";
+		case "synapse_error":       return detail ?? "Server error completing sign-in.";
+		case "network":             return "Can't reach the server. Check your connection and try again.";
+		default:                    return detail ?? "Sign-in failed.";
+	}
+}

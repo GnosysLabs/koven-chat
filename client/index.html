@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Koven</title>
+		<link rel="icon" type="image/png" href="/favicon.png" />
+		<!-- "Add to Home Screen" support.  apple-touch-icon is what iOS
+		     Safari uses for the home-screen icon; manifest.webmanifest +
+		     theme-color cover Android Chrome / installable PWA. -->
+		<link rel="apple-touch-icon" href="/favicon.png" />
+		<link rel="manifest" href="/manifest.webmanifest" />
+		<meta name="apple-mobile-web-app-capable" content="yes" />
+		<meta name="mobile-web-app-capable" content="yes" />
+		<meta name="apple-mobile-web-app-title" content="Koven" />
+		<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+		<meta name="theme-color" content="#0a0a0c" />
+		<link rel="preconnect" href="https://fonts.googleapis.com" />
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+		<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Kanit:wght@500;600;700&display=swap" />
+		<script>
+			// Set the theme attributes before React mounts so we don't
+			// flash the wrong palette for one frame.  Mirrors applyTheme
+			// in state/settings.ts — stored choice wins; otherwise honor
+			// prefers-color-scheme.
+			(function () {
+				var DARK_THEMES = ["midnight", "plum", "forest", "ember", "aurora", "cosmos", "sunset", "neon"];
+				try {
+					var raw = localStorage.getItem("koven:settings");
+					var theme = null;
+					if (raw) { try { theme = (JSON.parse(raw) || {}).theme || null; } catch (e) {} }
+					if (!theme) {
+						theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches
+							? "daylight" : "midnight";
+					}
+					document.documentElement.setAttribute("data-theme", theme);
+					if (DARK_THEMES.indexOf(theme) !== -1) document.documentElement.classList.add("dark");
+				} catch (e) {
+					document.documentElement.setAttribute("data-theme", "midnight");
+					document.documentElement.classList.add("dark");
+				}
+			})();
+		</script>
+	</head>
+	<body class="antialiased">
+		<div id="root"></div>
+		<script type="module" src="/src/main.tsx"></script>
+	</body>
+</html>
