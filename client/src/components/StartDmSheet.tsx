@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { cn } from "@/lib/utils";
+import { serverOf } from "@/lib/mxid";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
 
@@ -40,6 +41,13 @@ export function StartDmSheet({ open, onOpenChange, transport, onStarted }: Start
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const queryDebounceRef = useRef<number | null>(null);
+
+	// Use the viewer's own server in placeholder + error copy so the
+	// example matches the actual instance — `@alice:koven.chat` on
+	// production, `@alice:localhost` in dev — instead of a hard-
+	// coded value that's wrong half the time.
+	const serverName = serverOf(transport?.currentUserId ?? null) ?? "koven.chat";
+	const examplePlaceholder = `alice or @alice:${serverName}`;
 
 	function reset() {
 		setQuery("");
@@ -86,7 +94,7 @@ export function StartDmSheet({ open, onOpenChange, transport, onStarted }: Start
 		// even if directory search misses them).
 		const target = picked?.userId ?? (query.trim() as UserId);
 		if (!target.startsWith("@") || !target.includes(":")) {
-			setError("Enter a username (e.g. @alice:localhost) or pick a search result.");
+			setError(`Enter a username (e.g. @alice:${serverName}) or pick a search result.`);
 			return;
 		}
 		setPending(true);
@@ -109,7 +117,7 @@ export function StartDmSheet({ open, onOpenChange, transport, onStarted }: Start
 				<DialogHeader>
 					<DialogTitle>Start a direct message</DialogTitle>
 					<DialogDescription>
-						Search for someone by name or paste their full Matrix id.
+						Search for someone by name or paste their full username.
 					</DialogDescription>
 				</DialogHeader>
 
@@ -120,7 +128,7 @@ export function StartDmSheet({ open, onOpenChange, transport, onStarted }: Start
 							id="dm-query"
 							value={query}
 							onChange={(e) => { setQuery(e.target.value); setPicked(null); }}
-							placeholder="alice or @alice:localhost"
+							placeholder={examplePlaceholder}
 							autoFocus
 							autoComplete="off"
 						/>
