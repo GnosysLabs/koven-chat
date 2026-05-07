@@ -4,7 +4,7 @@
 	"version": "0.1.0",
 	"identifier": "chat.koven.desktop",
 	"build": {
-		"beforeBuildCommand": "bun install && bun run --cwd ../../../client build",
+		"beforeBuildCommand": "bun install && bun run --cwd ../../client build",
 		"frontendDist": "../../../client/dist",
 		"devUrl": "https://client.koven.chat"
 	},
