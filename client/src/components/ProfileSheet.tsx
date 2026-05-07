@@ -20,7 +20,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Ban, Camera, Trash2, UserCheck } from "lucide-react";
+import { Ban, Camera, MessageSquare, Trash2, UserCheck } from "lucide-react";
 import type { MatrixTransport } from "@/lib/matrix";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { BotBadge } from "@/components/BotBadge";
@@ -50,6 +50,11 @@ export interface ProfileSheetProps {
 	// True when the viewed user is a registered bot — drives the BOT
 	// pill and suppresses the reputation block.
 	isBot?: boolean;
+	// Open / create a DM with the viewed user.  Hidden when omitted
+	// or when the viewer is looking at their own profile.  Caller is
+	// responsible for closing this sheet + navigating to the new
+	// room — we just hand back the target id.
+	onStartDm?(userId: UserId): void | Promise<void>;
 }
 
 interface BaseProfile {
@@ -59,7 +64,7 @@ interface BaseProfile {
 	homeserver: string;
 }
 
-export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ignoredUsers, onSelfProfileSaved, isBot }: ProfileSheetProps) {
+export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ignoredUsers, onSelfProfileSaved, isBot, onStartDm }: ProfileSheetProps) {
 	const isSelf = useMemo(() => {
 		if (!viewedUserId || !transport) return false;
 		return transport.currentUserId === viewedUserId;
@@ -362,6 +367,17 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 					<Button type="button" variant="ghost" onClick={onClose} disabled={pending}>
 						{isSelf ? "Cancel" : "Close"}
 					</Button>
+					{!isSelf && viewedUserId && onStartDm && !isBlocked && (
+						<Button
+							type="button"
+							onClick={() => onStartDm(viewedUserId)}
+							disabled={loading || pending}
+							className="gap-1.5"
+						>
+							<MessageSquare className="h-3.5 w-3.5" />
+							Message
+						</Button>
+					)}
 					{isSelf && (
 						<Button type="button" onClick={save} disabled={loading || pending}>
 							{pending ? "Saving…" : "Save"}

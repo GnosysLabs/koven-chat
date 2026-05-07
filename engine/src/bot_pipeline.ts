@@ -52,7 +52,7 @@ export interface PipelineDeps {
  */
 export async function maybeHandleMention(deps: PipelineDeps): Promise<void> {
 	const { bot, event, room } = deps;
-	if (!isMentionOf(event, bot.mxid)) return;
+	if (!isMentionOf(event, bot.mxid, room)) return;
 
 	const flightKey = `${bot.id}:${room.roomId}`;
 	if (inFlight.has(flightKey)) {
@@ -118,11 +118,20 @@ async function dispatch(deps: PipelineDeps): Promise<void> {
  *   - Plain-text `@bot-localpart:server` matches in the body.
  *   - `@bot-localpart` (no server suffix) — same-server convenience
  *     so users on this homeserver don't need to type the full mxid.
+ *   - DM rooms — every message addressed to the bot is implicitly
+ *     for the bot, no @ required.
+ *   - **Replies to the bot's own messages** — the Matrix reply UI
+ *     adds an `m.in_reply_to` relation pointing at the message
+ *     being replied to.  When that target message was sent by the
+ *     bot, we treat the reply as a mention so users don't have to
+ *     also type @bot-name.  Requires `room` to be passed so we can
+ *     look up the target event's sender.
  *
- * Case-sensitive on the localpart since Matrix mxids are; the server
- * suffix match is case-insensitive (servers are domain names).
+ * Case-sensitive on the localpart since Matrix mxids are; the
+ * server suffix match is case-insensitive (servers are domain
+ * names).
  */
-export function isMentionOf(event: MatrixEvent, botMxid: string): boolean {
+export function isMentionOf(event: MatrixEvent, botMxid: string, room?: SdkRoom): boolean {
 	if (event.getType() !== "m.room.message") return false;
 
 	// We're being polite about ignoring our own messages elsewhere
@@ -133,6 +142,30 @@ export function isMentionOf(event: MatrixEvent, botMxid: string): boolean {
 	const mentions = content["m.mentions"] as { user_ids?: unknown } | undefined;
 	if (mentions && Array.isArray(mentions.user_ids) && mentions.user_ids.includes(botMxid)) {
 		return true;
+	}
+
+	// DM rooms: every message in a 1-on-1 with the bot is implicitly
+	// addressed to it.  Skip the @ scan entirely — typing the bot's
+	// name into a DM-with-the-bot is awkward.  We detect "DM with
+	// the bot" by the room having exactly two joined / invited
+	// members that include the bot.
+	if (room && isDmWithBot(room, botMxid)) {
+		return true;
+	}
+
+	// Reply to one of the bot's own messages → treat as a mention.
+	// Matrix's reply UI threads via `m.relates_to.m.in_reply_to.event_id`
+	// (current spec) or a top-level `m.in_reply_to` (older clients).
+	// Look up the target event in the live timeline; if its sender
+	// is the bot, that's a reply to the bot.
+	if (room) {
+		const replyTargetId = extractReplyTargetId(content);
+		if (replyTargetId) {
+			const target = room.findEventById(replyTargetId);
+			if (target && target.getSender() === botMxid) {
+				return true;
+			}
+		}
 	}
 
 	const body = typeof content.body === "string" ? content.body : "";
@@ -159,6 +192,30 @@ export function isMentionOf(event: MatrixEvent, botMxid: string): boolean {
 		// in case we widen this later.)
 	}
 	return re.test(body);
+}
+
+/** Pull the event id out of a reply relation if any.  Handles both
+ * the current spec (nested under `m.relates_to`) and the older
+ * top-level `m.in_reply_to` shape some clients still emit. */
+function extractReplyTargetId(content: Record<string, unknown>): string | null {
+	const relates = content["m.relates_to"] as Record<string, unknown> | undefined;
+	const nested = relates?.["m.in_reply_to"] as { event_id?: unknown } | undefined;
+	if (nested && typeof nested.event_id === "string") return nested.event_id;
+	const top = content["m.in_reply_to"] as { event_id?: unknown } | undefined;
+	if (top && typeof top.event_id === "string") return top.event_id;
+	return null;
+}
+
+/** True if `room` is a 1-on-1 DM whose other party is the bot.
+ * "DM" here means: exactly two joined-or-invited members, one of
+ * which is the bot.  Group chats with the bot don't count — there
+ * the user should still @-mention to disambiguate. */
+function isDmWithBot(room: SdkRoom, botMxid: string): boolean {
+	const members = room.getMembers().filter(m =>
+		m.membership === "join" || m.membership === "invite",
+	);
+	if (members.length !== 2) return false;
+	return members.some(m => m.userId === botMxid);
 }
 
 function escapeRegex(s: string): string {

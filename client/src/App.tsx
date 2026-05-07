@@ -986,6 +986,22 @@ export default function App() {
 					if (avatarMxc === undefined) return;
 					setMyAvatarMxc(avatarMxc ?? undefined);
 				}}
+				onStartDm={async (userId) => {
+					// Close the profile sheet first so the navigation
+					// to the new DM doesn't render under it; startDm
+					// is idempotent (returns the existing room id if
+					// a DM already exists) so the close + fire pattern
+					// is safe.
+					setViewedUserId(null);
+					if (!transport) return;
+					try {
+						const roomId = await transport.startDm(userId);
+						dispatch({ type: "set_active_space", space: { kind: "dms" } });
+						dispatch({ type: "set_active_room", roomId });
+					} catch (e) {
+						dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+					}
+				}}
 			/>
 			<AppSettingsSheet
 				open={settingsOpen}
