@@ -1153,6 +1153,40 @@ export class MatrixTransport {
 			initial_state: initialState.length ? initialState : undefined,
 		});
 		const newRoomId = res.room_id as RoomId;
+
+		// Koven PL scheme — see createSpace for the rationale.  Two
+		// tiers only: creator (PL 100) and everyone else (PL 0).
+		// All administrative actions require the creator; chat is
+		// open.  Content moderation goes through the engine's
+		// flag / consensus / collapse pipeline, not Matrix redactions
+		// or kicks.
+		try {
+			await c.sendStateEvent(newRoomId, "m.room.power_levels" as any, {
+				users: { [c.getUserId()!]: 100 },
+				users_default: 0,
+				events: {
+					"m.room.name": 100,
+					"m.room.power_levels": 100,
+					"m.room.history_visibility": 100,
+					"m.room.canonical_alias": 100,
+					"m.room.avatar": 100,
+					"m.room.topic": 100,
+					"m.room.tombstone": 100,
+					"m.room.server_acl": 100,
+					"m.room.encryption": 100,
+					"m.room.join_rules": 100,
+				},
+				state_default: 100,
+				kick: 100,
+				ban: 100,
+				redact: 100,
+				invite: opts.visibility === "public" ? 0 : 100,
+				events_default: 0,
+			}, "");
+		} catch (err) {
+			console.warn("createRoom: failed to apply Koven PL scheme", err);
+		}
+
 		if (opts.parentSpaceId) {
 			await this.linkRoomToSpace(opts.parentSpaceId, newRoomId).catch(err => {
 				console.warn("createRoom: failed to link to parent space", err);
@@ -1180,43 +1214,72 @@ export class MatrixTransport {
 		});
 		const spaceId = res.room_id as SpaceId;
 
-		// Founder-only space hierarchy.  Synapse's default state PL is
-		// 50, so any moderator-tier member could add or remove rooms
-		// from the space.  Most space creators expect "this is *my*
-		// space" and don't realise promoting a moderator hands them
-		// re-shape rights.  Lock m.space.child to PL 100 so the
-		// creator (and any explicit co-founders they promote to 100)
-		// stay in control of what's inside.  Best-effort — a failure
-		// here doesn't undo the space creation; it just leaves the
-		// looser default in place and the creator can re-run.
+		// Koven power-level model: two tiers, creator (PL 100) and
+		// everyone else (PL 0).  No moderators — content moderation
+		// is the community's job via the flag / consensus / collapse
+		// pipeline in the engine, not a privileged-user role at the
+		// Matrix layer.  Synapse's default scheme assumes a PL-50
+		// moderator tier and hands those users power over room
+		// settings, kicks, and (relevantly here) the space hierarchy.
+		// We override on space creation so:
+		//   - Anything administrative (settings, hierarchy, kicks,
+		//     invites in private spaces) requires the creator.
+		//   - Anything social (sending messages / reactions in child
+		//     rooms — this is a space, but the same model applies)
+		//     stays at PL 0 / open.
+		// Best-effort: a failure here doesn't undo space creation,
+		// it just leaves Synapse's looser default in place.  The
+		// creator can re-run by re-creating the space, or in a
+		// future "fortify existing space" admin gesture.
 		try {
 			await c.sendStateEvent(spaceId, "m.room.power_levels" as any, {
 				users: { [c.getUserId()!]: 100 },
 				users_default: 0,
 				events: {
-					"m.room.name": 50,
+					// Every administrative state event is creator-
+					// only.  No moderator tier means no reason to
+					// leave anything at the Matrix-default PL 50.
+					"m.room.name": 100,
 					"m.room.power_levels": 100,
 					"m.room.history_visibility": 100,
-					"m.room.canonical_alias": 50,
-					"m.room.avatar": 50,
+					"m.room.canonical_alias": 100,
+					"m.room.avatar": 100,
+					"m.room.topic": 100,
 					"m.room.tombstone": 100,
 					"m.room.server_acl": 100,
 					"m.room.encryption": 100,
-					// Founder-only: only PL 100 can add or remove
-					// rooms from the hierarchy.  Promoted admins at
-					// PL 50 can change other settings but can't
-					// restructure what's inside.
+					"m.room.join_rules": 100,
+					// Hierarchy: only the creator decides what rooms
+					// are inside this space.
 					"m.space.child": 100,
 				},
+				// Catch-all state floor.  Anything we didn't list
+				// above also requires PL 100, so future Matrix /
+				// Koven state-event types stay creator-only by
+				// default.
+				state_default: 100,
+				// Kick / ban / redact: creator-only.  In day-to-day
+				// Koven these are unused — the UI doesn't offer
+				// kick / ban affordances, and message hiding goes
+				// through the engine's collapse pipeline rather than
+				// Matrix redactions.  Locking them to 100 means
+				// nobody but the creator (during a Delete) can fire
+				// them, period.
+				kick: 100,
+				ban: 100,
+				redact: 100,
+				// Invites: creator-only on private spaces; open on
+				// public spaces (anyone can invite a friend to a
+				// public space, same as joining themselves).
+				invite: opts.visibility === "public" ? 0 : 100,
+				// Messages / reactions in chat rooms — this PL applies
+				// to non-state events too via events_default.  Open
+				// to all members.  (Spaces don't have timelines but
+				// the field is required by the schema.)
 				events_default: 0,
-				state_default: 50,
-				ban: 50,
-				kick: 50,
-				redact: 50,
-				invite: opts.visibility === "public" ? 0 : 50,
 			}, "");
 		} catch (err) {
-			console.warn("createSpace: failed to lock m.space.child to PL 100", err);
+			console.warn("createSpace: failed to apply Koven PL scheme", err);
 		}
 		if (opts.avatarFile) {
 			try {
