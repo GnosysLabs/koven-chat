@@ -46,12 +46,21 @@ function pageOrigin(): string {
  * build (the `tauri build` output, served from Tauri's custom
  * protocol scheme).  False in `tauri dev` mode (where `devUrl` loads
  * `https://client.koven.chat` directly), false in browsers, false
- * during SSR. */
+ * during SSR.
+ *
+ * Detection: Tauri injects `window.__TAURI_INTERNALS__` (the IPC
+ * bridge) into pages it serves from its own protocol — `tauri://`
+ * on macOS / Linux, `https://tauri.localhost` on Windows.  It does
+ * NOT inject it into pages loaded from a remote URL (the dev mode's
+ * `devUrl: https://client.koven.chat` path), which is why we can use
+ * its presence as a clean "are we the bundled SPA?" signal across
+ * all three platforms without origin-string matching.  Pure
+ * `window.location.origin` matching breaks on Windows in some
+ * WebView2 configurations where the origin format isn't exactly
+ * `https://tauri.localhost`. */
 function isTauriBundle(): boolean {
 	if (typeof window === "undefined") return false;
-	const o = window.location.origin;
-	// macOS / Linux: tauri://localhost ; Windows: https://tauri.localhost
-	return o.startsWith("tauri://") || o === "https://tauri.localhost";
+	return !!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
 }
 
 export const HOMESERVER_URL =
