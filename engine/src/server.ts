@@ -55,6 +55,10 @@ import {
 	readWeight,
 	setBotAvatarMxc,
 	suspensionsForRoom,
+	addBotKnowledge,
+	listBotKnowledge,
+	deleteBotKnowledge,
+	totalBotKnowledgeBytes,
 	touchEmailLogin,
 	updateBot,
 	updateSuspensionStatus,
@@ -75,6 +79,7 @@ import {
 import { openSecret, sealSecret } from "./secret_box";
 import { sendLoginCodeEmail } from "./email";
 import { extractToken, whoami } from "./auth";
+import { extractKnowledgeText } from "./knowledge_extract";
 import { reconcileOne, startOne, stopOne } from "./bot_manager";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -905,6 +910,97 @@ export function startServer(): void {
 						await setProfileAvatar(botToken, existing.mxid, "");
 						const updated = setBotAvatarMxc(id, null);
 						return json({ bot: updated ? toBotSummary(updated) : null });
+					}
+				}
+			}
+
+			// GET    /api/bots/:id/knowledge        — list metadata
+			// POST   /api/bots/:id/knowledge        — upload a .txt
+			// DELETE /api/bots/:id/knowledge/:fid   — drop one file
+			//
+			// Per-bot reference material the owner attaches to inform
+			// the LLM at inference time.  See bot_pipeline's buildContext
+			// — every knowledge file's full content gets prepended to
+			// the bot's system prompt on every call.  No chunking, no
+			// embeddings: simple is fine for the small-doc use case
+			// (FAQs, bios, project READMEs), and the bot owner's own
+			// API key pays for the tokens so they self-regulate.
+			{
+				const m = path.match(/^\/api\/bots\/(\d+)\/knowledge(?:\/(\d+))?$/);
+				if (m) {
+					const userId = await whoami(extractToken(req));
+					if (!userId) return json({ errcode: "M_FORBIDDEN" }, { status: 401 });
+					const id = Number(m[1]);
+					const fileId = m[2] ? Number(m[2]) : null;
+					const existing = getBotById(id);
+					if (!existing) return json({ errcode: "M_NOT_FOUND" }, { status: 404 });
+					if (existing.owner_id !== userId) {
+						return json({ errcode: "M_FORBIDDEN", error: "not your bot" }, { status: 403 });
+					}
+
+					if (req.method === "GET" && fileId === null) {
+						return json({
+							files: listBotKnowledge(id),
+							total_bytes: totalBotKnowledgeBytes(id),
+						});
+					}
+
+					if (req.method === "POST" && fileId === null) {
+						let form: Awaited<ReturnType<Request["formData"]>>;
+						try {
+							form = await req.formData();
+						} catch {
+							return json({ errcode: "M_BAD_JSON", error: "multipart body required" }, { status: 400 });
+						}
+						const file = form.get("file");
+						if (!(file instanceof File)) {
+							return json({ errcode: "M_INVALID_PARAM", error: "file field required" }, { status: 400 });
+						}
+						// 10 MB per upload — applies to the source
+						// file (.docx/.pdf/etc.), not the extracted
+						// text.  A 10 MB Word doc unpacks to maybe
+						// 1 MB of plain text, which is fine.
+						if (file.size > 10 * 1024 * 1024) {
+							return json({ errcode: "M_TOO_LARGE", error: "file > 10 MB" }, { status: 413 });
+						}
+						// Extract plain text — handles .txt, .md,
+						// .docx, and friends.  See
+						// engine/src/knowledge_extract.ts for the
+						// supported list.
+						const extract = await extractKnowledgeText(file);
+						if ("error" in extract) {
+							return json({
+								errcode: "M_INVALID_PARAM",
+								error: extract.error,
+								detail: extract.detail,
+							}, { status: 400 });
+						}
+						// Total cap per bot — prevents accidentally
+						// jamming a multi-hundred-MB context into
+						// every LLM call.  Measured against the
+						// extracted text size, not the source-file
+						// size, since that's what actually gets
+						// tokenised.
+						const newBytes = new TextEncoder().encode(extract.text).length;
+						const currentTotal = totalBotKnowledgeBytes(id);
+						if (currentTotal + newBytes > 50 * 1024 * 1024) {
+							return json({
+								errcode: "M_TOO_LARGE",
+								error: `bot knowledge total > 50 MB (currently ${currentTotal})`,
+							}, { status: 413 });
+						}
+						const meta = addBotKnowledge(
+							id,
+							extract.filename.slice(0, 255),
+							extract.text,
+						);
+						return json({ file: meta });
+					}
+
+					if (req.method === "DELETE" && fileId !== null) {
+						const ok = deleteBotKnowledge(fileId, id);
+						if (!ok) return json({ errcode: "M_NOT_FOUND" }, { status: 404 });
+						return json({ ok: true });
 					}
 				}
 			}

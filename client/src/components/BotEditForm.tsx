@@ -14,13 +14,17 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { BotBadge } from "@/components/BotBadge";
-import { Camera, ChevronDown, Eye, EyeOff, Trash2, X } from "lucide-react";
+import { Camera, ChevronDown, Eye, EyeOff, FileText, Trash2, Upload, X } from "lucide-react";
 import {
 	createBot,
 	patchBot,
 	PROVIDER_DEFAULTS,
 	removeBotAvatar,
 	uploadBotAvatar,
+	listBotKnowledge,
+	uploadBotKnowledge,
+	deleteBotKnowledge,
+	type BotKnowledgeFile,
 	type BotProvider,
 	type BotSummary,
 } from "@/lib/bots";
@@ -115,6 +119,19 @@ export function BotEditForm({
 	const [pendingAvatarPreview, setPendingAvatarPreview] = useState<string | null>(null);
 	const [clearAvatarOnSave, setClearAvatarOnSave] = useState(false);
 
+	// Knowledge files.  Two states share this section:
+	//   - Edit mode: existing files come from the engine (`knowledge`)
+	//     and uploads / deletes happen immediately against /api/bots/
+	//     :id/knowledge.
+	//   - Create mode: there's no bot id yet, so picks queue locally
+	//     in `pendingKnowledge` and upload after createBot succeeds
+	//     (handleSubmit walks the queue at the end).
+	const knowledgeFileInputRef = useRef<HTMLInputElement | null>(null);
+	const [knowledge, setKnowledge] = useState<BotKnowledgeFile[]>([]);
+	const [pendingKnowledge, setPendingKnowledge] = useState<File[]>([]);
+	const [knowledgeBusy, setKnowledgeBusy] = useState(false);
+	const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
+
 	// Reset whenever the target bot or mode changes — switching from
 	// edit-bot-A to edit-bot-B (or to "create") shouldn't keep stale
 	// form values around.
@@ -131,12 +148,30 @@ export function BotEditForm({
 			return null;
 		});
 		setClearAvatarOnSave(false);
+		setKnowledge([]);
+		setPendingKnowledge([]);
+		setKnowledgeError(null);
 		if (mode === "edit" && bot) {
 			setForm(formStateFromBot(bot));
 		} else {
 			setForm(freshFormState());
 		}
 	}, [mode, bot?.id]);
+
+	// Fetch the bot's existing knowledge files when entering edit
+	// mode (or when the selected bot changes).  Create mode skips —
+	// no bot id to query yet; pendingKnowledge holds whatever the
+	// user picks until handleSubmit can upload it post-create.
+	useEffect(() => {
+		if (!accessToken || mode !== "edit" || !bot?.id) return;
+		let cancelled = false;
+		listBotKnowledge(accessToken, bot.id)
+			.then(r => { if (!cancelled) setKnowledge(r.files); })
+			.catch(err => {
+				if (!cancelled) setKnowledgeError(err instanceof Error ? err.message : String(err));
+			});
+		return () => { cancelled = true; };
+	}, [accessToken, mode, bot?.id]);
 
 	// Object-URL cleanup on unmount — covers the case where the form
 	// closes with a pending pick that was never submitted.
@@ -268,12 +303,74 @@ export function BotEditForm({
 				}
 			}
 
+			// Knowledge follow-up: in create mode any pending picks
+			// queue here.  Walk them sequentially — parallel uploads
+			// would all check the 50 MB total against the same pre-
+			// upload number and let the bot exceed the cap.  Same
+			// fail-soft pattern as the avatar branch above; the bot
+			// is created either way.
+			if (pendingKnowledge.length > 0) {
+				try {
+					for (const f of pendingKnowledge) {
+						await uploadBotKnowledge(accessToken, saved.id, f);
+					}
+					setPendingKnowledge([]);
+				} catch (err) {
+					setError(`Saved, but knowledge upload failed: ${err instanceof Error ? err.message : String(err)}`);
+					await onSaved(saved);
+					return;
+				}
+			}
+
 			await onSaved(saved);
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
 		} finally {
 			setSubmitting(false);
 		}
+	}
+
+	// Knowledge handlers.  Edit mode uploads/deletes hit the engine
+	// immediately so the user gets instant feedback (no "wait until
+	// you click Save"); create mode queues until the bot exists.
+	async function pickKnowledgeFiles(files: FileList) {
+		const arr = Array.from(files);
+		if (arr.length === 0) return;
+		setKnowledgeError(null);
+		if (mode === "create") {
+			setPendingKnowledge(prev => [...prev, ...arr]);
+			return;
+		}
+		if (!accessToken || !bot) return;
+		setKnowledgeBusy(true);
+		try {
+			for (const f of arr) {
+				const meta = await uploadBotKnowledge(accessToken, bot.id, f);
+				setKnowledge(prev => [...prev, meta]);
+			}
+		} catch (err) {
+			setKnowledgeError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setKnowledgeBusy(false);
+		}
+	}
+
+	async function removeKnowledgeFile(fileId: number) {
+		if (!accessToken || !bot) return;
+		setKnowledgeError(null);
+		setKnowledgeBusy(true);
+		try {
+			await deleteBotKnowledge(accessToken, bot.id, fileId);
+			setKnowledge(prev => prev.filter(k => k.id !== fileId));
+		} catch (err) {
+			setKnowledgeError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setKnowledgeBusy(false);
+		}
+	}
+
+	function removePendingKnowledge(idx: number) {
+		setPendingKnowledge(prev => prev.filter((_, i) => i !== idx));
 	}
 
 	function pickAvatar(file: File) {
@@ -605,6 +702,58 @@ export function BotEditForm({
 						</div>
 					</section>
 
+					<Divider />
+
+					{/* ─── Knowledge ────────────────────────────────── */}
+					<section className="space-y-4">
+						<SectionHeader
+							title="Knowledge"
+							subtitle="Reference material the bot can quote from. Each file's full text is included in every prompt — keep them concise, since longer files mean more tokens billed per reply."
+						/>
+
+						<KnowledgeList
+							knowledge={knowledge}
+							pendingKnowledge={pendingKnowledge}
+							busy={knowledgeBusy}
+							onRemoveExisting={removeKnowledgeFile}
+							onRemovePending={removePendingKnowledge}
+						/>
+
+						<div>
+							<input
+								ref={knowledgeFileInputRef}
+								type="file"
+								accept=".txt,.md,.markdown,.csv,.tsv,.log,.json,.yaml,.yml,.xml,.html,.htm,.docx,.rtf"
+								multiple
+								className="hidden"
+								onChange={e => {
+									if (e.target.files) pickKnowledgeFiles(e.target.files);
+									e.target.value = "";
+								}}
+							/>
+							<Button
+								type="button"
+								variant="ghost"
+								size="sm"
+								onClick={() => knowledgeFileInputRef.current?.click()}
+								disabled={knowledgeBusy}
+								className="gap-1.5"
+							>
+								<Upload className="h-4 w-4" />
+								{knowledgeBusy ? "Uploading…" : "Upload files"}
+							</Button>
+							<p className="text-xs text-muted-foreground mt-1.5">
+								Plain text (.txt, .md), Word (.docx), or Apple/RTF (.rtf). Up to 10&nbsp;MB per file, 50&nbsp;MB total per bot.
+							</p>
+						</div>
+
+						{knowledgeError && (
+							<div className="text-sm text-destructive border border-destructive/40 bg-destructive/5 rounded-md px-3 py-2">
+								{knowledgeError}
+							</div>
+						)}
+					</section>
+
 					{error && (
 						<div className="text-sm text-destructive border border-destructive/40 bg-destructive/5 rounded-md px-3 py-2">
 							{error}
@@ -689,4 +838,78 @@ function SectionHeader({ title, subtitle }: { title: string; subtitle: string })
 // renders crisply on every theme.
 function Divider() {
 	return <div className="h-px bg-border" aria-hidden />;
+}
+
+// Render the bot's existing knowledge files plus any pending picks
+// queued for upload.  Empty-state copy nudges the user to upload
+// something useful instead of just showing a void.
+function KnowledgeList({
+	knowledge,
+	pendingKnowledge,
+	busy,
+	onRemoveExisting,
+	onRemovePending,
+}: {
+	knowledge: BotKnowledgeFile[];
+	pendingKnowledge: File[];
+	busy: boolean;
+	onRemoveExisting(id: number): void;
+	onRemovePending(idx: number): void;
+}) {
+	if (knowledge.length === 0 && pendingKnowledge.length === 0) {
+		return (
+			<div className="rounded-md border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+				No knowledge files yet.
+			</div>
+		);
+	}
+	return (
+		<ul className="rounded-md border border-border divide-y divide-border bg-card/30">
+			{knowledge.map(k => (
+				<li key={`existing-${k.id}`} className="px-3 py-2 flex items-center gap-3">
+					<FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+					<div className="flex-1 min-w-0">
+						<div className="text-sm truncate">{k.filename}</div>
+						<div className="text-[11px] text-muted-foreground">{formatBytes(k.bytes)}</div>
+					</div>
+					<button
+						type="button"
+						onClick={() => onRemoveExisting(k.id)}
+						disabled={busy}
+						title="Remove file"
+						aria-label="Remove file"
+						className="text-muted-foreground hover:text-destructive disabled:opacity-40"
+					>
+						<X className="h-4 w-4" />
+					</button>
+				</li>
+			))}
+			{pendingKnowledge.map((f, i) => (
+				<li key={`pending-${i}`} className="px-3 py-2 flex items-center gap-3 bg-primary/5">
+					<FileText className="h-4 w-4 shrink-0 text-primary" />
+					<div className="flex-1 min-w-0">
+						<div className="text-sm truncate">{f.name}</div>
+						<div className="text-[11px] text-muted-foreground">
+							{formatBytes(f.size)} · queued — uploads after save
+						</div>
+					</div>
+					<button
+						type="button"
+						onClick={() => onRemovePending(i)}
+						title="Remove from queue"
+						aria-label="Remove from queue"
+						className="text-muted-foreground hover:text-destructive"
+					>
+						<X className="h-4 w-4" />
+					</button>
+				</li>
+			))}
+		</ul>
+	);
+}
+
+function formatBytes(n: number): string {
+	if (n < 1024) return `${n} B`;
+	if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+	return `${(n / (1024 * 1024)).toFixed(2)} MB`;
 }

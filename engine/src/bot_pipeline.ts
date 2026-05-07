@@ -16,7 +16,7 @@
 
 import type { MatrixClient, MatrixEvent, Room as SdkRoom } from "matrix-js-sdk";
 import { MsgType } from "matrix-js-sdk";
-import { type BotRow, bumpBotUsage } from "./db";
+import { type BotRow, bumpBotUsage, getBotKnowledgeContent } from "./db";
 import { openSecret } from "./secret_box";
 import { chatCompletion, type ChatMessage } from "./llm_client";
 import { config } from "./config";
@@ -174,8 +174,34 @@ function escapeRegex(s: string): string {
  * the event lands in the timeline). */
 function buildContext(bot: BotRow, room: SdkRoom, _trigger: MatrixEvent): ChatMessage[] {
 	const out: ChatMessage[] = [];
+
+	// Compose the system message: knowledge-base reference material
+	// first, then the bot owner's own system prompt.  Order matters
+	// — the knowledge frames "what do I know" and the system prompt
+	// frames "how do I behave," and most LLMs respond better when
+	// behavioural instructions are last.  Each knowledge file gets
+	// its filename as a heading so the model can cite or
+	// disambiguate sources in its reply.
+	const knowledge = getBotKnowledgeContent(bot.id);
+	const knowledgeBlock = knowledge.length === 0
+		? ""
+		: [
+			"# Knowledge base",
+			"",
+			"The following reference material has been provided to you. Treat it as authoritative when relevant; if asked something it doesn't cover, answer from your general knowledge and say so.",
+			"",
+			...knowledge.map(k => `## ${k.filename}\n\n${k.content}`),
+			"---",
+			"",
+		].join("\n");
+
+	const promptParts: string[] = [];
+	if (knowledgeBlock) promptParts.push(knowledgeBlock);
 	if (bot.system_prompt && bot.system_prompt.trim().length > 0) {
-		out.push({ role: "system", content: bot.system_prompt });
+		promptParts.push(bot.system_prompt);
+	}
+	if (promptParts.length > 0) {
+		out.push({ role: "system", content: promptParts.join("\n\n") });
 	}
 
 	const live = room.getLiveTimeline().getEvents();

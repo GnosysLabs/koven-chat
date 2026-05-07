@@ -186,6 +186,64 @@ export async function removeBotAvatar(
 	return body.bot;
 }
 
+// ─── Knowledge files ───────────────────────────────────────────────
+
+export interface BotKnowledgeFile {
+	id: number;
+	bot_id: number;
+	filename: string;
+	bytes: number;
+	uploaded_at: number;
+}
+
+export interface BotKnowledgeListResponse {
+	files: BotKnowledgeFile[];
+	total_bytes: number;
+}
+
+export async function listBotKnowledge(
+	accessToken: string,
+	id: number,
+): Promise<BotKnowledgeListResponse> {
+	return callEngine<BotKnowledgeListResponse>(`/api/bots/${id}/knowledge`, accessToken);
+}
+
+/** Upload a single knowledge file (.txt, .md, .docx, etc.).  Engine
+ * extracts plain text server-side; the returned metadata includes
+ * the filename + size of the extracted text (which can differ from
+ * the source file for parsed formats like .docx). */
+export async function uploadBotKnowledge(
+	accessToken: string,
+	id: number,
+	file: File,
+): Promise<BotKnowledgeFile> {
+	const form = new FormData();
+	form.append("file", file);
+	const r = await fetch(`${ENGINE_URL}/api/bots/${id}/knowledge`, {
+		method: "POST",
+		headers: { Authorization: `Bearer ${accessToken}` },
+		body: form,
+	});
+	const text = await r.text();
+	let body: unknown = {};
+	try { body = text ? JSON.parse(text) : {}; } catch { /* keep raw */ }
+	if (!r.ok) {
+		const err = body as BotApiError;
+		throw new Error(err.detail ?? err.error ?? `HTTP ${r.status}`);
+	}
+	return (body as { file: BotKnowledgeFile }).file;
+}
+
+export async function deleteBotKnowledge(
+	accessToken: string,
+	botId: number,
+	fileId: number,
+): Promise<void> {
+	await callEngine<{ ok: true }>(`/api/bots/${botId}/knowledge/${fileId}`, accessToken, {
+		method: "DELETE",
+	});
+}
+
 // ─── Defaults ──────────────────────────────────────────────────────
 
 /** Shared defaults the create form uses to pre-fill the provider's

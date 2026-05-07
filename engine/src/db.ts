@@ -218,7 +218,32 @@ db.exec(`
 		last_used_at             INTEGER
 	);
 	CREATE INDEX IF NOT EXISTS idx_bots_owner ON bots(owner_id);
+
+	-- Per-bot knowledge files.  Plain-text reference material the
+	-- bot owner uploads (FAQs, character bios, project docs).  Each
+	-- file's full content is concatenated into the system prompt at
+	-- inference time so the LLM can quote / reason against it.  No
+	-- chunking + embedding for v1 — most use cases are small enough
+	-- that just dumping into context works, and the bot's owner is
+	-- paying for the tokens via their own API key, so they self-
+	-- regulate by not uploading the entire Wikipedia.  Cascading
+	-- delete: knowledge dies with the bot.
+	CREATE TABLE IF NOT EXISTS bot_knowledge (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		bot_id      INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+		filename    TEXT NOT NULL,
+		content     TEXT NOT NULL,
+		bytes       INTEGER NOT NULL,
+		uploaded_at INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_bot_knowledge_bot ON bot_knowledge(bot_id);
 `);
+
+// SQLite ships with foreign-key enforcement OFF by default; flip it
+// on so the bot_knowledge.bot_id FK actually cascades when we delete
+// a bot.  Per-connection setting, set after schema creation so it
+// applies for every subsequent statement on this connection.
+db.exec("PRAGMA foreign_keys = ON");
 
 // ─── Migrations for existing installs ───────────────────────────────
 // `CREATE TABLE IF NOT EXISTS` won't backfill new columns onto a
@@ -1131,4 +1156,84 @@ export function deleteBot(id: number): void {
 
 export function bumpBotUsage(id: number, promptTokens: number, completionTokens: number): void {
 	bumpBotUsageStmt.run(promptTokens, completionTokens, Date.now(), id);
+}
+
+// ─── Bot knowledge files ────────────────────────────────────────────
+
+/** Metadata about an uploaded knowledge file.  The full text content
+ * is intentionally NOT included here — listings need to stay cheap
+ * even if a bot has dozens of MB of reference material attached.
+ * Use `getBotKnowledgeContent` to pull the actual text for the
+ * inference path. */
+export interface BotKnowledgeMeta {
+	id: number;
+	bot_id: number;
+	filename: string;
+	bytes: number;
+	uploaded_at: number;
+}
+
+/** Knowledge file with full text — used by bot_pipeline when
+ * building the LLM call's system message. */
+export interface BotKnowledgeRow extends BotKnowledgeMeta {
+	content: string;
+}
+
+const insertBotKnowledgeStmt = db.prepare(`
+	INSERT INTO bot_knowledge (bot_id, filename, content, bytes, uploaded_at)
+	VALUES (?, ?, ?, ?, ?)
+`);
+const listBotKnowledgeStmt = db.prepare(
+	`SELECT id, bot_id, filename, bytes, uploaded_at FROM bot_knowledge
+	 WHERE bot_id = ? ORDER BY uploaded_at ASC`,
+);
+const getBotKnowledgeContentStmt = db.prepare(
+	`SELECT id, bot_id, filename, content, bytes, uploaded_at FROM bot_knowledge
+	 WHERE bot_id = ? ORDER BY uploaded_at ASC`,
+);
+const deleteBotKnowledgeStmt = db.prepare(
+	`DELETE FROM bot_knowledge WHERE id = ? AND bot_id = ?`,
+);
+const totalBotKnowledgeBytesStmt = db.prepare(
+	`SELECT COALESCE(SUM(bytes), 0) AS total FROM bot_knowledge WHERE bot_id = ?`,
+);
+
+export function addBotKnowledge(
+	botId: number,
+	filename: string,
+	content: string,
+): BotKnowledgeMeta {
+	const bytes = new TextEncoder().encode(content).length;
+	const r = insertBotKnowledgeStmt.run(botId, filename, content, bytes, Date.now());
+	return {
+		id: Number(r.lastInsertRowid),
+		bot_id: botId,
+		filename,
+		bytes,
+		uploaded_at: Date.now(),
+	};
+}
+
+export function listBotKnowledge(botId: number): BotKnowledgeMeta[] {
+	return listBotKnowledgeStmt.all(botId) as BotKnowledgeMeta[];
+}
+
+/** Full content for every knowledge file attached to this bot.  Used
+ * by the inference path; do NOT call from list endpoints — the rows
+ * can be megabytes each. */
+export function getBotKnowledgeContent(botId: number): BotKnowledgeRow[] {
+	return getBotKnowledgeContentStmt.all(botId) as BotKnowledgeRow[];
+}
+
+/** Delete a single knowledge file.  bot_id scoping defends against
+ * an owner who somehow learned another owner's file id (shouldn't
+ * happen — endpoints check ownership — but defence-in-depth). */
+export function deleteBotKnowledge(fileId: number, botId: number): boolean {
+	const r = deleteBotKnowledgeStmt.run(fileId, botId);
+	return r.changes > 0;
+}
+
+export function totalBotKnowledgeBytes(botId: number): number {
+	const row = totalBotKnowledgeBytesStmt.get(botId) as { total: number };
+	return row.total ?? 0;
 }
