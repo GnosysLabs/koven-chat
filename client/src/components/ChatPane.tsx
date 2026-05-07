@@ -190,13 +190,21 @@ export function ChatPane({
 	// than pointer events.
 	const [hoveredMessageId, setHoveredMessageId] = useState<EventId | null>(null);
 	useEffect(() => {
+		console.log("[hover-fix v5] document mousemove listener attached");
 		const onMove = (e: MouseEvent) => {
 			const t = e.target as HTMLElement | null;
 			const msgEl = t?.closest("[data-message-id]");
 			const id = (msgEl?.getAttribute("data-message-id") ?? null) as EventId | null;
-			setHoveredMessageId(prev => (prev === id ? prev : id));
+			setHoveredMessageId(prev => {
+				if (prev === id) return prev;
+				console.log("[hover-fix v5] hover →", id);
+				return id;
+			});
 		};
-		const onLeave = () => setHoveredMessageId(null);
+		const onLeave = () => {
+			console.log("[hover-fix v5] mouse left document");
+			setHoveredMessageId(null);
+		};
 		document.addEventListener("mousemove", onMove);
 		document.addEventListener("mouseleave", onLeave);
 		return () => {
@@ -500,6 +508,15 @@ export function ChatPane({
 				</div>
 			</header>
 
+			{/* TEMPORARY diagnostic — proves the new bundle is loaded.
+			    If you see this banner, the latest hover-fix code IS
+			    running in your WKWebView and any persisting bug is
+			    in my logic, not in caching.  If you DON'T see it,
+			    your WKWebView is serving a cached bundle and we need
+			    to bust the cache. */}
+			<div className="px-4 py-1 text-[10px] font-mono bg-amber-500 text-black tabular-nums">
+				[hover-fix v5] hovered: {hoveredMessageId ?? "none"}
+			</div>
 			<div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4">
 				{messages.length === 0 ? (
 					<div className="text-xs text-muted-foreground italic mt-8 text-center">No messages yet.</div>
