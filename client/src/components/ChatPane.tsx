@@ -4,18 +4,43 @@
 // renders in its own rounded bubble.  Self messages use the primary
 // bubble color; everyone else uses the muted card color.
 
-import { useEffect, useRef, useState } from "react";
-import type { CollapseAggregate, EventId, FlagAggregate, FlagCategory, Message, ReactionAggregate, Room } from "@koven/shared";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { CollapseAggregate, EventId, FlagAggregate, FlagCategory, Member, Message, ReactionAggregate, Room, UserId } from "@koven/shared";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { ReactionPills } from "@/components/ReactionPills";
 import { MessageActions } from "@/components/MessageActions";
+import { BotBadge } from "@/components/BotBadge";
+import {
+	MentionAutocomplete,
+	activeMentionToken,
+	scoreCandidate,
+	type AutocompleteCandidate,
+} from "@/components/MentionAutocomplete";
+import { serverOf } from "@/lib/mxid";
 import { FlagDialog } from "@/components/FlagDialog";
+import { firstLink, linkify } from "@/lib/linkify";
+import { MarkdownContent } from "@/components/MarkdownContent";
+
+// Heuristic: does this body have any markdown shape?  Cheap regex
+// pass — looks for headings, lists, fenced code, emphasis, links,
+// blockquotes.  Used to skip the markdown renderer for short
+// vanilla messages so a one-liner like "ok" doesn't pay for AST
+// parsing.
+function looksLikeMarkdown(s: string): boolean {
+	if (!s) return false;
+	// Heading on its own line, fenced code, list bullet, or numbered
+	// list at line start.
+	if (/(^|\n)(#{1,6} |[*\-+] |\d+\. |> |```)/.test(s)) return true;
+	// Inline emphasis or links anywhere.
+	if (/\*\*[^\n*]+\*\*|__[^\n_]+__|\*[^\n*]+\*|_[^\n_]+_|`[^`\n]+`|\[[^\]]+\]\([^)]+\)/.test(s)) return true;
+	return false;
+}
 import { useMatrixAttachment } from "@/lib/useMatrixAttachment";
 import { useMatrixMedia } from "@/lib/useMatrixMedia";
-import { extractFirstUrl, useUrlPreview } from "@/lib/useUrlPreview";
+import { useUrlPreview } from "@/lib/useUrlPreview";
 import { CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Lock, Network, Paperclip, Phone, Scale, Settings, UserPlus, Video, X } from "lucide-react";
 
 export interface ChatPaneProps {
@@ -52,6 +77,19 @@ export interface ChatPaneProps {
 	isSuspended: boolean;
 	// Open the per-room public mod log dialog.
 	onOpenModLog(roomId: EventId): void;
+	// mxids that should render with a BOT badge next to their name
+	// (sender labels, reply-quote labels).  Default empty Set means
+	// no badges — safe pre-fetch state.
+	botMxids?: Set<string>;
+	// Joined members of the active room.  Drives the @-mention
+	// autocomplete in the compose box.  Optional; when omitted only
+	// bot mxids are suggestible.
+	members?: Member[];
+	// Viewer's own server (e.g. "koven.chat") — drives the same-
+	// server mxid shorthand on insert: `@bot-foo` instead of
+	// `@bot-foo:koven.chat`.  Pulled from the current user's mxid
+	// upstream.
+	viewerServer?: string | null;
 }
 
 // Threshold for "this message is part of the same group as the
@@ -64,6 +102,9 @@ export function ChatPane({
 	room, messages, memberAvatars, reactionsByMessage, flagsByMessage, collapsesByMessage,
 	onSendMessage, onSendAttachment, onReact, onUnreact, onFlag, onUnflag, onAcceptInvite, onDeclineInvite, onInvite, onEditRoom,
 	onPlaceCall, callInProgress, isSuspended, onOpenModLog,
+	botMxids,
+	members,
+	viewerServer,
 }: ChatPaneProps) {
 	// Consensus flagging only works where the local engine can act:
 	//   - DMs are 1-on-1 — no quorum to gather, no consensus to reach.
@@ -87,7 +128,16 @@ export function ChatPane({
 	const [pendingAttachment, setPendingAttachment] = useState<File | null>(null);
 	const [uploading, setUploading] = useState(false);
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
+	const composeInputRef = useRef<HTMLInputElement | null>(null);
 	const scrollRef = useRef<HTMLDivElement | null>(null);
+	// Cursor position in the compose box.  Tracked separately from
+	// `draft` because keyboard shortcuts (Tab, Enter for send) fire
+	// before React syncs the input's selectionStart.  Updated on
+	// every keystroke, focus, and click.
+	const [cursor, setCursor] = useState(0);
+	// @-mention autocomplete state.  selectedIndex resets to 0 on
+	// every query change so arrow-down behaves intuitively.
+	const [mentionIndex, setMentionIndex] = useState(0);
 
 	useEffect(() => {
 		const el = scrollRef.current;
@@ -110,6 +160,91 @@ export function ChatPane({
 			</div>
 		);
 	}
+
+	// ─── @-mention autocomplete ────────────────────────────────────
+	// Look at the cursor position inside the draft.  If we're sitting
+	// in an active "@..." token, compute matching room members + bots
+	// and surface the popover.
+
+	const mentionToken = activeMentionToken(draft, cursor);
+
+	const allCandidates = useMemo<AutocompleteCandidate[]>(() => {
+		const seen = new Set<string>();
+		const out: AutocompleteCandidate[] = [];
+		// Room members first.  These are always relevant.
+		for (const m of members ?? []) {
+			if (seen.has(m.userId)) continue;
+			seen.add(m.userId);
+			out.push({
+				userId: m.userId as UserId,
+				displayName: m.displayName || m.userId,
+				avatarUrl: m.avatarUrl,
+				isBot: !!botMxids?.has(m.userId),
+			});
+		}
+		// Then bot mxids that aren't already in the member list — useful
+		// when the user wants to mention a bot that hasn't been invited
+		// yet (engine ignores the mention until the bot is in the room,
+		// but the typing experience matches Element).
+		for (const mxid of botMxids ?? []) {
+			if (seen.has(mxid)) continue;
+			seen.add(mxid);
+			const localpart = mxid.split(":")[0]?.slice(1) ?? mxid;
+			out.push({
+				userId: mxid as UserId,
+				displayName: localpart,
+				isBot: true,
+			});
+		}
+		return out;
+	}, [members, botMxids]);
+
+	const matches = useMemo<AutocompleteCandidate[]>(() => {
+		if (!mentionToken) return [];
+		const q = mentionToken.query;
+		const scored = allCandidates
+			.map(c => ({ c, score: scoreCandidate(c, q) }))
+			.filter(s => s.score > 0)
+			.sort((a, b) => b.score - a.score);
+		return scored.slice(0, 8).map(s => s.c);
+	}, [allCandidates, mentionToken]);
+
+	// Reset the highlighted row whenever the match set changes.
+	useEffect(() => { setMentionIndex(0); }, [mentionToken?.query, matches.length]);
+
+	const acceptMention = (c: AutocompleteCandidate) => {
+		if (!mentionToken) return;
+		// Same-server short form: drop ":server" when it matches the
+		// viewer's server.  Cross-server keeps the full mxid so it
+		// stays unambiguous.
+		const insertedMxid = (() => {
+			if (!viewerServer) return c.userId;
+			const cs = serverOf(c.userId);
+			if (cs && cs === viewerServer.toLowerCase()) {
+				const colon = c.userId.indexOf(":");
+				return colon > 0 ? c.userId.slice(0, colon) : c.userId;
+			}
+			return c.userId;
+		})();
+		const before = draft.slice(0, mentionToken.start);
+		const after = draft.slice(cursor);
+		const next = `${before}${insertedMxid} ${after}`;
+		setDraft(next);
+		// After paint, restore focus and place the caret right after
+		// the inserted mxid + trailing space.
+		const newCursor = mentionToken.start + insertedMxid.length + 1;
+		requestAnimationFrame(() => {
+			const el = composeInputRef.current;
+			if (!el) return;
+			el.focus();
+			try {
+				el.setSelectionRange(newCursor, newCursor);
+			} catch {
+				// some input types reject setSelectionRange; fine to ignore
+			}
+			setCursor(newCursor);
+		});
+	};
 
 	function send() {
 		// Attachment send: ignores draft text for now (Matrix carries
@@ -157,14 +292,23 @@ export function ChatPane({
 						mxc={room.avatarUrl}
 						emoji={room.kind !== "dm" ? room.iconEmoji : undefined}
 						seed={room.kind === "dm" ? (room.dmUserId ?? room.id) : room.id}
-						kind={room.kind === "dm" ? "user" : "room"}
+						kind={
+							room.kind === "dm"
+								? (room.dmUserId && botMxids?.has(room.dmUserId) ? "bot" : "user")
+								: "room"
+						}
 						className={cn(
 							"h-7 w-7 shrink-0",
 							room.kind === "dm" ? "rounded-full" : "rounded-md",
 						)}
 					/>
 					<div className="flex flex-col min-w-0">
-						<span className="text-sm font-semibold truncate">{room.name}</span>
+						<span className="text-sm font-semibold truncate flex items-center gap-1.5">
+							<span className="truncate">{room.name}</span>
+							{room.kind === "dm" && room.dmUserId && botMxids?.has(room.dmUserId) && (
+								<BotBadge />
+							)}
+						</span>
 						{room.topic && (
 							<span className="text-xs text-muted-foreground truncate max-w-[60ch]">{room.topic}</span>
 						)}
@@ -284,6 +428,7 @@ export function ChatPane({
 								continuesGroup={sameGroup}
 								isFirst={i === 0}
 								flaggable={flaggable}
+								roomEncrypted={!!room.encrypted}
 								reactions={reactionsByMessage.get(m.id) ?? []}
 								flags={flagsByMessage.get(m.id)}
 								collapse={collapsesByMessage.get(m.id)}
@@ -297,6 +442,7 @@ export function ChatPane({
 									// is handled inline (opens the flag dialog) — see
 									// MessageRow below.
 								}}
+								isBot={!!botMxids?.has(m.sender)}
 								onToggleReactionPill={(reaction) => {
 									if (reaction.myReactionId) onUnreact(reaction);
 									else onReact(m.id, reaction.key);
@@ -394,22 +540,71 @@ export function ChatPane({
 							</button>
 						</>
 					)}
-					<Input
-						type="text"
-						value={draft}
-						onChange={e => setDraft(e.target.value)}
-						placeholder={
-							isSuspended
-								? "Posting paused while your account is under review"
-								: pendingAttachment
-									? "Press send to share the file"
-									: replyTarget
-										? `Reply to ${replyTarget.senderDisplayName}`
-										: `Message ${room.name}`
-						}
-						disabled={isSuspended || !!pendingAttachment}
-						autoFocus={!isSuspended}
-					/>
+					<div className="relative flex-1">
+						{mentionToken && matches.length > 0 && (
+							<MentionAutocomplete
+								query={mentionToken.query}
+								candidates={matches}
+								selectedIndex={mentionIndex}
+								onSelect={acceptMention}
+								onHover={i => setMentionIndex(i)}
+							/>
+						)}
+						<Input
+							ref={composeInputRef}
+							type="text"
+							value={draft}
+							onChange={e => {
+								setDraft(e.target.value);
+								setCursor(e.target.selectionStart ?? e.target.value.length);
+							}}
+							onSelect={e => {
+								// Track caret moves driven by mouse / arrow keys
+								// without text changes — keeps the autocomplete
+								// trigger in sync.
+								setCursor((e.target as HTMLInputElement).selectionStart ?? draft.length);
+							}}
+							onKeyDown={e => {
+								if (mentionToken && matches.length > 0) {
+									if (e.key === "ArrowDown") {
+										e.preventDefault();
+										setMentionIndex(i => (i + 1) % matches.length);
+										return;
+									}
+									if (e.key === "ArrowUp") {
+										e.preventDefault();
+										setMentionIndex(i => (i - 1 + matches.length) % matches.length);
+										return;
+									}
+									if (e.key === "Enter" || e.key === "Tab") {
+										e.preventDefault();
+										const c = matches[mentionIndex] ?? matches[0];
+										if (c) acceptMention(c);
+										return;
+									}
+									if (e.key === "Escape") {
+										e.preventDefault();
+										// Force-close by moving the caret past
+										// the "@..." token.
+										setCursor(draft.length);
+										return;
+									}
+								}
+							}}
+							placeholder={
+								isSuspended
+									? "Posting paused while your account is under review"
+									: pendingAttachment
+										? "Press send to share the file"
+										: replyTarget
+											? `Reply to ${replyTarget.senderDisplayName}`
+											: `Message ${room.name}`
+							}
+							disabled={isSuspended || !!pendingAttachment}
+							autoFocus={!isSuspended}
+							className="w-full"
+						/>
+					</div>
 					<Button
 						type="submit"
 						disabled={
@@ -427,17 +622,30 @@ export function ChatPane({
 }
 
 function MessageRow({
-	message, avatarMxc, continuesGroup, isFirst, flaggable,
-	reactions, flags, collapse, onReact, onReply, onFlag, onTogglePillFlag, onToggleReactionPill,
+	message, avatarMxc, continuesGroup, isFirst, flaggable, roomEncrypted,
+	reactions, flags, collapse, onReact, onReply, onFlag, onTogglePillFlag, onToggleReactionPill, isBot,
 }: {
 	message: Message;
 	avatarMxc: string | undefined;
 	continuesGroup: boolean;
 	isFirst: boolean;
 	flaggable: boolean;
+	// Whether the room is end-to-end encrypted.  Drives URL-preview
+	// suppression: previewing in encrypted rooms would leak the URL
+	// to Synapse via /preview_url, defeating part of the encryption
+	// promise.  Element handles this with a per-user opt-in; we
+	// match by defaulting off in encrypted rooms with no opt-in for
+	// now (can be added later if anyone asks).
+	roomEncrypted: boolean;
 	reactions: ReactionAggregate[];
 	flags: FlagAggregate | undefined;
 	collapse: CollapseAggregate | undefined;
+	// True when the message sender is a registered bot — drives the
+	// BOT pill rendered next to the sender label.  The badge is the
+	// only visual difference from a human's message; nothing else
+	// changes, so users still mention bots and react to bot messages
+	// the same way.
+	isBot: boolean;
 	onReact(emoji: string): void;
 	onReply(): void;
 	onFlag(category: FlagCategory, rationale?: string): void | Promise<void>;
@@ -479,7 +687,7 @@ function MessageRow({
 	if (message.kind === "emote") {
 		return (
 			<div className={cn("group flex gap-3 items-start", topMargin)}>
-				<AvatarSlot mxc={avatarMxc} seed={message.sender} hidden={continuesGroup} />
+				<AvatarSlot mxc={avatarMxc} seed={message.sender} hidden={continuesGroup} isBot={isBot} />
 				<div className="flex-1 min-w-0 pt-1 text-sm italic text-muted-foreground flex items-center gap-2">
 					{isCollapsed ? (
 						<CollapsedBubble collapse={collapse!} onExpand={() => setExpanded(true)} />
@@ -514,14 +722,15 @@ function MessageRow({
 
 	return (
 		<div className={cn("group flex gap-3 items-start", topMargin)}>
-			<AvatarSlot mxc={avatarMxc} seed={message.sender} hidden={continuesGroup} />
+			<AvatarSlot mxc={avatarMxc} seed={message.sender} hidden={continuesGroup} isBot={isBot} />
 			<div className="flex-1 min-w-0">
 				{!continuesGroup && (
 					<div className={cn(
-						"text-xs font-medium mb-1.5",
+						"text-xs font-medium mb-1.5 flex items-center gap-1.5",
 						message.isSelf ? "text-primary" : "text-foreground"
 					)}>
-						{message.senderDisplayName}
+						<span>{message.senderDisplayName}</span>
+						{isBot && <BotBadge />}
 					</div>
 				)}
 				{message.replyTo && <ReplyQuote replyTo={message.replyTo} />}
@@ -558,10 +767,11 @@ function MessageRow({
 						className="opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
 					/>
 				</div>
-				{!isCollapsed && message.kind === "text" && (
+				{!isCollapsed && message.kind === "text" && !roomEncrypted && (
 					// Link preview rides under the bubble for plain text
 					// messages only.  Skipped on attachments / collapses /
-					// emotes to keep those layouts clean.
+					// emotes to keep those layouts clean.  Also skipped
+					// in encrypted rooms — see roomEncrypted prop above.
 					<UrlPreviewSlot text={message.text} />
 				)}
 				{!isCollapsed && (
@@ -641,7 +851,7 @@ function ReplyQuote({ replyTo }: { replyTo: NonNullable<Message["replyTo"]> }) {
 	);
 }
 
-function AvatarSlot({ mxc, seed, hidden }: { mxc?: string; seed: string; hidden: boolean }) {
+function AvatarSlot({ mxc, seed, hidden, isBot }: { mxc?: string; seed: string; hidden: boolean; isBot: boolean }) {
 	// Reserve the avatar gutter even when collapsed so subsequent
 	// messages line up under the avatar above.  Saves a layout shift
 	// and gives a clean indented column for grouped runs.
@@ -650,6 +860,7 @@ function AvatarSlot({ mxc, seed, hidden }: { mxc?: string; seed: string; hidden:
 		<MatrixAvatar
 			mxc={mxc}
 			seed={seed}
+			kind={isBot ? "bot" : "user"}
 			className="h-8 w-8 mt-0.5"
 		/>
 	);
@@ -681,7 +892,11 @@ function RoomBadge({ icon, label, tone, title }: {
 }
 
 function MessageBubble({ message }: { message: Message }) {
-	const baseBubble = "inline-block max-w-[60ch] px-3 py-2 rounded-xl text-sm leading-snug break-words whitespace-pre-wrap";
+	// `whitespace-pre-wrap` only applied to the plain-text path —
+	// markdown paragraphs/lists handle their own whitespace, and
+	// keeping pre-wrap on top of them would re-introduce the literal
+	// blank lines between blocks.
+	const baseBubble = "inline-block max-w-[60ch] px-3 py-2 rounded-xl text-sm leading-snug break-words";
 	const selfBubble = "bg-primary text-primary-foreground";
 	const otherBubble = "bg-muted text-foreground";
 
@@ -715,9 +930,20 @@ function MessageBubble({ message }: { message: Message }) {
 		return <AttachmentFileCard message={message} />;
 	}
 
+	const isMarkdown = looksLikeMarkdown(message.text);
 	return (
-		<div className={cn(baseBubble, message.isSelf ? selfBubble : otherBubble)}>
-			{linkify(message.text, !!message.isSelf)}
+		<div className={cn(
+			baseBubble,
+			message.isSelf ? selfBubble : otherBubble,
+			// Plain-text path keeps Matrix's literal newlines via
+			// pre-wrap.  Markdown owns its own whitespace.
+			!isMarkdown && "whitespace-pre-wrap",
+		)}>
+			{isMarkdown ? (
+				<MarkdownContent text={message.text} tone={message.isSelf ? "self" : "other"} />
+			) : (
+				linkify(message.text)
+			)}
 			{message.edited && (
 				<span className={cn(
 					"ml-1.5 text-[10px]",
@@ -730,61 +956,6 @@ function MessageBubble({ message }: { message: Message }) {
 	);
 }
 
-// Split a body into text + clickable links.  Plain text by default;
-// any http(s):// span becomes an <a target="_blank" rel="noopener
-// noreferrer">.  Trailing sentence-final punctuation is left out of
-// the link target (so "see https://example.com." doesn't link the
-// trailing period as part of the URL).
-//
-// Mirrors the URL detection in extractFirstUrl so the preview card
-// targets the same URL we surface as a clickable link.
-function linkify(text: string, isSelf: boolean): React.ReactNode[] {
-	const parts: React.ReactNode[] = [];
-	const regex = /https?:\/\/[^\s<>]+/g;
-	let lastIndex = 0;
-	let key = 0;
-	let match: RegExpExecArray | null;
-	while ((match = regex.exec(text)) !== null) {
-		if (match.index > lastIndex) {
-			parts.push(text.slice(lastIndex, match.index));
-		}
-		let url = match[0];
-		let trailing = "";
-		const tail = url.match(/[),.;:!?"'>\]]+$/);
-		if (tail) {
-			trailing = tail[0];
-			url = url.slice(0, url.length - trailing.length);
-		}
-		// Balance unmatched closing parens (Wikipedia-style URLs).
-		const opens = (url.match(/\(/g) ?? []).length;
-		const closes = (url.match(/\)/g) ?? []).length;
-		if (closes > opens) {
-			const extra = closes - opens;
-			trailing = ")".repeat(extra) + trailing;
-			url = url.slice(0, url.length - extra);
-		}
-		parts.push(
-			<a
-				key={key++}
-				href={url}
-				target="_blank"
-				rel="noopener noreferrer"
-				className={cn(
-					"underline underline-offset-2 hover:no-underline break-all",
-					isSelf ? "text-primary-foreground" : "text-primary",
-				)}
-			>
-				{url}
-			</a>,
-		);
-		if (trailing) parts.push(trailing);
-		lastIndex = match.index + match[0].length;
-	}
-	if (lastIndex < text.length) {
-		parts.push(text.slice(lastIndex));
-	}
-	return parts.length === 0 ? [text] : parts;
-}
 
 // ─── Attachment renderers ────────────────────────────────────────────
 // All four use useMatrixAttachment to get an authenticated + (when
@@ -1011,7 +1182,7 @@ function PendingAttachmentChip({
 // rendering entirely when there's no URL or no preview was returned —
 // no flicker, no empty cards.
 function UrlPreviewSlot({ text }: { text: string }) {
-	const url = extractFirstUrl(text);
+	const url = firstLink(text);
 	const preview = useUrlPreview(url);
 	const imageUrl = useMatrixMedia(preview?.imageMxc);
 	if (!url || !preview) return null;

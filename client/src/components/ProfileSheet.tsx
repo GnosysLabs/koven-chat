@@ -23,9 +23,11 @@ import { Label } from "@/components/ui/label";
 import { Ban, Camera, Trash2, UserCheck } from "lucide-react";
 import type { MatrixTransport } from "@/lib/matrix";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
+import { BotBadge } from "@/components/BotBadge";
 import { useReputation } from "@/lib/useReputation";
 import { descriptorFor, nextTierUnlockLabel, tickClassForFilled, ticksFor } from "@/lib/reputation";
 import { fetchUserBio, updateMyBio } from "@/lib/profile";
+import { formatMxid, serverOf } from "@/lib/mxid";
 import type { UserId } from "@koven/shared";
 
 export interface ProfileSheetProps {
@@ -45,6 +47,9 @@ export interface ProfileSheetProps {
 	// avatar mxc (string), null if cleared, or undefined if untouched.
 	// App.tsx uses this to update the SpaceBar tile without refresh.
 	onSelfProfileSaved?(avatarMxc: string | null | undefined): void;
+	// True when the viewed user is a registered bot — drives the BOT
+	// pill and suppresses the reputation block.
+	isBot?: boolean;
 }
 
 interface BaseProfile {
@@ -54,7 +59,7 @@ interface BaseProfile {
 	homeserver: string;
 }
 
-export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ignoredUsers, onSelfProfileSaved }: ProfileSheetProps) {
+export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ignoredUsers, onSelfProfileSaved, isBot }: ProfileSheetProps) {
 	const isSelf = useMemo(() => {
 		if (!viewedUserId || !transport) return false;
 		return transport.currentUserId === viewedUserId;
@@ -247,8 +252,8 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 										maxLength={100}
 										placeholder="Your name"
 									/>
-									<div className="text-[10px] font-mono text-muted-foreground truncate">
-										{profile.userId}
+									<div className="text-[10px] font-mono text-muted-foreground truncate" title={profile.userId}>
+										{formatMxid(profile.userId, serverOf(transport?.currentUserId ?? null))}
 									</div>
 								</div>
 
@@ -304,11 +309,17 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 							<MatrixAvatar
 								mxc={profile.avatarUrl}
 								seed={profile.userId}
+								kind={isBot ? "bot" : "user"}
 								className="h-16 w-16"
 							/>
 							<div className="min-w-0 flex-1">
-								<div className="text-base font-semibold truncate">{profile.displayName}</div>
-								<div className="text-xs text-muted-foreground font-mono truncate">{profile.userId}</div>
+								<div className="text-base font-semibold truncate flex items-center gap-1.5">
+									<span className="truncate">{profile.displayName}</span>
+									{isBot && <BotBadge compact={false} />}
+								</div>
+								<div className="text-xs text-muted-foreground font-mono truncate" title={profile.userId}>
+									{formatMxid(profile.userId, serverOf(transport?.currentUserId ?? null))}
+								</div>
 							</div>
 						</div>
 
@@ -318,9 +329,11 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 							</p>
 						)}
 
-						<div className="pt-2 border-t border-border">
-							<ReputationRow userId={profile.userId} />
-						</div>
+						{!isBot && (
+							<div className="pt-2 border-t border-border">
+								<ReputationRow userId={profile.userId} />
+							</div>
+						)}
 
 						{error && (
 							<div className="text-xs text-destructive border border-destructive/40 bg-destructive/10 rounded px-3 py-2">

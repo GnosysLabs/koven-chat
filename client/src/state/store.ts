@@ -30,17 +30,21 @@ export interface FlagRef {
 	sender: UserId;
 }
 
-// What's selected in the SpaceBar.  Three virtual selections flank
+// What's selected in the SpaceBar.  Several virtual selections flank
 // real user-created spaces:
 //   - "explore": homeserver-wide directory of public spaces + rooms
 //                the user can browse and join
 //   - "dms":     only direct messages
+//   - "bots":    the user's bot management view (under DMs in the
+//                rail).  Custom AI bots they created — list + create
+//                + edit + delete.
 //   - "rooms":   every joined room not assigned to any space
 //   - "space":   a real Matrix space the user joined or created
 // `null` is the brief pre-sync state before we pick a default.
 export type ActiveSpace =
 	| { kind: "explore" }
 	| { kind: "dms" }
+	| { kind: "bots" }
 	| { kind: "rooms" }
 	| { kind: "space"; id: SpaceId }
 	| null;

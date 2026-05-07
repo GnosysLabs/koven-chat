@@ -63,6 +63,12 @@ db.exec(`
 
 	-- Per-flag rows — one per chat.koven.flag.v1 event observed.
 	-- Aggregated on each tick to detect collapse-threshold crossings.
+	-- Append-only: when a user retracts their flag (by redacting the
+	-- flag event), we mark the row with retracted_at + retracted_by
+	-- rather than deleting it.  The mod log surfaces both the
+	-- original flag and the retraction as distinct entries; the
+	-- consensus evaluator filters retracted rows out of its tally so
+	-- a withdrawn flag no longer contributes to the collapse score.
 	CREATE TABLE IF NOT EXISTS flags (
 		event_id        TEXT PRIMARY KEY,
 		target_event_id TEXT NOT NULL,
@@ -70,7 +76,9 @@ db.exec(`
 		flagger         TEXT NOT NULL,
 		category        TEXT NOT NULL,
 		rationale       TEXT,
-		ts              INTEGER NOT NULL
+		ts              INTEGER NOT NULL,
+		retracted_at    INTEGER,             -- NULL until the flag is retracted
+		retracted_by    TEXT                 -- mxid that issued the retracting redaction
 	);
 	CREATE INDEX IF NOT EXISTS idx_flags_target ON flags(target_event_id);
 
@@ -177,7 +185,60 @@ db.exec(`
 	);
 	CREATE INDEX IF NOT EXISTS idx_auth_codes_email ON auth_codes(email, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_auth_codes_expires ON auth_codes(expires_at);
+
+	-- User-created bots.  Each row is one Matrix user (mxid lives in
+	-- the @bot-* appservice namespace) plus a config blob.  Sensitive
+	-- values — the LLM API key and the bot's Synapse access token —
+	-- are AES-GCM encrypted at rest via secret_box.ts and stored here
+	-- as base64 ciphertext.  Owner is the human Matrix user who
+	-- created the bot; only the owner can edit / delete.
+	CREATE TABLE IF NOT EXISTS bots (
+		id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+		mxid                     TEXT NOT NULL UNIQUE,
+		owner_id                 TEXT NOT NULL,
+		display_name             TEXT NOT NULL,
+		avatar_mxc               TEXT,
+		-- LLM provider config.
+		provider                 TEXT NOT NULL,        -- 'openrouter' | 'openai_compatible'
+		api_base                 TEXT NOT NULL,
+		api_key_enc              TEXT NOT NULL,        -- sealed via secret_box.ts
+		model                    TEXT NOT NULL,
+		system_prompt            TEXT NOT NULL DEFAULT '',
+		context_window           INTEGER NOT NULL DEFAULT 20,
+		-- Synapse-side credentials so the engine can act as the bot.
+		access_token_enc         TEXT NOT NULL,        -- sealed via secret_box.ts
+		device_id                TEXT NOT NULL,
+		-- Lifecycle.
+		enabled                  INTEGER NOT NULL DEFAULT 1,
+		created_at               INTEGER NOT NULL,
+		-- Per-bot usage counters (incremented after every LLM call).
+		total_prompt_tokens      INTEGER NOT NULL DEFAULT 0,
+		total_completion_tokens  INTEGER NOT NULL DEFAULT 0,
+		total_calls              INTEGER NOT NULL DEFAULT 0,
+		last_used_at             INTEGER
+	);
+	CREATE INDEX IF NOT EXISTS idx_bots_owner ON bots(owner_id);
 `);
+
+// ─── Migrations for existing installs ───────────────────────────────
+// `CREATE TABLE IF NOT EXISTS` won't backfill new columns onto a
+// table that already exists, so for any column we add post-launch we
+// do an explicit "introspect-then-ALTER" pass here.  Cheap (PRAGMA is
+// O(columns)) and idempotent.
+function ensureColumns(table: string, columns: Array<{ name: string; ddl: string }>): void {
+	const have = new Set(
+		(db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(c => c.name),
+	);
+	for (const col of columns) {
+		if (!have.has(col.name)) {
+			db.exec(`ALTER TABLE ${table} ADD COLUMN ${col.ddl}`);
+		}
+	}
+}
+ensureColumns("flags", [
+	{ name: "retracted_at", ddl: "retracted_at INTEGER" },
+	{ name: "retracted_by", ddl: "retracted_by TEXT" },
+]);
 
 export type PostRow = {
 	event_id: string;
@@ -329,44 +390,72 @@ export type FlagRow = {
 	room_id: string;
 	flagger: string;
 	category: string;
-	rationale?: string;
+	rationale?: string | null;
 	ts: number;
+	// NULL until the flag is retracted (the flagger redacts the
+	// chat.koven.flag.v1 event).  Once set, the row is excluded from
+	// consensus calculations but kept on disk so the mod log can
+	// surface both the original flag and the retraction.
+	retracted_at?: number | null;
+	retracted_by?: string | null;
 };
 
 const insertFlagStmt = db.prepare(`
 	INSERT OR IGNORE INTO flags (event_id, target_event_id, room_id, flagger, category, rationale, ts)
 	VALUES (?, ?, ?, ?, ?, ?, ?)
 `);
-const deleteFlagStmt = db.prepare(`DELETE FROM flags WHERE event_id = ?`);
+// Mark a flag retracted instead of deleting it.  Append-only: the
+// row is preserved so the public mod log can show the original flag
+// followed by its retraction in chronological order.  The
+// `retracted_at IS NULL` guard makes this idempotent — replays of
+// the same redaction (Synapse retries until 200) won't overwrite the
+// recorded retracter / timestamp.
+const markFlagRetractedStmt = db.prepare(`
+	UPDATE flags
+	SET retracted_at = ?, retracted_by = ?
+	WHERE event_id = ? AND retracted_at IS NULL
+`);
 
 export function insertFlag(row: FlagRow): void {
 	insertFlagStmt.run(row.event_id, row.target_event_id, row.room_id, row.flagger, row.category, row.rationale ?? null, row.ts);
 }
 
-export function deleteFlag(eventId: string): void {
-	deleteFlagStmt.run(eventId);
+/** Mark a flag as retracted.  Returns true if a non-retracted flag
+ * row existed and was updated, false otherwise (no row, or already
+ * retracted).  Caller uses the boolean to decide whether to fan out
+ * follow-up effects (e.g. auto-cancelling a still-pending floor-
+ * violation suspension). */
+export function markFlagRetracted(eventId: string, retractedAt: number, retractedBy: string): boolean {
+	const r = markFlagRetractedStmt.run(retractedAt, retractedBy, eventId);
+	return r.changes > 0;
 }
 
 // Distinct flagger/category breakdown for one target — drives the
-// collapse threshold check.
+// collapse threshold check.  Retracted flags are excluded: a
+// withdrawn flag shouldn't push the target past the collapse line.
 const flagsForTargetStmt = db.prepare(`
-	SELECT flagger, category FROM flags WHERE target_event_id = ?
+	SELECT flagger, category FROM flags
+	WHERE target_event_id = ? AND retracted_at IS NULL
 `);
 export function flagsForTarget(targetEventId: string): { flagger: string; category: string }[] {
 	return flagsForTargetStmt.all(targetEventId) as { flagger: string; category: string }[];
 }
 
-// All target_event_ids that have at least one flag.  Used by the
-// collapse evaluator to scan candidates each tick.
+// All target_event_ids that currently have at least one active
+// (non-retracted) flag.  Used by the collapse evaluator to scan
+// candidates each tick — a target whose only flags are all
+// retracted shouldn't be re-evaluated.
 const flaggedTargetsStmt = db.prepare(`
 	SELECT DISTINCT target_event_id, room_id FROM flags
+	WHERE retracted_at IS NULL
 `);
 export function listFlaggedTargets(): { target_event_id: string; room_id: string }[] {
 	return flaggedTargetsStmt.all() as { target_event_id: string; room_id: string }[];
 }
 
 // All flags submitted in a given room, newest first.  Drives the
-// per-room mod log.
+// per-room mod log.  Returns retracted rows too — the mod log
+// surfaces both the original flag and its retraction.
 const flagsForRoomStmt = db.prepare(`
 	SELECT * FROM flags WHERE room_id = ? ORDER BY ts DESC
 `);
@@ -556,6 +645,19 @@ const listPendingSuspensionsStmt = db.prepare(`
 const getSuspensionByIdStmt = db.prepare(`
 	SELECT * FROM suspensions WHERE id = ?
 `);
+
+// Find the still-pending suspension (if any) created by a specific
+// chat.koven.flag.v1 event.  Used by the flag-retraction handler to
+// auto-reverse a suspension whose originating flag was withdrawn
+// before an admin reviewed it.
+const findPendingSuspensionByFlagStmt = db.prepare(`
+	SELECT * FROM suspensions
+	WHERE flag_event_id = ? AND status = 'pending'
+	LIMIT 1
+`);
+export function findPendingSuspensionByFlag(flagEventId: string): SuspensionRow | null {
+	return (findPendingSuspensionByFlagStmt.get(flagEventId) as SuspensionRow | undefined) ?? null;
+}
 
 const updateSuspensionStmt = db.prepare(`
 	UPDATE suspensions
@@ -850,4 +952,169 @@ export function verifyAuthCode(email: string, code: string): { ok: true; codeId:
  * (taken username, etc.) leave the code valid for another try. */
 export function markAuthCodeUsed(codeId: number): void {
 	markCodeUsedStmt.run(Date.now(), codeId);
+}
+
+// ─── Bots ────────────────────────────────────────────────────────────
+
+export type BotProvider = "openrouter" | "openai_compatible";
+
+export interface BotRow {
+	id: number;
+	mxid: string;
+	owner_id: string;
+	display_name: string;
+	avatar_mxc: string | null;
+	provider: BotProvider;
+	api_base: string;
+	api_key_enc: string;
+	model: string;
+	system_prompt: string;
+	context_window: number;
+	access_token_enc: string;
+	device_id: string;
+	enabled: number;
+	created_at: number;
+	total_prompt_tokens: number;
+	total_completion_tokens: number;
+	total_calls: number;
+	last_used_at: number | null;
+}
+
+const insertBotStmt = db.prepare(`
+	INSERT INTO bots
+		(mxid, owner_id, display_name, avatar_mxc, provider, api_base,
+		 api_key_enc, model, system_prompt, context_window,
+		 access_token_enc, device_id, enabled, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+`);
+const listBotsByOwnerStmt = db.prepare(
+	`SELECT * FROM bots WHERE owner_id = ? ORDER BY created_at ASC`,
+);
+const listAllBotMxidsStmt = db.prepare(
+	`SELECT mxid FROM bots WHERE enabled = 1`,
+);
+const listAllEnabledBotsStmt = db.prepare(
+	`SELECT * FROM bots WHERE enabled = 1`,
+);
+const getBotByIdStmt = db.prepare(`SELECT * FROM bots WHERE id = ?`);
+const getBotByMxidStmt = db.prepare(`SELECT * FROM bots WHERE mxid = ?`);
+const countBotsByOwnerStmt = db.prepare(
+	`SELECT COUNT(*) AS n FROM bots WHERE owner_id = ?`,
+);
+const updateBotStmt = db.prepare(`
+	UPDATE bots SET
+		display_name   = COALESCE(?, display_name),
+		avatar_mxc     = COALESCE(?, avatar_mxc),
+		provider       = COALESCE(?, provider),
+		api_base       = COALESCE(?, api_base),
+		api_key_enc    = COALESCE(?, api_key_enc),
+		model          = COALESCE(?, model),
+		system_prompt  = COALESCE(?, system_prompt),
+		context_window = COALESCE(?, context_window),
+		enabled        = COALESCE(?, enabled)
+	WHERE id = ?
+`);
+const deleteBotStmt = db.prepare(`DELETE FROM bots WHERE id = ?`);
+const bumpBotUsageStmt = db.prepare(`
+	UPDATE bots SET
+		total_prompt_tokens     = total_prompt_tokens + ?,
+		total_completion_tokens = total_completion_tokens + ?,
+		total_calls             = total_calls + 1,
+		last_used_at            = ?
+	WHERE id = ?
+`);
+
+export function createBot(opts: {
+	mxid: string;
+	owner_id: string;
+	display_name: string;
+	provider: BotProvider;
+	api_base: string;
+	api_key_enc: string;
+	model: string;
+	system_prompt: string;
+	context_window: number;
+	access_token_enc: string;
+	device_id: string;
+}): BotRow {
+	const r = insertBotStmt.run(
+		opts.mxid,
+		opts.owner_id,
+		opts.display_name,
+		null,
+		opts.provider,
+		opts.api_base,
+		opts.api_key_enc,
+		opts.model,
+		opts.system_prompt,
+		opts.context_window,
+		opts.access_token_enc,
+		opts.device_id,
+		Date.now(),
+	);
+	const row = getBotByIdStmt.get(Number(r.lastInsertRowid)) as BotRow;
+	return row;
+}
+
+export function listBotsByOwner(ownerId: string): BotRow[] {
+	return listBotsByOwnerStmt.all(ownerId) as BotRow[];
+}
+
+export function listAllBotMxids(): string[] {
+	return (listAllBotMxidsStmt.all() as { mxid: string }[]).map(r => r.mxid);
+}
+
+export function listAllEnabledBots(): BotRow[] {
+	return listAllEnabledBotsStmt.all() as BotRow[];
+}
+
+export function getBotById(id: number): BotRow | null {
+	return (getBotByIdStmt.get(id) as BotRow | undefined) ?? null;
+}
+
+export function getBotByMxid(mxid: string): BotRow | null {
+	return (getBotByMxidStmt.get(mxid) as BotRow | undefined) ?? null;
+}
+
+export function countBotsByOwner(ownerId: string): number {
+	return (countBotsByOwnerStmt.get(ownerId) as { n: number }).n;
+}
+
+/**
+ * Patch a bot.  Only fields with a non-undefined value are touched
+ * (everything else stays put via the COALESCE in the SQL).  Returns
+ * the post-update row for echoing back to the caller.
+ */
+export function updateBot(id: number, patch: {
+	display_name?: string;
+	avatar_mxc?: string | null;
+	provider?: BotProvider;
+	api_base?: string;
+	api_key_enc?: string;
+	model?: string;
+	system_prompt?: string;
+	context_window?: number;
+	enabled?: 0 | 1;
+}): BotRow | null {
+	updateBotStmt.run(
+		patch.display_name ?? null,
+		patch.avatar_mxc === undefined ? null : patch.avatar_mxc,
+		patch.provider ?? null,
+		patch.api_base ?? null,
+		patch.api_key_enc ?? null,
+		patch.model ?? null,
+		patch.system_prompt ?? null,
+		patch.context_window ?? null,
+		patch.enabled ?? null,
+		id,
+	);
+	return getBotById(id);
+}
+
+export function deleteBot(id: number): void {
+	deleteBotStmt.run(id);
+}
+
+export function bumpBotUsage(id: number, promptTokens: number, completionTokens: number): void {
+	bumpBotUsageStmt.run(promptTokens, completionTokens, Date.now(), id);
 }

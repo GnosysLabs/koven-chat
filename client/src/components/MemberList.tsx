@@ -6,6 +6,7 @@
 import { cn } from "@/lib/utils";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { RepBadge } from "@/components/RepBadge";
+import { BotBadge } from "@/components/BotBadge";
 import type { Member } from "@koven/shared";
 import { Crown, Shield, Star } from "lucide-react";
 
@@ -13,6 +14,9 @@ export interface MemberListProps {
 	members: Member[];
 	currentUserId: string | null;
 	onSelectMember(userId: string): void;
+	// mxids in this Set render with a BOT pill next to the name.
+	// Optional — defaults to no badges.
+	botMxids?: Set<string>;
 }
 
 interface MemberGroup {
@@ -39,7 +43,7 @@ function groupMembers(members: Member[]): MemberGroup[] {
 	].filter(g => g.members.length > 0);
 }
 
-export function MemberList({ members, currentUserId, onSelectMember }: MemberListProps) {
+export function MemberList({ members, currentUserId, onSelectMember, botMxids }: MemberListProps) {
 	const groups = groupMembers(members);
 	const total = members.length;
 
@@ -65,6 +69,7 @@ export function MemberList({ members, currentUserId, onSelectMember }: MemberLis
 										key={m.userId}
 										member={m}
 										isSelf={m.userId === currentUserId}
+										isBot={!!botMxids?.has(m.userId)}
 										onClick={() => onSelectMember(m.userId)}
 									/>
 								))}
@@ -77,7 +82,7 @@ export function MemberList({ members, currentUserId, onSelectMember }: MemberLis
 	);
 }
 
-function MemberRow({ member, isSelf, onClick }: { member: Member; isSelf: boolean; onClick(): void }) {
+function MemberRow({ member, isSelf, isBot, onClick }: { member: Member; isSelf: boolean; isBot: boolean; onClick(): void }) {
 	return (
 		<li>
 			<button
@@ -89,20 +94,24 @@ function MemberRow({ member, isSelf, onClick }: { member: Member; isSelf: boolea
 				)}
 				title={member.userId}
 			>
-				<Avatar member={member} />
-				<span className="flex-1 truncate">{member.displayName}</span>
+				<Avatar member={member} isBot={isBot} />
+				<span className="flex-1 truncate flex items-center gap-1.5">
+					<span className="truncate">{member.displayName}</span>
+					{isBot && <BotBadge />}
+				</span>
 				<RoleIcon powerLevel={member.powerLevel} />
-				<RepBadge userId={member.userId} />
+				{!isBot && <RepBadge userId={member.userId} />}
 			</button>
 		</li>
 	);
 }
 
-function Avatar({ member }: { member: Member }) {
+function Avatar({ member, isBot }: { member: Member; isBot: boolean }) {
 	return (
 		<MatrixAvatar
 			mxc={member.avatarUrl}
 			seed={member.userId}
+			kind={isBot ? "bot" : "user"}
 			className="h-6 w-6"
 		/>
 	);

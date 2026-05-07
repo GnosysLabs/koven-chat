@@ -3,7 +3,7 @@
 // and renders the Sidebar + ChatPane.  Governance overlays go on top
 // of this in subsequent passes.
 
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
 	MatrixTransport,
 	loadStoredCredentials,
@@ -17,6 +17,9 @@ import { RoomList } from "@/components/RoomList";
 import { ChatPane } from "@/components/ChatPane";
 import { SpaceLanding } from "@/components/SpaceLanding";
 import { ExplorePane } from "@/components/ExplorePane";
+import { BotsPane } from "@/components/BotsPane";
+import { BotList } from "@/components/BotList";
+import { listMyBots, deleteBot as apiDeleteBot, type BotSummary } from "@/lib/bots";
 import { MemberList } from "@/components/MemberList";
 import { DmProfilePanel } from "@/components/DmProfilePanel";
 import { CreateRoomSheet } from "@/components/CreateRoomSheet";
@@ -34,6 +37,7 @@ import { SuspendedBanner } from "@/components/SuspendedBanner";
 import { ModLogSheet } from "@/components/ModLogSheet";
 import { FloorReviewSheet } from "@/components/FloorReviewSheet";
 import { fetchAdminStatus, fetchFloorQueue, fetchMyStatus, type SuspensionSummary } from "@/lib/instance";
+import { fetchAllBotMxids } from "@/lib/bots-cache";
 import { fetchUiaPassword } from "@/lib/auth";
 import { TransportContext } from "@/lib/transportContext";
 import { applyTheme, loadSettings, saveSettings, type Settings } from "@/state/settings";
@@ -76,6 +80,34 @@ export default function App() {
 	const [settingsOpen, setSettingsOpen] = useState(false);
 	const [settings, setSettings] = useState<Settings>(loadSettings);
 	const [myAvatarMxc, setMyAvatarMxc] = useState<string | undefined>(undefined);
+	// Public set of bot mxids — drives the BOT badge wherever a user
+	// is rendered.  Refreshed periodically so newly-created bots show
+	// up without a page reload.  Default empty Set so first-render
+	// branches just don't render any badges.
+	const [botMxids, setBotMxids] = useState<Set<UserId>>(() => new Set());
+
+	// ─── Bot management state (the user's own roster) ────────────────
+	// Lifted to App so BotList (sidebar) and BotsPane (detail pane)
+	// stay in sync.  Refreshed on activeSpace=="bots" entry and after
+	// every save / delete.  selectedBotId drives the right-pane view:
+	// number = edit, "new" = create form, null = picker / empty state.
+	const [myBots, setMyBots] = useState<BotSummary[]>([]);
+	const [myBotsLoading, setMyBotsLoading] = useState(false);
+	const [myBotsError, setMyBotsError] = useState<string | null>(null);
+	const [selectedBotId, setSelectedBotId] = useState<number | "new" | null>(null);
+	const refreshMyBots = useCallback(async () => {
+		if (!creds?.access_token) return;
+		setMyBotsLoading(true);
+		setMyBotsError(null);
+		try {
+			const list = await listMyBots(creds.access_token);
+			setMyBots(list);
+		} catch (err) {
+			setMyBotsError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setMyBotsLoading(false);
+		}
+	}, [creds?.access_token]);
 	// Encryption gate.  Null = not yet probed.  "needs-setup" means the
 	// account has no SSSS yet (first-time signup or an old account
 	// pre-dating E2EE), "needs-unlock" means SSSS exists but this
@@ -134,6 +166,37 @@ export default function App() {
 		applyTheme(settings.theme);
 		saveSettings(settings);
 	}, [settings]);
+
+	// Public bot roster — drives the BOT badge.  Pulled from the
+	// engine's unauthenticated `/api/bots/all-mxids`.  Refreshed every
+	// 5 minutes so creating or deleting a bot eventually surfaces
+	// without a page reload; the BotsPane management view triggers an
+	// immediate re-fetch via the same hook on save.
+	useEffect(() => {
+		let cancelled = false;
+		const refresh = async () => {
+			const set = await fetchAllBotMxids();
+			if (!cancelled) setBotMxids(set);
+		};
+		refresh();
+		const id = window.setInterval(refresh, 5 * 60 * 1000);
+		return () => {
+			cancelled = true;
+			window.clearInterval(id);
+		};
+	}, []);
+
+	// Refresh the user's own bot roster every time they navigate into
+	// the Bots view — keeps usage counters current without a manual
+	// reload.  Also resets the selection when navigating away so the
+	// next entry starts on the picker.
+	useEffect(() => {
+		if (state.activeSpace?.kind === "bots") {
+			void refreshMyBots();
+		} else {
+			setSelectedBotId(null);
+		}
+	}, [state.activeSpace?.kind, refreshMyBots]);
 
 	// Admin status + pending-review-queue length poll.  Cheap two-call
 	// fan-out on the same cadence as the suspension poll: first probe
@@ -218,7 +281,26 @@ export default function App() {
 			onSyncState: (s: SyncState) => dispatch({ type: "sync_state", state: s }),
 			onRoomsUpdated: rooms => dispatch({ type: "rooms_updated", rooms }),
 			onSpacesUpdated: spaces => dispatch({ type: "spaces_updated", spaces }),
-			onMessage: (message, { live }) => dispatch({ type: "message_arrived", message, live }),
+			onMessage: (message, { live }) => {
+				dispatch({ type: "message_arrived", message, live });
+				// Live message in the room the user is currently
+				// viewing → send a read receipt right away so the
+				// unread dot doesn't light up the moment they
+				// navigate elsewhere.  The on-entry markAsRead only
+				// fires when activeRoomId changes; without this,
+				// every live message that arrives while you're
+				// already in the room is recorded as unread by
+				// Synapse.  Skipped when the tab is backgrounded so
+				// notifications you didn't actually see don't get
+				// swallowed.
+				if (
+					live &&
+					activeRoomIdRef.current === message.roomId &&
+					(typeof document === "undefined" || document.visibilityState === "visible")
+				) {
+					t.markAsRead(message.roomId).catch(() => {});
+				}
+			},
 			onReaction: (reaction) => dispatch({
 				type: "reaction_arrived",
 				reaction,
@@ -315,6 +397,35 @@ export default function App() {
 		};
 	}, [creds]);
 
+	// Live mirror of the active room id, readable from inside long-
+	// lived callbacks (the transport's onMessage handler in particular)
+	// without the closure going stale.  Used to send read receipts
+	// for messages that arrive while the user is already in the room
+	// — see the transport setup useEffect below.
+	const activeRoomIdRef = useRef<RoomId | null>(null);
+	useEffect(() => {
+		activeRoomIdRef.current = state.activeRoomId;
+	}, [state.activeRoomId]);
+
+	// Tab refocus → catch up on read receipts for the active room.
+	// While the tab is hidden we suppress receipts for incoming
+	// messages (the user didn't actually see them), but the moment
+	// the tab becomes visible again we mark the latest event read so
+	// any messages that arrived while hidden don't linger as unread
+	// once the user moves on.
+	useEffect(() => {
+		if (typeof document === "undefined") return;
+		const onVisible = () => {
+			if (document.visibilityState !== "visible") return;
+			const id = activeRoomIdRef.current;
+			if (id && transport) {
+				transport.markAsRead(id).catch(() => {});
+			}
+		};
+		document.addEventListener("visibilitychange", onVisible);
+		return () => document.removeEventListener("visibilitychange", onVisible);
+	}, [transport]);
+
 	// When the active room changes, load its existing timeline + members
 	// + reactions from the matrix-js-sdk's in-memory state.
 	useEffect(() => {
@@ -392,6 +503,7 @@ export default function App() {
 	const activeSpaceObj = useMemo(() => {
 		if (!state.activeSpace) return null;
 		if (state.activeSpace.kind === "explore") return null;
+		if (state.activeSpace.kind === "bots") return null;
 		if (state.activeSpace.kind === "dms") {
 			return {
 				id: "__dms__",
@@ -418,6 +530,7 @@ export default function App() {
 	const roomsInActiveSpace = useMemo(() => {
 		if (!state.activeSpace) return [];
 		if (state.activeSpace.kind === "explore") return [];
+		if (state.activeSpace.kind === "bots") return [];
 		if (state.activeSpace.kind === "dms") return state.rooms.filter(r => r.kind === "dm");
 		if (state.activeSpace.kind === "rooms") {
 			return state.rooms.filter(r => r.kind !== "dm" && r.parentSpaceIds.length === 0);
@@ -543,6 +656,7 @@ export default function App() {
 					activeSpace={state.activeSpace}
 					onSelectExplore={() => dispatch({ type: "set_active_space", space: { kind: "explore" } })}
 					onSelectDms={() => dispatch({ type: "set_active_space", space: { kind: "dms" } })}
+					onSelectBots={() => dispatch({ type: "set_active_space", space: { kind: "bots" } })}
 					onSelectRooms={() => dispatch({ type: "set_active_space", space: { kind: "rooms" } })}
 					onSelectSpace={(id: SpaceId) => dispatch({ type: "set_active_space", space: { kind: "space", id } })}
 					onCreateSpace={async (opts) => {
@@ -556,7 +670,18 @@ export default function App() {
 					onOpenReview={isAdmin ? () => setReviewSheetOpen(true) : undefined}
 					pendingReviewCount={pendingReviewCount}
 				/>
-				{state.activeSpace?.kind !== "explore" && (
+				{state.activeSpace?.kind === "bots" ? (
+					<BotList
+						bots={myBots}
+						loading={myBotsLoading}
+						error={myBotsError}
+						selectedBotId={selectedBotId}
+						atLimit={myBots.length >= 30}
+						onSelectBot={id => setSelectedBotId(id)}
+						onNewBot={() => setSelectedBotId("new")}
+					/>
+				) : null}
+				{state.activeSpace?.kind !== "explore" && state.activeSpace?.kind !== "bots" && (
 				<RoomList
 					rooms={state.rooms}
 					spaces={state.spaces}
@@ -604,6 +729,38 @@ export default function App() {
 							}
 						}}
 					/>
+				) : state.activeSpace?.kind === "bots" ? (
+					<BotsPane
+						accessToken={creds?.access_token ?? null}
+						currentUserId={creds?.user_id ?? null}
+						bots={myBots}
+						selectedBotId={selectedBotId}
+						atLimit={myBots.length >= 30}
+						onNewBot={() => setSelectedBotId("new")}
+						onSelectionCleared={() => setSelectedBotId(null)}
+						onSaved={async (saved) => {
+							// Re-pull the canonical roster (server-side
+							// changes — token totals, mxid, etc.) and
+							// switch the selection to the just-saved bot.
+							await refreshMyBots();
+							// Refresh the public bot mxid set so the BOT
+							// badge in chat picks up new bots immediately.
+							void fetchAllBotMxids().then(setBotMxids);
+							setSelectedBotId(saved.id);
+						}}
+						onDelete={async (bot) => {
+							if (!creds?.access_token) return;
+							try {
+								await apiDeleteBot(creds.access_token, bot.id);
+							} catch (e) {
+								dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+								return;
+							}
+							setSelectedBotId(null);
+							await refreshMyBots();
+							void fetchAllBotMxids().then(setBotMxids);
+						}}
+					/>
 				) : showSpaceLanding && activeSpaceObj ? (
 					<SpaceLanding
 						space={activeSpaceObj}
@@ -627,6 +784,9 @@ export default function App() {
 					reactionsByMessage={state.reactionsByMessage}
 					flagsByMessage={state.flagsByMessage}
 					collapsesByMessage={state.collapsesByMessage}
+					botMxids={botMxids}
+					members={state.activeRoomId ? state.membersByRoom.get(state.activeRoomId) ?? [] : []}
+					viewerServer={creds.user_id ? creds.user_id.split(":")[1] ?? null : null}
 					onSendMessage={(text, replyTo) => {
 						if (!state.activeRoomId || !transport) return;
 						const send = replyTo
@@ -720,6 +880,7 @@ export default function App() {
 							otherUserId={activeRoom.dmUserId as UserId}
 							transport={transport}
 							ignoredUsers={ignoredUsers}
+							isBot={botMxids.has(activeRoom.dmUserId as UserId)}
 							onOpenProfile={(userId) => setViewedUserId(userId)}
 							onDeleteDm={async () => {
 								if (!transport || !state.activeRoomId) return;
@@ -736,6 +897,7 @@ export default function App() {
 							members={state.activeRoomId ? state.membersByRoom.get(state.activeRoomId) ?? [] : []}
 							currentUserId={creds.user_id}
 							onSelectMember={(userId) => setViewedUserId(userId as UserId)}
+							botMxids={botMxids}
 						/>
 					)
 				)}
@@ -816,6 +978,7 @@ export default function App() {
 				transport={transport}
 				accessToken={creds.access_token}
 				ignoredUsers={ignoredUsers}
+				isBot={!!viewedUserId && botMxids.has(viewedUserId)}
 				onSelfProfileSaved={(avatarMxc) => {
 					// undefined = avatar wasn't touched (e.g. only the
 					// display name changed); leave the cached mxc alone

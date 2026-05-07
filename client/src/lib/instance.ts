@@ -166,6 +166,21 @@ export type ModLogEntry =
 		flagger: string;
 		category: string;
 		rationale: string | null;
+		// True when the flag was later retracted.  A separate
+		// `flag_retracted` entry will appear elsewhere in the feed
+		// at the retraction's timestamp; this flag here lets the
+		// renderer mark the original entry as withdrawn (e.g.
+		// strikethrough) without scanning the rest of the list.
+		retracted: boolean;
+	}
+	| {
+		kind: "flag_retracted";
+		ts: number;                  // when the retraction happened
+		event_id: string;            // the original flag's event id
+		target_event_id: string;
+		category: string;
+		flagger: string;             // who originally flagged
+		retracted_by: string;        // mxid that issued the retraction
 	}
 	| {
 		kind: "collapse";

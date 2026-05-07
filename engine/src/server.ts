@@ -29,16 +29,23 @@ import {
 	bindEmailToUser,
 	bootstrapEmailBinding,
 	collapsesForRoom,
+	countBotsByOwner,
 	countFalseFlagsByUser,
+	createBot,
 	createSuspension,
 	deleteBio,
+	deleteBot,
 	deleteInstanceConfig,
 	flagsForRoom,
 	getActiveSuspension,
+	getBotById,
+	getBotByMxid,
 	getSuspensionById,
 	grantAdmin,
 	isAdmin,
 	issueAuthCode,
+	listAllBotMxids,
+	listBotsByOwner,
 	listPendingSuspensions,
 	lookupUserByEmail,
 	markAuthCodeUsed,
@@ -48,6 +55,7 @@ import {
 	readWeight,
 	suspensionsForRoom,
 	touchEmailLogin,
+	updateBot,
 	updateSuspensionStatus,
 	verifyAuthCode,
 	writeBio,
@@ -61,8 +69,10 @@ import {
 	deactivateUser,
 	loginAsUser,
 } from "./synapse";
+import { sealSecret } from "./secret_box";
 import { sendLoginCodeEmail } from "./email";
 import { extractToken, whoami } from "./auth";
+import { reconcileOne, startOne, stopOne } from "./bot_manager";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 // Auto-suspend the flagger if they've had this many floor flags
@@ -207,6 +217,45 @@ function isValidEmail(s: string): boolean {
 // Mirrored client-side in Login.tsx.
 function isValidLocalpart(s: string): boolean {
 	return s.length >= 1 && s.length <= 21 && /^[a-z0-9-]+$/.test(s);
+}
+
+// Bot localpart rules: lowercase a–z, 0–9, hyphens; 1..21 chars.
+// Mirrors the human-username validation, just slightly tighter (no
+// dots / underscores / etc).  The mxid Becomes `@bot-<name>:server`,
+// so the full visible localpart is `bot-<name>` with `bot-` always
+// the first 4 chars (the appservice namespace claim is `@bot-.*`).
+function isValidBotName(s: string): boolean {
+	return s.length >= 1 && s.length <= 21 && /^[a-z0-9-]+$/.test(s) && !s.startsWith("-") && !s.endsWith("-");
+}
+
+// Strip secrets out of a BotRow before sending to the client.  Token
+// encrypted-blobs and the device id are operator-internal; the API
+// key the client supplies is never echoed back (they re-paste on
+// edit if they want to change it).
+function toBotSummary(row: import("./db").BotRow) {
+	return {
+		id: row.id,
+		mxid: row.mxid,
+		owner_id: row.owner_id,
+		display_name: row.display_name,
+		avatar_mxc: row.avatar_mxc,
+		provider: row.provider,
+		api_base: row.api_base,
+		model: row.model,
+		system_prompt: row.system_prompt,
+		context_window: row.context_window,
+		enabled: row.enabled === 1,
+		created_at: row.created_at,
+		// Usage stats are operator-/owner-readable.
+		total_prompt_tokens: row.total_prompt_tokens,
+		total_completion_tokens: row.total_completion_tokens,
+		total_calls: row.total_calls,
+		last_used_at: row.last_used_at,
+		// Sentinel so the client knows an API key is on file without
+		// receiving the value itself.  The PATCH endpoint accepts an
+		// empty string (or omitted field) as "leave the key alone".
+		has_api_key: true,
+	};
 }
 
 // 32-byte URL-safe base64 password used for Synapse's stored password
@@ -523,6 +572,227 @@ export function startServer(): void {
 				});
 			}
 
+			// ─── Bots ────────────────────────────────────────────────
+			// User-managed AI bots.  Each bot is a real Matrix user in
+			// the @bot-* appservice namespace whose access token + LLM
+			// API key are AES-GCM encrypted at rest (see secret_box.ts).
+			// Owner is the Matrix user who created the bot; only the
+			// owner can edit / delete.  Anyone on the instance can see
+			// which bots exist (via /api/bots/all-mxids — drives the
+			// BOT badge in the UI) and can invite bots to their rooms.
+
+			// GET /api/bots/all-mxids
+			// Public read.  Returns every enabled bot's mxid so clients
+			// can render the BOT badge without needing per-bot lookups.
+			if (req.method === "GET" && path === "/api/bots/all-mxids") {
+				return json({ bots: listAllBotMxids() });
+			}
+
+			// GET /api/bots/me
+			// Authed.  Lists bots owned by the caller, with usage stats
+			// but WITHOUT the encrypted secrets (we never echo them).
+			if (req.method === "GET" && path === "/api/bots/me") {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN" }, { status: 401 });
+				return json({ bots: listBotsByOwner(userId).map(toBotSummary) });
+			}
+
+			// POST /api/bots
+			// Create a bot.  Provisions the Synapse user, mints its
+			// access token, encrypts both the LLM key + the Synapse
+			// token, and stores the row.  Returns the summary (no
+			// secrets).  Caller-supplied `name` becomes the localpart
+			// of the mxid as `@bot-<name>:server`.
+			if (req.method === "POST" && path === "/api/bots") {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN" }, { status: 401 });
+				const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+
+				const name = typeof body.name === "string" ? body.name.trim().toLowerCase() : "";
+				const displayName = typeof body.display_name === "string" ? body.display_name.trim() : name;
+				const provider = body.provider === "openrouter" || body.provider === "openai_compatible"
+					? body.provider : "";
+				const apiBase = typeof body.api_base === "string" ? body.api_base.trim() : "";
+				const apiKey = typeof body.api_key === "string" ? body.api_key : "";
+				const model = typeof body.model === "string" ? body.model.trim() : "";
+				const systemPrompt = typeof body.system_prompt === "string" ? body.system_prompt : "";
+				const contextWindow = Number.isFinite(body.context_window)
+					? Math.max(1, Math.min(100, Math.floor(body.context_window as number)))
+					: 20;
+
+				if (!isValidBotName(name)) {
+					return json({ error: "invalid_name", detail: "Use lowercase a-z, 0-9, and -; up to 21 chars." }, { status: 400 });
+				}
+				if (!displayName || displayName.length > 100) {
+					return json({ error: "invalid_display_name" }, { status: 400 });
+				}
+				if (!provider) return json({ error: "invalid_provider" }, { status: 400 });
+				if (!apiBase) return json({ error: "invalid_api_base" }, { status: 400 });
+				if (!apiKey) return json({ error: "invalid_api_key" }, { status: 400 });
+				if (!model) return json({ error: "invalid_model" }, { status: 400 });
+
+				if (countBotsByOwner(userId) >= config.maxBotsPerUser) {
+					return json({
+						error: "bot_limit_reached",
+						detail: `Per-user limit is ${config.maxBotsPerUser} bots.`,
+					}, { status: 409 });
+				}
+
+				const mxid = `@bot-${name}:${config.homeserverName}`;
+				if (getBotByMxid(mxid)) {
+					return json({ error: "name_taken" }, { status: 409 });
+				}
+
+				// Provision the Matrix user, then log in as it to get an
+				// access token + device id.  We discard the random
+				// password after this step — the engine acts as the bot
+				// via the access token from now on.
+				const initialPw = randomPassword();
+				const created = await adminCreateUser({
+					userId: mxid,
+					password: initialPw,
+					displayname: displayName,
+				});
+				if ("error" in created) {
+					return json({
+						error: "synapse_create_failed",
+						detail: created.detail ?? created.error,
+					}, { status: 502 });
+				}
+				const token = await loginAsUser(mxid, initialPw);
+				if ("error" in token) {
+					return json({
+						error: "synapse_token_failed",
+						detail: token.detail ?? token.error,
+					}, { status: 502 });
+				}
+
+				let apiKeyEnc: string;
+				let accessTokenEnc: string;
+				try {
+					apiKeyEnc = sealSecret(apiKey);
+					accessTokenEnc = sealSecret(token.access_token);
+				} catch (err) {
+					console.error("engine: failed to seal bot secrets", err);
+					return json({ error: "encryption_unavailable" }, { status: 503 });
+				}
+
+				const row = createBot({
+					mxid,
+					owner_id: userId,
+					display_name: displayName,
+					provider,
+					api_base: apiBase,
+					api_key_enc: apiKeyEnc,
+					model,
+					system_prompt: systemPrompt,
+					context_window: contextWindow,
+					access_token_enc: accessTokenEnc,
+					device_id: token.device_id,
+				});
+				// Boot the runtime in the background — sync + crypto
+				// init takes seconds; the API call returns immediately
+				// with the new bot's metadata.
+				startOne(row.id).catch(err =>
+					console.error(`bot manager: startOne(${row.id}) failed`, err),
+				);
+				return json({ bot: toBotSummary(row) });
+			}
+
+			// PATCH /api/bots/:id
+			{
+				const m = path.match(/^\/api\/bots\/(\d+)$/);
+				if (req.method === "PATCH" && m) {
+					const userId = await whoami(extractToken(req));
+					if (!userId) return json({ errcode: "M_FORBIDDEN" }, { status: 401 });
+					const id = Number(m[1]);
+					const existing = getBotById(id);
+					if (!existing) return json({ errcode: "M_NOT_FOUND" }, { status: 404 });
+					if (existing.owner_id !== userId) {
+						return json({ errcode: "M_FORBIDDEN", error: "not your bot" }, { status: 403 });
+					}
+					const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+					const patch: Parameters<typeof updateBot>[1] = {};
+
+					if (typeof body.display_name === "string") {
+						const v = body.display_name.trim();
+						if (!v || v.length > 100) {
+							return json({ error: "invalid_display_name" }, { status: 400 });
+						}
+						patch.display_name = v;
+					}
+					if (body.provider === "openrouter" || body.provider === "openai_compatible") {
+						patch.provider = body.provider;
+					}
+					if (typeof body.api_base === "string") {
+						const v = body.api_base.trim();
+						if (!v) return json({ error: "invalid_api_base" }, { status: 400 });
+						patch.api_base = v;
+					}
+					if (typeof body.api_key === "string" && body.api_key.length > 0) {
+						// Empty string means "leave the existing key alone."
+						// Any non-empty value is treated as a replacement.
+						try {
+							patch.api_key_enc = sealSecret(body.api_key);
+						} catch {
+							return json({ error: "encryption_unavailable" }, { status: 503 });
+						}
+					}
+					if (typeof body.model === "string") {
+						const v = body.model.trim();
+						if (!v) return json({ error: "invalid_model" }, { status: 400 });
+						patch.model = v;
+					}
+					if (typeof body.system_prompt === "string") {
+						patch.system_prompt = body.system_prompt;
+					}
+					if (Number.isFinite(body.context_window)) {
+						patch.context_window = Math.max(1, Math.min(100, Math.floor(body.context_window as number)));
+					}
+					if (typeof body.enabled === "boolean") {
+						patch.enabled = body.enabled ? 1 : 0;
+					}
+
+					const updated = updateBot(id, patch);
+					// If `enabled` flipped (or any other meaningful
+					// runtime field changed), reconcile so the
+					// background runtime matches the new DB state.
+					reconcileOne(id).catch(err =>
+						console.error(`bot manager: reconcileOne(${id}) failed`, err),
+					);
+					return json({ bot: updated ? toBotSummary(updated) : null });
+				}
+			}
+
+			// DELETE /api/bots/:id
+			{
+				const m = path.match(/^\/api\/bots\/(\d+)$/);
+				if (req.method === "DELETE" && m) {
+					const userId = await whoami(extractToken(req));
+					if (!userId) return json({ errcode: "M_FORBIDDEN" }, { status: 401 });
+					const id = Number(m[1]);
+					const existing = getBotById(id);
+					if (!existing) return json({ errcode: "M_NOT_FOUND" }, { status: 404 });
+					if (existing.owner_id !== userId) {
+						return json({ errcode: "M_FORBIDDEN", error: "not your bot" }, { status: 403 });
+					}
+					// Stop the runtime first so it flushes /sync state.
+					// On-disk crypto + sync state under data/bot-state/<id>/
+					// is left in place — operator can prune by hand if
+					// they want; we deliberately don't delete it because
+					// re-creating a bot under the same id is impossible
+					// (autoincrement) so old state can't collide.
+					await stopOne(id);
+					// We delete the engine row but don't deactivate the
+					// Synapse user.  The mxid is reserved by the appservice
+					// namespace forever (Synapse can't unclaim a registered
+					// localpart), so leaving the user in place is fine.
+					// An admin can prune via admin API if storage matters.
+					deleteBot(id);
+					return json({ ok: true });
+				}
+			}
+
 			// ─── Admin: floor-violation review queue ─────────────────
 			// Admin sees pending floor-violation suspensions and either
 			// confirms (deactivates the account) or reverses (lifts
@@ -616,15 +886,58 @@ export function startServer(): void {
 				const m = path.match(/^\/api\/rooms\/([^/]+)\/mod-log$/);
 				if (req.method === "GET" && m) {
 					const roomId = decodeURIComponent(m[1]!);
-					const flags = flagsForRoom(roomId).map(f => ({
-						kind: "flag" as const,
-						ts: f.ts,
-						event_id: f.event_id,
-						target_event_id: f.target_event_id,
-						flagger: f.flagger,
-						category: f.category,
-						rationale: f.rationale ?? null,
-					}));
+					// Each flag row may emit one OR two timeline entries:
+					//   - the original flag (always emitted)
+					//   - a separate "flag_retracted" entry if the
+					//     flagger later withdrew the flag (redacted
+					//     the chat.koven.flag.v1 event).
+					// The mod log is append-only by design — both
+					// events are durable rather than the second
+					// erasing the first.
+					const flags: Array<
+						| {
+							kind: "flag";
+							ts: number;
+							event_id: string;
+							target_event_id: string;
+							flagger: string;
+							category: string;
+							rationale: string | null;
+							retracted: boolean;
+						}
+						| {
+							kind: "flag_retracted";
+							ts: number;
+							event_id: string;       // the retracted flag's id
+							target_event_id: string;
+							category: string;
+							flagger: string;        // original flagger
+							retracted_by: string;   // mxid that issued the redaction
+						}
+					> = [];
+					for (const f of flagsForRoom(roomId)) {
+						flags.push({
+							kind: "flag",
+							ts: f.ts,
+							event_id: f.event_id,
+							target_event_id: f.target_event_id,
+							flagger: f.flagger,
+							category: f.category,
+							rationale: f.rationale ?? null,
+							retracted: !!f.retracted_at,
+						});
+						if (f.retracted_at && f.retracted_by) {
+							flags.push({
+								kind: "flag_retracted",
+								ts: f.retracted_at,
+								event_id: f.event_id,
+								target_event_id: f.target_event_id,
+								category: f.category,
+								flagger: f.flagger,
+								retracted_by: f.retracted_by,
+							});
+						}
+					}
 					const collapses = collapsesForRoom(roomId).map(c => ({
 						kind: "collapse" as const,
 						ts: c.collapsed_at,

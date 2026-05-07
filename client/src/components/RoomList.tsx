@@ -120,6 +120,7 @@ export function RoomList({
 function filterRooms(rooms: Room[], activeSpace: ActiveSpace): Room[] {
 	if (!activeSpace) return [];
 	if (activeSpace.kind === "explore") return [];
+	if (activeSpace.kind === "bots") return [];
 	if (activeSpace.kind === "dms") return rooms.filter(r => r.kind === "dm");
 	if (activeSpace.kind === "rooms") {
 		// Orphans pseudo-space: every joined room not assigned to any
@@ -133,6 +134,7 @@ function filterRooms(rooms: Room[], activeSpace: ActiveSpace): Room[] {
 function headerFor(activeSpace: ActiveSpace, spaces: Space[]): string {
 	if (!activeSpace) return "";
 	if (activeSpace.kind === "explore") return "Explore";
+	if (activeSpace.kind === "bots") return "Bots";
 	if (activeSpace.kind === "dms") return "Direct messages";
 	if (activeSpace.kind === "rooms") return "Rooms";
 	const space = spaces.find(s => s.id === activeSpace.id);

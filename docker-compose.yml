@@ -98,6 +98,11 @@ services:
       # accounts and mint per-session login tokens.  Provisioned by
       # `bin/koven setup` on first install.
       SYNAPSE_ADMIN_TOKEN: ${SYNAPSE_ADMIN_TOKEN:-}
+      # Bot platform: AES-GCM key for per-bot secret encryption +
+      # the per-user bot count cap.  Both auto-generated / defaulted
+      # by `bin/koven setup`.
+      BOT_KEY_ENCRYPTION_SECRET: ${BOT_KEY_ENCRYPTION_SECRET:-}
+      MAX_BOTS_PER_USER: ${MAX_BOTS_PER_USER:-30}
     depends_on:
       - synapse
 

@@ -23,7 +23,7 @@ import {
 } from "@/components/ui/dialog";
 import { fetchRoomModLog, type ModLogEntry } from "@/lib/instance";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
-import { Flag, Hammer, ShieldAlert } from "lucide-react";
+import { Flag, FlagOff, Hammer, ShieldAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export interface ModLogSheetProps {
@@ -77,11 +77,19 @@ function Entry({ e }: { e: ModLogEntry }) {
 	const time = new Date(e.ts).toLocaleString();
 
 	if (e.kind === "flag") {
+		// A retracted flag stays in the timeline (the log is
+		// append-only) but reads as historical: dimmed, strike-
+		// throughed, with a small "retracted" tag.  The actual
+		// retraction event is rendered as its own `flag_retracted`
+		// entry elsewhere in the feed.
 		return (
-			<li className="flex items-start gap-3 px-3 py-2 rounded border border-border bg-card/50">
+			<li className={cn(
+				"flex items-start gap-3 px-3 py-2 rounded border border-border bg-card/50",
+				e.retracted && "opacity-60",
+			)}>
 				<Flag className="h-4 w-4 shrink-0 mt-0.5 text-muted-foreground" />
 				<div className="flex-1 min-w-0 text-xs leading-snug">
-					<div>
+					<div className={cn(e.retracted && "line-through")}>
 						<span className="font-medium">Flag</span>
 						<span className="text-muted-foreground"> · {labelForCategory(e.category)}</span>
 					</div>
@@ -90,8 +98,49 @@ function Entry({ e }: { e: ModLogEntry }) {
 						<UserInline userId={e.flagger} />
 					</div>
 					{e.rationale && (
-						<div className="text-muted-foreground mt-1 italic">"{e.rationale}"</div>
+						<div className={cn(
+							"text-muted-foreground mt-1 italic",
+							e.retracted && "line-through",
+						)}>"{e.rationale}"</div>
 					)}
+					<div className="text-[10px] text-muted-foreground/70 mt-1 tabular-nums flex items-center gap-2">
+						<span>{time}</span>
+						{e.retracted && (
+							<span className="uppercase tracking-wide text-[9px] font-medium bg-muted px-1 py-px rounded">
+								Retracted
+							</span>
+						)}
+					</div>
+				</div>
+			</li>
+		);
+	}
+
+	if (e.kind === "flag_retracted") {
+		// Sibling event to the original flag — the moment the
+		// flagger withdrew it.  Same width / rhythm as a flag entry
+		// so the timeline stays visually balanced; the FlagOff icon
+		// + "Flag retracted" header carries the meaning.
+		const sameMxid = e.flagger === e.retracted_by;
+		return (
+			<li className="flex items-start gap-3 px-3 py-2 rounded border border-border bg-card/50">
+				<FlagOff className="h-4 w-4 shrink-0 mt-0.5 text-muted-foreground" />
+				<div className="flex-1 min-w-0 text-xs leading-snug">
+					<div>
+						<span className="font-medium">Flag retracted</span>
+						<span className="text-muted-foreground"> · {labelForCategory(e.category)}</span>
+					</div>
+					<div className="flex items-center gap-1 mt-0.5">
+						<span className="text-muted-foreground">By</span>
+						<UserInline userId={e.retracted_by} />
+						{!sameMxid && (
+							<>
+								<span className="text-muted-foreground">(originally flagged by</span>
+								<UserInline userId={e.flagger} />
+								<span className="text-muted-foreground">)</span>
+							</>
+						)}
+					</div>
 					<div className="text-[10px] text-muted-foreground/70 mt-1 tabular-nums">{time}</div>
 				</div>
 			</li>
@@ -143,7 +192,7 @@ function Entry({ e }: { e: ModLogEntry }) {
 				{e.reviewed_at && e.reviewed_by && (
 					<div className="flex items-center gap-1 mt-0.5">
 						<span className="text-muted-foreground">Reviewed by:</span>
-						<UserInline userId={e.reviewed_by} />
+						<ReviewerInline reviewer={e.reviewed_by} />
 						<span className="text-muted-foreground/70 ml-1">at {new Date(e.reviewed_at).toLocaleString()}</span>
 					</div>
 				)}
@@ -160,6 +209,31 @@ function UserInline({ userId }: { userId: string }) {
 			<span className="font-mono text-[10px] truncate">{userId}</span>
 		</span>
 	);
+}
+
+// Reviewers can be a real mxid (an admin user) or one of two
+// system-initiated sentinels: "self_retracted" (the flagger
+// withdrew their flag, auto-reversing the suspension) or
+// "self_deactivate" (the suspended user deleted their own account
+// while the case was pending).  Sentinels render as a plain
+// "System" tag with the action paraphrased — rendering them as a
+// mxid is misleading (no such user exists) and visually noisy.
+function ReviewerInline({ reviewer }: { reviewer: string }) {
+	if (reviewer === "self_retracted") {
+		return (
+			<span className="text-muted-foreground italic">
+				System (flag retracted)
+			</span>
+		);
+	}
+	if (reviewer === "self_deactivate") {
+		return (
+			<span className="text-muted-foreground italic">
+				System (account self-deleted)
+			</span>
+		);
+	}
+	return <UserInline userId={reviewer} />;
 }
 
 function labelForCategory(c: string): string {

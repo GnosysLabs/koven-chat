@@ -5,14 +5,16 @@
 
 import {
 	createSuspension,
-	deleteFlag,
 	deletePost,
 	deleteReaction,
+	findPendingSuspensionByFlag,
 	getActiveSuspension,
 	insertFlag,
 	insertPost,
 	insertReaction,
 	lookupPostUser,
+	markFlagRetracted,
+	updateSuspensionStatus,
 } from "./db";
 
 // Minimal shape of a Matrix client-server event coming through
@@ -139,10 +141,37 @@ function handleRedaction(ev: MatrixEvent): void {
 			? (ev.content["redacts"] as string)
 			: undefined);
 	if (!target) return;
-	// The redacted event might have been a post, reaction, or flag —
-	// we don't know which, so blow away all three.  IDs are unique so
-	// at most one row exists across the tables.
+	// The redacted event might have been a post, reaction, or flag.
+	// IDs are unique so at most one of these matches.  Posts and
+	// reactions are timeline content — when redacted, the message
+	// itself is gone from rooms so we can drop the row outright.
+	// Flags are the public moderation record; retracting a flag is a
+	// real governance event, so we mark the row retracted (rather
+	// than delete it) so the mod log can show both the original flag
+	// and the retraction in chronological order.
 	deletePost(target);
 	deleteReaction(target);
-	deleteFlag(target);
+	const wasFlag = markFlagRetracted(target, ev.origin_server_ts, ev.sender);
+
+	// Floor-violation cascade: if this flag was the one that opened a
+	// pending suspension, auto-reverse the suspension now.  The
+	// flagger withdrew the accusation, so it's incoherent to keep
+	// the target paused waiting on admin review of an accusation
+	// that no longer exists.  We use a sentinel reviewer string
+	// (not a mxid) so the admin queue can render this as system-
+	// initiated rather than as some user's review action — same
+	// pattern as `purgeUserState` which uses "self_deactivate".
+	// Confirmed suspensions stay confirmed: once an admin signed
+	// off, retracting the flag doesn't undo that decision.
+	if (wasFlag) {
+		const pending = findPendingSuspensionByFlag(target);
+		if (pending) {
+			updateSuspensionStatus(
+				pending.id,
+				"reversed",
+				"self_retracted",
+				"auto-reversed: originating flag was retracted",
+			);
+		}
+	}
 }

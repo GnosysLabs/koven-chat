@@ -20,11 +20,25 @@ hs_token: ${ENGINE_HS_TOKEN}
 # weight publications).
 sender_localpart: engine
 
-# We don't claim any user namespaces — the engine doesn't impersonate
-# users, it only observes and acts as itself.  The wildcard rooms
-# regex means we receive every event in every room.
+# Namespace claims:
+#
+#   users: every @bot-* user is exclusively owned by this appservice.
+#     User-created bots are provisioned in this namespace via the
+#     Synapse admin API; the engine then runs each bot's matrix-js-sdk
+#     client and acts as that user.  `exclusive: true` means Synapse
+#     refuses to let any other process create a user in this range.
+#
+#   rooms: regex ".*" means Synapse forwards every event in every
+#     room to /transactions, which is what the consensus-moderation
+#     engine needs (it has to see every flag, every message, every
+#     reaction).  Bots also rely on this stream — when a bot is
+#     mentioned in any room it's joined to, the trigger pipeline
+#     pulls the message off the appservice transaction stream rather
+#     than per-bot polling.
 namespaces:
-  users: []
+  users:
+    - exclusive: true
+      regex: "@bot-[a-z0-9-]+:${SERVER_NAME}"
   aliases: []
   rooms:
     - exclusive: false

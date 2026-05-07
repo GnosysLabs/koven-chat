@@ -6,9 +6,11 @@
 
 import { useEffect, useState } from "react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
+import { BotBadge } from "@/components/BotBadge";
 import { useReputation } from "@/lib/useReputation";
 import { descriptorFor, tickClassForFilled, ticksFor } from "@/lib/reputation";
 import { fetchUserBio } from "@/lib/profile";
+import { formatMxid, serverOf } from "@/lib/mxid";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
 import { Ban, Trash2, UserCheck } from "lucide-react";
@@ -27,9 +29,13 @@ export interface DmProfilePanelProps {
 	// "delete for me" — the other party's copy is unaffected.  After
 	// success, the parent should navigate away from the now-gone room.
 	onDeleteDm(): Promise<void>;
+	// Whether the other user is a registered bot — drives the BOT
+	// pill rendered next to their name and suppresses the reputation
+	// block (bots don't accrue rep).
+	isBot?: boolean;
 }
 
-export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenProfile, onDeleteDm }: DmProfilePanelProps) {
+export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenProfile, onDeleteDm, isBot }: DmProfilePanelProps) {
 	const [profile, setProfile] = useState<{
 		displayName: string;
 		avatarUrl?: string;
@@ -114,14 +120,16 @@ export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenPro
 					<MatrixAvatar
 						mxc={profile?.avatarUrl}
 						seed={otherUserId}
+						kind={isBot ? "bot" : "user"}
 						className="h-20 w-20 group-hover:ring-2 group-hover:ring-primary/40 transition-all"
 					/>
 					<div className="min-w-0 max-w-full">
-						<div className="text-sm font-semibold truncate group-hover:text-primary transition-colors">
-							{profile?.displayName ?? otherUserId}
+						<div className="text-sm font-semibold truncate group-hover:text-primary transition-colors flex items-center justify-center gap-1.5">
+							<span className="truncate">{profile?.displayName ?? otherUserId}</span>
+							{isBot && <BotBadge compact={false} />}
 						</div>
-						<div className="text-[10px] text-muted-foreground font-mono truncate">
-							{otherUserId}
+						<div className="text-[10px] text-muted-foreground font-mono truncate" title={otherUserId}>
+							{formatMxid(otherUserId, serverOf(transport?.currentUserId ?? null))}
 						</div>
 					</div>
 				</button>
@@ -132,9 +140,11 @@ export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenPro
 					</p>
 				)}
 
-				<div className="mt-5 pt-4 border-t border-border">
-					<ReputationBlock userId={otherUserId} />
-				</div>
+				{!isBot && (
+					<div className="mt-5 pt-4 border-t border-border">
+						<ReputationBlock userId={otherUserId} />
+					</div>
+				)}
 
 				<div className="mt-5 pt-4 border-t border-border">
 					<button

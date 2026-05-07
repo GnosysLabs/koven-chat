@@ -5,17 +5,23 @@
 // it stays crisp at any size.
 //
 // Style choices are deliberate per kind:
-//   - users:  fun-emoji  (faces, friendly, distinct)
-//   - rooms:  shapes     (abstract geometric — clearly inanimate)
-//   - spaces: glass      (translucent gradient blobs — heavier visual
-//                         weight that reads as "container of rooms")
+//   - users:  fun-emoji      (faces, friendly, distinct)
+//   - rooms:  shapes         (abstract geometric — clearly inanimate)
+//   - spaces: glass          (translucent gradient blobs — heavier
+//                             visual weight that reads as "container
+//                             of rooms")
+//   - bots:   bottts-neutral (cute robots — visibly non-human, stays
+//                             on-brand with the BOT badge so a glance
+//                             at the avatar already tells you it's
+//                             an automated account)
 
-export type AvatarKind = "user" | "room" | "space";
+export type AvatarKind = "user" | "room" | "space" | "bot";
 
 const STYLE_BY_KIND: Record<AvatarKind, string> = {
 	user: "fun-emoji",
 	room: "shapes",
 	space: "glass",
+	bot: "bottts-neutral",
 };
 
 export function autoAvatarUrl(seed: string, kind: AvatarKind = "user"): string {

@@ -8,5 +8,6 @@
     "dev": "bun run --cwd client dev",
     "dev:engine": "bun run --cwd engine dev",
     "build": "bun run --cwd client build"
-  }
+  },
+  "trustedDependencies": []
 }

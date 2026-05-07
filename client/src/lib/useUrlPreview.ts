@@ -24,22 +24,3 @@ export function useUrlPreview(url: string | null): UrlPreview | null {
 	return preview;
 }
 
-// First http(s) URL in a chunk of message text, or null if none.
-// Mirrors the convention most chat clients use — only the first
-// link gets a preview card, otherwise a wall of links would stack a
-// wall of cards beneath the bubble.  Excludes trailing punctuation
-// that's almost certainly not part of the URL ([)],.;:!?"'>]).
-export function extractFirstUrl(text: string): string | null {
-	const match = text.match(/https?:\/\/[^\s<>]+/);
-	if (!match) return null;
-	let url = match[0];
-	// Trim trailing punctuation that's likely sentence-final, not URL.
-	url = url.replace(/[),.;:!?"'>\]]+$/, "");
-	// Balance unmatched closing parens (common in Wikipedia URLs).
-	const opens = (url.match(/\(/g) ?? []).length;
-	const closes = (url.match(/\)/g) ?? []).length;
-	if (closes > opens) {
-		url = url.replace(/\)+$/, "");
-	}
-	return url || null;
-}

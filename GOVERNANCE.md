@@ -175,6 +175,8 @@ Matrix doesn't support disabling encryption on a room once enabled, so a private
 
 The flag, mod-log, and floor-violation affordances are also hidden in encrypted rooms client-side. Better to surface no affordance than to let users believe they took an action that won't produce a real review.
 
+URL link previews are likewise disabled in encrypted rooms. Generating a preview means asking Synapse's `/_matrix/media/v3/preview_url` endpoint to fetch the URL, which leaks the URL to the homeserver in plaintext even though the message body is end-to-end encrypted. Since DMs and any private encrypted room are exactly the contexts where users expect the homeserver not to see content, the preview card is hidden. Links remain clickable; they just don't get a card. (A future setting could let users opt back in per-room if they trust their homeserver with that metadata.)
+
 ## Federation
 
 Koven instances federate only with other Koven instances. The Synapse module `koven-federation-gate` (in `docker/synapse/modules/`) hooks the spam-checker callback and probes `https://<remote>/.well-known/koven` on first contact with a new homeserver. A valid Koven response means the peer's events are accepted; anything else (vanilla Synapse, 404, malformed JSON) means denied. Cached for 10 minutes on positive matches, 1 minute on negatives. Auto-discovery is symmetric: every Koven install serves `/.well-known/koven` via Caddy.

@@ -6,7 +6,7 @@
 import { forwardRef, useMemo } from "react";
 import { cn } from "@/lib/utils";
 import type { Room, Space } from "@koven/shared";
-import { Compass, Hash, LogOut, Plus, Settings, ShieldAlert, User } from "lucide-react";
+import { Bot, Compass, Hash, LogOut, Plus, Settings, ShieldAlert, User } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { SpaceCreateMenu } from "@/components/SpaceCreateMenu";
 import type { ActiveSpace } from "@/state/store";
@@ -21,6 +21,7 @@ export interface SpaceBarProps {
 	activeSpace: ActiveSpace;
 	onSelectExplore(): void;
 	onSelectDms(): void;
+	onSelectBots(): void;
 	onSelectRooms(): void;
 	onSelectSpace(spaceId: string): void;
 	onCreateSpace(opts: {
@@ -47,6 +48,7 @@ export function SpaceBar({
 	activeSpace,
 	onSelectExplore,
 	onSelectDms,
+	onSelectBots,
 	onSelectRooms,
 	onSelectSpace,
 	onCreateSpace,
@@ -58,6 +60,7 @@ export function SpaceBar({
 }: SpaceBarProps) {
 	const exploreActive = activeSpace?.kind === "explore";
 	const dmsActive = activeSpace?.kind === "dms";
+	const botsActive = activeSpace?.kind === "bots";
 	const roomsActive = activeSpace?.kind === "rooms";
 
 	// Per-tile attention indicators.  A "dot" surfaces on a tile when
@@ -109,6 +112,15 @@ export function SpaceBar({
 				dot={dmAttention}
 			>
 				<User className="h-5 w-5" />
+			</TileButton>
+
+			<TileButton
+				active={botsActive}
+				onClick={onSelectBots}
+				title="Bots — your custom AI bots"
+				ariaLabel="Bots"
+			>
+				<Bot className="h-5 w-5" />
 			</TileButton>
 
 			<TileButton

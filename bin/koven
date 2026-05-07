@@ -123,6 +123,11 @@ cmd_setup() {
 	ensure_secret ENGINE_AS_TOKEN
 	ensure_secret ENGINE_HS_TOKEN
 	ensure_secret TURN_SHARED_SECRET
+	# AES-256-GCM key (32 bytes / 64 hex) for at-rest encryption of
+	# per-bot LLM API keys + Synapse access tokens.  Rotating it
+	# breaks every existing bot config; regenerate only on a fresh
+	# install or after deliberately wiping the bots table.
+	ensure_secret BOT_KEY_ENCRYPTION_SECRET
 
 	# 4. Set up synapse-data/ — bootstrap signing key on first run, but
 	#    ALWAYS re-render homeserver.yaml + appservice from templates so
