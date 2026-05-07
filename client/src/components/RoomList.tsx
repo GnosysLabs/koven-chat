@@ -6,6 +6,7 @@
 //     space's id.
 
 import { cn } from "@/lib/utils";
+import { COLLAPSED_NAME } from "@/lib/collapsedRooms";
 import type { Room, RoomId, Space } from "@koven/shared";
 import { Check, EyeOff, Globe, Lock, Pin, Plus, X } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
@@ -27,6 +28,11 @@ export interface RoomListProps {
 	// knows where to write the `chat.koven.pinned_rooms` event.
 	onPinRoom?(spaceId: string, roomId: RoomId): void | Promise<void>;
 	onUnpinRoom?(spaceId: string, roomId: RoomId): void | Promise<void>;
+	// Set of room ids the engine reports as collapsed (offensive room
+	// name pipeline).  Sidebar entries for these rooms render with the
+	// "Name Removed by Community Review" placeholder instead of the
+	// verbatim name.
+	collapsedRoomIds?: Set<string>;
 }
 
 // PL gate for editing the space's `chat.koven.pinned_rooms` state
@@ -39,7 +45,7 @@ const PIN_PL_THRESHOLD = 50;
 export function RoomList({
 	rooms, spaces, activeSpace, activeRoomId,
 	onSelectRoom, onCreateRoom, onAcceptInvite, onDeclineInvite,
-	onPinRoom, onUnpinRoom,
+	onPinRoom, onUnpinRoom, collapsedRoomIds,
 }: RoomListProps) {
 	const activeSpaceObj = activeSpace?.kind === "space"
 		? spaces.find(s => s.id === activeSpace.id) ?? null
@@ -114,12 +120,14 @@ export function RoomList({
 				) : (
 					joinedRooms.map(room => {
 						const isPinned = pinnedRoomIdSet.has(room.id);
+						const isCollapsed = !!collapsedRoomIds?.has(room.id);
 						return (
 							<RoomRow
 								key={room.id}
 								room={room}
 								active={room.id === activeRoomId}
 								pinned={isPinned}
+								collapsed={isCollapsed}
 								onSelect={() => onSelectRoom(room.id)}
 								onPin={canManagePins && !isPinned ? pinHandler(room.id) : undefined}
 								onUnpin={canManagePins && isPinned ? unpinHandler(room.id) : undefined}
@@ -246,7 +254,7 @@ function DmPresenceDot({ presence }: { presence: Room["dmPresence"] }) {
 }
 
 function RoomRow({
-	room, active, pinned, onSelect, onPin, onUnpin,
+	room, active, pinned, collapsed, onSelect, onPin, onUnpin,
 }: {
 	room: Room;
 	active: boolean;
@@ -254,6 +262,11 @@ function RoomRow({
 	// read off the room — the same room can be pinned in one space
 	// and not in another (rooms can belong to multiple spaces).
 	pinned: boolean;
+	// True when the room is in the engine's collapsed-rooms list.  The
+	// row still renders (you might be a member who needs to leave),
+	// but with the "Name Removed by Community Review" placeholder in
+	// place of the verbatim name.
+	collapsed: boolean;
 	onSelect(): void;
 	// Either onPin or onUnpin is provided when the current user has
 	// permission to manage pins in the active space.  Both undefined
@@ -295,11 +308,22 @@ function RoomRow({
 					reservePinSlot ? "pr-8" : "pr-2",
 					active ? "text-foreground" : "text-foreground/90",
 				)}
-				title={room.name}
+				title={collapsed ? COLLAPSED_NAME : room.name}
 			>
 				<RoomAvatar room={room} />
 				<span className="flex-1 truncate flex items-center gap-1.5 min-w-0">
-					<span className={cn("truncate", hasUnread && "font-semibold")}>{room.name}</span>
+					<span className={cn(
+						"truncate",
+						hasUnread && "font-semibold",
+						// Italicise + dim the placeholder so collapsed
+						// rooms are visually distinct from regular ones —
+						// they exist in the user's room list (they're
+						// still a member) but the elevated styling makes
+						// it obvious the name was redacted by review.
+						collapsed && "italic text-muted-foreground",
+					)}>
+						{collapsed ? COLLAPSED_NAME : room.name}
+					</span>
 					{room.encrypted && (
 						<Lock className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
 					)}

@@ -28,9 +28,15 @@ export interface FlagDialogProps {
 	open: boolean;
 	onOpenChange(open: boolean): void;
 	onSubmit(category: FlagCategory, rationale?: string): void | Promise<void>;
+	// Same dialog handles both message flags (default) and room-target
+	// flags (the "offensive room name" pipeline).  The discriminator
+	// flips title + copy so users know exactly what the consensus
+	// action will hide — a single message vs. a whole room's name in
+	// Explore + everywhere it renders.
+	target?: "message" | "room";
 }
 
-export function FlagDialog({ open, onOpenChange, onSubmit }: FlagDialogProps) {
+export function FlagDialog({ open, onOpenChange, onSubmit, target = "message" }: FlagDialogProps) {
 	const [category, setCategory] = useState<FlagCategory | null>(null);
 	const [rationale, setRationale] = useState("");
 	const [pending, setPending] = useState(false);
@@ -101,9 +107,20 @@ export function FlagDialog({ open, onOpenChange, onSubmit }: FlagDialogProps) {
 							</ul>
 							<p>Submitting this report will:</p>
 							<ul className="list-disc pl-5 space-y-1 text-muted-foreground text-xs">
-								<li>Immediately collapse the message into a non-revealable hidden state.</li>
-								<li>Suspend the message author's account pending admin review.</li>
-								<li>Be permanently logged in this room's public mod log with your username attached.</li>
+								{target === "room" ? (
+									<>
+										<li>Immediately replace this room's name with "Name Removed by Community Review" everywhere it renders.</li>
+										<li>Hide the room from the Explore directory.</li>
+										<li>Suspend the room's creator pending admin review.</li>
+										<li>Be permanently logged in the public mod log with your username attached.</li>
+									</>
+								) : (
+									<>
+										<li>Immediately collapse the message into a non-revealable hidden state.</li>
+										<li>Suspend the message author's account pending admin review.</li>
+										<li>Be permanently logged in this room's public mod log with your username attached.</li>
+									</>
+								)}
 							</ul>
 							<p className="text-destructive">If an admin reviews this report and finds it was a false alarm:</p>
 							<ul className="list-disc pl-5 space-y-1 text-destructive/80 text-xs">
@@ -142,9 +159,11 @@ export function FlagDialog({ open, onOpenChange, onSubmit }: FlagDialogProps) {
 				) : (
 				<>
 				<DialogHeader>
-					<DialogTitle>Flag this message</DialogTitle>
+					<DialogTitle>{target === "room" ? "Flag this room" : "Flag this message"}</DialogTitle>
 					<DialogDescription>
-						Flags from multiple weighted users collapse a post pending review. Pick the closest reason.
+						{target === "room"
+							? `Flags from multiple weighted users hide the room and replace its name pending review. Pick the closest reason.`
+							: `Flags from multiple weighted users collapse a post pending review. Pick the closest reason.`}
 					</DialogDescription>
 				</DialogHeader>
 				<form onSubmit={submit} className="space-y-4">

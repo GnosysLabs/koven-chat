@@ -8,10 +8,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
+import { FlagDialog } from "@/components/FlagDialog";
 import { cn } from "@/lib/utils";
-import { Check, Compass, Hash, Search, Users } from "lucide-react";
+import { Check, Compass, Flag, Hash, Search, Users } from "lucide-react";
 import type { MatrixTransport } from "@/lib/matrix";
-import type { Room, RoomId, Space } from "@koven/shared";
+import type { FlagCategory, Room, RoomId, Space } from "@koven/shared";
+import { flagRoom } from "@/lib/instance";
 
 interface PublicEntry {
 	roomId: RoomId;
@@ -33,15 +35,29 @@ export interface ExplorePaneProps {
 	rooms: Room[];      // joined rooms — used to mark "Joined" rows
 	spaces: Space[];    // joined spaces — same
 	onJoined(roomId: RoomId, isSpace: boolean): void;
+	// Engine-issued bearer for the current user, used by the flag-room
+	// HTTP endpoint.  When null the per-tile flag affordance is hidden
+	// (a logged-out user can browse Explore but can't flag).
+	accessToken: string | null;
+	// Set of room ids the engine reports as collapsed.  Filtered out
+	// of the Explore directory so the offensive name never surfaces
+	// to a fresh visitor.  After a flag submission lands in the
+	// collapse pipeline, the SPA polls this list to refresh.
+	collapsedRoomIds: Set<string>;
+	onCollapseRefresh?(): void | Promise<void>;
 }
 
-export function ExplorePane({ transport, rooms, spaces, onJoined }: ExplorePaneProps) {
+export function ExplorePane({
+	transport, rooms, spaces, onJoined,
+	accessToken, collapsedRoomIds, onCollapseRefresh,
+}: ExplorePaneProps) {
 	const [query, setQuery] = useState("");
 	const [results, setResults] = useState<PublicEntry[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [filter, setFilter] = useState<Filter>("all");
 	const [joining, setJoining] = useState<string | null>(null);
 	const [error, setError] = useState<string | null>(null);
+	const [flagDialog, setFlagDialog] = useState<PublicEntry | null>(null);
 	const searchDebounceRef = useRef<number | null>(null);
 
 	// Initial load + debounced research as the query changes.  Public
@@ -85,10 +101,19 @@ export function ExplorePane({ transport, rooms, spaces, onJoined }: ExplorePaneP
 	}, [rooms, spaces]);
 
 	const visible = useMemo(() => {
-		if (filter === "spaces") return results.filter(r => r.isSpace);
-		if (filter === "rooms") return results.filter(r => !r.isSpace);
-		return results;
-	}, [results, filter]);
+		// Drop collapsed rooms from the directory entirely — surfacing
+		// "Name Removed by Community Review" tiles in Explore wouldn't
+		// help anyone and would re-broadcast the fact that they exist.
+		// Joined users still see the override in their room list (via
+		// displayRoomName); Explore is the discovery surface, so we
+		// just hide them.
+		const liveResults = collapsedRoomIds.size === 0
+			? results
+			: results.filter(r => !collapsedRoomIds.has(r.roomId));
+		if (filter === "spaces") return liveResults.filter(r => r.isSpace);
+		if (filter === "rooms") return liveResults.filter(r => !r.isSpace);
+		return liveResults;
+	}, [results, filter, collapsedRoomIds]);
 
 	const counts = useMemo(() => ({
 		all: results.length,
@@ -169,11 +194,33 @@ export function ExplorePane({ transport, rooms, spaces, onJoined }: ExplorePaneP
 								joined={joinedIds.has(entry.roomId)}
 								joining={joining === entry.roomId}
 								onJoin={() => handleJoin(entry)}
+								onFlag={accessToken ? () => setFlagDialog(entry) : undefined}
 							/>
 						))}
 					</div>
 				)}
 			</div>
+
+			{/* Flag-this-room dialog.  Shared FlagDialog component with
+			    target="room" so users see room-specific copy (what
+			    happens when the flag tips consensus, what false-flag
+			    consequences look like). */}
+			<FlagDialog
+				open={!!flagDialog}
+				onOpenChange={(o) => { if (!o) setFlagDialog(null); }}
+				target="room"
+				onSubmit={async (category: FlagCategory, rationale?: string) => {
+					if (!flagDialog || !accessToken) return;
+					const r = await flagRoom(accessToken, flagDialog.roomId, category, rationale);
+					if (!r.ok) throw new Error(r.error ?? "Flag submission failed");
+					setFlagDialog(null);
+					// Floor flags collapse on the engine side immediately;
+					// non-floor flags may still be one of the votes that
+					// pushes the room over the threshold.  Either way,
+					// re-poll so the user sees the latest state.
+					if (onCollapseRefresh) await onCollapseRefresh();
+				}}
+			/>
 		</div>
 	);
 }
@@ -196,12 +243,15 @@ function FilterChip({ active, onClick, children }: { active: boolean; onClick():
 }
 
 function EntryRow({
-	entry, joined, joining, onJoin,
+	entry, joined, joining, onJoin, onFlag,
 }: {
 	entry: PublicEntry;
 	joined: boolean;
 	joining: boolean;
 	onJoin(): void;
+	// When set, renders a small flag affordance on the tile (logged-in
+	// users only — flagging is gated on a Matrix token in the engine).
+	onFlag?(): void;
 }) {
 	return (
 		<div className="flex items-start gap-3 px-3 py-3">
@@ -236,7 +286,18 @@ function EntryRow({
 					)}
 				</div>
 			</div>
-			<div className="shrink-0">
+			<div className="shrink-0 flex items-center gap-1.5">
+				{onFlag && (
+					<button
+						type="button"
+						onClick={onFlag}
+						className="p-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+						title="Flag this room"
+						aria-label="Flag this room"
+					>
+						<Flag className="h-3.5 w-3.5" />
+					</button>
+				)}
 				{joined ? (
 					<span className="inline-flex items-center gap-1 text-xs text-emerald-500/90">
 						<Check className="h-3.5 w-3.5" /> Joined

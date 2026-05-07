@@ -36,7 +36,8 @@ import { ActiveCallView } from "@/components/ActiveCallView";
 import { SuspendedBanner } from "@/components/SuspendedBanner";
 import { ModLogSheet } from "@/components/ModLogSheet";
 import { FloorReviewSheet } from "@/components/FloorReviewSheet";
-import { fetchAdminStatus, fetchFloorQueue, fetchMyStatus, type SuspensionSummary } from "@/lib/instance";
+import { fetchAdminStatus, fetchFloorQueue, fetchMyStatus, flagRoom, type SuspensionSummary } from "@/lib/instance";
+import { useCollapsedRooms } from "@/lib/collapsedRooms";
 import { fetchAllBotMxids } from "@/lib/bots-cache";
 import { fetchUiaPassword } from "@/lib/auth";
 import { TransportContext } from "@/lib/transportContext";
@@ -67,6 +68,11 @@ function peerForCall(roomId: string | undefined, rooms: import("@koven/shared").
 export default function App() {
 	const [creds, setCreds] = useState<MatrixCredentials | null>(loadStoredCredentials);
 	const [state, dispatch] = useReducer(reduce, initialState);
+	// Engine-driven collapsed-room set: drives the room-name display
+	// override + the Explore directory filter for the offensive-room-
+	// name pipeline.  Polled every 5 min + on focus; we also call
+	// `refresh()` immediately after a flag submission.
+	const { ids: collapsedRoomIds, refresh: refreshCollapsedRooms } = useCollapsedRooms();
 	const [transport, setTransport] = useState<MatrixTransport | null>(null);
 	const [bootError, setBootError] = useState<string | null>(null);
 	const [createRoomOpen, setCreateRoomOpen] = useState(false);
@@ -689,6 +695,7 @@ export default function App() {
 					spaces={state.spaces}
 					activeSpace={state.activeSpace}
 					activeRoomId={state.activeRoomId}
+					collapsedRoomIds={collapsedRoomIds}
 					onSelectRoom={(roomId: RoomId) => dispatch({ type: "set_active_room", roomId })}
 					onCreateRoom={() => {
 						// "+" in the list header is context-aware: DMs
@@ -737,6 +744,9 @@ export default function App() {
 						transport={transport}
 						rooms={state.rooms}
 						spaces={state.spaces}
+						accessToken={creds?.access_token ?? null}
+						collapsedRoomIds={collapsedRoomIds}
+						onCollapseRefresh={refreshCollapsedRooms}
 						onJoined={(roomId, isSpace) => {
 							// Joining a room → switch to Rooms view + open
 							// it.  Joining a space → switch to that space.
@@ -849,6 +859,17 @@ export default function App() {
 							throw e;
 						}
 					}}
+					onFlagRoom={async (roomId, category, rationale) => {
+						if (!creds?.access_token) return;
+						const r = await flagRoom(creds.access_token, roomId, category, rationale);
+						if (!r.ok) throw new Error(r.error ?? "Flag submission failed");
+						// Re-poll the collapsed-rooms list — a floor flag
+						// may have just collapsed the room, in which case
+						// the SPA should pick that up immediately rather
+						// than wait for the next 5-min interval.
+						await refreshCollapsedRooms();
+					}}
+					collapsedRoomIds={collapsedRoomIds}
 					onAcceptInvite={async (roomId) => {
 						if (!transport) return;
 						try {

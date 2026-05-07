@@ -7,6 +7,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CollapseAggregate, EventId, FlagAggregate, FlagCategory, Member, Message, ReactionAggregate, Room, UserId } from "@koven/shared";
 import { cn } from "@/lib/utils";
+import { COLLAPSED_NAME } from "@/lib/collapsedRooms";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
@@ -77,6 +78,17 @@ export interface ChatPaneProps {
 	isSuspended: boolean;
 	// Open the per-room public mod log dialog.
 	onOpenModLog(roomId: EventId): void;
+	// Submit a room-target flag (the offensive-room-name pipeline) —
+	// rendered as a Flag icon right of the mod log icon in the header.
+	// Optional: when omitted (DMs, encrypted rooms, etc.) the icon is
+	// hidden.  Throws on engine-side rejection so the dialog can show
+	// the error inline.
+	onFlagRoom?(roomId: EventId, category: FlagCategory, rationale?: string): void | Promise<void>;
+	// Display-name override.  When this set contains the active room
+	// id, the header renders "Name Removed by Community Review" in
+	// place of the room name.  Same set the SPA-wide RoomList +
+	// SpaceLanding consume.
+	collapsedRoomIds?: Set<string>;
 	// mxids that should render with a BOT badge next to their name
 	// (sender labels, reply-quote labels).  Default empty Set means
 	// no badges — safe pre-fetch state.
@@ -101,7 +113,7 @@ const GROUP_WINDOW_MS = 5 * 60 * 1000;
 export function ChatPane({
 	room, messages, memberAvatars, reactionsByMessage, flagsByMessage, collapsesByMessage,
 	onSendMessage, onSendAttachment, onReact, onUnreact, onFlag, onUnflag, onAcceptInvite, onDeclineInvite, onInvite, onEditRoom,
-	onPlaceCall, callInProgress, isSuspended, onOpenModLog,
+	onPlaceCall, callInProgress, isSuspended, onOpenModLog, onFlagRoom, collapsedRoomIds,
 	botMxids,
 	members,
 	viewerServer,
@@ -120,6 +132,7 @@ export function ChatPane({
 	// Hiding the affordance everywhere it can't bite avoids misleading
 	// users into thinking they took action.
 	const flaggable = !!room && room.kind !== "dm" && !room.isFederated && !room.encrypted;
+	const [roomFlagOpen, setRoomFlagOpen] = useState(false);
 	const [draft, setDraft] = useState("");
 	const [replyTarget, setReplyTarget] = useState<Message | null>(null);
 	// Pending attachment: the user picked a file but hasn't hit send yet.
@@ -304,12 +317,23 @@ export function ChatPane({
 					/>
 					<div className="flex flex-col min-w-0">
 						<span className="text-sm font-semibold truncate flex items-center gap-1.5">
-							<span className="truncate">{room.name}</span>
+							<span className={cn(
+								"truncate",
+								// Italicise the placeholder so it visually
+								// reads as system-imposed, not as a user-
+								// chosen room name.
+								collapsedRoomIds?.has(room.id) && "italic text-muted-foreground",
+							)}>
+								{collapsedRoomIds?.has(room.id) ? COLLAPSED_NAME : room.name}
+							</span>
 							{room.kind === "dm" && room.dmUserId && botMxids?.has(room.dmUserId) && (
 								<BotBadge />
 							)}
 						</span>
-						{room.topic && (
+						{/* Topic stays hidden when the room is collapsed —
+						    the topic field can carry the same kind of
+						    abuse the name does, so we suppress both. */}
+						{room.topic && !collapsedRoomIds?.has(room.id) && (
 							<span className="text-xs text-muted-foreground truncate max-w-[60ch]">{room.topic}</span>
 						)}
 					</div>
@@ -393,6 +417,26 @@ export function ChatPane({
 							aria-label="Public mod log"
 						>
 							<Scale className="h-4 w-4" />
+						</button>
+					)}
+					{onFlagRoom && room.kind !== "dm" && !room.isInvite && !room.encrypted && (
+						// Flag the room itself (its name + topic), not a
+						// single message inside it.  Same gating as the
+						// mod log icon — hidden in DMs and encrypted
+						// rooms where the consensus pipeline can't act.
+						// Already-collapsed rooms still show the flag
+						// affordance: users may want to pile on with a
+						// floor flag (turning a community-vote collapse
+						// into a creator suspension) and the engine
+						// dedupes our own flag idempotently.
+						<button
+							type="button"
+							onClick={() => setRoomFlagOpen(true)}
+							className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+							title="Flag this room"
+							aria-label="Flag this room"
+						>
+							<Flag className="h-4 w-4" />
 						</button>
 					)}
 					{room.kind !== "dm" && !room.isInvite && (room.myPowerLevel ?? 0) >= 50 && (
@@ -616,6 +660,21 @@ export function ChatPane({
 					</Button>
 				</form>
 			</div>
+			)}
+
+			{/* Flag-this-room dialog.  Opens from the Flag icon in the
+			    header (right of the mod log Scale icon).  Same shared
+			    FlagDialog as the per-message version with target="room"
+			    so the copy is room-specific. */}
+			{onFlagRoom && (
+				<FlagDialog
+					open={roomFlagOpen}
+					onOpenChange={setRoomFlagOpen}
+					target="room"
+					onSubmit={async (category, rationale) => {
+						await onFlagRoom(room.id as EventId, category, rationale);
+					}}
+				/>
 			)}
 		</div>
 	);

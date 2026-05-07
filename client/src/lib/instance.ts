@@ -210,6 +210,71 @@ export async function fetchRoomModLog(roomId: string): Promise<ModLogEntry[]> {
 	return body.entries ?? [];
 }
 
+// ─── Room-target flagging (offensive room name pipeline) ─────────────
+
+export interface CollapsedRoom {
+	room_id: string;
+	collapsed_at: number;
+	categories: string[];
+	fast_track: boolean;
+}
+
+/** Public list of currently-collapsed rooms.  Polled by the SPA on
+ * Explore + room-list refresh: the Explore directory hides any room
+ * in this list, and any place we render a room name (sidebar, chat
+ * header, member sheets) substitutes "Name Removed by Community
+ * Review" when the room id matches.  No auth — the override is only
+ * meaningful if every client honours it. */
+export async function fetchCollapsedRooms(): Promise<CollapsedRoom[]> {
+	const r = await fetch(`${ENGINE_URL}/api/rooms/collapsed`);
+	if (!r.ok) return [];
+	const body = (await r.json()) as { rooms?: CollapsedRoom[] };
+	return body.rooms ?? [];
+}
+
+/** Submit a flag against a room as a whole.  Same category set as
+ * message flags; floor_violation fast-tracks via the engine and opens
+ * a suspension on the room's creator pending admin review. */
+export async function flagRoom(
+	accessToken: string,
+	roomId: string,
+	category: string,
+	rationale?: string,
+): Promise<{ ok: boolean; error?: string }> {
+	const r = await fetch(`${ENGINE_URL}/api/rooms/${encodeURIComponent(roomId)}/flag`, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${accessToken}`,
+		},
+		body: JSON.stringify({ category, rationale }),
+	});
+	if (!r.ok) {
+		const body = await r.json().catch(() => ({})) as { error?: string };
+		return { ok: false, error: body.error ?? `HTTP ${r.status}` };
+	}
+	return { ok: true };
+}
+
+/** Retract the caller's own active flag on a room.  No-op (404) if
+ * they had no active flag.  Symmetrical with the message-flag retract
+ * path that fires when the user redacts their chat.koven.flag.v1
+ * event. */
+export async function unflagRoom(
+	accessToken: string,
+	roomId: string,
+): Promise<{ ok: boolean; error?: string }> {
+	const r = await fetch(`${ENGINE_URL}/api/rooms/${encodeURIComponent(roomId)}/flag`, {
+		method: "DELETE",
+		headers: { Authorization: `Bearer ${accessToken}` },
+	});
+	if (!r.ok) {
+		const body = await r.json().catch(() => ({})) as { error?: string };
+		return { ok: false, error: body.error ?? `HTTP ${r.status}` };
+	}
+	return { ok: true };
+}
+
 export async function updateInstanceConfig(
 	accessToken: string,
 	patch: Partial<Record<keyof InstanceConfig, string | null>>,
