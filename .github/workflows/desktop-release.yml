@@ -141,6 +141,37 @@ jobs:
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
 
+      # Push the bundled artifacts to the workflow run as a workflow
+      # artifact too, so non-tag runs (every push to main, every
+      # workflow_dispatch) produce downloadable installers without
+      # having to cut a `desktop-v*` tag first.  Tag runs ALSO get
+      # this in addition to the GitHub Release upload tauri-action
+      # already performs — belt and suspenders, both surfaces stay
+      # populated and you can grab a build from either place.
+      #
+      # Path globs cover every bundler output Tauri 2 emits; non-
+      # matching globs are silently skipped on each platform (e.g.
+      # macOS won't find `nsis/`, Windows won't find `appimage/`).
+      # if-no-files-found: warn so a partial-bundle config change
+      # doesn't fail the whole job.
+      - name: Upload bundle to workflow artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: koven-desktop-${{ matrix.display }}
+          path: |
+            apps/desktop/src-tauri/target/**/release/bundle/macos/*.app.tar.gz
+            apps/desktop/src-tauri/target/**/release/bundle/macos/*.app.tar.gz.sig
+            apps/desktop/src-tauri/target/**/release/bundle/dmg/*.dmg
+            apps/desktop/src-tauri/target/**/release/bundle/appimage/*.AppImage
+            apps/desktop/src-tauri/target/**/release/bundle/appimage/*.AppImage.sig
+            apps/desktop/src-tauri/target/**/release/bundle/deb/*.deb
+            apps/desktop/src-tauri/target/**/release/bundle/nsis/*.exe
+            apps/desktop/src-tauri/target/**/release/bundle/nsis/*.exe.sig
+            apps/desktop/src-tauri/target/**/release/bundle/msi/*.msi
+          if-no-files-found: warn
+          retention-days: 14
+
   publish:
     # Only run on tag pushes — branch / dispatch builds stay as draft
     # artifacts.  Depends on every matrix job so the release exists
