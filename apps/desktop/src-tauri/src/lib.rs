@@ -307,7 +307,44 @@ pub fn run() {
 			// avatar isn't overlapped by the traffic lights because
 			// the OS reserves space for the title bar itself.
 
-			let _win = builder.build()?;
+			let win = builder.build()?;
+
+			// Embed the icon at compile time and apply it to the window
+			// at runtime.  Lifted from iris-linux's main.rs (a known-
+			// working AppImage / WinExe reference) — without this:
+			//
+			//   * Linux AppImage launches show a generic settings-cog
+			//     in the GNOME / KDE dock + taskbar, because the WM
+			//     can't find a matching .desktop entry when the
+			//     AppImage hasn't been integrated system-wide.  The
+			//     icon list in tauri.conf.json governs installed-app
+			//     bundle icons but doesn't reach the running window's
+			//     surface; the WM falls back to its default cog.
+			//   * Windows installs occasionally show the previous
+			//     version's icon in the taskbar / window title bar
+			//     because Windows caches icons keyed on the .exe path
+			//     and the cache doesn't always invalidate when a fresh
+			//     installer overwrites the binary in place.  set_icon
+			//     rewrites the running window's icon from PNG bytes the
+			//     cache never saw, side-stepping the staleness.
+			//
+			// macOS draws its window-chrome icon from the bundle's
+			// .icns automatically (and doesn't render window icons in
+			// the title bar at all), so this is a no-op there — but
+			// it's cheap and keeps the codepath uniform across OSes.
+			//
+			// `image-png` is enabled in Cargo.toml so the runtime PNG
+			// decoder is available; without that feature
+			// `Image::from_bytes` errors out and we'd silently fall
+			// back to the WM default.
+			let icon_bytes = include_bytes!("../icons/256x256.png");
+			if let Ok(image) = tauri::image::Image::from_bytes(icon_bytes) {
+				if let Err(err) = win.set_icon(image) {
+					log::warn!("set_icon failed: {err}");
+				}
+			} else {
+				log::warn!("set_icon: PNG decode failed (image-png feature missing?)");
+			}
 
 			// Kick off an update check after the window is up.
 			// Best-effort — failures (no network, no new release,
