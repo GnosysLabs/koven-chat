@@ -21,7 +21,7 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
-import { fetchFloorQueue, reviewFloorCase, type PendingSuspension } from "@/lib/instance";
+import { fetchFloorQueue, reviewFloorCase, type FloorReviewAction, type PendingSuspension } from "@/lib/instance";
 import type { MatrixTransport } from "@/lib/matrix";
 import { ExternalLink, ShieldAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -58,7 +58,7 @@ export function FloorReviewSection({ accessToken, transport: _transport, onQueue
 		return () => { cancelled = true; };
 	}, [accessToken]);
 
-	async function act(id: number, action: "confirm" | "reverse") {
+	async function act(id: number, action: FloorReviewAction) {
 		setBusy(id);
 		setError(null);
 		setInfo(null);
@@ -79,10 +79,13 @@ export function FloorReviewSection({ accessToken, transport: _transport, onQueue
 			setInfo(r.deactivated
 				? "Account confirmed banned and deactivated on the homeserver."
 				: "Suspension confirmed locally, but Synapse deactivate failed — check engine logs.");
-		} else {
+		} else if (action === "reverse") {
 			setInfo(r.autoSuspendedFlagger
-				? "Suspension reversed. The flagger has crossed the false-flag threshold and is now auto-suspended pending review."
-				: "Suspension reversed; the user has been restored.");
+				? "Marked as a false report. The flagger has crossed the false-flag threshold and is now auto-suspended pending review."
+				: "Marked as a false report. The reported user has been restored; the flagger is penalized.");
+		} else {
+			// dismiss
+			setInfo("Dismissed in good faith. The reported user is restored; no penalty for the flagger.");
 		}
 		await refresh();
 		onQueueChanged?.();
@@ -96,7 +99,7 @@ export function FloorReviewSection({ accessToken, transport: _transport, onQueue
 		<section className="space-y-4">
 			<div>
 				<p className="text-xs text-muted-foreground leading-snug">
-					Suspensions awaiting admin action. Confirming permanently deactivates the account on the homeserver. Reversing restores it and, if the originating flagger has too many reversed reports, auto-suspends them in turn.
+					Suspensions awaiting admin action. <strong className="text-foreground">Confirm</strong> permanently deactivates the reported account. <strong className="text-foreground">Dismiss</strong> restores the account with no penalty for either side — use when the report was a good-faith mistake. <strong className="text-foreground">Mark as false report</strong> restores the account and penalizes the flagger; if they cross the false-flag threshold (2 in 30 days, 3 ever) they're auto-suspended pending review. The mod log records which action you chose.
 				</p>
 			</div>
 
@@ -125,6 +128,7 @@ export function FloorReviewSection({ accessToken, transport: _transport, onQueue
 							note={notes[c.id] ?? ""}
 							onNoteChange={(v) => setNotes(prev => ({ ...prev, [c.id]: v }))}
 							onConfirm={() => act(c.id, "confirm")}
+							onDismiss={() => act(c.id, "dismiss")}
 							onReverse={() => act(c.id, "reverse")}
 						/>
 					))}
@@ -135,13 +139,14 @@ export function FloorReviewSection({ accessToken, transport: _transport, onQueue
 }
 
 function CaseCard({
-	c, busy, note, onNoteChange, onConfirm, onReverse,
+	c, busy, note, onNoteChange, onConfirm, onDismiss, onReverse,
 }: {
 	c: PendingSuspension;
 	busy: boolean;
 	note: string;
 	onNoteChange(v: string): void;
 	onConfirm(): void;
+	onDismiss(): void;
 	onReverse(): void;
 }) {
 	const isFloor = c.reason === "floor_violation";
@@ -210,15 +215,27 @@ function CaseCard({
 					disabled={busy}
 					className="flex h-8 w-full rounded-md border border-input bg-transparent px-3 py-1 text-xs shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
 				/>
-				<div className="flex gap-2 justify-end">
+				<div className="flex gap-2 justify-end flex-wrap">
+					<Button
+						type="button"
+						variant="outline"
+						size="sm"
+						onClick={onDismiss}
+						disabled={busy}
+						title="Lift the suspension. Use when the report was a good-faith mistake — flagger is not penalized."
+					>
+						Dismiss
+					</Button>
 					<Button
 						type="button"
 						variant="outline"
 						size="sm"
 						onClick={onReverse}
 						disabled={busy}
+						title="Lift the suspension AND penalize the flagger. Use when the report appears malicious or weaponized."
+						className="border-amber-500/50 text-amber-500 hover:bg-amber-500/10 hover:text-amber-500"
 					>
-						Reverse
+						Mark as false report
 					</Button>
 					<Button
 						type="button"

@@ -168,17 +168,24 @@ function Entry({ e }: { e: ModLogEntry }) {
 	// suspension
 	const statusColor =
 		e.status === "confirmed" ? "text-destructive"
-		: e.status === "reversed"  ? "text-muted-foreground line-through"
+		: e.status === "reversed"  ? "text-amber-500 line-through"
+		: e.status === "dismissed" ? "text-muted-foreground line-through"
 		: "text-amber-500";
-	const reasonLabel = e.reason === "floor_violation"
-		? "Floor-violation suspension"
+	const statusLabel =
+		e.status === "confirmed" ? "confirmed (account banned)"
+		: e.status === "reversed"  ? "reversed (false report — flagger penalized)"
+		: e.status === "dismissed" ? "dismissed in good faith (no penalty)"
+		: e.status; // pending
+	const reasonLabel =
+		e.reason === "floor_violation" ? "Floor-violation suspension"
+		: e.reason === "repeated_room_collapses" ? "Repeated-room-collapses suspension"
 		: "Repeat-false-flagger suspension";
 	return (
 		<li className="flex items-start gap-3 px-3 py-2 rounded border border-destructive/30 bg-destructive/5">
 			<ShieldAlert className="h-4 w-4 shrink-0 mt-0.5 text-destructive" />
 			<div className="flex-1 min-w-0 text-xs leading-snug">
 				<div className="font-medium">{reasonLabel}</div>
-				<div className={cn("mt-0.5", statusColor)}>Status: {e.status}</div>
+				<div className={cn("mt-0.5", statusColor)}>Status: {statusLabel}</div>
 				<div className="flex items-center gap-1 mt-0.5">
 					<span className="text-muted-foreground">Suspended:</span>
 					<UserInline userId={e.user_id} />

@@ -163,7 +163,7 @@ db.exec(`
 		target_event_id TEXT,                      -- the message that was floor-flagged
 		target_room_id  TEXT,                      -- where it happened
 		flagger         TEXT,                      -- who reported it (NULL when reason = 'repeated_false_floor_flags')
-		status          TEXT NOT NULL,             -- 'pending' | 'confirmed' | 'reversed'
+		status          TEXT NOT NULL,             -- 'pending' | 'confirmed' | 'reversed' | 'dismissed'
 		created_at      INTEGER NOT NULL,
 		reviewed_at     INTEGER,                   -- admin action timestamp
 		reviewed_by     TEXT,                      -- admin user id who took the action
@@ -883,7 +883,7 @@ export function deleteBio(userId: string): void {
 
 // ─── Suspensions ────────────────────────────────────────────────────
 
-export type SuspensionStatus = "pending" | "confirmed" | "reversed";
+export type SuspensionStatus = "pending" | "confirmed" | "reversed" | "dismissed";
 export type SuspensionReason =
 	| "floor_violation"
 	| "repeated_false_floor_flags"

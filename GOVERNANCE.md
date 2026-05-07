@@ -48,7 +48,7 @@ Activity drives the raw weight up; the age gate is a hard cap that keeps a fresh
 - The first jump (0.5 to 1.0) requires both 24 hours of age **and** at least three posts. Posts age out of the rolling 30-day window if the user goes silent, so reputation requires sustained presence rather than a one-time burst.
 - Reactions received are part of the multiplicative formula but aren't a hard prereq.
 - The cap at 5.0 prevents anyone, even decade-old accounts, from accumulating unbounded power.
-- A user whose floor-violation flag is reversed by an admin gets clamped to the 0.5 floor for 30 days regardless of activity. Two reversed false floor flags in 30 days, or three ever, also auto-suspend the flagger pending admin review.
+- A user whose floor-violation flag is **marked as a false report** by an admin (not merely dismissed) gets clamped to the 0.5 floor for 30 days regardless of activity. Two such marks in 30 days, or three ever, also auto-suspend the flagger pending admin review. Cases an admin chooses to **dismiss** (a good-faith mistake) carry no reputation penalty.
 
 ## Flagging
 
@@ -111,9 +111,12 @@ When a user submits a flag with category `floor_violation`, the engine takes fou
 1. **Immediate non-revealable collapse.** The flagged message is rendered as a static "Hidden, flagged as a serious violation" banner. Unlike ordinary collapses, there is no expand affordance.
 2. **Suspension of the message author.** The author is placed in `pending_review` state. Client-side, this disables compose, DM creation, and room/space creation. They can still read. (Server-side enforcement, in the form of Synapse account deactivation, only applies on admin confirmation, see step 4.)
 3. **Public log entry.** The flag, the collapse, and the suspension all show up in the room's public mod log with the flagger's user id attached.
-4. **Admin review.** The case lands in the pending-review queue (Settings → Pending review). An admin picks one of two outcomes:
+4. **Admin review.** The case lands in the pending-review queue (Settings → Pending review). An admin picks one of three outcomes:
    - **Confirm**: the engine calls Synapse's `/_synapse/admin/v1/deactivate/<user_id>`. The account is permanently deactivated server-side; the user can't authenticate from any Matrix client afterward. The suspension row transitions from `pending` to `confirmed`.
-   - **Reverse**: the suspension lifts and the wrongly-accused user can post again. The originating flagger is then penalized (see "False-flag punishment" below).
+   - **Dismiss**: the suspension lifts and the reported user can post again. **No penalty for the flagger.** Use this when the flag was a good-faith mistake — the flagger genuinely believed the content crossed the floor-violation line, but the admin disagrees, and there's no sign of weaponizing. The suspension row transitions to `dismissed`.
+   - **Mark as false report**: the suspension lifts AND the originating flagger is penalized (weight clamp + auto-suspension threshold tick — see "False-flag punishment" below). Use this when the report appears malicious or weaponized. The suspension row transitions to `reversed`.
+
+   The admin's choice is recorded in the public mod log so the community can see who's distinguishing malicious from good-faith reports. An admin who always dismisses to avoid drama is publicly visible; so is an admin who marks every reversed case as malicious.
 
 There is no automatic CSAM/threat/doxx classifier today. Detection is user-initiated via the Floor violation flag category. Operators who want hash-based or model-based pre-screening would need to build that as a separate Synapse module or appservice and have it issue floor-violation flags on the engine bot's behalf.
 
@@ -185,19 +188,23 @@ Deletion is irreversible. The username is gone, the message contents are scrubbe
 
 ## False-flag punishment
 
-When an admin reverses a `floor_violation` suspension, the original flagger is penalized in two ways:
+The penalty pipeline only fires when an admin chooses **Mark as false report** on a `floor_violation` suspension — that is, when the admin actively judges the flag as malicious or weaponized rather than a good-faith mistake. **Dismissed** cases (where the admin decided the report was wrong but in good faith) carry no penalty and are explicitly excluded from the threshold counters below.
+
+When the flag IS marked as a false report, the originating flagger is penalized in two ways:
 
 1. **Weight clamp**: their reputation weight is forced to the 0.5 floor for the next 30 days, regardless of their activity history. Their flags during this window count for half a baseline user.
-2. **Auto-suspension threshold**: the engine counts the flagger's previous reversed floor flags. If they now have **two reversed flags within 30 days** or **three reversed flags ever**, the engine creates a fresh suspension on the flagger's own account with reason `repeated_false_floor_flags`. They appear in the same admin queue as floor-violation cases. Admin reviews and either confirms (deactivates them) or reverses (clears the auto-suspension).
+2. **Auto-suspension threshold**: the engine counts the flagger's previous reversed floor flags (status = `reversed` only — `dismissed` rows don't count). If they now have **two reversed flags within 30 days** or **three reversed flags ever**, the engine creates a fresh suspension on the flagger's own account with reason `repeated_false_floor_flags`. They appear in the same admin queue as floor-violation cases. Admin reviews and either confirms (deactivates them), dismisses (clears the auto-suspension, no penalty), or reverses (clears the auto-suspension AND penalizes — though there's no further "second-order flagger" since the engine itself originates these cases with no flagger field).
 
-The first reversed false flag is a one-strike warning that costs the flagger reputation. The second triggers admin scrutiny of the pattern. The third forces it.
+The first reversed false flag is a one-strike warning that costs the flagger reputation. The second triggers admin scrutiny of the pattern. The third forces it. Each step is gated on the admin's explicit "this was malicious" judgment — the system does not penalize honest mistakes.
+
+This three-way distinction (confirm / dismiss / mark-as-false) is meant to keep two pressures balanced. If every reversed flag carried a penalty, users would stop flagging marginal cases — the cost of being wrong would chill legitimate reporting. If reversed flags carried no penalty at all, users could weaponize floor-violation flags indiscriminately. The dismiss path lets admins say "you were wrong, but you were trying" without nuking the flagger's reputation.
 
 ## What admins can and cannot do
 
 A Koven instance has admins. The first user the engine sees on a fresh install is auto-promoted to admin via the bootstrap mechanism in `engine/src/admins.ts`. Subsequent admin appointments would have to be done by hand in the engine database; there is no admin-management UI today.
 
 Admins can:
-- Review pending floor-violation cases (message- and room-targeted, plus the engine-generated `repeated_false_floor_flags` and `repeated_room_collapses` cases) and confirm or reverse them
+- Review pending floor-violation cases (message- and room-targeted, plus the engine-generated `repeated_false_floor_flags` and `repeated_room_collapses` cases) and choose one of three outcomes: **confirm** (deactivate the reported account), **dismiss** (lift the suspension, no penalty for the flagger), or **mark as false report** (lift the suspension AND penalize the flagger). The choice is logged.
 - Set instance branding via Settings → Instance (server name, login tagline, login background, instance logo, default space for new signups)
 
 Admins explicitly **cannot**:

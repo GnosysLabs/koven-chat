@@ -1189,14 +1189,27 @@ export function startServer(): void {
 			}
 
 			// POST /api/admin/floor-queue/:id/confirm
-			//      /api/admin/floor-queue/:id/reverse
+			//      /api/admin/floor-queue/:id/reverse   — lift + penalize flagger
+			//      /api/admin/floor-queue/:id/dismiss   — lift, no flagger penalty
+			//
+			// `reverse` and `dismiss` both lift the target user's
+			// suspension and undo any room-target collapse the
+			// original flag installed.  The difference is what they
+			// say about the flagger:
+			//   - reverse: "this was a false report, count it against
+			//              the flagger's auto-suspend threshold and
+			//              clamp their reputation."
+			//   - dismiss: "this report was a good-faith mistake, but
+			//              the admin disagreed.  No penalty."
+			// The mod log records WHICH action the admin chose so
+			// users can see who's distinguishing the cases.
 			{
-				const m = path.match(/^\/api\/admin\/floor-queue\/(\d+)\/(confirm|reverse)$/);
+				const m = path.match(/^\/api\/admin\/floor-queue\/(\d+)\/(confirm|reverse|dismiss)$/);
 				if (req.method === "POST" && m) {
 					const auth = await requireAdmin(req);
 					if (auth instanceof Response) return auth;
 					const id = Number(m[1]);
-					const action = m[2] as "confirm" | "reverse";
+					const action = m[2] as "confirm" | "reverse" | "dismiss";
 					const susp = getSuspensionById(id);
 					if (!susp) return json({ errcode: "M_NOT_FOUND" }, { status: 404 });
 					if (susp.status !== "pending") {
@@ -1217,10 +1230,12 @@ export function startServer(): void {
 						return json({ id, status: "confirmed", deactivated: ok });
 					}
 
-					// Reverse: lift the suspension on the wrongly-accused
-					// user, then check whether the flagger has now
-					// crossed the false-flag auto-suspension threshold.
-					updateSuspensionStatus(id, "reversed", auth.userId, note);
+					// Both reverse and dismiss lift the target user's
+					// suspension.  Status differs so the false-flag
+					// counter (which only counts `status='reversed'`
+					// rows) cleanly excludes good-faith dismissals.
+					const newStatus = action === "reverse" ? "reversed" : "dismissed";
+					updateSuspensionStatus(id, newStatus, auth.userId, note);
 
 					// Room-target floor cases (`target_room_id` set,
 					// `target_event_id` null) also installed a room
@@ -1231,6 +1246,9 @@ export function startServer(): void {
 					// the collapse decision is reversed.  The Layer 4
 					// directory hide is undone in lockstep so the
 					// room is rediscoverable via federation again.
+					// Same restore behaviour for both reverse and
+					// dismiss — the only difference between them is
+					// the flagger penalty, not the target restoration.
 					let restoredRoom: string | null = null;
 					if (
 						susp.reason === "floor_violation" &&
@@ -1247,9 +1265,22 @@ export function startServer(): void {
 						}
 					}
 
-					// Skip the false-flag cascade for repeated_false_flag
-					// suspensions (the flagger field is null there) and
-					// for suspensions where we never recorded a flagger.
+					// Dismiss path stops here — no flagger penalty,
+					// no auto-suspension cascade.  The admin signaled
+					// this was a good-faith report that turned out to
+					// be wrong, and we trust that judgment.
+					if (action === "dismiss") {
+						return json({
+							id,
+							status: "dismissed",
+							restored_room: restoredRoom,
+						});
+					}
+
+					// Reverse-only from here down: false-flag cascade.
+					// Skip for repeated_false_flag suspensions (the
+					// flagger field is null there) and for any
+					// suspension where we never recorded a flagger.
 					if (susp.reason !== "floor_violation" || !susp.flagger) {
 						return json({
 							id,

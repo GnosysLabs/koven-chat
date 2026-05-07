@@ -80,7 +80,7 @@ export type SuspensionReason =
 	| "floor_violation"
 	| "repeated_false_floor_flags"
 	| "repeated_room_collapses";
-export type SuspensionStatus = "pending" | "confirmed" | "reversed";
+export type SuspensionStatus = "pending" | "confirmed" | "reversed" | "dismissed";
 
 export interface SuspensionSummary {
 	id: number;
@@ -132,10 +132,24 @@ export async function fetchFloorQueue(accessToken: string): Promise<PendingSuspe
 	return body.pending ?? [];
 }
 
+/** Three review actions:
+ *   - confirm: deactivate the reported user, no flagger penalty
+ *   - reverse: lift the reported user's suspension AND penalize the
+ *              flagger (weight clamp + auto-suspend threshold tick).
+ *              Use when the report looks malicious / weaponized.
+ *   - dismiss: lift the reported user's suspension, NO flagger
+ *              penalty.  Use when the report was a good-faith
+ *              mistake — flagger thought it was a violation but
+ *              admin disagrees, and there's no malicious intent.
+ *
+ * The mod log records which action was chosen so users can see how
+ * admins are distinguishing between malicious and good-faith cases. */
+export type FloorReviewAction = "confirm" | "reverse" | "dismiss";
+
 export async function reviewFloorCase(
 	accessToken: string,
 	id: number,
-	action: "confirm" | "reverse",
+	action: FloorReviewAction,
 	note?: string,
 ): Promise<{ ok: boolean; autoSuspendedFlagger?: boolean; deactivated?: boolean; error?: string }> {
 	const r = await fetch(`${ENGINE_URL}/api/admin/floor-queue/${id}/${action}`, {
