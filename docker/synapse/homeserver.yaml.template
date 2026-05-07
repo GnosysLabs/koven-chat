@@ -89,6 +89,17 @@ modules:
     config:
       always_allow: []
       always_deny: []
+  # Rate-limit + reputation-gate the publish-room-to-directory action
+  # by delegating to the engine over HTTP.  The engine consults the
+  # user's reputation weight + how many rooms they've already
+  # published in the last 24h and either allows or denies; the module
+  # fails open on engine errors so a flaky engine doesn't lock all
+  # directory publishes.  Auth is the appservice as_token, the same
+  # secret already shared via the appservice yaml.
+  - module: koven_room_gate.KovenRoomGate
+    config:
+      engine_url: "http://engine:9000"
+      auth_token: "${ENGINE_AS_TOKEN}"
 
 # --- TURN / VoIP -----------------------------------------------------
 # coturn runs alongside Synapse in the compose stack.  Synapse hands

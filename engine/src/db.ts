@@ -100,6 +100,24 @@ db.exec(`
 		joined_at INTEGER NOT NULL
 	);
 
+	-- Per-room creation log.  Populated reactively when the engine
+	-- observes m.room.create events on the appservice transaction
+	-- stream — that's after the room exists, but the spam-checker
+	-- hook in Synapse calls back to the engine BEFORE the create
+	-- proceeds, and reads from this table to enforce rate limits.
+	-- (The spam-checker can't insert here because the room id isn't
+	-- known until Synapse mints it; reactive insertion via the
+	-- appservice stream is good enough — the spam-checker's count
+	-- includes everything from before the current attempt.)
+	CREATE TABLE IF NOT EXISTS room_creations (
+		room_id    TEXT PRIMARY KEY,
+		creator_id TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		visibility TEXT NOT NULL DEFAULT 'unknown'  -- 'public' | 'private' | 'unknown'
+	);
+	CREATE INDEX IF NOT EXISTS idx_room_creations_creator_ts
+		ON room_creations(creator_id, created_at);
+
 	-- Instance admins.  First user the engine sees gets auto-promoted
 	-- on bootstrap (see admins.ts).  Subsequent admins must be
 	-- granted by an existing admin via the API.
@@ -724,6 +742,46 @@ const deleteRoomCollapseStmt = db.prepare(`
 export function deleteRoomCollapse(roomId: string): boolean {
 	const r = deleteRoomCollapseStmt.run(roomId);
 	return r.changes > 0;
+}
+
+// ─── Room creations (rate-limit + reputation gate) ──────────────────
+
+const recordRoomCreationStmt = db.prepare(`
+	INSERT OR IGNORE INTO room_creations (room_id, creator_id, created_at, visibility)
+	VALUES (?, ?, ?, ?)
+`);
+const countRoomCreationsByUserStmt = db.prepare(`
+	SELECT COUNT(*) AS n FROM room_creations
+	WHERE creator_id = ? AND created_at >= ?
+`);
+
+/** Record a room creation.  Called from aggregate.ts when the engine
+ * observes an m.room.create event on the appservice transaction
+ * stream — fires once per room since INSERT OR IGNORE drops repeats.
+ * `visibility` is best-effort from the create event content; defaults
+ * to 'unknown' when not in scope.  Used by the rate-limit gate below. */
+export function recordRoomCreation(opts: {
+	room_id: string;
+	creator_id: string;
+	created_at: number;
+	visibility?: "public" | "private" | "unknown";
+}): void {
+	recordRoomCreationStmt.run(
+		opts.room_id,
+		opts.creator_id,
+		opts.created_at,
+		opts.visibility ?? "unknown",
+	);
+}
+
+/** How many rooms `creatorId` has created at or after `sinceTs`.  The
+ * spam-checker calls this each time a user attempts to create a room,
+ * with `sinceTs = now - 24h` (or whatever window the engine config
+ * dictates).  Returning a number plus the threshold lets the caller
+ * compute "how many more they can make today" for the error message. */
+export function countRoomCreationsByUser(creatorId: string, sinceTs: number): number {
+	const row = countRoomCreationsByUserStmt.get(creatorId, sinceTs) as { n: number } | undefined;
+	return row?.n ?? 0;
 }
 
 // ─── Joined rooms (engine bot membership cache) ──────────────────────

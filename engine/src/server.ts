@@ -31,6 +31,7 @@ import {
 	collapsesForRoom,
 	countBotsByOwner,
 	countFalseFlagsByUser,
+	countRoomCreationsByUser,
 	createBot,
 	createSuspension,
 	deleteBio,
@@ -584,6 +585,83 @@ export function startServer(): void {
 				bootstrapEmailBinding(email, userId);
 				grantAdmin(userId, null);
 				return json({ ok: true, user_id: userId, email });
+			}
+
+			// POST /api/internal/can-publish-room { user_id, room_id }
+			//
+			// Called by the koven-room-gate Synapse module on the
+			// `user_may_publish_room` spam-checker hook BEFORE Synapse
+			// adds the room to the public-rooms directory.  Returns:
+			//
+			//   { allowed: true }                           — proceed
+			//   { allowed: false, reason: "rate_limited",    — deny
+			//     count, threshold, retry_after_sec }
+			//   { allowed: false, reason: "suspended" }     — deny
+			//   { allowed: false, reason: "low_reputation",  — deny
+			//     weight, threshold }
+			//
+			// Auth: the engine's appservice token (same secret already
+			// shared with Synapse via the appservice yaml).  Refused
+			// outright if the token doesn't match — this endpoint is
+			// not for end-user clients.
+			if (req.method === "POST" && path === "/api/internal/can-publish-room") {
+				const token = extractToken(req);
+				if (!token || token !== config.asToken) {
+					return json({ errcode: "M_FORBIDDEN", error: "use the appservice token" }, { status: 403 });
+				}
+				const body = (await req.json().catch(() => ({}))) as {
+					user_id?: string;
+					room_id?: string;
+				};
+				const userId = typeof body.user_id === "string" ? body.user_id : "";
+				if (!userId.startsWith("@") || !userId.includes(":")) {
+					return json({ errcode: "M_INVALID_PARAM", error: "user_id required" }, { status: 400 });
+				}
+				// Admins are always allowed to publish.  This also covers
+				// the engine's own bot user when the engine reverses a
+				// collapse via setRoomDirectoryVisibility — that call
+				// fires `user_may_publish_room` too.
+				if (isAdmin(userId)) {
+					return json({ allowed: true, reason: "admin" });
+				}
+				// Suspended accounts cannot publish anything new.  A
+				// confirmed-suspension user is essentially read-only on
+				// the platform; allowing them to elevate visibility on
+				// rooms they made before pausing would be incoherent.
+				if (getActiveSuspension(userId)) {
+					return json({ allowed: false, reason: "suspended" });
+				}
+
+				// Reputation-tiered rate limit per rolling 24h window.
+				// Default-weight users (1.0, what new accounts have
+				// before posting much) get the strictest cap; bumps to
+				// 3 then 10 as their reputation rises.  Offensive-name
+				// floods land entirely in the bottom tier so the cap
+				// at 1/24h here is the load-bearing rule.
+				const w = readWeight(userId);
+				const weight = w?.weight ?? 1.0;
+				const threshold =
+					weight >= 2.0 ? 10
+					: weight >= 1.5 ? 3
+					: 1;
+				const windowMs = 24 * 60 * 60 * 1000;
+				const sinceTs = Date.now() - windowMs;
+				const recentCount = countRoomCreationsByUser(userId, sinceTs);
+				if (recentCount >= threshold) {
+					return json({
+						allowed: false,
+						reason: "rate_limited",
+						count: recentCount,
+						threshold,
+						retry_after_sec: Math.ceil(windowMs / 1000),
+					});
+				}
+				return json({
+					allowed: true,
+					weight,
+					count: recentCount,
+					threshold,
+				});
 			}
 
 			// POST /api/auth/uia-password

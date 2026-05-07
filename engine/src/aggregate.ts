@@ -14,6 +14,7 @@ import {
 	insertReaction,
 	lookupPostUser,
 	markFlagRetracted,
+	recordRoomCreation,
 	updateSuspensionStatus,
 } from "./db";
 
@@ -52,7 +53,26 @@ export function applyEvent(ev: MatrixEvent): void {
 		case "m.room.redaction":
 			handleRedaction(ev);
 			return;
+		case "m.room.create":
+			handleRoomCreate(ev);
+			return;
 	}
+}
+
+function handleRoomCreate(ev: MatrixEvent): void {
+	// m.room.create is a state event with state_key="" and the creator
+	// is the sender.  We use this to populate the room_creations log
+	// the rate-limit gate consults — fires once per room, idempotent
+	// via INSERT OR IGNORE.  Visibility comes from the create event
+	// content's "preset" or via the room's directory listing later
+	// (we don't have it in scope here); default to 'unknown' and
+	// upstream callers can refine if needed.
+	if (ev.state_key === undefined) return;
+	recordRoomCreation({
+		room_id: ev.room_id,
+		creator_id: ev.sender,
+		created_at: ev.origin_server_ts,
+	});
 }
 
 function handleFlag(ev: MatrixEvent): void {
