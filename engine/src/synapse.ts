@@ -187,6 +187,82 @@ export async function adminCreateUser(opts: {
 }
 
 /**
+ * Admin-join a user to a room or space using Synapse's admin
+ * `POST /_synapse/admin/v1/join/<roomIdOrAlias>` endpoint.  Synapse
+ * mints an `m.room.member` join event with the target user's identity,
+ * effectively pulling them into the room without requiring them to
+ * issue the join themselves.
+ *
+ * Required permissions: the admin token must have permission to invite
+ * to the room — which on Synapse means either being a member of the
+ * room with PL ≥ invite, or the room being publicly joinable
+ * (`join_rule == "public"`).  Public rooms always work, so this is
+ * what we lean on for default-space auto-join.
+ *
+ * Idempotent in practice: if the user is already in the room Synapse
+ * returns 200 with a benign body.  Errors come back as `{ error }`
+ * with the HTTP status preserved so callers can branch.
+ */
+export async function adminJoinUserToRoom(
+	userId: string,
+	roomIdOrAlias: string,
+): Promise<{ ok: true } | { error: string; detail?: string }> {
+	const path = `/_synapse/admin/v1/join/${encodeURIComponent(roomIdOrAlias)}`;
+	const r = await adminFetch(path, {
+		method: "POST",
+		body: JSON.stringify({ user_id: userId }),
+	});
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		return { error: `synapse_${r.status}`, detail: txt.slice(0, 300) };
+	}
+	return { ok: true };
+}
+
+/**
+ * Read the active child room ids of a Matrix space.  Pulls the full
+ * state and filters m.space.child events to those that still have a
+ * non-empty `via` array — Matrix represents removed children with
+ * `content == {}`, so a missing `via` means the child was unset.
+ *
+ * Returns [] on any error so callers don't have to special-case
+ * "couldn't read state" against "no children."
+ */
+export async function getSpaceChildRoomIds(spaceId: string): Promise<string[]> {
+	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(spaceId)}/state`;
+	const r = await adminFetch(path);
+	if (!r.ok) return [];
+	const events = (await r.json().catch(() => null)) as
+		| Array<{ type?: string; state_key?: string; content?: { via?: unknown } }>
+		| null;
+	if (!Array.isArray(events)) return [];
+	const ids: string[] = [];
+	for (const ev of events) {
+		if (ev.type !== "m.space.child") continue;
+		if (typeof ev.state_key !== "string" || !ev.state_key) continue;
+		const via = ev.content?.via;
+		if (!Array.isArray(via) || via.length === 0) continue;
+		ids.push(ev.state_key);
+	}
+	return ids;
+}
+
+/**
+ * Read a room's m.room.join_rules state event.  Returns the
+ * `join_rule` string ("public", "invite", "knock", "restricted") or
+ * null on error / missing.  Used to skip private children when
+ * auto-joining users to a default space — no point in attempting an
+ * admin-join that Synapse will reject with M_FORBIDDEN.
+ */
+export async function getRoomJoinRule(roomId: string): Promise<string | null> {
+	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.join_rules/`;
+	const r = await adminFetch(path);
+	if (!r.ok) return null;
+	const body = (await r.json().catch(() => null)) as { join_rule?: string } | null;
+	return typeof body?.join_rule === "string" ? body.join_rule : null;
+}
+
+/**
  * Set (or replace) a user's email 3PID via the admin API.  Used by
  * the install-time admin bootstrap so the operator's email is bound
  * on Synapse's side too, not just in the engine's user_emails table.

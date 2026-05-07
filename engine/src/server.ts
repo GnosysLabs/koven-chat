@@ -69,9 +69,12 @@ import {
 import { evaluateCollapses } from "./collapse";
 import {
 	adminCreateUser,
+	adminJoinUserToRoom,
 	adminResetPassword,
 	adminSetUserEmail,
 	deactivateUser,
+	getRoomJoinRule,
+	getSpaceChildRoomIds,
 	loginAsUser,
 	setProfileAvatar,
 	uploadMedia,
@@ -92,6 +95,50 @@ const FALSE_FLAG_WINDOW_MS = 30 * DAY_MS;
 const FALSE_FLAG_TOTAL_THRESHOLD = 3;
 
 const seenTransactions = new Set<string>();
+
+/**
+ * Auto-join a brand-new user to the configured default space + every
+ * public/knock child room in it.  Best-effort: a failure on any
+ * individual room is logged and swallowed so a misconfigured admin
+ * can't break signup.  Awaited inline so the user's first /sync after
+ * sign-in includes these rooms — fire-and-forget would race against
+ * the SPA opening a sync.
+ *
+ * Sub-spaces are skipped: the user's onboarding lands them in chat
+ * rooms with content, not in a layered hierarchy of empty containers.
+ * Private children are skipped because Synapse's admin-join API can't
+ * pull a user into an invite-only room that the engine admin isn't a
+ * member of.
+ */
+async function autoJoinDefaultSpace(userId: string, spaceId: string): Promise<void> {
+	try {
+		const spaceJoin = await adminJoinUserToRoom(userId, spaceId);
+		if ("error" in spaceJoin) {
+			console.warn(
+				`engine: default-space join ${userId} → ${spaceId} failed: ${spaceJoin.error} ${spaceJoin.detail ?? ""}`,
+			);
+			return;
+		}
+
+		const childIds = await getSpaceChildRoomIds(spaceId);
+		await Promise.all(childIds.map(async childId => {
+			const rule = await getRoomJoinRule(childId);
+			// "public" auto-joinable; "knock" still needs membership but
+			// admin-join works because the admin can override.  Anything
+			// else (invite, restricted, private) we skip — admin-join
+			// would 403.
+			if (rule !== "public" && rule !== "knock") return;
+			const r = await adminJoinUserToRoom(userId, childId);
+			if ("error" in r) {
+				console.warn(
+					`engine: default-space child join ${userId} → ${childId} failed: ${r.error} ${r.detail ?? ""}`,
+				);
+			}
+		}));
+	} catch (err) {
+		console.warn(`engine: autoJoinDefaultSpace ${userId} → ${spaceId} threw`, err);
+	}
+}
 
 const UPLOADS_DIR = join(dirname(config.dbPath), "uploads");
 const STATIC_FILE_RE = /^[a-z0-9]+\.[a-z0-9]+$/i;
@@ -439,6 +486,18 @@ export function startServer(): void {
 					}
 					bindEmailToUser(email, candidateMxid);
 					userId = candidateMxid;
+
+					// Auto-join the new user to the instance's default
+					// space + its public child rooms (if an admin has
+					// configured one).  Best-effort: failures here are
+					// logged but never fail signup, so a stale or
+					// misconfigured default_space_id can't lock a user
+					// out of registering.  Awaited so the user's first
+					// /sync after this response already shows the rooms.
+					const defaultSpaceId = readInstanceConfig().default_space_id;
+					if (defaultSpaceId) {
+						await autoJoinDefaultSpace(candidateMxid, defaultSpaceId);
+					}
 				}
 
 				// Rotate the password to a fresh value, then log in
