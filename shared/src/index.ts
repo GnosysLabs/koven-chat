@@ -86,6 +86,13 @@ export interface Space {
 	myPowerLevel?: number;
 	// Sender of the original m.room.create event.  See Room.creatorId.
 	creatorId?: UserId;
+	// Room ids the space owner has chosen to pin.  Pins are a public
+	// affordance — visible to everyone in the space — set via the
+	// Koven-custom `chat.koven.pinned_rooms` state event on the space
+	// itself.  Order matters: rooms render at the top of the list in
+	// this order, with unpinned rooms sorted normally below them.
+	// Editing requires PL ≥ 50 in the space (state_default).
+	pinnedRoomIds: RoomId[];
 }
 
 export interface Member {

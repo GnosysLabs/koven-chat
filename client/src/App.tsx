@@ -512,6 +512,7 @@ export default function App() {
 				avatarUrl: undefined,
 				kind: "private" as const,
 				childRoomIds: [],
+				pinnedRoomIds: [],
 			};
 		}
 		if (state.activeSpace.kind === "rooms") {
@@ -522,6 +523,7 @@ export default function App() {
 				avatarUrl: undefined,
 				kind: "public" as const,
 				childRoomIds: [],
+				pinnedRoomIds: [],
 			};
 		}
 		const id = state.activeSpace.id;
@@ -708,6 +710,22 @@ export default function App() {
 						if (!transport) return;
 						try {
 							await transport.declineInvite(roomId);
+						} catch (e) {
+							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+						}
+					}}
+					onPinRoom={async (spaceId, roomId) => {
+						if (!transport) return;
+						try {
+							await transport.pinRoomInSpace(spaceId, roomId);
+						} catch (e) {
+							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+						}
+					}}
+					onUnpinRoom={async (spaceId, roomId) => {
+						if (!transport) return;
+						try {
+							await transport.unpinRoomInSpace(spaceId, roomId);
 						} catch (e) {
 							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
 						}

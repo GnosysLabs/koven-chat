@@ -7,7 +7,7 @@
 
 import { cn } from "@/lib/utils";
 import type { Room, RoomId, Space } from "@koven/shared";
-import { Check, EyeOff, Globe, Lock, Plus, User, X } from "lucide-react";
+import { Check, EyeOff, Globe, Lock, Pin, Plus, User, X } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import type { ActiveSpace } from "@/state/store";
 
@@ -20,19 +20,55 @@ export interface RoomListProps {
 	onCreateRoom(): void;
 	onAcceptInvite(roomId: RoomId): void | Promise<void>;
 	onDeclineInvite(roomId: RoomId): void | Promise<void>;
+	// Pin / unpin a room within a space.  Space-scoped: pins are
+	// visible to everyone in the space and require state-event
+	// permission to set.  Only meaningful when activeSpace is a real
+	// user-created space.  Receives the space id so the transport
+	// knows where to write the `chat.koven.pinned_rooms` event.
+	onPinRoom?(spaceId: string, roomId: RoomId): void | Promise<void>;
+	onUnpinRoom?(spaceId: string, roomId: RoomId): void | Promise<void>;
 }
+
+// PL gate for editing the space's `chat.koven.pinned_rooms` state
+// event.  Matches the rest of the UI (Settings sheet, Add Room) which
+// also use ≥ 50.  Koven's createSpace sets state_default to 100, so in
+// practice this still resolves to founder-only on Koven-created spaces;
+// the looser gate matters for spaces created outside our flow.
+const PIN_PL_THRESHOLD = 50;
 
 export function RoomList({
 	rooms, spaces, activeSpace, activeRoomId,
 	onSelectRoom, onCreateRoom, onAcceptInvite, onDeclineInvite,
+	onPinRoom, onUnpinRoom,
 }: RoomListProps) {
+	const activeSpaceObj = activeSpace?.kind === "space"
+		? spaces.find(s => s.id === activeSpace.id) ?? null
+		: null;
+	const pinnedRoomIds = activeSpaceObj?.pinnedRoomIds ?? [];
+	const pinnedRoomIdSet = new Set(pinnedRoomIds);
+	const canManagePins = !!activeSpaceObj && (activeSpaceObj.myPowerLevel ?? 0) >= PIN_PL_THRESHOLD;
+
 	const visibleRooms = filterRooms(rooms, activeSpace);
 	// Pending invites bubble to the top of the list as request rows
 	// with inline Accept/Decline buttons; "joined" rooms render as the
 	// usual clickable conversation rows below.
 	const inviteRooms = visibleRooms.filter(r => r.isInvite);
-	const joinedRooms = visibleRooms.filter(r => !r.isInvite);
+	const joinedRooms = sortWithPinnedFirst(
+		visibleRooms.filter(r => !r.isInvite),
+		pinnedRoomIds,
+	);
 	const header = headerFor(activeSpace, spaces);
+
+	const pinHandler = (roomId: RoomId) => {
+		if (!activeSpaceObj || !onPinRoom) return undefined;
+		const spaceId = activeSpaceObj.id;
+		return () => onPinRoom(spaceId, roomId);
+	};
+	const unpinHandler = (roomId: RoomId) => {
+		if (!activeSpaceObj || !onUnpinRoom) return undefined;
+		const spaceId = activeSpaceObj.id;
+		return () => onUnpinRoom(spaceId, roomId);
+	};
 
 	return (
 		<aside className="w-60 shrink-0 border-r border-border bg-card flex flex-col">
@@ -76,45 +112,41 @@ export function RoomList({
 						{emptyHintFor(activeSpace)}
 					</div>
 				) : (
-					joinedRooms.map(room => (
-						<button
-							key={room.id}
-							type="button"
-							onClick={() => onSelectRoom(room.id)}
-							className={cn(
-								"w-full flex items-center gap-2 px-2 py-1.5 rounded text-sm text-left hover:bg-accent transition-colors",
-								room.id === activeRoomId && "bg-accent text-accent-foreground"
-							)}
-						>
-							<RoomAvatar room={room} />
-							<span className="truncate flex-1">{room.name}</span>
-							{room.encrypted && (
-								<Lock
-									className="h-3.5 w-3.5 shrink-0 text-emerald-500/80"
-									aria-label="End-to-end encrypted"
-								/>
-							)}
-							{room.unreadCount > 0 && room.id !== activeRoomId && (
-								// Suppress the dot for the currently-open room.
-								// Synapse takes a beat to register our read
-								// receipt; during that window unreadCount is
-								// still > 0, but the user is literally looking
-								// at the conversation — flagging it as "you
-								// have unread here" is just noise.
-								<span
-									className={cn(
-										"shrink-0 h-2 w-2 rounded-full",
-										room.highlightCount > 0 ? "bg-destructive" : "bg-primary",
-									)}
-									aria-label={room.highlightCount > 0 ? "Mentions" : "Unread"}
-								/>
-							)}
-						</button>
-					))
+					joinedRooms.map(room => {
+						const isPinned = pinnedRoomIdSet.has(room.id);
+						return (
+							<RoomRow
+								key={room.id}
+								room={room}
+								active={room.id === activeRoomId}
+								pinned={isPinned}
+								onSelect={() => onSelectRoom(room.id)}
+								onPin={canManagePins && !isPinned ? pinHandler(room.id) : undefined}
+								onUnpin={canManagePins && isPinned ? unpinHandler(room.id) : undefined}
+							/>
+						);
+					})
 				)}
 			</nav>
 		</aside>
 	);
+}
+
+// Reorder a room list so any room whose id appears in `pinnedIds`
+// floats to the top, in the order the space owner set on the
+// `chat.koven.pinned_rooms` event.  Unpinned rooms keep the order
+// they came in with (last-active descending, applied upstream).
+function sortWithPinnedFirst(rooms: Room[], pinnedIds: string[]): Room[] {
+	if (pinnedIds.length === 0) return rooms;
+	const byId = new Map(rooms.map(r => [r.id, r]));
+	const pinned: Room[] = [];
+	for (const id of pinnedIds) {
+		const r = byId.get(id);
+		if (r) pinned.push(r);
+	}
+	const pinnedSet = new Set(pinned.map(r => r.id));
+	const rest = rooms.filter(r => !pinnedSet.has(r.id));
+	return [...pinned, ...rest];
 }
 
 function filterRooms(rooms: Room[], activeSpace: ActiveSpace): Room[] {
@@ -184,6 +216,111 @@ function AccessGlyph({ room, className }: { room: Room; className?: string }) {
 	if (room.kind === "dm") return <User className={className} aria-hidden />;
 	if (room.kind === "private") return <EyeOff className={className} aria-hidden />;
 	return <Globe className={className} aria-hidden />;
+}
+
+function RoomRow({
+	room, active, pinned, onSelect, onPin, onUnpin,
+}: {
+	room: Room;
+	active: boolean;
+	// Pin state is space-scoped, passed in from RoomList rather than
+	// read off the room — the same room can be pinned in one space
+	// and not in another (rooms can belong to multiple spaces).
+	pinned: boolean;
+	onSelect(): void;
+	// Either onPin or onUnpin is provided when the current user has
+	// permission to manage pins in the active space.  Both undefined
+	// means "no pin button at all" — the row is read-only.  The pinned
+	// indicator still shows on the avatar regardless of permission, so
+	// every member sees which rooms are pinned.
+	onPin?(): void;
+	onUnpin?(): void;
+}) {
+	// Pin affordance: button always visible (and clickable) when the
+	// room is pinned and the user can unpin; faded-in on row hover when
+	// the user can pin but the room isn't pinned yet.  When the user
+	// has no pin permission, the button is hidden entirely but a
+	// non-interactive solid pin indicator still renders on pinned rooms
+	// so every member can tell at a glance which rooms are pinned.
+	const canTogglePin = pinned ? !!onUnpin : !!onPin;
+	const handlePinClick = (e: React.MouseEvent) => {
+		e.stopPropagation();
+		if (pinned) onUnpin?.();
+		else onPin?.();
+	};
+	const hasUnread = room.unreadCount > 0 || room.highlightCount > 0;
+	// Reserve room on the right for the pin icon (always when pinned;
+	// also when the user can pin, since the slot needs to be there for
+	// the hover affordance).  Avoids overlap with the unread dot.
+	const reservePinSlot = pinned || canTogglePin;
+	return (
+		<div
+			className={cn(
+				"group relative rounded-md transition-colors",
+				active ? "bg-accent" : "hover:bg-accent/60",
+			)}
+		>
+			<button
+				type="button"
+				onClick={onSelect}
+				className={cn(
+					"w-full flex items-center gap-2 py-1.5 pl-2 text-sm text-left min-w-0",
+					reservePinSlot ? "pr-8" : "pr-2",
+					active ? "text-foreground" : "text-foreground/90",
+				)}
+				title={room.name}
+			>
+				<RoomAvatar room={room} />
+				<span className="flex-1 truncate flex items-center gap-1.5 min-w-0">
+					<span className={cn("truncate", hasUnread && "font-semibold")}>{room.name}</span>
+					{room.encrypted && (
+						<Lock className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
+					)}
+				</span>
+				{hasUnread && (
+					<span
+						className={cn(
+							"shrink-0 h-2 w-2 rounded-full",
+							room.highlightCount > 0 ? "bg-primary" : "bg-muted-foreground/60",
+						)}
+						aria-label={`${room.unreadCount} unread`}
+					/>
+				)}
+			</button>
+			{pinned && !canTogglePin && (
+				// Read-only pin marker for members who can't manage pins —
+				// just a visual indicator that this room was pinned by an
+				// admin so the elevated rooms still stand out for them.
+				<span
+					className="absolute right-1 top-1/2 -translate-y-1/2 p-1 text-primary pointer-events-none"
+					aria-label="Pinned"
+					title="Pinned by space admin"
+				>
+					<Pin className="h-3.5 w-3.5 fill-current" aria-hidden />
+				</span>
+			)}
+			{canTogglePin && (
+				<button
+					type="button"
+					onClick={handlePinClick}
+					aria-label={pinned ? "Unpin room" : "Pin room"}
+					title={pinned ? "Unpin from top" : "Pin to top"}
+					className={cn(
+						"absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded transition-opacity",
+						"hover:bg-background/80",
+						pinned
+							? "opacity-100 text-primary"
+							: "opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground",
+					)}
+				>
+					<Pin
+						className={cn("h-3.5 w-3.5", pinned && "fill-current")}
+						aria-hidden
+					/>
+				</button>
+			)}
+		</div>
+	);
 }
 
 function InviteRow({

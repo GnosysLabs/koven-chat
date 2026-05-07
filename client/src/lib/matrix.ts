@@ -516,9 +516,17 @@ export class MatrixTransport {
 		// m.space.child / m.space.parent state changes don't fire
 		// MyMembership — listen for state events on any room and refresh
 		// the space view when one of those types changes.
+		// `chat.koven.pinned_rooms` is the Koven-custom state event a
+		// space admin uses to pin rooms in that space; refresh both
+		// lists when it changes so the new ordering picks up.
 		this.client.on(RoomEvent.Timeline, (event: MatrixEvent) => {
 			const t = event.getType();
-			if (t === "m.space.child" || t === "m.space.parent" || t === "m.room.create") {
+			if (
+				t === "m.space.child" ||
+				t === "m.space.parent" ||
+				t === "m.room.create" ||
+				t === "chat.koven.pinned_rooms"
+			) {
 				this.emitSpaceList();
 				this.emitRoomList();
 			}
@@ -1892,6 +1900,53 @@ export class MatrixTransport {
 	}
 
 	/**
+	 * Pin a room within a space.  This is a space-wide affordance
+	 * (visible to everyone in the space), not per-user — the goal is
+	 * for a space owner to elevate one or two important rooms above
+	 * the rest of the list so they stand out for every member.
+	 *
+	 * Persisted as a `chat.koven.pinned_rooms` state event on the
+	 * space itself, with `state_key=""` and content
+	 *   `{ rooms: [roomId1, roomId2, ...] }`
+	 * Order in the array is the order rooms render in.  Editing the
+	 * event requires PL ≥ 50 in the space (state_default).
+	 *
+	 * No-op if the room is already pinned.
+	 */
+	async pinRoomInSpace(spaceId: SpaceId, roomId: RoomId): Promise<void> {
+		const c = this.requireClient();
+		const current = this.readPinnedRoomIds(spaceId);
+		if (current.includes(roomId)) return;
+		const next = [...current, roomId];
+		await c.sendStateEvent(spaceId, "chat.koven.pinned_rooms" as any, { rooms: next }, "");
+		this.emitSpaceList();
+		this.emitRoomList();
+	}
+
+	async unpinRoomInSpace(spaceId: SpaceId, roomId: RoomId): Promise<void> {
+		const c = this.requireClient();
+		const current = this.readPinnedRoomIds(spaceId);
+		if (!current.includes(roomId)) return;
+		const next = current.filter(id => id !== roomId);
+		await c.sendStateEvent(spaceId, "chat.koven.pinned_rooms" as any, { rooms: next }, "");
+		this.emitSpaceList();
+		this.emitRoomList();
+	}
+
+	/** Read the current `chat.koven.pinned_rooms` list for a space.
+	 * Returns [] if the event is missing, malformed, or the space isn't
+	 * in the local store. */
+	private readPinnedRoomIds(spaceId: SpaceId): RoomId[] {
+		const r = this.client?.getRoom(spaceId);
+		if (!r) return [];
+		const ev = r.currentState.getStateEvents("chat.koven.pinned_rooms", "");
+		if (!ev) return [];
+		const content = ev.getContent() as { rooms?: unknown };
+		if (!Array.isArray(content.rooms)) return [];
+		return content.rooms.filter((id): id is RoomId => typeof id === "string");
+	}
+
+	/**
 	 * Leave a room or space.  The user's membership is dropped (so the
 	 * room disappears from their list and they stop receiving events
 	 * from it) and the server-side memory of their membership is
@@ -2040,6 +2095,10 @@ export class MatrixTransport {
 			.filter(r => isLiveMembership(r.getMyMembership()))
 			.map(r => this.sdkRoomToRoom(r))
 			.sort((a, b) => {
+				// Sort by last-active so chatty rooms bubble up.
+				// Pin handling is space-scoped and applied in the UI
+				// layer (RoomList), since pins live on the space and
+				// only have meaning when filtering for that space.
 				const ta = this.client!.getRoom(a.id)?.getLastActiveTimestamp() ?? 0;
 				const tb = this.client!.getRoom(b.id)?.getLastActiveTimestamp() ?? 0;
 				if (ta !== tb) return tb - ta;
@@ -2083,6 +2142,14 @@ export class MatrixTransport {
 		if (myUserId) myPowerLevel = r.getMember(myUserId)?.powerLevel ?? 0;
 		const createEvent = r.currentState.getStateEvents("m.room.create", "");
 		const creatorId = (createEvent?.getSender() ?? undefined) as UserId | undefined;
+		// Pinned rooms — space-wide, set by space admins, visible to
+		// everyone.  Stored on the space's `chat.koven.pinned_rooms`
+		// state event.  Filter the list to ids we still see as live
+		// children so a pin doesn't survive room deletion as a stale
+		// reference.
+		const childIdSet = new Set(childRoomIds);
+		const pinnedRoomIds = this.readPinnedRoomIds(r.roomId as SpaceId)
+			.filter(id => childIdSet.has(id));
 		return {
 			id: r.roomId as SpaceId,
 			name: r.name || r.roomId,
@@ -2093,6 +2160,7 @@ export class MatrixTransport {
 			childRoomIds,
 			myPowerLevel,
 			creatorId,
+			pinnedRoomIds,
 		};
 	}
 
