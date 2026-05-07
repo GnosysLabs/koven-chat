@@ -80,11 +80,18 @@ export async function sendBotEvent(roomId: string, opts: SendOptions): Promise<s
 }
 
 /**
- * Permanently deactivate a Synapse account via the admin API.  Used
- * when an admin confirms a floor-violation suspension: the user's
- * homeserver account is wiped, they can no longer authenticate, and
- * they're kicked from every room they're in.  This is the real ban
- * — it doesn't matter what client they try to use afterward.
+ * Deactivate a Synapse account via the admin API.  Two callers:
+ *
+ *   - Floor-violation suspension (erase=true): the user's homeserver
+ *     account is wiped, they can no longer authenticate, all rooms
+ *     auto-kick them, and Synapse emits redactions for their content
+ *     on a best-effort basis.  This is the real ban — it doesn't
+ *     matter what client they try to use afterward.
+ *
+ *   - Bot deletion (erase=false): the bot's account is deactivated
+ *     and Synapse handles the room departures, but past messages
+ *     stay in place attributed to the (now deactivated) account.
+ *     The BotsPane delete confirmation explicitly promises this.
  *
  * Requires the engine bot to have admin privileges on the homeserver.
  * The default Synapse setup grants admin to the user that owns the
@@ -99,18 +106,19 @@ export async function sendBotEvent(roomId: string, opts: SendOptions): Promise<s
  * first run.
  *
  * Returns true on success, false on any error (already-deactivated,
- * missing admin rights, etc.).  Caller logs and proceeds; the
- * suspension row is still marked confirmed locally so we don't loop.
+ * missing admin rights, etc.).  Caller logs and proceeds; we don't
+ * want a transient Synapse hiccup to leave the engine row in a
+ * different state than the homeserver.
  */
-export async function deactivateUser(userId: string): Promise<boolean> {
+export async function deactivateUser(userId: string, erase: boolean = true): Promise<boolean> {
 	const path = `/_synapse/admin/v1/deactivate/${encodeURIComponent(userId)}`;
 	const r = await asFetch(path, {
 		method: "POST",
-		body: JSON.stringify({ erase: true }),
+		body: JSON.stringify({ erase }),
 	});
 	if (!r.ok) {
 		const txt = await r.text().catch(() => "");
-		console.warn(`engine: deactivateUser ${userId} → ${r.status} ${txt.slice(0, 200)}`);
+		console.warn(`engine: deactivateUser ${userId} (erase=${erase}) → ${r.status} ${txt.slice(0, 200)}`);
 		return false;
 	}
 	return true;

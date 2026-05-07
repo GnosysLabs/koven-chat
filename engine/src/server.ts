@@ -18,7 +18,7 @@
 // `Authorization: Bearer ...` on newer versions).  Admin-gated endpoints
 // validate the caller's Matrix token via /account/whoami.
 
-import { mkdir, unlink, writeFile } from "node:fs/promises";
+import { mkdir, rm, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
@@ -776,19 +776,45 @@ export function startServer(): void {
 					if (existing.owner_id !== userId) {
 						return json({ errcode: "M_FORBIDDEN", error: "not your bot" }, { status: 403 });
 					}
-					// Stop the runtime first so it flushes /sync state.
-					// On-disk crypto + sync state under data/bot-state/<id>/
-					// is left in place — operator can prune by hand if
-					// they want; we deliberately don't delete it because
-					// re-creating a bot under the same id is impossible
-					// (autoincrement) so old state can't collide.
+					// 1. Stop the runtime so it flushes /sync state and
+					//    drops its sockets + crypto handles.
 					await stopOne(id);
-					// We delete the engine row but don't deactivate the
-					// Synapse user.  The mxid is reserved by the appservice
-					// namespace forever (Synapse can't unclaim a registered
-					// localpart), so leaving the user in place is fine.
-					// An admin can prune via admin API if storage matters.
+
+					// 2. Deactivate the bot's Synapse account so Synapse
+					//    auto-kicks it from every room it joined.  Without
+					//    this the bot persists as an inactive member in
+					//    every room it was invited to — exactly the bug
+					//    report.  `erase: false` keeps the bot's past
+					//    messages attributed (the BotsPane delete
+					//    confirmation says so explicitly); pass `true`
+					//    here only if we ever want bot-deletion to also
+					//    redact prior content.  Logged-but-non-fatal on
+					//    Synapse error so a transient admin-API hiccup
+					//    doesn't strand the engine row.
+					const deactivated = await deactivateUser(existing.mxid, false);
+					if (!deactivated) {
+						console.warn(
+							`engine: bot ${existing.mxid} delete: deactivate failed; deleting engine row anyway`,
+						);
+					}
+
+					// 3. Drop the engine row.  After this the mxid is
+					//    free in the engine's namespace check, but the
+					//    Synapse user record sticks around (deactivated)
+					//    forever — Synapse doesn't support unclaiming a
+					//    localpart.  Re-creating with the same name will
+					//    re-activate the same Matrix account via
+					//    adminCreateUser's idempotent PUT.
 					deleteBot(id);
+
+					// 4. Wipe the bot's on-disk crypto snapshot.  Bot
+					//    ids are autoincrement (no reuse), but leaving
+					//    the directory leaks disk over many delete +
+					//    re-create cycles.
+					const stateDir = join(dirname(config.dbPath), "bot-state", String(id));
+					await rm(stateDir, { recursive: true, force: true })
+						.catch(err => console.warn(`engine: bot ${id} state cleanup failed`, err));
+
 					return json({ ok: true });
 				}
 			}

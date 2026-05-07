@@ -36,7 +36,7 @@ export function BotList({
 	onNewBot,
 }: BotListProps) {
 	return (
-		<aside className="w-64 shrink-0 bg-card border-r border-border flex flex-col">
+		<aside className="w-60 shrink-0 bg-card border-r border-border flex flex-col">
 			<div className="h-12 px-3 flex items-center justify-between border-b border-border">
 				<span className="text-sm font-semibold">Bots</span>
 				<button
