@@ -7,7 +7,7 @@
 
 import { cn } from "@/lib/utils";
 import type { Room, RoomId, Space } from "@koven/shared";
-import { Check, EyeOff, Globe, Lock, Pin, Plus, User, X } from "lucide-react";
+import { Check, EyeOff, Globe, Lock, Pin, Plus, X } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import type { ActiveSpace } from "@/state/store";
 
@@ -188,8 +188,11 @@ function emptyHintFor(activeSpace: ActiveSpace): string {
 }
 
 // Room tile avatar: DiceBear "shapes" fallback for normal rooms, user
-// avatar for DMs, with a small access-type badge in the bottom-right
-// corner so public/private/DM stays at-a-glance readable.
+// avatar for DMs, with a small badge in the bottom-right corner.  For
+// rooms the badge is the access-type glyph (public/private) so the
+// kind stays at-a-glance readable; for DMs it's a presence dot mirroring
+// the member-list pattern (green = online, amber = idle, nothing when
+// offline) so you can tell who's around without opening each chat.
 function RoomAvatar({ room }: { room: Room }) {
 	// For DMs, seed with the other user's id so the auto-avatar reflects
 	// THEIR identity (not the room's), and round to a circle since it's
@@ -205,17 +208,41 @@ function RoomAvatar({ room }: { room: Room }) {
 				kind={isDm ? "user" : "room"}
 				className={isDm ? "h-7 w-7 rounded-full" : "h-7 w-7 rounded-md"}
 			/>
-			<span className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-card border border-border flex items-center justify-center text-muted-foreground">
-				<AccessGlyph room={room} className="h-2.5 w-2.5" />
-			</span>
+			{isDm
+				? <DmPresenceDot presence={room.dmPresence} />
+				: (
+					<span className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-card border border-border flex items-center justify-center text-muted-foreground">
+						<AccessGlyph room={room} className="h-2.5 w-2.5" />
+					</span>
+				)}
 		</div>
 	);
 }
 
 function AccessGlyph({ room, className }: { room: Room; className?: string }) {
-	if (room.kind === "dm") return <User className={className} aria-hidden />;
 	if (room.kind === "private") return <EyeOff className={className} aria-hidden />;
 	return <Globe className={className} aria-hidden />;
+}
+
+/** Small status overlay for DM avatars.  Green when the peer is
+ * online, amber when idle ("unavailable"), nothing at all when
+ * offline / unknown — matches the member-list dot exactly so the two
+ * surfaces feel consistent. */
+function DmPresenceDot({ presence }: { presence: Room["dmPresence"] }) {
+	const cls =
+		presence === "online" ? "bg-green-500"
+		: presence === "unavailable" ? "bg-amber-500"
+		: null;
+	if (!cls) return null;
+	return (
+		<span
+			className={cn(
+				"absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-card",
+				cls,
+			)}
+			aria-label={presence === "online" ? "Online" : "Idle"}
+		/>
+	);
 }
 
 function RoomRow({

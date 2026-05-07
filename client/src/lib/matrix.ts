@@ -409,11 +409,20 @@ export class MatrixTransport {
 		// "online" presence — also reflected in our 3-bucket model.
 		const refreshPresenceFor = (userId: string | undefined) => {
 			if (!userId || !this.client) return;
+			let touchedDm = false;
 			for (const room of this.client.getRooms()) {
-				if (room.getMember(userId)) {
-					this.handlers.onMembersUpdated(room.roomId as RoomId);
+				if (!room.getMember(userId)) continue;
+				this.handlers.onMembersUpdated(room.roomId as RoomId);
+				// If `userId` is the peer of a DM, the DM tile in the
+				// room list shows a live presence dot — needs the room
+				// list to re-emit so RoomAvatar picks up the new colour.
+				const dm = this.client.getAccountData("m.direct" as any);
+				const dmMap = (dm?.getContent() ?? {}) as Record<string, string[]>;
+				if (Array.isArray(dmMap[userId]) && dmMap[userId].includes(room.roomId)) {
+					touchedDm = true;
 				}
 			}
+			if (touchedDm) this.emitRoomList();
 		};
 		this.client.on(UserEvent.Presence, (_event, user) => refreshPresenceFor(user?.userId));
 		this.client.on(UserEvent.CurrentlyActive, (_event, user) => refreshPresenceFor(user?.userId));
@@ -2466,6 +2475,24 @@ export class MatrixTransport {
 		const createEvent = r.currentState.getStateEvents("m.room.create", "");
 		const creatorId = (createEvent?.getSender() ?? undefined) as UserId | undefined;
 
+		// DM presence — same 3-bucket model the member list uses.  We
+		// peek at the SDK's User object directly (rather than walking
+		// per-room members) because the room view of presence updates
+		// lags by a sync; UserEvent.Presence updates land here first.
+		let dmPresence: "online" | "unavailable" | "offline" | undefined;
+		if (isDm && dmUserId) {
+			const u = this.client?.getUser(dmUserId);
+			if (u) {
+				if (u.presence === "online") {
+					dmPresence = u.currentlyActive ? "online" : "unavailable";
+				} else if (u.presence === "unavailable") {
+					dmPresence = "unavailable";
+				} else {
+					dmPresence = "offline";
+				}
+			}
+		}
+
 		return {
 			id: r.roomId as RoomId,
 			name: r.name || dmUserId || r.roomId,
@@ -2480,6 +2507,7 @@ export class MatrixTransport {
 			encrypted: r.hasEncryptionStateEvent(),
 			parentSpaceIds,
 			dmUserId: isDm ? (dmUserId as UserId | undefined) : undefined,
+			dmPresence,
 			isInvite: isInvite || undefined,
 			inviter,
 			homeserver,

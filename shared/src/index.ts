@@ -38,6 +38,12 @@ export interface Room {
 	// For DMs only — the other participant's user id.  Lets the UI
 	// show their avatar/identity rather than a generic room one.
 	dmUserId?: UserId;
+	// For DMs only — Matrix presence of the other participant, in the
+	// same 3-bucket model the member list uses.  Drives the live
+	// status dot on DM tiles so you can see at a glance who's around
+	// without opening each conversation.  Undefined for non-DMs and
+	// for DMs where presence hasn't been observed yet.
+	dmPresence?: "online" | "unavailable" | "offline";
 	// Pending invite state.  When `isInvite` is true, the user has
 	// been invited to the room but hasn't joined yet — the UI surfaces
 	// it as a request with Accept/Decline buttons rather than a
