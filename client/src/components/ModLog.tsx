@@ -43,7 +43,14 @@ export function ModLog({ events, loading }: ModLogProps) {
 function ModLogRow({ event }: { event: GovernanceEvent }) {
 	const ts = new Date(event.timestamp).toISOString();
 	switch (event.type) {
-		case "chat.koven.flag.v1":
+		case "chat.koven.flag.v1": {
+			// Discriminated union: room flags carry target_room_id,
+			// message flags target_event_id.  Both narrow into a
+			// printable target ref for this stub.
+			const targetRef = event.target_kind === "room"
+				? event.target_room_id
+				: event.target_event_id;
+			const targetLabel = event.target_kind === "room" ? "room" : null;
 			return (
 				<>
 					<span>{ts}</span>
@@ -52,9 +59,9 @@ function ModLogRow({ event }: { event: GovernanceEvent }) {
 					{" "}
 					<span className="text-foreground">{event.flagger}</span>
 					{" "}
-					<span>flagged</span>
+					<span>flagged{targetLabel ? ` ${targetLabel}` : ""}</span>
 					{" "}
-					<code>{event.target_event_id.slice(0, 12)}…</code>
+					<code>{targetRef.slice(0, 12)}…</code>
 					{" "}
 					<span>as</span>
 					{" "}
@@ -67,14 +74,19 @@ function ModLogRow({ event }: { event: GovernanceEvent }) {
 					)}
 				</>
 			);
-		case "chat.koven.collapse.v1":
+		}
+		case "chat.koven.collapse.v1": {
+			const targetRef = event.target_kind === "room"
+				? event.target_room_id
+				: event.target_event_id;
+			const targetLabel = event.target_kind === "room" ? "ROOM " : "";
 			return (
 				<>
 					<span>{ts}</span>
 					{" "}
-					<span className="text-orange-500">COLLAPSE</span>
+					<span className="text-orange-500">{targetLabel}COLLAPSE</span>
 					{" "}
-					<code>{event.target_event_id.slice(0, 12)}…</code>
+					<code>{targetRef.slice(0, 12)}…</code>
 					{" "}
 					<span>by</span>
 					{" "}
@@ -83,6 +95,7 @@ function ModLogRow({ event }: { event: GovernanceEvent }) {
 					(<span>weight {event.weighted_score.toFixed(1)} / {event.threshold_weight.toFixed(1)}</span>)
 				</>
 			);
+		}
 		case "chat.koven.appeal.v1":
 			return (
 				<>

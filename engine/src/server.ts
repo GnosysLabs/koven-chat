@@ -36,19 +36,25 @@ import {
 	deleteBio,
 	deleteBot,
 	deleteInstanceConfig,
+	deleteRoomCollapse,
 	flagsForRoom,
+	flagsForTarget,
 	getActiveSuspension,
 	getBotById,
 	getBotByMxid,
+	getRoomCollapse,
 	getSuspensionById,
 	grantAdmin,
+	insertFlag,
 	isAdmin,
 	issueAuthCode,
 	listAllBotMxids,
 	listBotsByOwner,
 	listPendingSuspensions,
+	listRoomCollapses,
 	lookupUserByEmail,
 	markAuthCodeUsed,
+	markFlagRetracted,
 	purgeUserState,
 	readBio,
 	readInstanceConfig,
@@ -74,6 +80,7 @@ import {
 	adminSetUserEmail,
 	deactivateUser,
 	getRoomJoinRule,
+	getRoomNameAndCreator,
 	getSpaceChildRoomIds,
 	loginAsUser,
 	setProfileAvatar,
@@ -1136,11 +1143,33 @@ export function startServer(): void {
 					// crossed the false-flag auto-suspension threshold.
 					updateSuspensionStatus(id, "reversed", auth.userId, note);
 
+					// Room-target floor cases (`target_room_id` set,
+					// `target_event_id` null) also installed a room
+					// collapse via the evaluator at flag time.  Undo
+					// that here so the SPA stops overriding the name
+					// and Explore re-includes the room.  Flag rows
+					// stay in place — append-only audit trail — only
+					// the collapse decision is reversed.
+					let restoredRoom: string | null = null;
+					if (
+						susp.reason === "floor_violation" &&
+						susp.target_room_id &&
+						!susp.target_event_id
+					) {
+						const removed = deleteRoomCollapse(susp.target_room_id);
+						if (removed) restoredRoom = susp.target_room_id;
+					}
+
 					// Skip the false-flag cascade for repeated_false_flag
 					// suspensions (the flagger field is null there) and
 					// for suspensions where we never recorded a flagger.
 					if (susp.reason !== "floor_violation" || !susp.flagger) {
-						return json({ id, status: "reversed", auto_suspended_flagger: false });
+						return json({
+							id,
+							status: "reversed",
+							restored_room: restoredRoom,
+							auto_suspended_flagger: false,
+						});
 					}
 
 					// Counts include the row we just reversed.
@@ -1172,8 +1201,159 @@ export function startServer(): void {
 						flagger_reversed_total: totalReversed,
 						flagger_reversed_30d: recentReversed,
 						auto_suspended_flagger: autoSuspended,
+						restored_room: restoredRoom,
 					});
 				}
+			}
+
+			// ─── Room-target flags (offensive room name pipeline) ──
+			//
+			// Submit / retract a flag against the room itself (its name +
+			// topic), as opposed to a single message inside it.  Same
+			// flag categories as message flags, same consensus pipeline:
+			// distinct flaggers above the room's dynamic threshold OR
+			// any single floor-violation flag fast-tracks the collapse
+			// (handled by collapse.ts).  Floor-violation room flags
+			// also create a suspension row pointing at the room's
+			// creator — they're the one accountable for the name.
+			//
+			// Flagging happens over HTTP rather than as a Matrix wire
+			// event because room flags need to work from Explore (where
+			// the user isn't a room member yet, so they can't send
+			// timeline events into it).  The engine still records the
+			// chat.koven.flag.v1 event id field as a synthetic id so
+			// the audit-trail shape stays uniform with message flags.
+			{
+				const m = path.match(/^\/api\/rooms\/([^/]+)\/flag$/);
+				if (m) {
+					const roomId = decodeURIComponent(m[1]!);
+					if (!roomId.startsWith("!")) {
+						return json({ errcode: "M_INVALID_PARAM", error: "expected matrix room id" }, { status: 400 });
+					}
+					const userId = await whoami(extractToken(req));
+					if (!userId) return json({ errcode: "M_MISSING_TOKEN", error: "auth required" }, { status: 401 });
+					// Flagging while paused is incoherent — a paused user
+					// shouldn't be able to push the consensus pipeline.
+					if (getActiveSuspension(userId)) {
+						return json({ errcode: "M_FORBIDDEN", error: "account suspended" }, { status: 403 });
+					}
+
+					if (req.method === "POST") {
+						const body = (await req.json().catch(() => null)) as
+							| { category?: unknown; rationale?: unknown }
+							| null;
+						const category = typeof body?.category === "string" ? body.category : "";
+						const rationale = typeof body?.rationale === "string" ? body.rationale.slice(0, 500) : undefined;
+						const allowed = new Set([
+							"off_topic", "spam", "harassment", "misinformation", "floor_violation",
+						]);
+						if (!allowed.has(category)) {
+							return json({ errcode: "M_INVALID_PARAM", error: "unknown category" }, { status: 400 });
+						}
+						// Synthetic event id — namespaced so it can't collide
+						// with a real Matrix event id (`$...`).  Stored in
+						// the `event_id` PK column the existing flag table
+						// uses, so retract / mod-log paths work uniformly.
+						const flagEventId = `koven-room-flag:${roomId}:${userId}:${Date.now()}`;
+						const ts = Date.now();
+						insertFlag({
+							event_id: flagEventId,
+							target_event_id: roomId,   // unified polymorphic key (see db.ts)
+							room_id: roomId,
+							flagger: userId,
+							category,
+							rationale,
+							ts,
+							target_kind: "room",
+						});
+
+						// Floor-violation: open a suspension on the room's
+						// creator pending admin review.  Same shape as the
+						// message-floor path so the existing /api/admin/
+						// floor-queue surfaces both kinds in one feed.
+						if (category === "floor_violation") {
+							const state = await getRoomNameAndCreator(roomId);
+							const creator = state?.creator;
+							if (creator && !getActiveSuspension(creator)) {
+								createSuspension({
+									user_id: creator,
+									reason: "floor_violation",
+									flag_event_id: flagEventId,
+									target_event_id: null,        // no message in scope
+									target_room_id: roomId,
+									flagger: userId,
+								});
+							}
+						}
+
+						// Kick the collapse evaluator immediately so users
+						// see the consensus action (when thresholds are
+						// already met) without waiting for the next tick.
+						void evaluateCollapses().catch(err =>
+							console.warn("engine: post-flag collapse eval failed", err),
+						);
+
+						return json({ ok: true, event_id: flagEventId, ts });
+					}
+
+					if (req.method === "DELETE") {
+						// Retract the caller's most recent active flag on
+						// this room.  We look up by composite (room_id,
+						// flagger, target_kind='room', not retracted) and
+						// mark retracted — symmetric with the
+						// chat.koven.flag.v1 redaction path for messages.
+						const own = flagsForTarget(roomId).find(
+							f => f.flagger === userId,
+						);
+						if (!own) {
+							return json({ errcode: "M_NOT_FOUND", error: "no active flag" }, { status: 404 });
+						}
+						// Need the full row to find the synthetic event_id —
+						// flagsForTarget returns a thin projection.  Pull
+						// it from the room flag list by matching flagger.
+						const rows = flagsForRoom(roomId);
+						const row = rows.find(
+							r => r.flagger === userId && r.target_kind === "room" && !r.retracted_at,
+						);
+						if (!row) {
+							return json({ errcode: "M_NOT_FOUND", error: "no active flag" }, { status: 404 });
+						}
+						const ok = markFlagRetracted(row.event_id, Date.now(), userId);
+						if (!ok) {
+							return json({ errcode: "M_NOT_FOUND", error: "no active flag" }, { status: 404 });
+						}
+						return json({ ok: true });
+					}
+				}
+			}
+
+			// ─── Currently-collapsed rooms list (public) ───────────
+			// SPA polls this on Explore + room-list refresh to:
+			//   1. Hide collapsed rooms from the Explore directory.
+			//   2. Override room-name rendering to "Name Removed by
+			//      Community Review" everywhere (sidebar, header,
+			//      member sheets, etc.) without mutating m.room.name
+			//      itself — the original is preserved on the engine
+			//      so an admin reverse restores it verbatim.
+			// Public read: the override is meaningful only if every
+			// client honours it, so unauthenticated GET is fine and
+			// federation-friendly.
+			if (req.method === "GET" && path === "/api/rooms/collapsed") {
+				const rows = listRoomCollapses();
+				return json({
+					rooms: rows.map(r => ({
+						room_id: r.room_id,
+						collapsed_at: r.collapsed_at,
+						categories: r.categories,
+						fast_track: r.fast_track,
+						// `original_name` is intentionally NOT included
+						// in the public response — surfacing the
+						// collapsed name via an unauthenticated endpoint
+						// would defeat the purpose of hiding it.  Admins
+						// see it via /api/admin/floor-queue when the
+						// case is open.
+					})),
+				});
 			}
 
 			// ─── Per-room public mod log ─────────────────────────────

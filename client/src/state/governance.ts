@@ -10,7 +10,9 @@
 import type {
 	GovernanceEvent,
 	FlagEvent,
+	MessageFlagEvent,
 	CollapseEvent,
+	MessageCollapseEvent,
 	AppealEvent,
 	CensureEvent,
 	FloorActionEvent,
@@ -75,8 +77,15 @@ export function reduceGovernance(
 
 	switch (event.type) {
 		case "chat.koven.flag.v1":
+			// Room-target flags don't live in the per-message governance
+			// map (they're keyed by room, not by event id) — they're
+			// surfaced separately via the engine's /api/rooms/collapsed
+			// poll.  Skip them here; the log entry above still records
+			// them in chronological order.
+			if (event.target_kind === "room") return { ...state, log };
 			return { ...state, byMessage: applyFlag(state.byMessage, event, weightLookup), log };
 		case "chat.koven.collapse.v1":
+			if (event.target_kind === "room") return { ...state, log };
 			return { ...state, byMessage: applyCollapse(state.byMessage, event), log };
 		case "chat.koven.appeal.v1":
 			return { ...state, byMessage: applyAppeal(state.byMessage, event), log };
@@ -87,9 +96,11 @@ export function reduceGovernance(
 	}
 }
 
+// Per-message reducer.  Room-target flags / collapses are filtered out
+// in the dispatcher above; these helpers only see the message variant.
 function applyFlag(
 	byMessage: Map<EventId, MessageGovernance>,
-	event: FlagEvent,
+	event: MessageFlagEvent,
 	weightLookup: (user: UserId) => number,
 ): Map<EventId, MessageGovernance> {
 	const next = new Map(byMessage);
@@ -110,7 +121,7 @@ function applyFlag(
 
 function applyCollapse(
 	byMessage: Map<EventId, MessageGovernance>,
-	event: CollapseEvent,
+	event: MessageCollapseEvent,
 ): Map<EventId, MessageGovernance> {
 	const next = new Map(byMessage);
 	const existing = next.get(event.target_event_id) ?? emptyMessageGovernance();

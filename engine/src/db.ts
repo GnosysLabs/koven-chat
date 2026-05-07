@@ -270,6 +270,29 @@ function ensureColumns(table: string, columns: Array<{ name: string; ddl: string
 ensureColumns("flags", [
 	{ name: "retracted_at", ddl: "retracted_at INTEGER" },
 	{ name: "retracted_by", ddl: "retracted_by TEXT" },
+	// Discriminator for the polymorphic flag target.  `'message'` means
+	// `target_event_id` is the Matrix event id being flagged (existing
+	// behaviour, default).  `'room'` means `target_event_id` is reused
+	// as the room id of the target room — `target_event_id` and
+	// `room_id` columns will hold the same value for these rows.  Room
+	// IDs start with `!` and event IDs start with `$`, so the two
+	// namespaces are disjoint and we can keep the unified primary-key
+	// shape on the table without sentinels.
+	{ name: "target_kind", ddl: "target_kind TEXT NOT NULL DEFAULT 'message'" },
+]);
+ensureColumns("collapses", [
+	// Same discriminator as flags.  `'room'` collapses are the
+	// per-room "name removed by community review" pipeline.
+	{ name: "target_kind", ddl: "target_kind TEXT NOT NULL DEFAULT 'message'" },
+	// For room collapses, the m.room.name value at the moment of
+	// collapse — kept so an admin reverse can restore the verbatim
+	// original name without a separate lookup against Synapse state.
+	// NULL for message collapses.
+	{ name: "original_name", ddl: "original_name TEXT" },
+	// Mirrors the wire field: true if a floor-violation flag triggered
+	// the collapse (single-flag fast-track), false if it crossed the
+	// distinct-flagger + weighted-score thresholds.
+	{ name: "fast_track", ddl: "fast_track INTEGER NOT NULL DEFAULT 0" },
 ]);
 ensureColumns("bots", [
 	// JSON array of trigger phrases — see CREATE TABLE comment above.
@@ -420,14 +443,23 @@ export function roomActiveWeight(roomId: string, sinceTs: number): number {
 
 // ─── Flags ───────────────────────────────────────────────────────────
 
+export type FlagTargetKind = "message" | "room";
+
 export type FlagRow = {
 	event_id: string;
+	// For target_kind='message' this is the Matrix event id of the
+	// flagged message.  For target_kind='room' this is the target room
+	// id (Matrix room ids start with `!`, event ids with `$`, so the
+	// two namespaces don't collide).
 	target_event_id: string;
 	room_id: string;
 	flagger: string;
 	category: string;
 	rationale?: string | null;
 	ts: number;
+	// Defaults to 'message' for backwards compatibility with rows
+	// inserted before the room-flag pipeline existed.
+	target_kind?: FlagTargetKind;
 	// NULL until the flag is retracted (the flagger redacts the
 	// chat.koven.flag.v1 event).  Once set, the row is excluded from
 	// consensus calculations but kept on disk so the mod log can
@@ -437,8 +469,8 @@ export type FlagRow = {
 };
 
 const insertFlagStmt = db.prepare(`
-	INSERT OR IGNORE INTO flags (event_id, target_event_id, room_id, flagger, category, rationale, ts)
-	VALUES (?, ?, ?, ?, ?, ?, ?)
+	INSERT OR IGNORE INTO flags (event_id, target_event_id, room_id, flagger, category, rationale, ts, target_kind)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 `);
 // Mark a flag retracted instead of deleting it.  Append-only: the
 // row is preserved so the public mod log can show the original flag
@@ -453,7 +485,16 @@ const markFlagRetractedStmt = db.prepare(`
 `);
 
 export function insertFlag(row: FlagRow): void {
-	insertFlagStmt.run(row.event_id, row.target_event_id, row.room_id, row.flagger, row.category, row.rationale ?? null, row.ts);
+	insertFlagStmt.run(
+		row.event_id,
+		row.target_event_id,
+		row.room_id,
+		row.flagger,
+		row.category,
+		row.rationale ?? null,
+		row.ts,
+		row.target_kind ?? "message",
+	);
 }
 
 /** Mark a flag as retracted.  Returns true if a non-retracted flag
@@ -480,13 +521,23 @@ export function flagsForTarget(targetEventId: string): { flagger: string; catego
 // All target_event_ids that currently have at least one active
 // (non-retracted) flag.  Used by the collapse evaluator to scan
 // candidates each tick — a target whose only flags are all
-// retracted shouldn't be re-evaluated.
+// retracted shouldn't be re-evaluated.  `target_kind` is surfaced so
+// the evaluator knows whether to emit a message-collapse or a
+// room-collapse on threshold crossing.
 const flaggedTargetsStmt = db.prepare(`
-	SELECT DISTINCT target_event_id, room_id FROM flags
+	SELECT DISTINCT target_event_id, room_id, target_kind FROM flags
 	WHERE retracted_at IS NULL
 `);
-export function listFlaggedTargets(): { target_event_id: string; room_id: string }[] {
-	return flaggedTargetsStmt.all() as { target_event_id: string; room_id: string }[];
+export function listFlaggedTargets(): {
+	target_event_id: string;
+	room_id: string;
+	target_kind: FlagTargetKind;
+}[] {
+	return flaggedTargetsStmt.all() as Array<{
+		target_event_id: string;
+		room_id: string;
+		target_kind: FlagTargetKind;
+	}>;
 }
 
 // All flags submitted in a given room, newest first.  Drives the
@@ -508,12 +559,24 @@ export type CollapseRow = {
 	flagger_count: number;
 	weighted_score: number;
 	categories: string[];
+	// Discriminator: 'message' (default) or 'room'.  When 'room', the
+	// `target_event_id` and `room_id` columns hold the same value (the
+	// target room id).
+	target_kind?: FlagTargetKind;
+	// For target_kind='room' only: m.room.name verbatim at the moment
+	// of collapse, kept so admin reverse can restore it.  NULL/empty
+	// for message collapses.
+	original_name?: string | null;
+	// True if a floor-violation flag triggered the collapse (single-
+	// flag fast-track) rather than the distinct-flagger + weighted-
+	// score thresholds.  Mirrors the wire field.
+	fast_track?: boolean;
 };
 
 const insertCollapseStmt = db.prepare(`
 	INSERT OR IGNORE INTO collapses
-	(target_event_id, room_id, collapsed_at, flagger_count, weighted_score, categories)
-	VALUES (?, ?, ?, ?, ?, ?)
+	(target_event_id, room_id, collapsed_at, flagger_count, weighted_score, categories, target_kind, original_name, fast_track)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const hasCollapseStmt = db.prepare(`SELECT 1 FROM collapses WHERE target_event_id = ?`);
 
@@ -525,6 +588,9 @@ export function insertCollapse(row: CollapseRow): void {
 		row.flagger_count,
 		row.weighted_score,
 		JSON.stringify(row.categories),
+		row.target_kind ?? "message",
+		row.original_name ?? null,
+		row.fast_track ? 1 : 0,
 	);
 }
 
@@ -538,8 +604,90 @@ const collapsesForRoomStmt = db.prepare(`
 	SELECT * FROM collapses WHERE room_id = ? ORDER BY collapsed_at DESC
 `);
 export function collapsesForRoom(roomId: string): CollapseRow[] {
-	const rows = collapsesForRoomStmt.all(roomId) as Array<Omit<CollapseRow, "categories"> & { categories: string }>;
-	return rows.map(r => ({ ...r, categories: JSON.parse(r.categories) as string[] }));
+	const rows = collapsesForRoomStmt.all(roomId) as Array<
+		Omit<CollapseRow, "categories" | "fast_track"> & { categories: string; fast_track: number }
+	>;
+	return rows.map(r => ({
+		...r,
+		categories: JSON.parse(r.categories) as string[],
+		fast_track: !!r.fast_track,
+	}));
+}
+
+// All currently-collapsed rooms, for the public /api/rooms/collapsed
+// endpoint the SPA polls to override room-name display + filter
+// Explore.  Returns minimal columns so the response is cheap to
+// serialise even on instances with thousands of collapses.
+const listRoomCollapsesStmt = db.prepare(`
+	SELECT target_event_id AS room_id, original_name, collapsed_at, categories, fast_track
+	FROM collapses
+	WHERE target_kind = 'room'
+	ORDER BY collapsed_at DESC
+`);
+export function listRoomCollapses(): Array<{
+	room_id: string;
+	original_name: string | null;
+	collapsed_at: number;
+	categories: string[];
+	fast_track: boolean;
+}> {
+	const rows = listRoomCollapsesStmt.all() as Array<{
+		room_id: string;
+		original_name: string | null;
+		collapsed_at: number;
+		categories: string;
+		fast_track: number;
+	}>;
+	return rows.map(r => ({
+		...r,
+		categories: JSON.parse(r.categories) as string[],
+		fast_track: !!r.fast_track,
+	}));
+}
+
+// Lookup the original name + collapse metadata for a single room.
+// Used by the SPA when rendering a room the user is already a member
+// of (the room's m.room.name still holds the offensive original; we
+// override the display from this row).  Returns null if the room is
+// not currently collapsed.
+const getRoomCollapseStmt = db.prepare(`
+	SELECT target_event_id AS room_id, original_name, collapsed_at, categories, fast_track
+	FROM collapses
+	WHERE target_kind = 'room' AND target_event_id = ?
+`);
+export function getRoomCollapse(roomId: string): {
+	room_id: string;
+	original_name: string | null;
+	collapsed_at: number;
+	categories: string[];
+	fast_track: boolean;
+} | null {
+	const row = getRoomCollapseStmt.get(roomId) as {
+		room_id: string;
+		original_name: string | null;
+		collapsed_at: number;
+		categories: string;
+		fast_track: number;
+	} | undefined;
+	if (!row) return null;
+	return {
+		...row,
+		categories: JSON.parse(row.categories) as string[],
+		fast_track: !!row.fast_track,
+	};
+}
+
+// Remove a room collapse — used by the admin "reverse" flow when an
+// admin decides a floor-flagged room shouldn't have been hidden.  The
+// flag rows stay (audit trail); only the collapse decision is undone,
+// so the SPA stops overriding the display name and Explore re-includes
+// the room.  No-op if the row doesn't exist.
+const deleteRoomCollapseStmt = db.prepare(`
+	DELETE FROM collapses WHERE target_kind = 'room' AND target_event_id = ?
+`);
+export function deleteRoomCollapse(roomId: string): boolean {
+	const r = deleteRoomCollapseStmt.run(roomId);
+	return r.changes > 0;
 }
 
 // ─── Joined rooms (engine bot membership cache) ──────────────────────

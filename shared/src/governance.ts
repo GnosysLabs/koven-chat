@@ -29,25 +29,69 @@ export const FLAG_CATEGORY_SEVERITY: Record<FlagCategory, number> = {
 
 // ─── Custom Matrix event types (wire payloads) ───────────────────────
 
-export interface FlagEvent {
+// Flags target either a single message OR an entire room.  Room flags
+// were added to handle the "abusive room name" attack — a creator
+// puts a slur or threat in the room name, where the per-message flag
+// pipeline can't reach.  Both kinds flow through the same consensus
+// pipeline (count distinct flaggers, sum reputation-weighted score,
+// trip the threshold) and the same floor-violation fast-track for
+// CSAM/threat/doxx categories.
+//
+// Wire format: when `target_kind` is missing, the flag is treated as
+// `"message"` for backwards compatibility with v1 clients.  A room
+// flag MUST set `target_kind: "room"` and `target_room_id`; the
+// `target_event_id` field is left absent.
+export type FlagTargetKind = "message" | "room";
+
+export interface FlagEventBase {
 	type: "chat.koven.flag.v1";
-	target_event_id: EventId;
 	category: FlagCategory;
 	flagger: UserId;
 	timestamp: number;        // server-time ms
 	rationale?: string;       // optional one-line note from the flagger
 }
 
-export interface CollapseEvent {
-	type: "chat.koven.collapse.v1";
+export interface MessageFlagEvent extends FlagEventBase {
+	target_kind?: "message";  // optional for backwards compat — defaults to "message"
 	target_event_id: EventId;
+}
+
+export interface RoomFlagEvent extends FlagEventBase {
+	target_kind: "room";
+	target_room_id: RoomId;
+}
+
+export type FlagEvent = MessageFlagEvent | RoomFlagEvent;
+
+// Collapse mirrors the same kind discrimination as Flag.  A message
+// collapse hides the message body in-UI (still readable via "show
+// anyway"); a room collapse displays "Name Removed by Community
+// Review" in place of the room name and excludes it from Explore.
+// `original_name` is recorded on room collapses so admins can restore
+// the room verbatim if a floor flag is reversed.
+export interface CollapseEventBase {
+	type: "chat.koven.collapse.v1";
 	threshold_users: number;
 	threshold_weight: number;
 	flaggers: UserId[];       // distinct flaggers at the moment of collapse
 	weighted_score: number;   // sum of weights at collapse
 	categories: FlagCategory[];
 	timestamp: number;
+	fast_track?: boolean;     // true if a floor-violation flag triggered it
 }
+
+export interface MessageCollapseEvent extends CollapseEventBase {
+	target_kind?: "message";
+	target_event_id: EventId;
+}
+
+export interface RoomCollapseEvent extends CollapseEventBase {
+	target_kind: "room";
+	target_room_id: RoomId;
+	original_name: string;    // verbatim m.room.name at the moment of collapse
+}
+
+export type CollapseEvent = MessageCollapseEvent | RoomCollapseEvent;
 
 export interface AppealEvent {
 	type: "chat.koven.appeal.v1";

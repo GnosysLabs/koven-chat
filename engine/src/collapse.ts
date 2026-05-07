@@ -18,7 +18,7 @@ import {
 	readWeight,
 	roomActiveWeight,
 } from "./db";
-import { joinRoomIfNeeded, sendBotEvent } from "./synapse";
+import { getRoomNameAndCreator, joinRoomIfNeeded, sendBotEvent } from "./synapse";
 
 // Hard floor on number of distinct flaggers.  Independent of room
 // size — fewer than 3 doesn't read as "the room agrees" anywhere.
@@ -100,12 +100,12 @@ export async function evaluateCollapses(): Promise<number> {
 		const thresholdWeight = thresholdWeightFor(t.room_id);
 		if (!shouldCollapse(tally, thresholdWeight)) continue;
 
-		// Make sure the bot is in the room before trying to send.
+		// Make sure the bot is in the room before trying to send the
+		// announcement event.  Idempotent: no-op if already joined.
 		await joinRoomIfNeeded(t.room_id);
 
 		const categories = Array.from(tally.categories);
-		const content = {
-			target_event_id: t.target_event_id,
+		const baseContent = {
 			threshold_users: THRESHOLD_USERS,
 			threshold_weight: Number(thresholdWeight.toFixed(4)),
 			flaggers: Array.from(tally.flaggers),
@@ -113,6 +113,55 @@ export async function evaluateCollapses(): Promise<number> {
 			categories,
 			timestamp: Date.now(),
 			fast_track: tally.hasFloor,
+		};
+
+		const targetKind = t.target_kind ?? "message";
+
+		if (targetKind === "room") {
+			// Room collapses also need the verbatim m.room.name at
+			// the moment of collapse — saved on the row so an admin
+			// reverse can restore it without a separate lookup.  If
+			// we can't read state for any reason (federation glitch,
+			// the bot just got demoted) we still record the collapse
+			// with a null original_name; admins can look up an older
+			// name via the homeserver event log if they need to.
+			const state = await getRoomNameAndCreator(t.target_event_id);
+			const originalName = state?.name ?? "";
+			const content = {
+				...baseContent,
+				target_kind: "room" as const,
+				target_room_id: t.target_event_id,
+				original_name: originalName,
+			};
+			const eventId = await sendBotEvent(t.room_id, {
+				type: "chat.koven.collapse.v1",
+				content,
+			});
+			if (!eventId) continue;
+			insertCollapse({
+				target_event_id: t.target_event_id,
+				room_id: t.room_id,
+				collapsed_at: baseContent.timestamp,
+				flagger_count: tally.flaggers.size,
+				weighted_score: baseContent.weighted_score,
+				categories,
+				target_kind: "room",
+				original_name: originalName,
+				fast_track: tally.hasFloor,
+			});
+			emitted++;
+			console.log(
+				`engine: collapsed ROOM ${t.target_event_id} ` +
+				`(${tally.flaggers.size} flaggers, ${baseContent.weighted_score} weight, ` +
+				`floor=${tally.hasFloor}, original_name="${originalName}")`,
+			);
+			continue;
+		}
+
+		// Message collapse — original behaviour.
+		const content = {
+			...baseContent,
+			target_event_id: t.target_event_id,
 		};
 		const eventId = await sendBotEvent(t.room_id, {
 			type: "chat.koven.collapse.v1",
@@ -123,15 +172,16 @@ export async function evaluateCollapses(): Promise<number> {
 		insertCollapse({
 			target_event_id: t.target_event_id,
 			room_id: t.room_id,
-			collapsed_at: content.timestamp,
+			collapsed_at: baseContent.timestamp,
 			flagger_count: tally.flaggers.size,
-			weighted_score: content.weighted_score,
+			weighted_score: baseContent.weighted_score,
 			categories,
+			fast_track: tally.hasFloor,
 		});
 		emitted++;
 		console.log(
 			`engine: collapsed ${t.target_event_id} in ${t.room_id} ` +
-			`(${tally.flaggers.size} flaggers, ${content.weighted_score} weight, ` +
+			`(${tally.flaggers.size} flaggers, ${baseContent.weighted_score} weight, ` +
 			`floor=${tally.hasFloor})`,
 		);
 	}

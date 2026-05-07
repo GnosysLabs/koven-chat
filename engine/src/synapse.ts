@@ -248,6 +248,47 @@ export async function getSpaceChildRoomIds(spaceId: string): Promise<string[]> {
 }
 
 /**
+ * Read a room's current m.room.name + m.room.create from a single
+ * /state pull.  Used by the room-flag pipeline:
+ *   - `name` becomes `original_name` on the collapse row so an admin
+ *     reverse can restore it verbatim.
+ *   - `creator` is the user id we point a floor-violation suspension
+ *     at — the room's founder is on the hook for what they named it.
+ *
+ * Returns null on any error (room not found, network glitch, etc.) so
+ * callers don't have to special-case "couldn't read state."  Either
+ * field may be undefined inside the result if the corresponding state
+ * event is absent (a freshly-created room without an m.room.name yet,
+ * for instance).
+ */
+export async function getRoomNameAndCreator(roomId: string): Promise<{
+	name?: string;
+	creator?: string;
+} | null> {
+	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state`;
+	const r = await adminFetch(path);
+	if (!r.ok) return null;
+	const events = (await r.json().catch(() => null)) as Array<{
+		type?: string;
+		state_key?: string;
+		sender?: string;
+		content?: { name?: unknown };
+	}> | null;
+	if (!Array.isArray(events)) return null;
+	let name: string | undefined;
+	let creator: string | undefined;
+	for (const ev of events) {
+		if (ev.type === "m.room.name" && ev.state_key === "" && typeof ev.content?.name === "string") {
+			name = ev.content.name;
+		} else if (ev.type === "m.room.create" && ev.state_key === "" && typeof ev.sender === "string") {
+			creator = ev.sender;
+		}
+		if (name !== undefined && creator !== undefined) break;
+	}
+	return { name, creator };
+}
+
+/**
  * Read a room's m.room.join_rules state event.  Returns the
  * `join_rule` string ("public", "invite", "knock", "restricted") or
  * null on error / missing.  Used to skip private children when
