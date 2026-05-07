@@ -1179,6 +1179,45 @@ export class MatrixTransport {
 			creation_content: { type: "m.space" } as any,
 		});
 		const spaceId = res.room_id as SpaceId;
+
+		// Founder-only space hierarchy.  Synapse's default state PL is
+		// 50, so any moderator-tier member could add or remove rooms
+		// from the space.  Most space creators expect "this is *my*
+		// space" and don't realise promoting a moderator hands them
+		// re-shape rights.  Lock m.space.child to PL 100 so the
+		// creator (and any explicit co-founders they promote to 100)
+		// stay in control of what's inside.  Best-effort — a failure
+		// here doesn't undo the space creation; it just leaves the
+		// looser default in place and the creator can re-run.
+		try {
+			await c.sendStateEvent(spaceId, "m.room.power_levels" as any, {
+				users: { [c.getUserId()!]: 100 },
+				users_default: 0,
+				events: {
+					"m.room.name": 50,
+					"m.room.power_levels": 100,
+					"m.room.history_visibility": 100,
+					"m.room.canonical_alias": 50,
+					"m.room.avatar": 50,
+					"m.room.tombstone": 100,
+					"m.room.server_acl": 100,
+					"m.room.encryption": 100,
+					// Founder-only: only PL 100 can add or remove
+					// rooms from the hierarchy.  Promoted admins at
+					// PL 50 can change other settings but can't
+					// restructure what's inside.
+					"m.space.child": 100,
+				},
+				events_default: 0,
+				state_default: 50,
+				ban: 50,
+				kick: 50,
+				redact: 50,
+				invite: opts.visibility === "public" ? 0 : 50,
+			}, "");
+		} catch (err) {
+			console.warn("createSpace: failed to lock m.space.child to PL 100", err);
+		}
 		if (opts.avatarFile) {
 			try {
 				const upload = await c.uploadContent(opts.avatarFile, {
@@ -1799,12 +1838,12 @@ export class MatrixTransport {
 	 * one with the canonical child list, so we don't re-derive it
 	 * here from the SDK state.
 	 *
-	 * Returns the per-child outcome so the UI can surface partial
-	 * failures.  In practice every child the user created should
-	 * succeed (PL 100 → kick + leave + forget); foreign-owned child
-	 * rooms (someone else added them under this space) end up in
-	 * `failed` because the user can't kick from rooms where they
-	 * lack power-level.
+	 * In practice every child should succeed: createSpace locks
+	 * `m.space.child` to PL 100, so only the creator (or explicit
+	 * co-founders) could have added rooms in the first place.  A
+	 * `failed` entry usually means the room was deleted out from
+	 * under us by another founder, or the user is operating against
+	 * a space they imported from elsewhere with looser PLs.
 	 */
 	async deleteSpace(
 		spaceId: RoomId,
