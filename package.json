@@ -3,11 +3,13 @@
   "version": "0.0.1",
   "private": true,
   "description": "Koven — consensus-governed chat. Web client + server (Matrix-backed).",
-  "workspaces": ["client", "shared", "engine"],
+  "workspaces": ["client", "shared", "engine", "apps/desktop"],
   "scripts": {
     "dev": "bun run --cwd client dev",
     "dev:engine": "bun run --cwd engine dev",
-    "build": "bun run --cwd client build"
+    "build": "bun run --cwd client build",
+    "desktop:dev": "bun run --cwd apps/desktop dev",
+    "desktop:build": "bun run --cwd apps/desktop build"
   },
   "trustedDependencies": []
 }

@@ -1,0 +1,158 @@
+# Cross-platform release pipeline for the Koven desktop shell.
+#
+# Triggered by pushing a `desktop-v*` tag.  Branch pushes that touch
+# apps/desktop/ run the same matrix as a sanity build but skip the
+# release upload + signing.  Each runner builds one platform, signs
+# the artifact with the minisign keypair (used by Tauri's updater),
+# and uploads to a draft GitHub Release.  A final "publish" job
+# constructs the updater manifest from each platform's .sig and
+# flips the release to public.
+#
+# Versioning is independent from the web client and the engine.  The
+# tag IS the version: `desktop-v0.1.0` → version 0.1.0.  The version
+# in `apps/desktop/src-tauri/tauri.conf.json` and `Cargo.toml` must
+# match the tag — `tauri-action` reads them at build time and bakes
+# them into Info.plist / .nsh / .desktop.
+
+name: Desktop release
+
+on:
+  push:
+    tags: ["desktop-v*"]
+    branches: [main]
+    paths:
+      - "apps/desktop/**"
+      - "client/**"
+      - ".github/workflows/desktop-release.yml"
+  workflow_dispatch:
+
+# One release in flight at a time per ref — cancel an in-progress run
+# if a newer tag arrives, prevents racing uploads against the same
+# release id.
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Mac Apple Silicon — primary target for Mac users.
+          - platform: macos-latest
+            args: "--target aarch64-apple-darwin"
+            display: macOS-arm64
+          # Mac Intel — for older hardware.  Builds independently
+          # rather than as a universal binary so the .dmg footprint
+          # stays smaller per download.
+          - platform: macos-latest
+            args: "--target x86_64-apple-darwin"
+            display: macOS-x64
+          - platform: ubuntu-22.04
+            args: ""
+            display: linux-x64
+          - platform: windows-latest
+            args: ""
+            display: windows-x64
+    runs-on: ${{ matrix.platform }}
+    name: build (${{ matrix.display }})
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Mac: both Apple Silicon and Intel triples installed so a
+          # single runner can cross-compile via the matrix `args`.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/desktop/src-tauri -> target"
+
+      - name: Linux deps
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            patchelf
+
+      - name: Install JS deps (root + apps/desktop)
+        run: |
+          bun install
+          bun install --cwd apps/desktop
+
+      - name: Build web client
+        run: bun run --cwd client build
+
+      # `tauri-action` runs `tauri build`, signs each updater artifact
+      # with TAURI_SIGNING_PRIVATE_KEY, uploads the bundles + .sig
+      # files as release assets to the draft release named below.  The
+      # `tagName` and `releaseName` are evaluated only on tag pushes;
+      # branch / dispatch runs skip the upload step entirely.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          # Tauri updater signing.  Private key + (empty) password
+          # come from repo secrets.  pubkey is committed in
+          # tauri.conf.json — that's correct, minisign pubkeys are
+          # public.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS code signing + notarization.  Without these the
+          # build still succeeds, but the .dmg / .app is unsigned and
+          # users see Gatekeeper warnings on first launch.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ startsWith(github.ref, 'refs/tags/desktop-v') && github.ref_name || '' }}
+          releaseName: "Koven Desktop ${{ github.ref_name }}"
+          releaseBody: |
+            See the [changelog](https://github.com/GnosysLabs/koven-chat/blob/main/CHANGELOG.md) for what's new.
+
+            **macOS:** download the `.dmg`, open it, drag Koven into Applications.
+            **Windows:** download the `.exe` setup, run it.  First launch may trip SmartScreen — click "More info → Run anyway".
+            **Linux:** download the `.AppImage`, `chmod +x`, run.  Or use the `.deb`.
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
+          args: ${{ matrix.args }}
+
+  publish:
+    # Only run on tag pushes — branch / dispatch builds stay as draft
+    # artifacts.  Depends on every matrix job so the release exists
+    # with all platform binaries before we flip it public.
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Promote draft → published
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${{ github.ref_name }}" \
+            --draft=false \
+            --latest=false \
+            -R ${{ github.repository }}

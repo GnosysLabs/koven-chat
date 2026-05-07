@@ -1,0 +1,12 @@
+{
+	"$schema": "../gen/schemas/desktop-schema.json",
+	"identifier": "default",
+	"description": "Permissions granted to the main window — kept tight so a compromised SPA can't reach beyond what the shell strictly needs.",
+	"windows": ["main"],
+	"permissions": [
+		"core:default",
+		"opener:allow-open-url",
+		"updater:default",
+		"notification:default"
+	]
+}

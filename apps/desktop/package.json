@@ -1,0 +1,14 @@
+{
+	"name": "@koven/desktop",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Koven desktop shell — Tauri WebView wrapping client.koven.chat.",
+	"scripts": {
+		"dev": "tauri dev",
+		"build": "tauri build",
+		"icon": "tauri icon"
+	},
+	"devDependencies": {
+		"@tauri-apps/cli": "^2"
+	}
+}

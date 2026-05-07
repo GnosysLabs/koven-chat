@@ -1,0 +1,57 @@
+{
+	"$schema": "https://schema.tauri.app/config/2",
+	"productName": "Koven",
+	"version": "0.1.0",
+	"identifier": "chat.koven.desktop",
+	"build": {
+		"beforeBuildCommand": "bun install && bun run --cwd ../../../client build",
+		"frontendDist": "../../../client/dist",
+		"devUrl": "https://client.koven.chat"
+	},
+	"app": {
+		"windows": [],
+		"security": {
+			"csp": null
+		}
+	},
+	"bundle": {
+		"active": true,
+		"targets": ["dmg", "app", "msi", "nsis", "appimage", "deb"],
+		"icon": [
+			"icons/32x32.png",
+			"icons/128x128.png",
+			"icons/128x128@2x.png",
+			"icons/icon.icns",
+			"icons/icon.ico"
+		],
+		"category": "SocialNetworking",
+		"copyright": "Copyright © 2026 Gnosys Labs",
+		"publisher": "Gnosys Labs",
+		"homepage": "https://koven.chat",
+		"shortDescription": "Consensus-governed chat",
+		"longDescription": "Koven is a chat platform where censorship requires consensus, not authority.  Every visibility decision is a community vote, weighted by reputation.  Every action is logged forever.",
+		"createUpdaterArtifacts": true,
+		"macOS": {
+			"minimumSystemVersion": "11.0",
+			"frameworks": []
+		},
+		"windows": {},
+		"linux": {
+			"deb": {
+				"depends": ["libwebkit2gtk-4.1-0", "libssl3"]
+			}
+		}
+	},
+	"plugins": {
+		"updater": {
+			"active": true,
+			"endpoints": [
+				"https://github.com/GnosysLabs/koven-chat/releases/latest/download/desktop-latest.json"
+			],
+			"pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcwRjAxNTk2RDMxOTlEOTIKUldTU25SblRsaFh3Y0R2Q1YzOTdDWEZLZysyVzJFZEpMZ0ZoQWVERjBQdmFMT010MElOczhxUEwK",
+			"windows": {
+				"installMode": "passive"
+			}
+		}
+	}
+}
