@@ -158,6 +158,41 @@ export function ChatPane({
 		el.scrollTop = el.scrollHeight;
 	}, [messages.length, room?.id]);
 
+	// Global hover tracking for the message-action toolbar.  Per-row
+	// onMouseEnter/onMouseLeave (and even onPointerEnter/onPointerLeave)
+	// drop events unreliably in WKWebView when sibling rows are
+	// adjacent and the mouse moves quickly between them — React's
+	// synthetic-event layer doesn't fire `leave` on the previous row.
+	// Result: action toolbars accumulate visible across multiple
+	// messages.
+	//
+	// Robust fix: a single native `pointermove` listener on the chat
+	// scroll container.  On every move we walk up from `e.target` to
+	// the nearest element with `data-message-id` and that becomes the
+	// authoritatively-hovered message.  When the pointer leaves the
+	// container, no message is hovered.  ChatPane owns this state and
+	// passes `isHovered` down, so each MessageRow renders without any
+	// hover events of its own.  Bypasses React's synthetic-event
+	// indirection entirely.
+	const [hoveredMessageId, setHoveredMessageId] = useState<EventId | null>(null);
+	useEffect(() => {
+		const el = scrollRef.current;
+		if (!el) return;
+		const onMove = (e: PointerEvent) => {
+			const t = e.target as HTMLElement | null;
+			const msgEl = t?.closest("[data-message-id]");
+			const id = (msgEl?.getAttribute("data-message-id") ?? null) as EventId | null;
+			setHoveredMessageId(prev => (prev === id ? prev : id));
+		};
+		const onLeave = () => setHoveredMessageId(null);
+		el.addEventListener("pointermove", onMove);
+		el.addEventListener("pointerleave", onLeave);
+		return () => {
+			el.removeEventListener("pointermove", onMove);
+			el.removeEventListener("pointerleave", onLeave);
+		};
+	}, [room?.id]);
+
 	// Clear the reply target + any pending attachment when the user
 	// switches rooms — those are scoped to the previous conversation.
 	useEffect(() => {
@@ -487,6 +522,7 @@ export function ChatPane({
 									// MessageRow below.
 								}}
 								isBot={!!botMxids?.has(m.sender)}
+								isHovered={hoveredMessageId === m.id}
 								onToggleReactionPill={(reaction) => {
 									if (reaction.myReactionId) onUnreact(reaction);
 									else onReact(m.id, reaction.key);
@@ -683,6 +719,7 @@ export function ChatPane({
 function MessageRow({
 	message, avatarMxc, continuesGroup, isFirst, flaggable, roomEncrypted,
 	reactions, flags, collapse, onReact, onReply, onFlag, onTogglePillFlag, onToggleReactionPill, isBot,
+	isHovered,
 }: {
 	message: Message;
 	avatarMxc: string | undefined;
@@ -710,22 +747,21 @@ function MessageRow({
 	onFlag(category: FlagCategory, rationale?: string): void | Promise<void>;
 	onTogglePillFlag(): void;
 	onToggleReactionPill(reaction: ReactionAggregate): void;
+	// Authoritative "is the cursor currently over this row?" signal,
+	// computed in ChatPane via a single native pointermove listener
+	// on the scroll container.  See the comment there for why this
+	// has to live above the row instead of using per-row React events.
+	isHovered: boolean;
 }) {
 	const [flagDialogOpen, setFlagDialogOpen] = useState(false);
 	const [expanded, setExpanded] = useState(false);
-	// Explicit hover + popover state instead of CSS group-hover.  The
-	// CSS approach worked everywhere except WKWebView when a Radix
-	// Popover opens/closes inside the row — the popover sets
-	// pointer-events:none on the body while open, and on close the
-	// underlying `:hover` state doesn't always reset cleanly, leaving
-	// the action toolbar stuck visible.  React onMouseEnter/onMouseLeave
-	// dispatches at the React-event level, isn't affected by that
-	// quirk, and reliably hides the toolbar on actual mouse-leave.
-	// Tracking the popover open state separately lets us keep the
-	// toolbar visible while the user picks an emoji.
-	const [hovered, setHovered] = useState(false);
+	// Popover state stays local to the row — only relevant for THIS
+	// row's React picker.  Combined with the parent-supplied
+	// `isHovered` to keep the toolbar visible while the user picks
+	// an emoji (otherwise the toolbar would fade out the moment they
+	// move the cursor up to the popover content).
 	const [reactOpen, setReactOpen] = useState(false);
-	const showActions = hovered || reactOpen;
+	const showActions = isHovered || reactOpen;
 	const myFlagId = flags?.myFlagId;
 	// You can't flag your own messages — both because the consensus
 	// vote is meaningless on yourself and because it'd let users
@@ -759,10 +795,8 @@ function MessageRow({
 	if (message.kind === "emote") {
 		return (
 			<div
+				data-message-id={message.id}
 				className={cn("flex gap-3 items-start", topMargin)}
-				onPointerEnter={() => setHovered(true)}
-				onPointerLeave={() => setHovered(false)}
-				onPointerCancel={() => setHovered(false)}
 			>
 				<AvatarSlot mxc={avatarMxc} seed={message.sender} hidden={continuesGroup} isBot={isBot} />
 				<div className="flex-1 min-w-0 pt-1 text-sm italic text-muted-foreground flex items-center gap-2">
@@ -804,9 +838,8 @@ function MessageRow({
 
 	return (
 		<div
+			data-message-id={message.id}
 			className={cn("flex gap-3 items-start", topMargin)}
-			onMouseEnter={() => setHovered(true)}
-			onMouseLeave={() => setHovered(false)}
 		>
 			<AvatarSlot mxc={avatarMxc} seed={message.sender} hidden={continuesGroup} isBot={isBot} />
 			<div className="flex-1 min-w-0">
