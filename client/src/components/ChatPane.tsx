@@ -713,6 +713,19 @@ function MessageRow({
 }) {
 	const [flagDialogOpen, setFlagDialogOpen] = useState(false);
 	const [expanded, setExpanded] = useState(false);
+	// Explicit hover + popover state instead of CSS group-hover.  The
+	// CSS approach worked everywhere except WKWebView when a Radix
+	// Popover opens/closes inside the row — the popover sets
+	// pointer-events:none on the body while open, and on close the
+	// underlying `:hover` state doesn't always reset cleanly, leaving
+	// the action toolbar stuck visible.  React onMouseEnter/onMouseLeave
+	// dispatches at the React-event level, isn't affected by that
+	// quirk, and reliably hides the toolbar on actual mouse-leave.
+	// Tracking the popover open state separately lets us keep the
+	// toolbar visible while the user picks an emoji.
+	const [hovered, setHovered] = useState(false);
+	const [reactOpen, setReactOpen] = useState(false);
+	const showActions = hovered || reactOpen;
 	const myFlagId = flags?.myFlagId;
 	// You can't flag your own messages — both because the consensus
 	// vote is meaningless on yourself and because it'd let users
@@ -745,7 +758,11 @@ function MessageRow({
 	// doesn't shift.
 	if (message.kind === "emote") {
 		return (
-			<div className={cn("group flex gap-3 items-start", topMargin)}>
+			<div
+				className={cn("flex gap-3 items-start", topMargin)}
+				onMouseEnter={() => setHovered(true)}
+				onMouseLeave={() => setHovered(false)}
+			>
 				<AvatarSlot mxc={avatarMxc} seed={message.sender} hidden={continuesGroup} isBot={isBot} />
 				<div className="flex-1 min-w-0 pt-1 text-sm italic text-muted-foreground flex items-center gap-2">
 					{isCollapsed ? (
@@ -765,7 +782,12 @@ function MessageRow({
 						onReply={onReply}
 						onFlagClick={() => setFlagDialogOpen(true)}
 						showFlag={canFlag}
-						className="opacity-0 group-hover:opacity-100 transition-opacity"
+						reactOpen={reactOpen}
+						onReactOpenChange={setReactOpen}
+						className={cn(
+							"transition-opacity",
+							showActions ? "opacity-100" : "opacity-0 pointer-events-none",
+						)}
 					/>
 				</div>
 				{canFlag && (
@@ -780,7 +802,11 @@ function MessageRow({
 	}
 
 	return (
-		<div className={cn("group flex gap-3 items-start", topMargin)}>
+		<div
+			className={cn("flex gap-3 items-start", topMargin)}
+			onMouseEnter={() => setHovered(true)}
+			onMouseLeave={() => setHovered(false)}
+		>
 			<AvatarSlot mxc={avatarMxc} seed={message.sender} hidden={continuesGroup} isBot={isBot} />
 			<div className="flex-1 min-w-0">
 				{!continuesGroup && (
@@ -823,7 +849,12 @@ function MessageRow({
 						onReply={onReply}
 						onFlagClick={() => setFlagDialogOpen(true)}
 						showFlag={canFlag}
-						className="opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+						reactOpen={reactOpen}
+						onReactOpenChange={setReactOpen}
+						className={cn(
+							"transition-opacity shrink-0",
+							showActions ? "opacity-100" : "opacity-0 pointer-events-none",
+						)}
 					/>
 				</div>
 				{!isCollapsed && message.kind === "text" && !roomEncrypted && (

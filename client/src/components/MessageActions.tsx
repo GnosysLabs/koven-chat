@@ -24,10 +24,23 @@ export interface MessageActionsProps {
 	// apply (a 1-on-1 chat has no community to vote with you).
 	showFlag?: boolean;
 	className?: string;
+	// Optional controlled popover state for the React picker.  Lifted
+	// up to the parent message row so the parent can keep the action
+	// toolbar visible while the picker is open (otherwise the toolbar
+	// fades out the moment the user moves their mouse off the message
+	// to pick an emoji).  When omitted, the popover stays uncontrolled
+	// for callers that don't need this coordination.
+	reactOpen?: boolean;
+	onReactOpenChange?(open: boolean): void;
 }
 
-export function MessageActions({ onReact, onReply, onFlagClick, showFlag = true, className }: MessageActionsProps) {
-	const [reactOpen, setReactOpen] = useState(false);
+export function MessageActions({
+	onReact, onReply, onFlagClick, showFlag = true, className,
+	reactOpen: reactOpenProp, onReactOpenChange,
+}: MessageActionsProps) {
+	const [internalReactOpen, setInternalReactOpen] = useState(false);
+	const reactOpen = reactOpenProp ?? internalReactOpen;
+	const setReactOpen = onReactOpenChange ?? setInternalReactOpen;
 
 	return (
 		<div className={cn(

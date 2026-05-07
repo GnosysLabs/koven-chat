@@ -48,20 +48,27 @@ function pageOrigin(): string {
  * `https://client.koven.chat` directly), false in browsers, false
  * during SSR.
  *
- * Detection: Tauri injects `window.__TAURI_INTERNALS__` (the IPC
- * bridge) into pages it serves from its own protocol — `tauri://`
- * on macOS / Linux, `https://tauri.localhost` on Windows.  It does
- * NOT inject it into pages loaded from a remote URL (the dev mode's
- * `devUrl: https://client.koven.chat` path), which is why we can use
- * its presence as a clean "are we the bundled SPA?" signal across
- * all three platforms without origin-string matching.  Pure
- * `window.location.origin` matching breaks on Windows in some
- * WebView2 configurations where the origin format isn't exactly
- * `https://tauri.localhost`. */
-function isTauriBundle(): boolean {
+ * Detection signal: the Tauri shell's initialization_script runs
+ * before any SPA code and sets `window.__KOVEN_DESKTOP__ = true` plus
+ * `window.__KOVEN_PLATFORM__ = "macos" | "linux" | "windows"` —
+ * compile-time tags from the Rust side that don't depend on origin
+ * format, IPC injection, or UA sniffing.  The earlier protocol /
+ * UA-based heuristics drifted between WebView versions; this is
+ * deterministic.
+ *
+ * In `tauri dev` mode the same script runs for the same window, so
+ * dev shows the same flags — that's intentional.  The dev-vs-prod
+ * difference is only the URL the WebView loads, not the chrome. */
+type KovenWindow = Window & {
+	__KOVEN_DESKTOP__?: boolean;
+	__KOVEN_PLATFORM__?: "macos" | "linux" | "windows" | "unknown";
+};
+
+export function isTauriBundle(): boolean {
 	if (typeof window === "undefined") return false;
-	return !!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+	return !!(window as KovenWindow).__KOVEN_DESKTOP__;
 }
+
 
 export const HOMESERVER_URL =
 	(import.meta.env.VITE_HOMESERVER_URL as string | undefined)

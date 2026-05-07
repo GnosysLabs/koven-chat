@@ -125,6 +125,33 @@ fn is_internal(url: &Url) -> bool {
 	}
 }
 
+/// Compile-time platform tag exposed to the SPA via `__KOVEN_PLATFORM__`.
+/// Lets the SPA gate platform-specific UI (e.g. the macOS draggable
+/// strip that compensates for `TitleBarStyle::Overlay`) without
+/// trying to feature-detect or sniff user agents from inside the
+/// WebView, both of which have proven unreliable.
+#[cfg(target_os = "macos")]
+const KOVEN_PLATFORM: &str = "macos";
+#[cfg(target_os = "linux")]
+const KOVEN_PLATFORM: &str = "linux";
+#[cfg(target_os = "windows")]
+const KOVEN_PLATFORM: &str = "windows";
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+const KOVEN_PLATFORM: &str = "unknown";
+
+/// Build the init script that runs before the SPA scripts on every
+/// page.  Prepends a small prelude that exposes `__KOVEN_DESKTOP__`
+/// (always true here) and `__KOVEN_PLATFORM__` (compile-time OS tag),
+/// which the SPA reads to branch on platform-specific UI.  Done at
+/// runtime so the platform string can be interpolated; LINK_INTERCEPTOR_JS
+/// stays a const &str.
+fn build_init_script() -> String {
+	format!(
+		"window.__KOVEN_DESKTOP__=true;window.__KOVEN_PLATFORM__='{}';\n{}",
+		KOVEN_PLATFORM, LINK_INTERCEPTOR_JS,
+	)
+}
+
 pub fn run() {
 	tauri::Builder::default()
 		// Keep one window per machine — second `koven-desktop` launch
@@ -252,7 +279,7 @@ pub fn run() {
 				// for top-level navigations, not pop-up requests.  This
 				// runs before any page script so it catches links from
 				// the very first paint.
-				.initialization_script(LINK_INTERCEPTOR_JS)
+				.initialization_script(build_init_script())
 				.on_navigation(move |url| {
 					if is_internal(url) {
 						return true;
@@ -273,18 +300,12 @@ pub fn run() {
 					false
 				});
 
-			// macOS: use the Overlay title-bar style so the WebView
-			// content paints all the way to the top of the window and
-			// the traffic lights float over the SPA's chat-themed
-			// background — matching what `tauri dev` renders.  In the
-			// default `Visible` style the OS draws a separate solid
-			// strip at the top, which produces a hard cut between the
-			// title bar and the login background image (and breaks the
-			// brand feel everywhere else).  Tauri's CLI seems to apply
-			// Overlay implicitly during `tauri dev` but not during
-			// `tauri build`, so pin it explicitly here for parity.
-			#[cfg(target_os = "macos")]
-			let builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay);
+			// macOS: no title-bar customization.  The default
+			// `Visible` style draws a standard native title bar with
+			// "Koven" text and traffic lights, the WebView starts
+			// below it, dragging works natively, and the SpaceBar's
+			// avatar isn't overlapped by the traffic lights because
+			// the OS reserves space for the title bar itself.
 
 			let _win = builder.build()?;
 
