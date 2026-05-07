@@ -1792,6 +1792,44 @@ export class MatrixTransport {
 	}
 
 	/**
+	 * Destroy a space along with every room declared as its child.
+	 * Walks `childRoomIds` first, calling `deleteRoom` for each
+	 * (best-effort — rooms the user can't kick from are skipped and
+	 * logged), then deletes the space room itself.  Caller is the
+	 * one with the canonical child list, so we don't re-derive it
+	 * here from the SDK state.
+	 *
+	 * Returns the per-child outcome so the UI can surface partial
+	 * failures.  In practice every child the user created should
+	 * succeed (PL 100 → kick + leave + forget); foreign-owned child
+	 * rooms (someone else added them under this space) end up in
+	 * `failed` because the user can't kick from rooms where they
+	 * lack power-level.
+	 */
+	async deleteSpace(
+		spaceId: RoomId,
+		childRoomIds: RoomId[],
+	): Promise<{ deletedChildren: RoomId[]; failedChildren: RoomId[] }> {
+		const deletedChildren: RoomId[] = [];
+		const failedChildren: RoomId[] = [];
+		for (const childId of childRoomIds) {
+			try {
+				await this.deleteRoom(childId);
+				deletedChildren.push(childId);
+			} catch (err) {
+				console.warn(`deleteSpace: child ${childId} delete failed`, err);
+				failedChildren.push(childId);
+			}
+		}
+		// Delete the space room itself last so the children's
+		// `m.space.parent` references are still valid while we
+		// process them (matters for any client that uses parent
+		// references for navigation).
+		await this.deleteRoom(spaceId);
+		return { deletedChildren, failedChildren };
+	}
+
+	/**
 	 * Destroy a room or space the user created.  Matrix has no
 	 * "delete room" primitive — rooms are eternal once created.  The
 	 * closest gesture: kick every other member, then leave + forget

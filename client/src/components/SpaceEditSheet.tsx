@@ -36,10 +36,19 @@ export interface SpaceEditSheetProps {
 	}): Promise<void>;
 	// See RoomEditSheet for the Leave-vs-Delete creator rule.
 	onLeave?(spaceId: string): Promise<void>;
-	onDelete?(spaceId: string): Promise<void>;
+	// Delete the space + every child room in `childIds`.  The dialog
+	// resolves names via `lookupChildName` and shows them in the
+	// confirmation UI before firing this; caller's responsible for
+	// closing the dialog + navigating away on resolve.
+	onDelete?(spaceId: string, childIds: string[]): Promise<void>;
+	// Resolves a child room id to the human-readable name we render
+	// in the confirmation list.  Falls back to the room id when the
+	// user isn't a member of the child (so we can't read its name
+	// locally) — at that point all the dialog can show is the id.
+	lookupChildName?(roomId: string): string;
 }
 
-export function SpaceEditSheet({ space, currentUserId, onClose, onSave, onLeave, onDelete }: SpaceEditSheetProps) {
+export function SpaceEditSheet({ space, currentUserId, onClose, onSave, onLeave, onDelete, lookupChildName }: SpaceEditSheetProps) {
 	const [name, setName] = useState("");
 	const [topic, setTopic] = useState("");
 	const [visibility, setVisibility] = useState<"public" | "private">("public");
@@ -94,7 +103,7 @@ export function SpaceEditSheet({ space, currentUserId, onClose, onSave, onLeave,
 		setPending(true);
 		setError(null);
 		try {
-			await onDelete(space.id);
+			await onDelete(space.id, space.childRoomIds);
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
 			setPending(false);
@@ -168,6 +177,85 @@ export function SpaceEditSheet({ space, currentUserId, onClose, onSave, onLeave,
 	}
 
 	const hasRealAvatar = !!(avatarPreview || (!clearAvatar && space?.avatarUrl));
+
+	// Delete-confirmation view replaces the settings form when the
+	// creator clicks Delete.  Lists the child rooms by name so the
+	// user knows exactly what they're nuking.  We can only show
+	// names for rooms the user is a joined member of (the
+	// matrix-js-sdk store doesn't carry full state for foreign
+	// rooms); rooms we can't resolve fall back to their id, which
+	// is rare in practice — the creator usually authored the
+	// children and is in all of them.
+	if (confirmingDelete && space) {
+		const childCount = space.childRoomIds.length;
+		return (
+			<Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+				<DialogContent className="sm:max-w-md">
+					<DialogHeader>
+						<DialogTitle>
+							Delete {space.name || "this space"}?
+						</DialogTitle>
+						<DialogDescription>
+							{childCount === 0
+								? "This space has no rooms inside it. Deleting will kick everyone out and shut the space down."
+								: `Deleting will kick everyone out of the space and shut down its ${childCount} ${childCount === 1 ? "room" : "rooms"}. Past messages stay attributed but no one will be able to post or read them again.`
+							}
+						</DialogDescription>
+					</DialogHeader>
+
+					{childCount > 0 && (
+						<div className="space-y-2">
+							<div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+								Rooms that will be deleted
+							</div>
+							<ul className="rounded-md border border-border divide-y divide-border bg-card/30 max-h-48 overflow-y-auto">
+								{space.childRoomIds.map(id => (
+									<li key={id} className="px-3 py-1.5 text-sm">
+										{lookupChildName ? lookupChildName(id) : id}
+									</li>
+								))}
+							</ul>
+						</div>
+					)}
+
+					<p className="text-xs text-muted-foreground">
+						This can't be undone.
+					</p>
+
+					{error && (
+						<div className="text-xs text-destructive border border-destructive/40 bg-destructive/10 rounded px-3 py-2">
+							{error}
+						</div>
+					)}
+
+					<DialogFooter>
+						<Button
+							type="button"
+							variant="ghost"
+							onClick={() => { setConfirmingDelete(false); setError(null); }}
+							disabled={pending}
+						>
+							Cancel
+						</Button>
+						<Button
+							type="button"
+							variant="destructive"
+							onClick={doDelete}
+							disabled={pending}
+							className="gap-1.5"
+						>
+							<Trash2 className="h-4 w-4" />
+							{pending
+								? "Deleting…"
+								: childCount === 0
+									? "Delete space"
+									: `Delete space + ${childCount} ${childCount === 1 ? "room" : "rooms"}`}
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
+		);
+	}
 
 	return (
 		<Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
@@ -362,17 +450,10 @@ export function SpaceEditSheet({ space, currentUserId, onClose, onSave, onLeave,
 									</Button>
 								</>
 							)}
-							{confirmingDelete && (
-								<>
-									<span className="text-xs text-muted-foreground">Kick everyone and delete?</span>
-									<Button type="button" variant="ghost" size="sm" onClick={() => setConfirmingDelete(false)} disabled={pending}>
-										Cancel
-									</Button>
-									<Button type="button" variant="destructive" size="sm" onClick={doDelete} disabled={pending}>
-										{pending ? "Deleting…" : "Confirm delete"}
-									</Button>
-								</>
-							)}
+							{/* Delete uses a full-body confirmation view (see
+							    the early-return above) so we can list every
+							    child room about to be destroyed.  No inline
+							    confirm here. */}
 						</div>
 						<div className="flex items-center gap-2">
 							<Button type="button" variant="ghost" onClick={onClose} disabled={pending}>

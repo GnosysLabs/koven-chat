@@ -190,6 +190,99 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 
 	const hasRealAvatar = !!(avatarPreview || (!clearAvatar && room?.avatarUrl));
 
+	// Delete-confirmation view — full-body replacement so the user
+	// sees exactly what they're firing.  Rooms have no children to
+	// list so the copy is shorter than the space-delete equivalent.
+	if (confirmingDelete && room) {
+		return (
+			<Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+				<DialogContent className="sm:max-w-md">
+					<DialogHeader>
+						<DialogTitle>
+							Delete {room.name || "this room"}?
+						</DialogTitle>
+						<DialogDescription>
+							Everyone will be kicked out and the room will shut down. Past messages stay attributed but no one will be able to post or read them again. This can't be undone.
+						</DialogDescription>
+					</DialogHeader>
+
+					{error && (
+						<div className="text-xs text-destructive border border-destructive/40 bg-destructive/10 rounded px-3 py-2">
+							{error}
+						</div>
+					)}
+
+					<DialogFooter>
+						<Button
+							type="button"
+							variant="ghost"
+							onClick={() => { setConfirmingDelete(false); setError(null); }}
+							disabled={pending}
+						>
+							Cancel
+						</Button>
+						<Button
+							type="button"
+							variant="destructive"
+							onClick={doDelete}
+							disabled={pending}
+							className="gap-1.5"
+						>
+							<Trash2 className="h-4 w-4" />
+							{pending ? "Deleting…" : "Delete room"}
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
+		);
+	}
+
+	// Leave-confirmation view — same shape as Delete, scoped to "I'm
+	// out" gestures (the room continues without us).
+	if (confirmingLeave && room) {
+		return (
+			<Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+				<DialogContent className="sm:max-w-md">
+					<DialogHeader>
+						<DialogTitle>
+							Leave {room.name || "this room"}?
+						</DialogTitle>
+						<DialogDescription>
+							You'll stop receiving messages from this room and it'll disappear from your room list. Other members are unaffected — the room continues without you.
+						</DialogDescription>
+					</DialogHeader>
+
+					{error && (
+						<div className="text-xs text-destructive border border-destructive/40 bg-destructive/10 rounded px-3 py-2">
+							{error}
+						</div>
+					)}
+
+					<DialogFooter>
+						<Button
+							type="button"
+							variant="ghost"
+							onClick={() => { setConfirmingLeave(false); setError(null); }}
+							disabled={pending}
+						>
+							Cancel
+						</Button>
+						<Button
+							type="button"
+							variant="destructive"
+							onClick={doLeave}
+							disabled={pending}
+							className="gap-1.5"
+						>
+							<DoorOpen className="h-4 w-4" />
+							{pending ? "Leaving…" : "Leave room"}
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
+		);
+	}
+
 	return (
 		<Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
 			<DialogContent className="sm:max-w-md">
@@ -388,28 +481,10 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 									Delete
 								</Button>
 							)}
-							{confirmingLeave && (
-								<>
-									<span className="text-xs text-muted-foreground">Leave this room?</span>
-									<Button type="button" variant="ghost" size="sm" onClick={() => setConfirmingLeave(false)} disabled={pending}>
-										Cancel
-									</Button>
-									<Button type="button" variant="destructive" size="sm" onClick={doLeave} disabled={pending}>
-										{pending ? "Leaving…" : "Confirm leave"}
-									</Button>
-								</>
-							)}
-							{confirmingDelete && (
-								<>
-									<span className="text-xs text-muted-foreground">Kick everyone and delete?</span>
-									<Button type="button" variant="ghost" size="sm" onClick={() => setConfirmingDelete(false)} disabled={pending}>
-										Cancel
-									</Button>
-									<Button type="button" variant="destructive" size="sm" onClick={doDelete} disabled={pending}>
-										{pending ? "Deleting…" : "Confirm delete"}
-									</Button>
-								</>
-							)}
+							{/* Leave + Delete fire full-body confirmation
+							    views (see early-returns above) instead
+							    of inline confirms — clearer copy, more
+							    room for "what happens next." */}
 						</div>
 						<div className="flex items-center gap-2">
 							<Button type="button" variant="ghost" onClick={onClose} disabled={pending}>

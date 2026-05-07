@@ -952,11 +952,20 @@ export default function App() {
 					setEditingSpaceId(null);
 					dispatch({ type: "set_active_space", space: { kind: "rooms" } });
 				}}
-				onDelete={async (spaceId) => {
+				onDelete={async (spaceId, childIds) => {
 					if (!transport) throw new Error("Not connected");
-					await transport.deleteRoom(spaceId as RoomId);
+					await transport.deleteSpace(spaceId as RoomId, childIds as RoomId[]);
 					setEditingSpaceId(null);
 					dispatch({ type: "set_active_space", space: { kind: "rooms" } });
+					dispatch({ type: "set_active_room", roomId: null });
+				}}
+				lookupChildName={(roomId) => {
+					// Resolve via the SPA's room cache.  Falls back to
+					// the bare room id only if the user isn't a joined
+					// member of the child (rare for creator-deleted
+					// spaces, common only when somebody else added a
+					// foreign room into the space).
+					return state.rooms.find(r => r.id === roomId)?.name ?? roomId;
 				}}
 			/>
 			<RoomEditSheet
