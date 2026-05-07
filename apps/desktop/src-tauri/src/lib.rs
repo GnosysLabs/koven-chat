@@ -13,6 +13,9 @@ use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 
+#[cfg(target_os = "macos")]
+use tauri::menu::{AboutMetadataBuilder, MenuBuilder, SubmenuBuilder};
+
 /// JS injected into every page before the SPA scripts run.  Catches
 /// `<a target="_blank">` clicks and `window.open()` calls and routes
 /// the URL through the WebView's top-level navigation, where the Rust
@@ -144,6 +147,70 @@ pub fn run() {
 		// URL declared in tauri.conf.json.
 		.plugin(tauri_plugin_updater::Builder::new().build())
 		.setup(|app| {
+			// macOS application menu.  Tauri 2 doesn't auto-build one,
+			// and without an explicit menu the system falls back to a
+			// stub that names every item after the binary
+			// (`koven-desktop`) — hence "About koven-desktop" instead
+			// of "About Koven".  Build the standard set (App / Edit /
+			// View / Window) explicitly so menu labels, the About
+			// dialog, and Cmd-shortcuts behave the way users expect.
+			//
+			// Linux / Windows ignore this — they don't have a global
+			// menu bar (Linux desktops vary; Windows menus live inside
+			// the window via Tauri's built-in chrome).
+			#[cfg(target_os = "macos")]
+			{
+				let about = AboutMetadataBuilder::new()
+					.name(Some("Koven"))
+					.version(Some(env!("CARGO_PKG_VERSION").to_string()))
+					.copyright(Some("Copyright © 2026 Gnosys Labs".to_string()))
+					.website(Some("https://koven.chat".to_string()))
+					.website_label(Some("koven.chat".to_string()))
+					// The .icns bundled by Tauri's icon pipeline lives
+					// inside the .app's Resources folder — macOS pulls
+					// it for the About dialog automatically via
+					// CFBundleIconFile.  No need to load bytes here.
+					.build();
+
+				let app_menu = SubmenuBuilder::new(app, "Koven")
+					.about(Some(about))
+					.separator()
+					.services()
+					.separator()
+					.hide()
+					.hide_others()
+					.show_all()
+					.separator()
+					.quit()
+					.build()?;
+
+				let edit_menu = SubmenuBuilder::new(app, "Edit")
+					.undo()
+					.redo()
+					.separator()
+					.cut()
+					.copy()
+					.paste()
+					.select_all()
+					.build()?;
+
+				let view_menu = SubmenuBuilder::new(app, "View")
+					.fullscreen()
+					.build()?;
+
+				let window_menu = SubmenuBuilder::new(app, "Window")
+					.minimize()
+					.maximize()
+					.separator()
+					.close_window()
+					.build()?;
+
+				let menu = MenuBuilder::new(app)
+					.items(&[&app_menu, &edit_menu, &view_menu, &window_menu])
+					.build()?;
+				app.set_menu(menu)?;
+			}
+
 			// Build the main window in code rather than declaring it
 			// statically in tauri.conf.json so we can attach the
 			// navigation handler before the WebView's first load —
