@@ -10,7 +10,7 @@
 // we do (a simple, stable Room/Message shape).
 
 import * as sdk from "matrix-js-sdk";
-import { ClientEvent, MatrixEventEvent, RoomEvent, RoomMemberEvent } from "matrix-js-sdk";
+import { ClientEvent, MatrixEventEvent, RoomEvent, RoomMemberEvent, UserEvent } from "matrix-js-sdk";
 import { CallEventHandlerEvent } from "matrix-js-sdk/lib/webrtc/callEventHandler";
 import type { MatrixCall } from "matrix-js-sdk/lib/webrtc/call";
 import type {
@@ -527,6 +527,24 @@ export class MatrixTransport {
 		this.client.on(RoomMemberEvent.Membership, (_event, member) => {
 			this.handlers.onMembersUpdated(member.roomId as RoomId);
 		});
+
+		// Presence updates — fire onMembersUpdated for every room
+		// the user is in so the member-list status dot + grouping
+		// stay live as people come / go online.  Walking rooms per
+		// event is fine: presence updates aren't that frequent and
+		// the room list is small.  CurrentlyActive fires when a
+		// user transitions between active and idle inside the
+		// "online" presence — also reflected in our 3-bucket model.
+		const refreshPresenceFor = (userId: string | undefined) => {
+			if (!userId || !this.client) return;
+			for (const room of this.client.getRooms()) {
+				if (room.getMember(userId)) {
+					this.handlers.onMembersUpdated(room.roomId as RoomId);
+				}
+			}
+		};
+		this.client.on(UserEvent.Presence, (_event, user) => refreshPresenceFor(user?.userId));
+		this.client.on(UserEvent.CurrentlyActive, (_event, user) => refreshPresenceFor(user?.userId));
 
 		// 1:1 voice/video — the SDK fires CallEventHandlerEvent.Incoming
 		// once when a remote m.call.invite is processed and ringing.
@@ -2290,18 +2308,41 @@ export class MatrixTransport {
 
 	/** Joined members of a room, sorted by power level then name. */
 	getRoomMembers(roomId: RoomId): import("@koven/shared").Member[] {
-		const room = this.client?.getRoom(roomId);
-		if (!room) return [];
+		const c = this.client;
+		const room = c?.getRoom(roomId);
+		if (!c || !room) return [];
 		const joined = room.getMembersWithMembership("join");
-		return joined.map(m => ({
-			userId: m.userId as UserId,
-			displayName: m.name || m.userId,
-			// Raw mxc:// — UI components fetch via getMxcBlobUrl().
-			avatarUrl: m.getMxcAvatarUrl() ?? undefined,
-			powerLevel: m.powerLevel ?? 0,
-			presence: undefined,         // TODO: wire to client.presence sync
-			statusMessage: undefined,
-		})).sort((a, b) => {
+		return joined.map(m => {
+			// Synapse presence is best-effort; getUser() may return
+			// null for members the local client hasn't observed
+			// presence for yet.  Treat unknown as "offline" — better
+			// to under-promise (show as offline) than over-promise
+			// (claim online for someone we haven't heard from).
+			const u = c.getUser(m.userId);
+			let presence: import("@koven/shared").Member["presence"] = "offline";
+			if (u) {
+				if (u.presence === "online") {
+					// "online" + currentlyActive=false means the user
+					// is logged in but idle — bucket as "unavailable"
+					// so the UI surfaces the recently-active state
+					// distinctly from active-right-now.
+					presence = u.currentlyActive ? "online" : "unavailable";
+				} else if (u.presence === "unavailable") {
+					presence = "unavailable";
+				} else if (u.presence === "offline") {
+					presence = "offline";
+				}
+			}
+			return {
+				userId: m.userId as UserId,
+				displayName: m.name || m.userId,
+				// Raw mxc:// — UI components fetch via getMxcBlobUrl().
+				avatarUrl: m.getMxcAvatarUrl() ?? undefined,
+				powerLevel: m.powerLevel ?? 0,
+				presence,
+				statusMessage: u?.presenceStatusMsg ?? undefined,
+			};
+		}).sort((a, b) => {
 			if (a.powerLevel !== b.powerLevel) return b.powerLevel - a.powerLevel;
 			return a.displayName.localeCompare(b.displayName);
 		});
