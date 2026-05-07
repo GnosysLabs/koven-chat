@@ -38,6 +38,18 @@ const MAX_BODY_CHARS = 4_000;
 // defensive trim.
 const MAX_REPLY_CHARS = 8_000;
 
+// Stale-event guard: drop messages whose origin_server_ts is more
+// than this many ms in the past at receipt time.  Matrix-js-sdk's
+// first /sync after a reconnect delivers everything that landed
+// during the offline window as live events with `liveEvent: true`;
+// without this filter, every engine restart triggers a flood of
+// belated bot responses to anything that mentioned a bot or hit a
+// trigger phrase while we were down.  60s is generous: legitimate
+// chats move faster than that, and federation-induced delivery
+// delay between Koven instances is small (we federate only with
+// other Kovens, no relay hops).
+const STALE_EVENT_THRESHOLD_MS = 60_000;
+
 export interface PipelineDeps {
 	bot: BotRow;
 	client: MatrixClient;
@@ -52,6 +64,17 @@ export interface PipelineDeps {
  */
 export async function maybeHandleMention(deps: PipelineDeps): Promise<void> {
 	const { bot, event, room } = deps;
+
+	// Don't respond to events that were already old when we got
+	// them — see STALE_EVENT_THRESHOLD_MS.  Belated responses to
+	// hours-old messages are bizarre UX and used to fire after
+	// every engine restart; this gate is the cheapest fix.
+	const ageMs = Date.now() - event.getTs();
+	if (ageMs > STALE_EVENT_THRESHOLD_MS) {
+		console.log(`bot ${bot.mxid}: skipping stale event in ${room.roomId} (age ${Math.floor(ageMs / 1000)}s)`);
+		return;
+	}
+
 	if (!isMentionOf(event, bot.mxid, room) && !matchesTrigger(event, bot.triggers)) return;
 
 	const flightKey = `${bot.id}:${room.roomId}`;
