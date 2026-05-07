@@ -1111,6 +1111,20 @@ export function updateBot(id: number, patch: {
 	return getBotById(id);
 }
 
+// Direct avatar set / clear, bypassing the COALESCE-based updateBot.
+// Needed because COALESCE(NULL, avatar_mxc) preserves the existing
+// value, so there's no way to *clear* the avatar through updateBot —
+// passing `null` is indistinguishable from "don't touch."  The avatar
+// endpoint uses this helper for both set (with the mxc:// string)
+// and clear (with null) paths.
+const setBotAvatarStmt = db.prepare(
+	`UPDATE bots SET avatar_mxc = ? WHERE id = ?`,
+);
+export function setBotAvatarMxc(id: number, avatarMxc: string | null): BotRow | null {
+	setBotAvatarStmt.run(avatarMxc, id);
+	return getBotById(id);
+}
+
 export function deleteBot(id: number): void {
 	deleteBotStmt.run(id);
 }

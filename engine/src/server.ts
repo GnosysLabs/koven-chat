@@ -53,6 +53,7 @@ import {
 	readBio,
 	readInstanceConfig,
 	readWeight,
+	setBotAvatarMxc,
 	suspensionsForRoom,
 	touchEmailLogin,
 	updateBot,
@@ -68,8 +69,10 @@ import {
 	adminSetUserEmail,
 	deactivateUser,
 	loginAsUser,
+	setProfileAvatar,
+	uploadMedia,
 } from "./synapse";
-import { sealSecret } from "./secret_box";
+import { openSecret, sealSecret } from "./secret_box";
 import { sendLoginCodeEmail } from "./email";
 import { extractToken, whoami } from "./auth";
 import { reconcileOne, startOne, stopOne } from "./bot_manager";
@@ -816,6 +819,93 @@ export function startServer(): void {
 						.catch(err => console.warn(`engine: bot ${id} state cleanup failed`, err));
 
 					return json({ ok: true });
+				}
+			}
+
+			// POST /api/bots/:id/avatar  (multipart "file" field)
+			// DELETE /api/bots/:id/avatar
+			//
+			// Owner-only.  Avatar bytes are uploaded to Synapse's media
+			// repo authenticated AS the bot (via the bot's stored access
+			// token), then the bot's own profile `avatar_url` is set so
+			// the picture shows up everywhere the bot's mxid is rendered
+			// — member lists, message rows, federated previews.  The
+			// resulting `mxc://` URL is mirrored into bots.avatar_mxc so
+			// the client gets it back for instant rendering without
+			// waiting for a /sync round-trip.
+			{
+				const m = path.match(/^\/api\/bots\/(\d+)\/avatar$/);
+				if (m) {
+					const userId = await whoami(extractToken(req));
+					if (!userId) return json({ errcode: "M_FORBIDDEN" }, { status: 401 });
+					const id = Number(m[1]);
+					const existing = getBotById(id);
+					if (!existing) return json({ errcode: "M_NOT_FOUND" }, { status: 404 });
+					if (existing.owner_id !== userId) {
+						return json({ errcode: "M_FORBIDDEN", error: "not your bot" }, { status: 403 });
+					}
+
+					let botToken: string;
+					try {
+						botToken = openSecret(existing.access_token_enc);
+					} catch (err) {
+						console.error("engine: bot avatar: failed to decrypt access token", err);
+						return json({ error: "encryption_unavailable" }, { status: 503 });
+					}
+
+					if (req.method === "POST") {
+						let form: Awaited<ReturnType<Request["formData"]>>;
+						try {
+							form = await req.formData();
+						} catch {
+							return json({ errcode: "M_BAD_JSON", error: "multipart body required" }, { status: 400 });
+						}
+						const file = form.get("file");
+						if (!(file instanceof File)) {
+							return json({ errcode: "M_INVALID_PARAM", error: "file field required" }, { status: 400 });
+						}
+						if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+							return json({ errcode: "M_INVALID_PARAM", error: `unsupported type: ${file.type}` }, { status: 400 });
+						}
+						if (file.size > MAX_UPLOAD_BYTES) {
+							return json({ errcode: "M_TOO_LARGE", error: "file > 5 MB" }, { status: 413 });
+						}
+
+						const bytes = new Uint8Array(await file.arrayBuffer());
+						const upload = await uploadMedia({
+							accessToken: botToken,
+							bytes,
+							contentType: file.type,
+							filename: file.name || `avatar.${extensionFor(file.type) ?? "png"}`,
+						});
+						if ("error" in upload) {
+							return json({
+								error: "synapse_upload_failed",
+								detail: upload.detail ?? upload.error,
+							}, { status: 502 });
+						}
+
+						// Set the bot's profile avatar so every Matrix
+						// client renders the new picture; if this fails
+						// the upload is already done so we still update
+						// the row, but log the inconsistency.
+						const set = await setProfileAvatar(botToken, existing.mxid, upload.mxc);
+						if (!set) {
+							console.warn(`engine: bot ${existing.mxid} avatar uploaded (${upload.mxc}) but profile set failed`);
+						}
+
+						const updated = setBotAvatarMxc(id, upload.mxc);
+						return json({ bot: updated ? toBotSummary(updated) : null });
+					}
+
+					if (req.method === "DELETE") {
+						// Best-effort profile clear — if Synapse is
+						// unreachable we still drop the local mxc so
+						// the bot row reflects the user's intent.
+						await setProfileAvatar(botToken, existing.mxid, "");
+						const updated = setBotAvatarMxc(id, null);
+						return json({ bot: updated ? toBotSummary(updated) : null });
+					}
 				}
 			}
 

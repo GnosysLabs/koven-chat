@@ -252,6 +252,76 @@ export async function adminResetPassword(userId: string, password: string): Prom
  *
  * Returns { access_token, device_id, user_id } on success, or { error }.
  */
+// ─── Per-user media upload + profile avatar ─────────────────────────
+//
+// Used by the bot platform to set per-bot profile avatars: upload
+// the image bytes to Synapse's media repo authenticated AS the bot,
+// then set the bot's own `avatar_url` profile field via the standard
+// client API.  Synapse won't accept a profile change unless the call
+// is authenticated as the user being changed (or by a homeserver
+// admin), so the engine reaches in with the bot's stored access
+// token rather than the engine's own admin token.
+
+/** Upload `bytes` to Synapse's media repository authenticated by
+ * `accessToken`.  Returns the resulting `mxc://` URL on success or
+ * { error } on failure.  Caller is responsible for content-type and
+ * size validation — Synapse accepts whatever it gets and worries
+ * about display in the client. */
+export async function uploadMedia(opts: {
+	accessToken: string;
+	bytes: Uint8Array | ArrayBuffer;
+	contentType: string;
+	filename?: string;
+}): Promise<{ mxc: string } | { error: string; detail?: string }> {
+	const url = new URL(`${config.homeserverUrl}/_matrix/media/v3/upload`);
+	if (opts.filename) url.searchParams.set("filename", opts.filename);
+	const r = await fetch(url, {
+		method: "POST",
+		headers: {
+			"Authorization": `Bearer ${opts.accessToken}`,
+			"Content-Type": opts.contentType,
+		},
+		body: opts.bytes as BodyInit,
+	});
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		console.warn(`engine: uploadMedia → ${r.status} ${txt.slice(0, 200)}`);
+		return { error: `synapse_${r.status}`, detail: txt.slice(0, 300) };
+	}
+	const body = (await r.json()) as { content_uri?: string };
+	if (!body.content_uri) {
+		return { error: "incomplete_upload_response" };
+	}
+	return { mxc: body.content_uri };
+}
+
+/** Set the user's profile `avatar_url` to `mxc` (or empty to clear).
+ * Authenticated as that user via `accessToken`.  Returns true on
+ * success, false on any non-2xx (logged so the operator can check). */
+export async function setProfileAvatar(
+	accessToken: string,
+	userId: string,
+	avatarMxc: string,
+): Promise<boolean> {
+	const r = await fetch(
+		`${config.homeserverUrl}/_matrix/client/v3/profile/${encodeURIComponent(userId)}/avatar_url`,
+		{
+			method: "PUT",
+			headers: {
+				"Authorization": `Bearer ${accessToken}`,
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ avatar_url: avatarMxc }),
+		},
+	);
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		console.warn(`engine: setProfileAvatar ${userId} → ${r.status} ${txt.slice(0, 200)}`);
+		return false;
+	}
+	return true;
+}
+
 export async function loginAsUser(userId: string, password: string): Promise<
 	| { access_token: string; device_id: string; user_id: string }
 	| { error: string; detail?: string }

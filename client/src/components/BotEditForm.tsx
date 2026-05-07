@@ -14,11 +14,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { BotBadge } from "@/components/BotBadge";
-import { ChevronDown, Eye, EyeOff, Trash2 } from "lucide-react";
+import { Camera, ChevronDown, Eye, EyeOff, Trash2, X } from "lucide-react";
 import {
 	createBot,
 	patchBot,
 	PROVIDER_DEFAULTS,
+	removeBotAvatar,
+	uploadBotAvatar,
 	type BotProvider,
 	type BotSummary,
 } from "@/lib/bots";
@@ -101,6 +103,17 @@ export function BotEditForm({
 	// below.  Resetting height to "auto" first lets the browser
 	// re-measure the natural content height before we pin it.
 	const systemPromptRef = useRef<HTMLTextAreaElement | null>(null);
+	// Avatar picker state.  Three states:
+	//   - pendingAvatarFile + pendingAvatarPreview set → user picked a
+	//     new image; preview the local object URL until save uploads it.
+	//   - clearAvatarOnSave === true → user clicked the small X to
+	//     remove the existing avatar; render the DiceBear fallback and
+	//     fire DELETE on save.
+	//   - both null/false → render whatever the bot already has.
+	const avatarFileInputRef = useRef<HTMLInputElement | null>(null);
+	const [pendingAvatarFile, setPendingAvatarFile] = useState<File | null>(null);
+	const [pendingAvatarPreview, setPendingAvatarPreview] = useState<string | null>(null);
+	const [clearAvatarOnSave, setClearAvatarOnSave] = useState(false);
 
 	// Reset whenever the target bot or mode changes — switching from
 	// edit-bot-A to edit-bot-B (or to "create") shouldn't keep stale
@@ -110,12 +123,28 @@ export function BotEditForm({
 		setShowKey(false);
 		setSubmitting(false);
 		setConfirmingDelete(false);
+		setPendingAvatarFile(null);
+		setPendingAvatarPreview(prev => {
+			// Revoke the previous object URL so we don't leak browser
+			// memory on form re-renders or bot-switches.
+			if (prev) URL.revokeObjectURL(prev);
+			return null;
+		});
+		setClearAvatarOnSave(false);
 		if (mode === "edit" && bot) {
 			setForm(formStateFromBot(bot));
 		} else {
 			setForm(freshFormState());
 		}
 	}, [mode, bot?.id]);
+
+	// Object-URL cleanup on unmount — covers the case where the form
+	// closes with a pending pick that was never submitted.
+	useEffect(() => {
+		return () => {
+			if (pendingAvatarPreview) URL.revokeObjectURL(pendingAvatarPreview);
+		};
+	}, [pendingAvatarPreview]);
 
 	// Keep the system-prompt textarea sized to its content.  Recompute
 	// on every value change so the height tracks both user typing and
@@ -211,11 +240,65 @@ export function BotEditForm({
 			} else {
 				return;
 			}
+
+			// Avatar follow-up.  Two cases beyond "no change":
+			//   - pendingAvatarFile set → upload it.  The endpoint
+			//     overwrites the bot's profile avatar on Synapse and
+			//     returns the updated summary so we re-render with the
+			//     mxc immediately (no /sync round-trip).
+			//   - clearAvatarOnSave set → DELETE /api/bots/:id/avatar
+			//     to wipe both the Synapse profile and our row.
+			// Failures here don't undo the metadata save — log + show
+			// the error so the user knows the avatar didn't apply.
+			if (pendingAvatarFile) {
+				try {
+					saved = await uploadBotAvatar(accessToken, saved.id, pendingAvatarFile);
+				} catch (err) {
+					setError(`Saved, but avatar upload failed: ${err instanceof Error ? err.message : String(err)}`);
+					await onSaved(saved);
+					return;
+				}
+			} else if (clearAvatarOnSave && saved.avatar_mxc) {
+				try {
+					saved = await removeBotAvatar(accessToken, saved.id);
+				} catch (err) {
+					setError(`Saved, but avatar clear failed: ${err instanceof Error ? err.message : String(err)}`);
+					await onSaved(saved);
+					return;
+				}
+			}
+
 			await onSaved(saved);
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
 		} finally {
 			setSubmitting(false);
+		}
+	}
+
+	function pickAvatar(file: File) {
+		// Replace the existing pending pick (revoke its blob URL so
+		// we don't leak), wire up the new one.  No upload yet — that
+		// fires from handleSubmit.
+		setPendingAvatarPreview(prev => {
+			if (prev) URL.revokeObjectURL(prev);
+			return URL.createObjectURL(file);
+		});
+		setPendingAvatarFile(file);
+		setClearAvatarOnSave(false);
+	}
+
+	function clearAvatar() {
+		setPendingAvatarFile(null);
+		setPendingAvatarPreview(prev => {
+			if (prev) URL.revokeObjectURL(prev);
+			return null;
+		});
+		// Only flag the server-side clear if the bot already has an
+		// avatar.  A fresh create with no pick + a click on the X is
+		// a no-op.
+		if (mode === "edit" && bot?.avatar_mxc) {
+			setClearAvatarOnSave(true);
 		}
 	}
 
@@ -227,16 +310,76 @@ export function BotEditForm({
 		: `@bot-${form.name || "new"}:local`;
 	const previewName = form.displayName.trim() || (mode === "create" ? form.name || "New bot" : bot?.display_name ?? "");
 
+	// Effective avatar source: pending preview wins; cleared flag
+	// forces the DiceBear fallback; otherwise show whatever the bot
+	// already has.
+	const effectiveAvatarMxc = pendingAvatarPreview
+		? undefined
+		: clearAvatarOnSave
+			? undefined
+			: (mode === "edit" ? bot?.avatar_mxc ?? undefined : undefined);
+	const showRemove = !!pendingAvatarPreview || (mode === "edit" && !!bot?.avatar_mxc && !clearAvatarOnSave);
+
 	return (
 		<div className="flex-1 min-w-0 flex flex-col bg-background overflow-hidden">
-			{/* Header — bot identity preview at the top of the pane. */}
+			{/* Header — bot identity preview at the top of the pane.
+			    The avatar is clickable: opens a file picker that swaps
+			    in a local preview; the actual upload happens on Save
+			    (handleSubmit). */}
 			<div className="px-6 pt-6 pb-4 border-b border-border flex items-center gap-4">
-				<MatrixAvatar
-					mxc={mode === "edit" ? bot?.avatar_mxc ?? undefined : undefined}
-					seed={previewSeed}
-					kind="bot"
-					className="h-12 w-12"
-				/>
+				<div className="relative shrink-0">
+					<button
+						type="button"
+						onClick={() => avatarFileInputRef.current?.click()}
+						className="group relative h-12 w-12 rounded-full overflow-hidden focus:outline-none focus:ring-2 focus:ring-primary"
+						aria-label="Change bot avatar"
+					>
+						{pendingAvatarPreview ? (
+							<img
+								src={pendingAvatarPreview}
+								alt=""
+								className="h-12 w-12 rounded-full object-cover bg-muted"
+							/>
+						) : (
+							<MatrixAvatar
+								mxc={effectiveAvatarMxc}
+								seed={previewSeed}
+								kind="bot"
+								className="h-12 w-12"
+							/>
+						)}
+						{/* Hover overlay — surfaces the affordance only
+						    when the user moves over the avatar so the
+						    bot's image reads cleanly otherwise. */}
+						<span className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
+							<Camera className="h-4 w-4" />
+						</span>
+					</button>
+					{showRemove && (
+						<button
+							type="button"
+							onClick={clearAvatar}
+							title="Remove avatar"
+							aria-label="Remove avatar"
+							className="absolute -top-1 -right-1 h-5 w-5 rounded-full bg-card border border-border text-muted-foreground hover:text-destructive hover:border-destructive transition-colors flex items-center justify-center"
+						>
+							<X className="h-3 w-3" />
+						</button>
+					)}
+					<input
+						ref={avatarFileInputRef}
+						type="file"
+						accept="image/png,image/jpeg,image/webp,image/gif"
+						className="hidden"
+						onChange={e => {
+							const file = e.target.files?.[0];
+							if (file) pickAvatar(file);
+							// Reset so the same file can be re-picked
+							// after a clear + re-attach in one flow.
+							e.target.value = "";
+						}}
+					/>
+				</div>
 				<div className="min-w-0 flex-1">
 					<div className="text-base font-semibold truncate flex items-center gap-1.5">
 						<span className="truncate">{previewName || "—"}</span>
@@ -247,7 +390,7 @@ export function BotEditForm({
 							? bot.mxid
 							: form.name
 								? `@bot-${form.name}`
-								: "Pick a name to claim a Matrix handle"}
+								: "Pick a name your bot will be mentioned by"}
 					</div>
 					{mode === "edit" && bot && bot.total_calls > 0 && (
 						<div className="text-xs text-muted-foreground mt-0.5">

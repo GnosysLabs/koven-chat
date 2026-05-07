@@ -143,6 +143,49 @@ export async function deleteBot(accessToken: string, id: number): Promise<void> 
 	});
 }
 
+/** Upload an avatar image for a bot.  The engine forwards the bytes
+ * to Synapse's media repo authenticated as the bot, sets the bot's
+ * `avatar_url` profile field, and updates `bots.avatar_mxc`.  Returns
+ * the updated bot summary so the caller can re-render. */
+export async function uploadBotAvatar(
+	accessToken: string,
+	id: number,
+	file: File,
+): Promise<BotSummary> {
+	const form = new FormData();
+	form.append("file", file);
+	const r = await fetch(`${ENGINE_URL}/api/bots/${id}/avatar`, {
+		method: "POST",
+		headers: {
+			// IMPORTANT: don't set Content-Type — the browser fills it
+			// in with the multipart boundary parameter.  Hardcoding
+			// "multipart/form-data" without the boundary breaks the
+			// upload silently with a 400.
+			Authorization: `Bearer ${accessToken}`,
+		},
+		body: form,
+	});
+	const text = await r.text();
+	let body: unknown = {};
+	try { body = text ? JSON.parse(text) : {}; } catch { /* keep raw */ }
+	if (!r.ok) {
+		const err = body as BotApiError;
+		throw new Error(err.detail ?? err.error ?? `HTTP ${r.status}`);
+	}
+	return (body as BotResponse).bot;
+}
+
+/** Clear the avatar — Synapse profile reset + null in the DB. */
+export async function removeBotAvatar(
+	accessToken: string,
+	id: number,
+): Promise<BotSummary> {
+	const body = await callEngine<BotResponse>(`/api/bots/${id}/avatar`, accessToken, {
+		method: "DELETE",
+	});
+	return body.bot;
+}
+
 // ─── Defaults ──────────────────────────────────────────────────────
 
 /** Shared defaults the create form uses to pre-fill the provider's
