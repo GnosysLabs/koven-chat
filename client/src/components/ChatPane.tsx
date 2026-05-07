@@ -760,8 +760,9 @@ function MessageRow({
 		return (
 			<div
 				className={cn("flex gap-3 items-start", topMargin)}
-				onMouseEnter={() => setHovered(true)}
-				onMouseLeave={() => setHovered(false)}
+				onPointerEnter={() => setHovered(true)}
+				onPointerLeave={() => setHovered(false)}
+				onPointerCancel={() => setHovered(false)}
 			>
 				<AvatarSlot mxc={avatarMxc} seed={message.sender} hidden={continuesGroup} isBot={isBot} />
 				<div className="flex-1 min-w-0 pt-1 text-sm italic text-muted-foreground flex items-center gap-2">
