@@ -13,6 +13,88 @@ use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 
+/// JS injected into every page before the SPA scripts run.  Catches
+/// `<a target="_blank">` clicks and `window.open()` calls and routes
+/// external URLs through the `opener` plugin (the capabilities config
+/// permits `opener:allow-open-url` for the main window).
+///
+/// Why a JS interceptor on top of Rust's `on_navigation`?  WKWebView
+/// (macOS) and WebKitGTK (Linux) treat target=_blank / window.open as
+/// pop-up requests, not top-level navigations — without a native
+/// new-window handler the click is silently dropped and `on_navigation`
+/// never fires.  This script catches them on the way out.
+///
+/// The internal-host list mirrors `is_internal` in Rust; they need to
+/// stay in sync if either set of origins changes.
+const LINK_INTERCEPTOR_JS: &str = r#"
+(function () {
+	'use strict';
+	function isInternal(rawUrl) {
+		try {
+			const u = new URL(rawUrl, window.location.href);
+			if (u.protocol === 'tauri:') return true;
+			if (u.protocol === 'http:' || u.protocol === 'https:') {
+				return u.hostname === 'client.koven.chat' || u.hostname === 'tauri.localhost';
+			}
+			return false;
+		} catch (_) {
+			// Non-URL-parseable href (mailto:, tel:, javascript:, etc.) —
+			// let the default handler take it; the opener plugin can
+			// route mailto:/tel: through the OS too via the navigation
+			// path below.
+			return false;
+		}
+	}
+	function openExternal(url) {
+		try {
+			window.__TAURI_INTERNALS__.invoke('plugin:opener|open_url', { url: url });
+		} catch (e) {
+			console.warn('koven-desktop: opener invoke failed', e);
+		}
+	}
+	document.addEventListener('click', function (e) {
+		if (e.defaultPrevented) return;
+		if (e.button !== 0) return;
+		// Honor modifier-clicks (cmd/ctrl-click) — let the page handle
+		// them however it wants; we only intercept plain left-clicks.
+		if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+		let a = e.target;
+		while (a && a !== document && a.tagName !== 'A') {
+			a = a.parentNode;
+		}
+		if (!a || a.tagName !== 'A') return;
+		const href = a.getAttribute('href');
+		if (!href) return;
+		// Same-page anchors (#section) and javascript: voids are
+		// strictly in-page; never route them out.
+		if (href.startsWith('#') || href.startsWith('javascript:')) return;
+		const blank = a.target === '_blank';
+		const external = !isInternal(a.href);
+		if (!blank && !external) return;
+		e.preventDefault();
+		if (external) {
+			openExternal(a.href);
+		} else {
+			// Internal but with target=_blank — keep it in the single
+			// window we have rather than dropping the click.
+			window.location.assign(a.href);
+		}
+	}, true);
+	const origOpen = window.open;
+	window.open = function (url, target, features) {
+		if (typeof url === 'string') {
+			if (isInternal(url)) {
+				window.location.assign(url);
+			} else {
+				openExternal(url);
+			}
+			return null;
+		}
+		return origOpen ? origOpen.call(window, url, target, features) : null;
+	};
+})();
+"#;
+
 /// Treat a navigation request as "internal" (stays inside the
 /// WebView) iff it lands on one of these origins.  Everything else is
 /// dispatched to the user's default browser via the opener plugin.
@@ -94,15 +176,26 @@ pub fn run() {
 				.min_inner_size(720.0, 480.0)
 				.resizable(true)
 				.center()
+				// Inject a click + window.open interceptor that routes
+				// external URLs through the opener plugin.  Required
+				// because WKWebView (macOS) and WebKitGTK (Linux)
+				// silently drop `<a target="_blank">` clicks and
+				// `window.open()` calls when there's no native
+				// new-window handler — `on_navigation` below only fires
+				// for top-level navigations, not pop-up requests.  This
+				// runs before any page script so it catches links from
+				// the very first paint.
+				.initialization_script(LINK_INTERCEPTOR_JS)
 				.on_navigation(move |url| {
 					if is_internal(url) {
 						return true;
 					}
-					// External: hand off to the OS browser, cancel
-					// the in-WebView navigation.  This also fires
-					// for `<a target="_blank">` and `window.open()`
-					// because WebView treats both as a top-level
-					// navigation request from this hook's POV.
+					// External top-level navigation: hand off to the
+					// OS browser, cancel the in-WebView navigation.
+					// This branch handles direct address-bar style
+					// navigations and same-window `<a href>` clicks
+					// (no `_blank`); pop-up style links are handled
+					// by the JS interceptor above.
 					log::info!("opening external link in OS browser: {}", url);
 					if let Err(err) = opener_app
 						.opener()
