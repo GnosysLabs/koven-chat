@@ -52,7 +52,7 @@ Activity drives the raw weight up; the age gate is a hard cap that keeps a fresh
 
 ## Flagging
 
-Any registered user can flag any message with one of:
+Any registered user can flag a **message** or a **room** itself (its name + topic) with one of:
 
 - **Off-topic** (channel-specific, soft signal)
 - **Spam**
@@ -60,7 +60,9 @@ Any registered user can flag any message with one of:
 - **Misinformation** (factual claims demonstrably false)
 - **Floor violation** (CSAM, credible threat, or doxx). Bypasses the community vote and routes to admin review. See the Floor section below.
 
-Each flag is a Matrix event of type `chat.koven.flag.v1` with the flagger, target message ID, category, and timestamp. Flags travel through the room's encrypted timeline (in encrypted rooms) or plaintext timeline (otherwise) like any other event.
+Each flag is recorded as a `chat.koven.flag.v1` event with the flagger, category, and timestamp. The wire format carries a `target_kind: "message" | "room"` discriminator: message flags carry `target_event_id`; room flags carry `target_room_id`. Old clients reading without `target_kind` default to `"message"` for backwards compatibility.
+
+Message flags travel through the room's encrypted (or plaintext) timeline like any other event. Room flags are submitted via HTTP (`POST /api/rooms/{id}/flag`) so they work from the Explore directory before the user has joined — the same surface a flooder is trying to abuse.
 
 The flagging UI surfaces a confirmation dialog before submitting a Floor violation, explaining the consequences of false reports.
 
@@ -117,6 +119,47 @@ There is no automatic CSAM/threat/doxx classifier today. Detection is user-initi
 
 There is no formal appeals process today. A user whose account was confirmed-banned can be restored only by an admin who's willing to reach into the Synapse and engine databases to reverse the deactivation by hand.
 
+## Offensive room names
+
+The flag/collapse pipeline above also applies when the *room itself* is the abuse — a creator gives the room a name that's a slur, a threat, or doxxes a target. The per-message pipeline can't reach a room name, so the room-flag pipeline (`target_kind: "room"`) extends the same primitive to that target.
+
+Five layers run in defense, each closing a different part of the attack surface:
+
+**1. Friction at publish-to-directory.** Synapse's `user_may_publish_room` callback fires on every attempt to publish a room to the public-rooms directory. The Koven module (`koven-room-gate` in `docker/synapse/modules/`) HTTP-calls the engine, which checks the requester's reputation:
+
+| Reputation weight | Public-room publishes per 24h |
+|-------------------|------------------------------|
+| Default-weight (≤1.0) | 1 |
+| Mid-tier (≤2.0)       | 3 |
+| Established (>2.0)    | 10 |
+
+Admins are uncapped. Suspended users are denied outright. The hook only fires on *publishing*, not creation — DMs and private rooms are unaffected. Failure modes (engine unreachable, rate-limit DB locked) fail open: a flooder slipping through is recoverable via the consensus pipeline below; a deadlocked engine that blocks all room creation is worse.
+
+**2. Community consensus on the room name itself.** Anyone can flag a room from its Explore tile or its in-room header (Flag icon, right of the public mod log Scale icon). The same distinct-flagger floor of 3 and dynamic weighted-score gate that govern message collapse govern room collapse. When the threshold is met:
+
+- The collapsed room's name renders as **"Name Removed by Community Review"** everywhere it appears in the SPA — sidebar, chat header, member sheets, profile mentions. The actual `m.room.name` state event is left untouched; the override is a display concern only, so admin reverse can restore the original verbatim from the engine.
+- Synapse's directory listing for the room is flipped from `public` to `private`, removing it from local Explore *and* federated peers' directories (Layer 4 below).
+- The room continues to function for existing members. They can leave; messages still flow if they stay. The collapse silences the *broadcast*, not the conversation.
+
+The placeholder is a deliberate self-documenting artifact. A user seeing "Name Removed by Community Review" in their sidebar knows what happened, can audit the public mod log to see who flagged and why, and can vouch for the original name to admins if they think the collapse was mistaken.
+
+**3. Floor-violation room flags.** A room flag with category `floor_violation` (e.g. the room's name is itself a credible threat) bypasses the vote and:
+
+- Immediately collapses the room name (single-flag fast-track, same as floor flags on messages).
+- Opens a suspension on the room's *creator* — sender of the original `m.room.create` — pending admin review. The case lands in the same `/api/admin/floor-queue` admins use for message-target floor cases.
+- On admin **confirm**: the creator's account is permanently deactivated via Synapse's admin API. Standard floor-violation outcome.
+- On admin **reverse**: the suspension lifts, the engine deletes the room collapse row, and the directory listing is flipped back to public. Flag rows stay (append-only audit). The original name renders again from `m.room.name`. The flagger eats the standard false-flag penalty if the case ever was floor-class.
+
+**4. Federation-aware directory hide.** When a room collapses (whether by community vote or floor-flag fast-track), the engine calls Synapse's directory API to set `visibility=private`. Synapse's federation `/_matrix/federation/v1/publicRooms` endpoint only returns `visibility=public` rooms, so the offensive name stops being broadcast to peer Koven instances in the same step that it stops being broadcast locally. Reverse path lifts visibility back to public.
+
+Edge case: a room that was already private before being flagged gets re-published to public on admin reverse. That's accepted for v1 — offensive-name attacks land on publicly-discoverable rooms by definition; private-room collapses are exotic.
+
+**5. Repeat-collapse accumulator.** After every room collapse, the engine counts how many room collapses have been recorded against the same creator overall and within a rolling 30-day window. If either crosses threshold (**3 ever** or **2 in 30 days**), the engine opens a suspension on the creator with a new `repeated_room_collapses` reason. The case surfaces in the same admin floor queue as everything else; admins decide whether the pattern warrants deactivation.
+
+The accumulator is the answer to "one bad room is a mistake; ten is a pattern." Floor-fast-tracked collapses skip this accumulator (a suspension was opened on the creator at flag time anyway, and stacking a second case would double-count the same offense).
+
+**Why this layered shape, not a word filter or admin-delete button.** Word blocklists are brittle: someone's slur is someone else's reclaimed identity term. Admin-direct deletion contradicts the platform's premise (community is the moderator). Each layer above is consensus-aligned: Layer 1 is resource-protection (rate limits, not content judgment), Layers 2 and 3 inherit from the existing flag pipeline, Layer 4 is hosting hygiene downstream of a consensus decision, Layer 5 is a counter that surfaces a pattern to existing admin review. None of them grant any individual the power to silence speech without the community's say-so, except in the narrow floor-violation category where Koven already grants admins a single-step ban with permanent audit-log visibility.
+
 ## Personal block list
 
 Independent of consensus moderation, every user has a Matrix-native block list (`m.ignored_user_list` account data). Adding a user to it hides their messages from your timeline going forward and prevents their DMs from reaching you. The list syncs across devices via account data.
@@ -154,7 +197,7 @@ The first reversed false flag is a one-strike warning that costs the flagger rep
 A Koven instance has admins. The first user the engine sees on a fresh install is auto-promoted to admin via the bootstrap mechanism in `engine/src/admins.ts`. Subsequent admin appointments would have to be done by hand in the engine database; there is no admin-management UI today.
 
 Admins can:
-- Review pending floor-violation cases and confirm or reverse them
+- Review pending floor-violation cases (message- and room-targeted, plus the engine-generated `repeated_false_floor_flags` and `repeated_room_collapses` cases) and confirm or reverse them
 - Set instance branding via Settings → Instance (server name, login tagline, login background, instance logo, default space for new signups)
 
 Admins explicitly **cannot**:
@@ -190,11 +233,13 @@ Encrypted DMs that cross federation boundaries lose the engine's visibility. The
 - Quiet bans. Every flag, collapse, and suspension lands in the per-room public mod log.
 - Permabans for one bad day. Only floor violations result in bans; everything else decays as the rolling activity windows slide.
 - Hidden algorithmic suppression. No algorithm. The math is in this document.
+- Offensive-room-name floods. Reputation-tiered publish caps (1 / 3 / 10 per 24h depending on weight) stop most of the burst at the door; the consensus pipeline cleans the rest reactively; the federation visibility flip stops collapsed names from propagating to peer instances; the repeat-collapse accumulator surfaces serial offenders to admin review.
 
 **Does not prevent:**
 - Coordinated brigading by a large hostile group, if they can clear the dynamic threshold for the target room. Mitigated by reputation weighting and the time-gated tier ladder (a fresh account army carries minimum weight); not eliminated.
 - Genuine unpopular speech being collapsed by a sufficiently large majority. This is the price of community governance. There is no platform design that lets you say anything to anyone without the room having any say in whether it stays visible.
 - False `floor_violation` reports landing the target in suspended state until an admin reviews. The author can't post during the review window. The false-flag punishment described above is the deterrent.
 - Admins acting against an individual user via the floor-violation pipeline. Confirming a floor case and deactivating an account is a real power held by a single person. The check on this power is that the action is in the public mod log forever.
+- A small window of exposure between when an offensive room is published and when consensus or floor-flag collapse fires. The publish-rate cap shrinks this window for low-reputation flooders to a handful of rooms; for an established account abusing reputation it can be longer. The repeat-collapse accumulator catches sustained patterns but not one-off acts of an established user.
 
 Koven is not utopian. It moves moderation power from individual mods to a documented, decaying, community-driven process for ordinary speech, and it confines unilateral admin action to a single narrow category (confirmed floor violations) where the action is permanently visible. It does not solve human disagreement.
