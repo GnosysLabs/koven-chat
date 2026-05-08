@@ -1,12 +1,13 @@
 {
 	"$schema": "https://schema.tauri.app/config/2",
 	"productName": "Koven",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"identifier": "chat.koven.desktop",
 	"build": {
 		"beforeBuildCommand": "bun install && bun run --cwd ../../client build",
+		"beforeDevCommand": "bun run --cwd ../../client dev:tauri",
 		"frontendDist": "../../../client/dist",
-		"devUrl": "https://client.koven.chat"
+		"devUrl": "http://localhost:1420"
 	},
 	"app": {
 		"windows": [],

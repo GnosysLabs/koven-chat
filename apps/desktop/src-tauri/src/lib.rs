@@ -16,6 +16,15 @@ use tauri_plugin_updater::UpdaterExt;
 #[cfg(target_os = "macos")]
 use tauri::menu::{AboutMetadataBuilder, MenuBuilder, SubmenuBuilder};
 
+// macOS rounded-corner plugin (cloudworxx/tauri-plugin-mac-rounded-corners).
+// Copied into ./plugins/mac_rounded_corners.rs by the npm postinstall hook;
+// exposes #[tauri::command]s the SPA invokes to set the NSWindow's
+// contentView layer corner radius via Cocoa.
+#[cfg(target_os = "macos")]
+mod plugins;
+#[cfg(target_os = "macos")]
+use plugins::mac_rounded_corners;
+
 /// JS injected into every page before the SPA scripts run.  Catches
 /// `<a target="_blank">` clicks and `window.open()` calls and routes
 /// the URL through the WebView's top-level navigation, where the Rust
@@ -117,10 +126,16 @@ const LINK_INTERCEPTOR_JS: &str = r#"
 fn is_internal(url: &Url) -> bool {
 	match url.scheme() {
 		"tauri" => true,
-		"http" | "https" => matches!(
-			url.host_str(),
-			Some("client.koven.chat") | Some("tauri.localhost"),
-		),
+		"http" | "https" => match url.host_str() {
+			Some("client.koven.chat") | Some("tauri.localhost") => true,
+			// Dev-only: localhost (Vite) counts as internal so
+			// in-SPA navigations don't get routed out to the OS
+			// browser when running `tauri dev`.  Production builds
+			// never hit localhost, so this branch is gated on
+			// debug_assertions to keep the prod URL whitelist tight.
+			Some("localhost") | Some("127.0.0.1") if cfg!(debug_assertions) => true,
+			_ => false,
+		},
 		_ => false,
 	}
 }
@@ -173,6 +188,26 @@ pub fn run() {
 		// Signed auto-update from GitHub Releases via the manifest
 		// URL declared in tauri.conf.json.
 		.plugin(tauri_plugin_updater::Builder::new().build())
+		// Rounded-corner plugin commands.  macOS-only — guarded so
+		// the invoke_handler isn't compiled into Linux / Windows
+		// builds that don't need it.  The SPA invokes
+		// `enable_modern_window_style` once on mount (see
+		// DesktopTitleBar.tsx) to apply the layer mask.
+		.invoke_handler({
+			#[cfg(target_os = "macos")]
+			{
+				tauri::generate_handler![
+					mac_rounded_corners::enable_rounded_corners,
+					mac_rounded_corners::enable_modern_window_style,
+					mac_rounded_corners::reposition_traffic_lights,
+					mac_rounded_corners::hide_traffic_lights,
+				]
+			}
+			#[cfg(not(target_os = "macos"))]
+			{
+				tauri::generate_handler![]
+			}
+		})
 		.setup(|app| {
 			// macOS application menu.  Tauri 2 doesn't auto-build one,
 			// and without an explicit menu the system falls back to a
@@ -221,9 +256,11 @@ pub fn run() {
 					.select_all()
 					.build()?;
 
-				let view_menu = SubmenuBuilder::new(app, "View")
-					.fullscreen()
-					.build()?;
+				// View menu intentionally omitted.  The only standard
+				// item it would carry is "Enter Full Screen", which
+				// we've disabled via NSWindowCollectionBehaviorFullScreenNone
+				// — showing a non-functional menu item would be worse
+				// than no menu at all.
 
 				let window_menu = SubmenuBuilder::new(app, "Window")
 					.minimize()
@@ -233,7 +270,7 @@ pub fn run() {
 					.build()?;
 
 				let menu = MenuBuilder::new(app)
-					.items(&[&app_menu, &edit_menu, &view_menu, &window_menu])
+					.items(&[&app_menu, &edit_menu, &window_menu])
 					.build()?;
 				app.set_menu(menu)?;
 			}
@@ -245,12 +282,15 @@ pub fn run() {
 			// until after they're already on screen, which races
 			// against the first paint.
 			let url = if cfg!(debug_assertions) {
-				// Dev: load the live SPA so shell features can be
-				// iterated without spinning up Synapse + the engine
-				// locally.  Replace this with `WebviewUrl::External`
-				// pointing at a local Vite dev server if you're
-				// hot-reloading client/ alongside the shell.
-				WebviewUrl::External("https://client.koven.chat".parse().unwrap())
+				// Dev: load the local Vite dev server.  This matches
+				// `devUrl` in tauri.conf.json (Tauri's CLI starts
+				// Vite via `beforeDevCommand`), so SPA edits hot-
+				// reload into the running window.  Backend traffic
+				// (engine + Matrix) goes to client.koven.chat via
+				// the VITE_ENGINE_URL / VITE_HOMESERVER_URL env vars
+				// the dev:tauri script sets — no local engine /
+				// Synapse needed.
+				WebviewUrl::External("http://localhost:1420".parse().unwrap())
 			} else {
 				// Production: bundled `client/dist/` — Tauri serves
 				// it from `tauri://localhost/` on macOS / Linux and
@@ -264,7 +304,7 @@ pub fn run() {
 			// Sync`, which the `on_navigation` closure requires.
 			let opener_app = app.handle().clone();
 
-			let builder = WebviewWindowBuilder::new(app, "main", url)
+			let mut builder = WebviewWindowBuilder::new(app, "main", url)
 				.title("Koven")
 				.inner_size(1280.0, 800.0)
 				.min_inner_size(720.0, 480.0)
@@ -279,7 +319,51 @@ pub fn run() {
 				// specifically for GNOME, which snapshots the dock /
 				// Activities icon at the moment the window registers
 				// with mutter and never re-reads it.
-				.visible(false)
+				.visible(false);
+
+			// macOS: kill ALL native chrome and render our own title
+			// bar in the SPA.  Tauri's stock options (Visible /
+			// Transparent / Overlay) all have problems for our case:
+			//
+			//   * Visible — chunky opaque bar with "Koven" text
+			//     centered.  Doesn't blend with the dark gradient,
+			//     reads like an early-2010s desktop app.
+			//   * Transparent + hiddenTitle — bar exists but is
+			//     invisible.  Past attempts had drag-region issues
+			//     where clicks on the SPA's leftmost column ate the
+			//     drag handle.
+			//   * Overlay — no allocated chrome, traffic lights
+			//     overlay the SpaceBar.  Same drag problem.
+			//
+			// `decorations(false)` removes everything: no traffic
+			// lights, no title bar, no chrome.  The SPA fills the
+			// entire window edge-to-edge.  We then render a custom
+			// `<DesktopTitleBar />` inside the SPA (see
+			// client/src/components/DesktopTitleBar.tsx) that:
+			//
+			//   * Draws our own three macOS-style traffic-light
+			//     buttons that call window.close() / minimize() /
+			//     toggleMaximize() via the Tauri JS API,
+			//   * Carries `data-tauri-drag-region` on the strip
+			//     between the buttons and the right edge so window
+			//     drag still works the way users expect.
+			//
+			// Linux + Windows keep default decorations — they have
+			// less ugly defaults and the drag-region story would be
+			// more work for less benefit.  Custom chrome on Mac
+			// only.
+			#[cfg(target_os = "macos")]
+			{
+				// Strip native chrome (no traffic lights from OS, no
+				// title bar).  Window stays OPAQUE — we'll round its
+				// corners via NSView.layer.cornerRadius in a post-
+				// build step.  `transparent(true)` is documented as
+				// actively breaking layer corner-masking on macOS
+				// (Tauri issue #14165), so don't go there.
+				builder = builder.decorations(false);
+			}
+
+			let builder_final = builder
 				// Inject a click + window.open interceptor that routes
 				// external URLs through the opener plugin.  Required
 				// because WKWebView (macOS) and WebKitGTK (Linux)
@@ -310,14 +394,39 @@ pub fn run() {
 					false
 				});
 
-			// macOS: no title-bar customization.  The default
-			// `Visible` style draws a standard native title bar with
-			// "Koven" text and traffic lights, the WebView starts
-			// below it, dragging works natively, and the SpaceBar's
-			// avatar isn't overlapped by the traffic lights because
-			// the OS reserves space for the title bar itself.
+			let win = builder_final.build()?;
 
-			let win = builder.build()?;
+			// Disable fullscreen.  Fullscreen on macOS uses a
+			// separate compositor space that breaks our rounded-
+			// corner / NSFullSizeContentView setup — the window
+			// flips to full-size square chrome and the SPA layout
+			// behaves badly during the transition.  Setting
+			// NSWindowCollectionBehaviorFullScreenNone (1 << 9)
+			// blocks all four entry points: green-button hover
+			// menu, ⌃⌘F shortcut, View menu's "Enter Full Screen"
+			// item, and double-click-titlebar-to-fullscreen.
+			// Window zoom (toggleMaximize) still works — that's a
+			// separate operation that just resizes the window.
+			#[cfg(target_os = "macos")]
+			{
+				use cocoa::base::id;
+				use objc::{msg_send, sel, sel_impl};
+				const FULL_SCREEN_NONE: u64 = 1 << 9;
+				if let Ok(ptr) = win.ns_window() {
+					unsafe {
+						let ns_window: id = ptr as id;
+						let _: () = msg_send![ns_window, setCollectionBehavior: FULL_SCREEN_NONE];
+					}
+				}
+			}
+
+			// macOS rounded window corners are applied via the
+			// cloudworxx plugin's `enable_modern_window_style`
+			// command, invoked from the SPA after the window mounts
+			// (see client/src/components/DesktopTitleBar.tsx).  The
+			// plugin handles the NSWindow.styleMask + layer-mask +
+			// traffic-light dance correctly — direct Cocoa from
+			// Rust didn't survive the WKWebView's own opaque layer.
 
 			// Embed the icon at compile time and apply it to the window
 			// at runtime.  Lifted from iris-linux's main.rs (a known-

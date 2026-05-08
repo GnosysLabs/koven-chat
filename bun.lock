@@ -8,6 +8,9 @@
     "apps/desktop": {
       "name": "@koven/desktop",
       "version": "0.1.0",
+      "dependencies": {
+        "@cloudworxx/tauri-plugin-mac-rounded-corners": "^1.1.1",
+      },
       "devDependencies": {
         "@tauri-apps/cli": "^2",
       },
@@ -16,6 +19,7 @@
       "name": "@koven/client",
       "version": "0.0.1",
       "dependencies": {
+        "@cloudworxx/tauri-plugin-mac-rounded-corners": "^1.1.1",
         "@emoji-mart/data": "^1.2.1",
         "@emoji-mart/react": "^1.1.1",
         "@koven/shared": "workspace:*",
@@ -122,6 +126,8 @@
     "@babel/traverse": ["@babel/traverse@7.29.0", "", { "dependencies": { "@babel/code-frame": "^7.29.0", "@babel/generator": "^7.29.0", "@babel/helper-globals": "^7.28.0", "@babel/parser": "^7.29.0", "@babel/template": "^7.28.6", "@babel/types": "^7.29.0", "debug": "^4.3.1" } }, "sha512-4HPiQr0X7+waHfyXPZpWPfWL/J7dcN1mx9gL6WdQVMbPnF3+ZhSMs8tCxN7oHddJE9fhNE7+lxdnlyemKfJRuA=="],
 
     "@babel/types": ["@babel/types@7.29.0", "", { "dependencies": { "@babel/helper-string-parser": "^7.27.1", "@babel/helper-validator-identifier": "^7.28.5" } }, "sha512-LwdZHpScM4Qz8Xw2iKSzS+cfglZzJGvofQICy7W7v4caru4EaAmyUuO6BGrbyQ2mYV11W0U8j5mBhd14dd3B0A=="],
+
+    "@cloudworxx/tauri-plugin-mac-rounded-corners": ["@cloudworxx/tauri-plugin-mac-rounded-corners@1.1.1", "", { "peerDependencies": { "@tauri-apps/api": "^2" }, "bin": { "tauri-plugin-mac-rounded-corners": "scripts/install.js" } }, "sha512-oF75CsaetpvqzMlbULMqGjpg4Y3GqdIIqU4+gbjtPEuLb2AYWGGprjL3UQfIm6Ew75pDFFgVxnL7rJBr5uttgg=="],
 
     "@emoji-mart/data": ["@emoji-mart/data@1.2.1", "", {}, "sha512-no2pQMWiBy6gpBEiqGeU77/bFejDqUTRY7KX+0+iur13op3bqUsXdnwoZs6Xb1zbv0gAj5VvS1PWoUUckSr5Dw=="],
 

@@ -430,6 +430,7 @@
 	html, body, #root {
 		height: 100%;
 	}
+
 	body {
 		@apply bg-background text-foreground;
 		background-image: var(--bg-gradient, none);
@@ -470,3 +471,11 @@
 		display: none;                /* WebKit / Blink (Chrome, Safari, WebView2) */
 	}
 }
+
+/* Rounded window corners on macOS desktop builds are handled at
+ * the OS level by Cocoa (lib.rs sets contentView.layer.cornerRadius
+ * + masksToBounds on the NSWindow's content view).  No CSS needed
+ * — the OS clips the entire WebView surface to a rounded rect, so
+ * everything inside paints normally and the desktop wallpaper
+ * shows through outside the radius automatically.
+ */

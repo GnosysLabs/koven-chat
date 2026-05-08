@@ -4,10 +4,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:tauri": "KOVEN_DEV_HTTP=1 VITE_ENGINE_URL=https://client.koven.chat VITE_HOMESERVER_URL=https://client.koven.chat vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@cloudworxx/tauri-plugin-mac-rounded-corners": "^1.1.1",
     "@emoji-mart/data": "^1.2.1",
     "@emoji-mart/react": "^1.1.1",
     "@koven/shared": "workspace:*",
