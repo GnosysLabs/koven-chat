@@ -441,7 +441,13 @@ export function SpaceEditSheet({ space, currentUserId, onClose, onSave, onLeave,
 							)}
 							{confirmingLeave && (
 								<>
-									<span className="text-xs text-muted-foreground">Leave this space?</span>
+									{/* Copy spells out the cascade because users
+									    coming from Discord/Slack already expect it
+									    but Matrix-native users (who'd expect the
+									    space-only leave) need the heads-up.  Phrase
+									    it positively — "and its rooms" — rather
+									    than burying the cascade in a footnote. */}
+									<span className="text-xs text-muted-foreground">Leave this space and its rooms?</span>
 									<Button type="button" variant="ghost" size="sm" onClick={() => setConfirmingLeave(false)} disabled={pending}>
 										Cancel
 									</Button>

@@ -1982,16 +1982,147 @@ export class MatrixTransport {
 	 * without them.  This is the symmetric "I want out" action; for
 	 * "destroy this room" creators have `deleteRoom` below.
 	 *
-	 * Spaces work identically (Matrix treats them as rooms with
-	 * `type: m.space`).  No special handling for child rooms — leaving
-	 * a space doesn't leave its children; the user keeps anything
-	 * they joined directly.
+	 * Low-level escape hatch.  When called on a space, this leaves
+	 * ONLY the space room, not any of its child rooms.  The
+	 * Discord-style "leave this whole community" gesture lives in
+	 * `leaveSpaceWithChildren` below — that's what App.tsx wires up
+	 * to the SpaceEditSheet.  Direct callers of `leaveRoom(spaceId)`
+	 * are leaving the space-as-a-room only; mostly useful when the
+	 * caller has already enumerated child cleanup themselves.
 	 */
 	async leaveRoom(roomId: RoomId): Promise<void> {
 		const c = this.requireClient();
 		await c.leave(roomId);
 		await c.forget(roomId).catch(() => {/* ok if not supported */});
 		this.emitRoomList();
+	}
+
+	/**
+	 * Leave a space along with every child room the user joined through
+	 * it — symmetric to `joinSpaceWithChildren`.  Matrix's protocol
+	 * model treats space membership as independent of child-room
+	 * membership ("I can be in #general without being in 'My Server'"),
+	 * but that's not how users think about Discord-style communities,
+	 * which is what we're building.  Joining a space pulls in all its
+	 * channels; leaving should drop them too.
+	 *
+	 * Two protections against the worst case (user accidentally loses
+	 * access to a room they reach through multiple paths):
+	 *
+	 *   1. Sub-spaces (children with `room_type: m.space`) are NOT
+	 *      auto-left.  Mirrors `joinSpaceWithChildren`, which doesn't
+	 *      auto-join sub-spaces — they're an explicit opt-in.
+	 *
+	 *   2. A child room is only left if NO other joined space the user
+	 *      is in claims it as a child.  If room X is filed under both
+	 *      spaces A and B and the user leaves A, X stays — they still
+	 *      have a navigation path to it via B.  This matches the user
+	 *      mental model of "rooms belong to a server" while honoring
+	 *      Matrix's many-to-many parent reality.
+	 *
+	 * Per-child failures are logged and counted but never abort the
+	 * sequence: getting halfway out is better than getting stuck
+	 * half-in.  The space room itself is left LAST so the SDK still
+	 * has the parent's local state available while we walk children.
+	 */
+	async leaveSpaceWithChildren(spaceId: SpaceId): Promise<{
+		leftChildren: number;
+		skippedChildren: number;
+		failedChildren: number;
+	}> {
+		const c = this.requireClient();
+		const me = c.getUserId();
+		if (!me) throw new Error("leaveSpaceWithChildren: client has no user id");
+		const space = c.getRoom(spaceId);
+		if (!space) {
+			// Space not in store — fall back to a plain leave on the
+			// id and call it done.  Without local state we can't
+			// enumerate children.
+			await c.leave(spaceId);
+			await c.forget(spaceId).catch(() => {});
+			this.emitRoomList();
+			this.emitSpaceList();
+			return { leftChildren: 0, skippedChildren: 0, failedChildren: 0 };
+		}
+
+		// Build the set of child room ids declared by m.space.child
+		// state events on the space.  An empty `via` array on a child
+		// event means it's been "tombstoned" (admin removed the room
+		// from the space) — skip those.
+		const childIds = new Set<string>();
+		const childEvents = space.currentState.getStateEvents("m.space.child") ?? [];
+		for (const ev of childEvents) {
+			const childId = ev.getStateKey();
+			if (!childId) continue;
+			const content = ev.getContent() as { via?: string[] };
+			if (!Array.isArray(content.via) || content.via.length === 0) continue;
+			childIds.add(childId);
+		}
+
+		// Build the set of child ids claimed by OTHER joined spaces, so
+		// we can skip those and avoid stranding the user.  Walking the
+		// SDK's room list once is cheap; we'd otherwise need a per-child
+		// lookup that's strictly more work.
+		const protectedByOtherSpace = new Set<string>();
+		for (const r of c.getRooms()) {
+			if (r.roomId === spaceId) continue;
+			const isSpace = r.isSpaceRoom?.() ?? false;
+			if (!isSpace) continue;
+			if (r.getMyMembership() !== "join") continue;
+			const otherChildren = r.currentState.getStateEvents("m.space.child") ?? [];
+			for (const ev of otherChildren) {
+				const childId = ev.getStateKey();
+				if (!childId) continue;
+				const content = ev.getContent() as { via?: string[] };
+				if (!Array.isArray(content.via) || content.via.length === 0) continue;
+				protectedByOtherSpace.add(childId);
+			}
+		}
+
+		let left = 0;
+		let skipped = 0;
+		let failed = 0;
+		// Sequential rather than parallel — Synapse rate-limits /leave,
+		// and a thundering herd of leave calls on a 50-channel space
+		// gets several of them rejected with 429.  Sequential keeps us
+		// well inside the per-user quota and the wall-clock time is
+		// fine because we leave child rooms in the user's mental
+		// background after they've already navigated away.
+		for (const childId of childIds) {
+			const child = c.getRoom(childId);
+			// Skip sub-spaces — symmetric with joinSpaceWithChildren.
+			if (child?.isSpaceRoom?.()) { skipped++; continue; }
+			// Skip rooms the user reaches through another joined space.
+			if (protectedByOtherSpace.has(childId)) { skipped++; continue; }
+			// Skip rooms the user already isn't in (left previously,
+			// kicked, never joined to begin with).
+			const membership = child?.getMyMembership();
+			if (membership !== "join" && membership !== "invite") { skipped++; continue; }
+			try {
+				await c.leave(childId);
+				await c.forget(childId).catch(() => {});
+				left++;
+			} catch (err) {
+				console.warn(`leaveSpaceWithChildren: failed to leave child ${childId}`, err);
+				failed++;
+			}
+		}
+
+		// Leave the space itself last.
+		try {
+			await c.leave(spaceId);
+			await c.forget(spaceId).catch(() => {});
+		} catch (err) {
+			console.warn(`leaveSpaceWithChildren: failed to leave space ${spaceId}`, err);
+			// Re-throw — the user explicitly asked to leave the space;
+			// child cleanup having already run is fine but the headline
+			// operation failing should bubble up so the UI can show it.
+			throw err;
+		}
+
+		this.emitRoomList();
+		this.emitSpaceList();
+		return { leftChildren: left, skippedChildren: skipped, failedChildren: failed };
 	}
 
 	/**

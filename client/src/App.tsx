@@ -1143,7 +1143,15 @@ export default function App() {
 				}}
 				onLeave={async (spaceId) => {
 					if (!transport) throw new Error("Not connected");
-					await transport.leaveRoom(spaceId as RoomId);
+					// Cascade-leave: drops the user from every child
+					// room reachable through this space (skipping
+					// sub-spaces and rooms protected by another joined
+					// space — see leaveSpaceWithChildren for the full
+					// rules).  Symmetric with joinSpaceWithChildren so
+					// the Discord-style "join the server, get all
+					// channels" gesture has a "leave the server, lose
+					// all channels" counterpart.
+					await transport.leaveSpaceWithChildren(spaceId as SpaceId);
 					// Close the sheet + bounce out of the now-gone
 					// space.  Rooms tile is the safest landing place
 					// since it always exists and never depends on a
