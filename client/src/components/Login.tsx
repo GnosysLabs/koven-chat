@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import { isMobileShell } from "@/lib/mobile";
 import type { MatrixCredentials } from "@/lib/matrix";
 import { fetchInstanceConfig, resolveAssetUrl, type InstanceConfig } from "@/lib/instance";
 import {
@@ -41,6 +42,33 @@ export function Login({ onLoggedIn }: LoginProps) {
 	const [info, setInfo] = useState<string | null>(null);
 	const [instance, setInstance] = useState<InstanceConfig>({});
 
+	// Mobile login: drop the brand image entirely and paint the
+	// whole canvas `#0a0a0c` — the same colour iOS forces the
+	// home-indicator safe-area zone to use in PWA standalone mode
+	// (manifest `theme_color`).  Solid-colour login means there's
+	// no visible boundary between the page and the system strip
+	// at the bottom: it all reads as one continuous dark canvas.
+	// Trade-off: lose the brand wallpaper on mobile login, but
+	// gain a clean edge-to-edge presentation that no iOS WebKit
+	// regression can break.
+	//
+	// Cleared on unmount so the rest of the SPA gets its normal
+	// theme-driven background back.
+	useEffect(() => {
+		if (!isMobileShell) return;
+		const html = document.documentElement;
+		const prevStyle = html.getAttribute("style") ?? "";
+		html.style.backgroundColor = "#0a0a0c";
+		html.style.backgroundImage = "none";
+		const body = document.body;
+		const prevBg = body.style.backgroundColor;
+		body.style.backgroundColor = "#0a0a0c";
+		return () => {
+			html.setAttribute("style", prevStyle);
+			body.style.backgroundColor = prevBg;
+		};
+	}, []);
+
 	useEffect(() => {
 		// Best-effort. If the engine is offline, we render the
 		// hard-coded defaults rather than blocking the form.
@@ -51,7 +79,13 @@ export function Login({ onLoggedIn }: LoginProps) {
 
 	const brandName = instance.name?.trim() || "Koven";
 	const tagline = instance.login_tagline?.trim();
-	const bgUrl = resolveAssetUrl(instance.login_background_url);
+	// Brand background image on desktop only.  Mobile uses a flat
+	// `#0a0a0c` canvas (matching iOS's PWA safe-area fill) so the
+	// home-indicator system strip blends seamlessly — see the
+	// useEffect above for the rationale.
+	const bgUrl = isMobileShell
+		? null
+		: resolveAssetUrl(instance.login_background_url);
 	const logoUrl = resolveAssetUrl(instance.logo_url);
 
 	function reset() {
@@ -127,7 +161,22 @@ export function Login({ onLoggedIn }: LoginProps) {
 
 	return (
 		<div
-			className="h-full flex items-center justify-center p-8 bg-background bg-cover bg-center relative"
+			className={cn(
+				"h-full flex items-center justify-center bg-background bg-cover bg-center relative",
+				// Outer breathing room — generous on desktop, snug on
+				// phone-sized viewports.  `pt`/`pb` use safe-area-inset
+				// so the form clears the iOS notch + home-indicator
+				// when the WebView paints under them (viewport-fit=cover).
+				"px-4 sm:p-8",
+				"pt-[max(env(safe-area-inset-top),1rem)]",
+				"pb-[max(env(safe-area-inset-bottom),1rem)]",
+				// Force the midnight palette regardless of the user's
+				// chosen theme — the brand bg image is tuned for a
+				// dark canvas, and the login is the brand handshake
+				// every user should see the same way.  Once they're
+				// signed in, their theme preference takes over.
+				"force-midnight",
+			)}
 			style={bgUrl ? { backgroundImage: `url(${cssUrl(bgUrl)})` } : undefined}
 		>
 			{bgUrl && (
@@ -158,14 +207,35 @@ export function Login({ onLoggedIn }: LoginProps) {
 						<h1 className="text-2xl font-semibold tracking-tight">{brandName}</h1>
 					)}
 					{tagline ? (
-						<p className="text-xs text-muted-foreground italic">{tagline}</p>
+						<p className={cn(
+							"text-xs italic",
+							// On mobile the brand image is the user's
+							// whole canvas so muted-foreground reads
+							// faded against it; force white for the
+							// tagline.  Desktop keeps muted-foreground
+							// because the SPA renders inside a window
+							// with framing chrome that gives it consistent
+							// contrast.
+							isMobileShell ? "text-white" : "text-muted-foreground",
+						)}>{tagline}</p>
 					) : null}
 				</div>
 
 				<div className={cn(
 					"rounded-lg overflow-hidden",
+					// Desktop keeps the original light-glass effect
+					// (`bg-card/30`) because the window-framed crop of
+					// the brand image is consistent enough for text to
+					// read.  On the mobile shell the same image gets a
+					// tighter portrait crop so colorful strips bleed
+					// through and contrast jumps from line to line —
+					// `bg-card/70` gives a consistent dark floor without
+					// losing the blur.
 					bgUrl
-						? "bg-card/30 backdrop-blur-xl border border-white/10 shadow-2xl"
+						? cn(
+							"backdrop-blur-xl border border-white/10 shadow-2xl",
+							isMobileShell ? "bg-card/70" : "bg-card/30",
+						)
 						: "bg-card border border-border",
 				)}>
 					{step === "email" ? (
@@ -282,22 +352,29 @@ export function Login({ onLoggedIn }: LoginProps) {
 				</div>
 			</div>
 
-			{/* Koven attribution footer.  Pinned to the bottom of the
-			    viewport regardless of where the form ends up. */}
-			<p className={cn(
-				"absolute bottom-4 left-0 right-0 text-center text-[11px] tracking-wide",
-				bgUrl ? "text-white/70" : "text-muted-foreground",
-			)}>
-				Chat powered by{" "}
-				<a
-					href="https://koven.chat"
-					target="_blank"
-					rel="noopener noreferrer"
-					className="font-medium hover:underline underline-offset-2"
-				>
-					Koven
-				</a>
-			</p>
+			{/* Koven attribution footer — desktop only.  Mobile drops
+			    it entirely: iOS 26.x ignores manifest `theme_color`
+			    + meta tag for the home-indicator safe-area zone,
+			    so any coloured footer here would just leave a
+			    black system strip below it that reads worse than
+			    no footer at all.  When Apple fixes the regression
+			    we can put the footer back. */}
+			{!isMobileShell && (
+				<p className={cn(
+					"absolute bottom-4 left-0 right-0 text-center text-[11px] tracking-wide",
+					bgUrl ? "text-white/70" : "text-muted-foreground",
+				)}>
+					Chat powered by{" "}
+					<a
+						href="https://koven.chat"
+						target="_blank"
+						rel="noopener noreferrer"
+						className="font-medium hover:underline underline-offset-2"
+					>
+						Koven
+					</a>
+				</p>
+			)}
 		</div>
 	);
 }
@@ -343,8 +420,23 @@ function verifyErrorMessage(err: VerifyCodeError, detail?: string): string {
 		case "too_many_attempts":   return "Too many wrong attempts on that code. Request a fresh one.";
 		case "invalid_username":    return "Username can only contain lowercase letters, numbers, and hyphens.";
 		case "username_unavailable":return "That username is taken. Pick another.";
-		case "password_rotate_failed": return "Server hiccup minting your session. Try again in a moment.";
-		case "synapse_error":       return detail ?? "Server error completing sign-in.";
+		case "password_rotate_failed":
+			// Engine retried once already.  When `detail` is set the
+			// failure was Synapse-specific (admin token revoked,
+			// account state inconsistency, etc.) — surface it so
+			// the user has something to escalate with rather than
+			// a generic "try again" they've already tried.
+			return detail
+				? `Sign-in blocked at the homeserver: ${detail}`
+				: "Server hiccup minting your session. Try again in a moment.";
+		case "synapse_error":
+			// Detail is the engine's verbatim Synapse error (status
+			// code + errcode + body).  Long, but truthful — far better
+			// than a generic "try again" when the actual blocker is
+			// "admin token revoked" or "Synapse 502 from upstream."
+			return detail
+				? `Sign-in blocked at the homeserver: ${detail}`
+				: "Server error completing sign-in.";
 		case "network":             return "Can't reach the server. Check your connection and try again.";
 		default:                    return detail ?? "Sign-in failed.";
 	}

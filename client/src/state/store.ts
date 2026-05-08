@@ -41,12 +41,21 @@ export interface FlagRef {
 //   - "rooms":   every joined room not assigned to any space
 //   - "space":   a real Matrix space the user joined or created
 // `null` is the brief pre-sync state before we pick a default.
+//
+// `spaces_overview` is mobile-only: when the bottom-tab "Spaces"
+// tab is selected and no specific space is active, we land on a
+// vertical list of every joined space (the iOS-native equivalent
+// of the desktop SpaceBar).  Tapping a space transitions to
+// `{ kind: "space", id }`; the back arrow on the chat header
+// returns here.  Desktop never enters this state — the SpaceBar
+// is always visible there.
 export type ActiveSpace =
 	| { kind: "explore" }
 	| { kind: "dms" }
 	| { kind: "bots" }
 	| { kind: "rooms" }
 	| { kind: "space"; id: SpaceId }
+	| { kind: "spaces_overview" }
 	| null;
 
 export interface AppState {

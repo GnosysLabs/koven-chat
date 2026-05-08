@@ -197,7 +197,7 @@ cmd_setup() {
 	echo
 	echo "Next:"
 	echo "  1. docker compose up -d"
-	echo "  2. bin/koven bootstrap-admin   # binds ADMIN_EMAIL to the admin user"
+	echo "  2. bin/koven bootstrap-admin   # creates @koven-svc (engine) + your operator account, binds ADMIN_EMAIL to the operator"
 	echo "  3. sign in at https://$KOVEN_HOSTNAME with $ADMIN_EMAIL"
 	echo
 	echo "Set up DNS:"
@@ -245,7 +245,15 @@ cmd_bootstrap_admin() {
 	# Reuse an existing admin user/password if .env already has them
 	# (re-runs after a partial failure should pick up where they left
 	# off, not generate a brand-new password we then have to reconcile).
-	local admin_user="${SYNAPSE_ADMIN_USER:-koven-admin}"
+	# Default service-account localpart is `koven-svc` — a name
+	# that telegraphs "machine, not human" to anyone reading the
+	# user list later.  Older installs set this to `koven-admin`
+	# (back when the same user was both engine service account AND
+	# operator) and may keep that name; the existing value in .env
+	# wins.  See `bin/koven migrate-prod-svc-account` for moving
+	# off `koven-admin` on a running prod stack without losing
+	# operator history.
+	local admin_user="${SYNAPSE_ADMIN_USER:-koven-svc}"
 	local admin_pw="${SYNAPSE_ADMIN_PASSWORD:-$(gen_secret)}"
 
 	# register_new_matrix_user fails noisily if the user already exists.
@@ -290,20 +298,73 @@ print(json.load(resp)["access_token"])
 	write_env_var SYNAPSE_ADMIN_TOKEN    "$token"
 	log "wrote SYNAPSE_ADMIN_USER, SYNAPSE_ADMIN_PASSWORD, SYNAPSE_ADMIN_TOKEN to .env"
 
-	# Bind ADMIN_EMAIL to the admin user.  Two writes:
-	#   - Synapse 3PID (informational; lives in Synapse's user record).
-	#   - Engine user_emails + admins rows (this is what email-code
-	#     login actually reads on /api/auth/verify-code).
-	# Skipped if ADMIN_EMAIL is blank; the operator can still sign
-	# in to Matrix clients with the password but not via Koven web.
+	# ─── Operator account ────────────────────────────────────────────
+	#
+	# Create a SECOND user, separate from the engine service account,
+	# that gets ADMIN_EMAIL bound to it and the instance-admin role
+	# inside the engine's RBAC.  The two-user split is load-bearing:
+	#
+	#   @koven-svc              — engine's service account.  Holds the
+	#                             access token in SYNAPSE_ADMIN_TOKEN
+	#                             and authenticates every /admin/v2/*
+	#                             call the engine makes.  No email
+	#                             bound, no email-code login path
+	#                             leads here.
+	#   @<operator>             — the human operator's account.  Email
+	#                             bound (3PID + engine user_emails).
+	#                             Marked admin in the engine's `admins`
+	#                             table.  Logs in like any user via
+	#                             email-code; password rotates per
+	#                             session.
+	#
+	# Conflating the two (binding ADMIN_EMAIL directly to the engine's
+	# service account) means every operator login rotates the engine's
+	# own access-token-bearing user's password — fine in steady state
+	# because adminResetPassword passes logout_devices=false, but ANY
+	# external disturbance (manual password reset, token revocation,
+	# .env restore) cascades into a self-destruct loop where the
+	# engine's own token is dead and SYNAPSE_ADMIN_PASSWORD in .env is
+	# stale.  Keeping the accounts separate eliminates the cascade
+	# entirely.
 	local admin_mxid="@${admin_user}:${SERVER_NAME}"
-	if [[ -n "${ADMIN_EMAIL:-}" && "$ADMIN_EMAIL" != "admin@example.com" ]]; then
-		log "binding $ADMIN_EMAIL to $admin_mxid (Synapse 3PID)"
-		# Synapse admin API: PUT /admin/v2/users/<id>.  We use the
-		# admin token we just minted.  Failure is non-fatal — the
-		# 3PID isn't load-bearing for sign-in (the engine's
-		# user_emails table is); we just want them in sync.
-		printf '%s\n%s\n%s' "$admin_mxid" "$ADMIN_EMAIL" "$token" \
+	if [[ -z "${ADMIN_EMAIL:-}" || "$ADMIN_EMAIL" == "admin@example.com" ]]; then
+		warn "ADMIN_EMAIL not set (or still admin@example.com); skipping operator account creation."
+		warn "  fix: edit .env, set ADMIN_EMAIL, and re-run bin/koven bootstrap-admin --force"
+	else
+		# Localpart for the operator.  Defaults to a generic "admin"
+		# rather than deriving from the email — leaking the email's
+		# local part into the public Matrix handle is a privacy
+		# footgun (an operator typing their personal email into .env
+		# wouldn't expect it to also become their @-handle).  Override
+		# with ADMIN_LOCALPART if you want something else (e.g. "owner",
+		# your real handle, etc.).
+		local op_localpart="${ADMIN_LOCALPART:-admin}"
+		# Sanitize the override too — Matrix localparts are
+		# [a-z0-9-_.=/+], the engine tightens that to [a-z0-9-]{1,21}.
+		op_localpart="$(printf '%s' "$op_localpart" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]//g' | cut -c1-21)"
+		[[ -n "$op_localpart" ]] || die "ADMIN_LOCALPART '${ADMIN_LOCALPART:-}' is empty after sanitizing; set it to a valid Matrix localpart ([a-z0-9-]{1,21})"
+		[[ "$op_localpart" != "$admin_user" ]] || die "operator localpart '$op_localpart' collides with engine service account '$admin_user'; set ADMIN_LOCALPART in .env to disambiguate"
+
+		local op_mxid="@${op_localpart}:${SERVER_NAME}"
+		# Random initial password.  Never persisted — the operator's
+		# first email-code login rotates it like any other user.
+		local op_pw
+		op_pw="$(gen_secret)"
+
+		log "registering operator account $op_mxid (idempotent)"
+		# No --admin flag: operator gets admin via the engine's `admins`
+		# table, which is what gates the in-app admin UI.  Synapse-side
+		# admin power belongs to the engine service account only —
+		# for the user-facing account.
+		docker compose exec -T synapse register_new_matrix_user \
+			-u "$op_localpart" -p "$op_pw" \
+			-c /data/homeserver.yaml http://localhost:8008 >/dev/null 2>&1 || true
+
+		log "binding $ADMIN_EMAIL to $op_mxid (Synapse 3PID)"
+		# Synapse admin API: PUT /admin/v2/users/<id>.  Failure is
+		# non-fatal — the engine's user_emails table is what the login
+		# flow actually reads; the 3PID is just informational metadata.
+		printf '%s\n%s\n%s' "$op_mxid" "$ADMIN_EMAIL" "$token" \
 		| docker compose exec -T synapse python3 -c '
 import json, sys, urllib.request, urllib.parse
 mxid, email, tok = sys.stdin.read().splitlines()
@@ -316,41 +377,64 @@ req = urllib.request.Request(
 urllib.request.urlopen(req).read()
 ' >/dev/null 2>&1 || warn "Synapse 3PID set failed; sign-in still works via engine binding below"
 
-		# Engine bootstrap: writes user_emails row + admins row.
-		# Auth is the appservice token (operator-level secret),
-		# not the user-level admin token; the engine's admins
-		# table is empty at this point so the admin token has no
-		# special privilege there yet.
-		log "binding $ADMIN_EMAIL to $admin_mxid (engine user_emails + admins)"
-		printf '%s\n%s\n%s' "$ADMIN_EMAIL" "$admin_mxid" "$ENGINE_AS_TOKEN" \
-		| docker compose exec -T engine bun -e '
-const [email, userId, asToken] = (await Bun.stdin.text()).trim().split("\n");
+		# Engine bootstrap: writes user_emails row + admins row.  Auth
+		# is the appservice token (operator-level secret).  This script
+		# can target either the in-compose engine container OR a native
+		# bun engine running on host:9000 — local dev workflows use the
+		# latter.  Detect which is available; die loud if neither.
+		log "binding $ADMIN_EMAIL to $op_mxid (engine user_emails + admins)"
+		local engine_in_compose=0
+		if docker compose ps --services --filter status=running 2>/dev/null | grep -qx engine; then
+			engine_in_compose=1
+		fi
+
+		local bootstrap_payload
+		bootstrap_payload="$(printf '{"email":%s,"user_id":%s}' \
+			"$(printf '%s' "$ADMIN_EMAIL" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')" \
+			"$(printf '%s' "$op_mxid"     | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')")"
+
+		if [[ $engine_in_compose -eq 1 ]]; then
+			printf '%s' "$bootstrap_payload" | docker compose exec -T engine bun -e '
+const body = await Bun.stdin.text();
 const r = await fetch("http://localhost:9000/api/admin/bootstrap", {
 	method: "POST",
-	headers: { "Content-Type": "application/json", Authorization: "Bearer " + asToken },
-	body: JSON.stringify({ email, user_id: userId }),
+	headers: { "Content-Type": "application/json", Authorization: "Bearer " + process.env.AS_TOKEN },
+	body,
 });
-if (!r.ok) {
-	console.error(await r.text());
-	process.exit(1);
-}
-' || die "engine bootstrap binding failed; check 'docker compose logs engine'"
-	else
-		warn "ADMIN_EMAIL not set (or still admin@example.com); skipping email binding."
-		warn "  fix: edit .env, set ADMIN_EMAIL, and re-run bin/koven bootstrap-admin --force"
+if (!r.ok) { console.error(await r.text()); process.exit(1); }
+' AS_TOKEN="$ENGINE_AS_TOKEN" || die "engine bootstrap binding failed (compose); check 'docker compose logs engine'"
+		else
+			# Native engine on host:9000.  Make sure it's actually up
+			# before we issue the bootstrap call — otherwise the curl
+			# fails with a connection-refused that's hard to debug.
+			if ! curl -fsS -o /dev/null -m 2 "http://localhost:9000/api/instance" 2>/dev/null; then
+				die "no engine reachable: not in compose, and http://localhost:9000 isn't responding. Start the engine (\`bun run --cwd engine dev\` or \`docker compose up -d engine\`) and re-run."
+			fi
+			curl -fsS -X POST "http://localhost:9000/api/admin/bootstrap" \
+				-H "Content-Type: application/json" \
+				-H "Authorization: Bearer $ENGINE_AS_TOKEN" \
+				--data-raw "$bootstrap_payload" >/dev/null \
+				|| die "engine bootstrap binding failed (native); check the engine's stderr"
+		fi
 	fi
 
-	# Engine has the env baked at start — recreate so it sees the new
-	# token.  --force-recreate because compose's env-change detection
-	# is unreliable across versions.
-	log "recreating engine container so it picks up the new token"
-	docker compose up -d --force-recreate engine
+	# Engine container (if running in compose) needs to re-read .env
+	# to pick up the new SYNAPSE_ADMIN_TOKEN.  Native bun engine has
+	# to be restarted manually by the operator — we can't see its
+	# parent shell.
+	if docker compose ps --services --filter status=running 2>/dev/null | grep -qx engine; then
+		log "recreating engine container so it picks up the new token"
+		docker compose up -d --force-recreate engine
+	else
+		warn "no compose engine running — restart your native engine to pick up the new SYNAPSE_ADMIN_TOKEN"
+	fi
 
 	echo
-	log "admin user is $admin_mxid"
-	log "  password stored in .env as SYNAPSE_ADMIN_PASSWORD (rarely needed)"
-	log "  token stored in .env as SYNAPSE_ADMIN_TOKEN"
+	log "engine service account: $admin_mxid"
+	log "  password in .env as SYNAPSE_ADMIN_PASSWORD (rarely needed)"
+	log "  token in .env as SYNAPSE_ADMIN_TOKEN (engine reads this)"
 	if [[ -n "${ADMIN_EMAIL:-}" && "$ADMIN_EMAIL" != "admin@example.com" ]]; then
+		log "operator account: @${op_localpart:-?}:${SERVER_NAME}"
 		log "  sign in to Koven web with $ADMIN_EMAIL"
 	fi
 }
@@ -364,12 +448,196 @@ cmd_secrets() {
 	done
 }
 
+# ╔═══════════════════════════════════════════════════════════════════╗
+# ║  ONE-SHOT MIGRATION — DELETE THIS FUNCTION AFTER PROD HAS RUN IT  ║
+# ║                                                                   ║
+# ║  Lifecycle:                                                       ║
+# ║    1. Run on prod, verify, sign in → confirms migration worked.   ║
+# ║    2. Delete cmd_migrate_prod_svc_account + its dispatch case +   ║
+# ║       its mention in `usage:` strings + the .env.example note     ║
+# ║       referring to it.                                            ║
+# ║                                                                   ║
+# ║  This is throwaway code.  Keeping it around past its purpose      ║
+# ║  invites someone to run it on a fresh install and break their     ║
+# ║  stack.  When prod is migrated, this whole block goes.            ║
+# ╚═══════════════════════════════════════════════════════════════════╝
+#
+# Migrate a prod stack off the conflated "@koven-admin = engine service
+# account AND operator" shape onto the clean separated shape:
+#
+#   @koven-admin (existing, kept untouched)
+#       — keeps email binding, keeps engine `admins` row, keeps every
+#         message / room membership / DM thread under that MXID.  This
+#         is still the operator account; you sign in as this user.
+#   @koven-svc (new, created by this script)
+#       — pure engine service account.  Synapse admin flag set so it
+#         can hit /admin/v2/users.  No email bound.  Holds the access
+#         token in SYNAPSE_ADMIN_TOKEN going forward.
+#
+# Why not use bootstrap-admin --force?  That would try to ADD an
+# operator user too, and would re-bind ADMIN_EMAIL to a fresh @admin
+# user — destroying the operator's prod history under @koven-admin.
+# This script does the minimum: create the service account, mint a
+# token, print the .env lines.  Doesn't touch user_emails, doesn't
+# touch the engine's `admins` table, doesn't restart anything.
+#
+# Idempotent in the safe sense: re-running creates a new password +
+# token (the old one stops working as soon as you swap .env), but it
+# never deletes or modifies @koven-admin.  Failed mid-run: re-run
+# fresh, the @koven-svc user already exists so register fails-but-
+# swallowed and the login mints a fresh token.
+cmd_migrate_prod_svc_account() {
+	require_cmd docker
+	[[ -f .env ]] || die "no .env yet — run from a stack root with .env present"
+	# shellcheck disable=SC1091
+	source .env
+
+	# Sanity gates — refuse to run if we're not actually on the shape
+	# this migration is designed for.  Better to bail loud than do the
+	# wrong thing on a stack that's already been migrated or wasn't
+	# in the conflated shape to begin with.
+	[[ -n "${SERVER_NAME:-}" ]] || die "SERVER_NAME is empty in .env"
+	[[ -n "${SYNAPSE_ADMIN_TOKEN:-}" ]] || die "SYNAPSE_ADMIN_TOKEN is empty — nothing to migrate from.  Run \`bin/koven bootstrap-admin\` first if this is a fresh install."
+
+	# Service-account localpart.  Default `koven-svc`; override with
+	# SVC_LOCALPART for stacks that already have something at that
+	# name.  Validated against Matrix's localpart grammar in the
+	# strict subset the engine expects.
+	local svc_localpart="${SVC_LOCALPART:-koven-svc}"
+	if [[ ! "$svc_localpart" =~ ^[a-z0-9-]{1,21}$ ]]; then
+		die "SVC_LOCALPART '$svc_localpart' must match [a-z0-9-]{1,21}"
+	fi
+
+	# Refuse to run if .env's SYNAPSE_ADMIN_USER already points at the
+	# target — means we already migrated, or there's nothing to do.
+	if [[ "${SYNAPSE_ADMIN_USER:-}" == "$svc_localpart" ]]; then
+		die "SYNAPSE_ADMIN_USER is already '$svc_localpart'; this stack appears to already be migrated.  Nothing to do."
+	fi
+
+	local svc_mxid="@${svc_localpart}:${SERVER_NAME}"
+	local svc_pw
+	svc_pw="$(gen_secret)"
+
+	log "migrating prod to a separated service account"
+	log "  current SYNAPSE_ADMIN_USER: ${SYNAPSE_ADMIN_USER:-?} (will keep their email, history, admin role — UNTOUCHED)"
+	log "  new service account:        $svc_mxid"
+
+	# Wait for Synapse — same liveness probe bootstrap-admin uses.
+	log "checking Synapse reachability..."
+	local attempts=0
+	until docker compose exec -T synapse \
+		python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8008/_matrix/client/versions', timeout=2)" \
+		>/dev/null 2>&1
+	do
+		attempts=$((attempts + 1))
+		if [[ $attempts -gt 60 ]]; then
+			die "Synapse didn't become reachable after 60s.  Aborting — re-run when 'docker compose ps' shows synapse Healthy."
+		fi
+		sleep 1
+	done
+
+	# Create the service account.  --admin so it can hit /admin/v2/*.
+	# register_new_matrix_user fails noisily if the user already
+	# exists; swallow that — the login below is the proof we have
+	# valid credentials, and a stale @koven-svc with a different
+	# password would surface there instead.
+	log "registering $svc_mxid (idempotent — swallows 'already exists')"
+	docker compose exec -T synapse register_new_matrix_user \
+		-u "$svc_localpart" -p "$svc_pw" --admin \
+		-c /data/homeserver.yaml http://localhost:8008 >/dev/null 2>&1 || true
+
+	# If the user already existed with a different password, the
+	# above register call left it intact and our local $svc_pw is now
+	# wrong.  Force the password to our known value via the existing
+	# admin token.  This is the one thing we DO have to do via admin
+	# API — register_new_matrix_user has no "force update password"
+	# option.
+	log "ensuring service-account password matches our local copy"
+	printf '%s\n%s\n%s' "$svc_mxid" "$svc_pw" "$SYNAPSE_ADMIN_TOKEN" \
+	| docker compose exec -T synapse python3 -c '
+import json, sys, urllib.request, urllib.parse
+mxid, pw, tok = sys.stdin.read().splitlines()
+req = urllib.request.Request(
+	"http://localhost:8008/_synapse/admin/v2/users/" + urllib.parse.quote(mxid, safe=""),
+	method="PUT",
+	data=json.dumps({"password": pw, "logout_devices": False, "admin": True}).encode(),
+	headers={"Content-Type":"application/json","Authorization":"Bearer "+tok},
+)
+urllib.request.urlopen(req).read()
+' >/dev/null 2>&1 || die "failed to set service-account password via admin API.  Existing SYNAPSE_ADMIN_TOKEN may be stale — investigate before retrying."
+
+	# Mint a token for the service account.  Same pattern as
+	# bootstrap-admin — read JSON from stdin so the password never
+	# ends up in the python source / process list.
+	log "minting service-account access token"
+	local svc_token
+	svc_token="$(printf '%s\n%s' "$svc_localpart" "$svc_pw" | docker compose exec -T synapse python3 -c '
+import json, sys, urllib.request
+user, pw = sys.stdin.read().splitlines()
+body = json.dumps({
+	"type": "m.login.password",
+	"identifier": {"type": "m.id.user", "user": user},
+	"password": pw,
+	"initial_device_display_name": "koven-engine-svc",
+}).encode()
+req = urllib.request.Request(
+	"http://localhost:8008/_matrix/client/v3/login",
+	data=body,
+	headers={"Content-Type": "application/json"},
+)
+resp = urllib.request.urlopen(req)
+print(json.load(resp)["access_token"])
+')" || die "login failed for $svc_mxid — password set may not have stuck.  Investigate."
+
+	[[ -n "$svc_token" ]] || die "Synapse returned an empty access token"
+
+	# Don't write to .env automatically — the operator should review
+	# the swap before applying.  Print everything they need: the
+	# three lines to paste, and the one-shot recreate command.
+	echo
+	echo "═══════════════════════════════════════════════════════════════"
+	echo " Service account ready.  Apply the migration in two steps:"
+	echo "═══════════════════════════════════════════════════════════════"
+	echo
+	echo " 1. Edit .env — replace these three lines with:"
+	echo
+	echo "      SYNAPSE_ADMIN_USER=${svc_localpart}"
+	echo "      SYNAPSE_ADMIN_PASSWORD=${svc_pw}"
+	echo "      SYNAPSE_ADMIN_TOKEN=${svc_token}"
+	echo
+	echo "    (the OLD values are for ${SYNAPSE_ADMIN_USER:-?} — keep them"
+	echo "     somewhere safe for rollback, then overwrite the .env lines.)"
+	echo
+	echo " 2. Recreate the engine container so it reads the new .env:"
+	echo
+	echo "      docker compose up -d --force-recreate engine"
+	echo
+	echo "═══════════════════════════════════════════════════════════════"
+	echo
+	echo " ROLLBACK (if anything goes wrong after step 2):"
+	echo "   Put the OLD SYNAPSE_ADMIN_USER / PASSWORD / TOKEN values back"
+	echo "   in .env, run \`docker compose up -d --force-recreate engine\`"
+	echo "   again.  ${svc_mxid} stays in Synapse but unused — harmless."
+	echo
+	echo " VERIFICATION (after step 2):"
+	echo "   - Tail engine logs: docker compose logs -f --tail=50 engine"
+	echo "     Look for 'engine: starting' with no M_UNKNOWN_TOKEN errors."
+	echo "   - Sign in with your existing email on the web client."
+	echo "     Should resolve to ${SYNAPSE_ADMIN_USER:-?} as before."
+	echo "   - Check Synapse user list:"
+	echo "     curl -H \"Authorization: Bearer \$SYNAPSE_ADMIN_TOKEN\" \\"
+	echo "       https://\$KOVEN_HOSTNAME/_synapse/admin/v2/users?from=0"
+	echo "     Should list both ${SYNAPSE_ADMIN_USER:-?} and ${svc_localpart}."
+	echo
+}
+
 # ─── Dispatch ───────────────────────────────────────────────────────
 
 case "${1:-}" in
-	setup)            shift; cmd_setup "$@"            ;;
-	bootstrap-admin)  shift; cmd_bootstrap_admin "$@"  ;;
-	secrets)          shift; cmd_secrets "$@"          ;;
-	"")               die "usage: bin/koven {setup|bootstrap-admin|secrets}" ;;
-	*)                die "unknown subcommand: $1 (try setup, bootstrap-admin, secrets)" ;;
+	setup)                     shift; cmd_setup "$@"                     ;;
+	bootstrap-admin)           shift; cmd_bootstrap_admin "$@"           ;;
+	secrets)                   shift; cmd_secrets "$@"                   ;;
+	migrate-prod-svc-account)  shift; cmd_migrate_prod_svc_account "$@"  ;;
+	"")               die "usage: bin/koven {setup|bootstrap-admin|secrets|migrate-prod-svc-account}" ;;
+	*)                die "unknown subcommand: $1 (try setup, bootstrap-admin, secrets, migrate-prod-svc-account)" ;;
 esac

@@ -35,9 +35,16 @@ import {
 	countRoomCreationsByUser,
 	createBot,
 	createSuspension,
+	deleteAllNotifications,
 	deleteBio,
 	deleteBot,
+	deleteNotification,
+	listNotifications,
 	lookupPostUser,
+	markAllNotificationsRead,
+	markNotificationRead,
+	markRoomNotificationsRead,
+	unreadNotificationCount,
 	deleteInstanceConfig,
 	deleteRoomCollapse,
 	flagsForRoom,
@@ -370,6 +377,30 @@ function randomPassword(): string {
 		.replace(/=+$/, "");
 }
 
+/**
+ * Pull the `errcode` out of a Synapse error response body.  Synapse
+ * always replies to errors with `{"errcode": "M_*", "error": "human
+ * message"}` — but our admin helpers only capture the body as raw text
+ * (truncated to 300 chars), so callers that need to branch on the
+ * specific failure (e.g. "username actually taken" vs "admin token
+ * revoked") have to re-parse.  Returns undefined if the body isn't
+ * JSON, isn't an object, or doesn't carry a string errcode — in which
+ * case the caller should treat the error as opaque.
+ */
+function parseSynapseErrcode(body: string | undefined): string | undefined {
+	if (!body) return undefined;
+	try {
+		const parsed = JSON.parse(body) as unknown;
+		if (parsed && typeof parsed === "object" && "errcode" in parsed) {
+			const e = (parsed as { errcode?: unknown }).errcode;
+			if (typeof e === "string") return e;
+		}
+	} catch {
+		// Body wasn't JSON (HTML 502 page, plain text, etc.).
+	}
+	return undefined;
+}
+
 export function startServer(): void {
 	Bun.serve({
 		port: config.port,
@@ -506,13 +537,26 @@ export function startServer(): void {
 						email,
 					});
 					if ("error" in created) {
-						// Most common: M_USER_IN_USE if the localpart
-						// is taken by someone else.  Surface raw detail
-						// so the UI can show a helpful message.
+						// Distinguish "localpart genuinely taken" from
+						// every other failure mode (admin token revoked,
+						// Synapse 500, network blip, rate limit, etc.).
+						// Lying with "username taken" when the real
+						// failure was an admin-auth issue cost us hours
+						// of debugging once and is unforgivable for the
+						// end user — they retype usernames forever
+						// while the actual blocker is somewhere else
+						// entirely.
+						const errcode = parseSynapseErrcode(created.detail);
+						if (errcode === "M_USER_IN_USE") {
+							return json({ error: "username_unavailable" }, { status: 409 });
+						}
+						console.warn(
+							`engine: signup blocked by Synapse for ${candidateMxid}: ${created.error} ${errcode ?? ""} ${created.detail ?? ""}`,
+						);
 						return json({
-							error: "username_unavailable",
-							detail: created.detail ?? created.error,
-						}, { status: 409 });
+							error: "synapse_error",
+							detail: `Homeserver rejected account creation (${created.error}${errcode ? `, ${errcode}` : ""}): ${created.detail ?? "no body"}`,
+						}, { status: 502 });
 					}
 					bindEmailToUser(email, candidateMxid);
 					userId = candidateMxid;
@@ -543,10 +587,28 @@ export function startServer(): void {
 				//     Synapse's "Cannot use admin API to login as
 				//     self" guard, which fires when the admin user
 				//     signs themselves in via this same flow.
+				// Rotate with one retry — Synapse's admin/v2 PUT can
+				// transiently 502 / 504 under load (rate-limit on
+				// admin endpoint, brief upstream blip, etc.) and
+				// the operation is idempotent, so retrying once with
+				// a small backoff covers most flakes without
+				// frustrating the user with a "server hiccup" toast.
 				const uiaPassword = randomPassword();
-				const ok = await adminResetPassword(userId, uiaPassword);
-				if (!ok) {
-					return json({ error: "password_rotate_failed" }, { status: 502 });
+				let resetResult = await adminResetPassword(userId, uiaPassword);
+				if (!resetResult.ok) {
+					await new Promise(r => setTimeout(r, 250));
+					resetResult = await adminResetPassword(userId, uiaPassword);
+				}
+				if (!resetResult.ok) {
+					return json({
+						error: "password_rotate_failed",
+						// Include Synapse's status + body preview so
+						// the client can show something more specific
+						// than "server hiccup" when the failure is
+						// persistent (admin token revoked, user
+						// suspended, Synapse DB issue, etc.).
+						detail: `Synapse ${resetResult.status}: ${resetResult.detail}`,
+					}, { status: 502 });
 				}
 
 				const token = await loginAsUser(userId, uiaPassword);
@@ -716,9 +778,19 @@ export function startServer(): void {
 				const userId = await whoami(extractToken(req));
 				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
 				const password = randomPassword();
-				const ok = await adminResetPassword(userId, password);
-				if (!ok) {
-					return json({ error: "password_rotate_failed" }, { status: 502 });
+				// Same retry posture as verify-code: one retry on
+				// transient failure, then surface Synapse's detail
+				// for triage if it sticks.
+				let resetResult = await adminResetPassword(userId, password);
+				if (!resetResult.ok) {
+					await new Promise(r => setTimeout(r, 250));
+					resetResult = await adminResetPassword(userId, password);
+				}
+				if (!resetResult.ok) {
+					return json({
+						error: "password_rotate_failed",
+						detail: `Synapse ${resetResult.status}: ${resetResult.detail}`,
+					}, { status: 502 });
 				}
 				return json({ password });
 			}
@@ -787,6 +859,128 @@ export function startServer(): void {
 						created_at: susp.created_at,
 					} : null,
 				});
+			}
+
+			// ─── Notifications (in-app bell) ─────────────────────────
+			// All routes here are authed via Bearer-Matrix-token.
+			// The bell pulls a paginated list, polls unread count,
+			// and posts mark-read / dismiss writes; the engine fans
+			// out events into rows in real time (see
+			// notification-fanout.ts).
+
+			// GET /api/notifications?limit=&before=
+			//   limit  — defaults to 50, capped at 200
+			//   before — exclusive upper bound on created_at (ms);
+			//            omit / "0" / negative => first page
+			// Returns the user's notifications newest-first.
+			if (req.method === "GET" && path === "/api/notifications") {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				const rawLimit = Number(url.searchParams.get("limit") ?? "50");
+				const limit = Number.isFinite(rawLimit)
+					? Math.min(200, Math.max(1, Math.floor(rawLimit)))
+					: 50;
+				const rawBefore = Number(url.searchParams.get("before") ?? "");
+				const before = Number.isFinite(rawBefore) && rawBefore > 0
+					? rawBefore
+					: Number.MAX_SAFE_INTEGER;
+				const rows = listNotifications({ userId, limit, before });
+				// Normalise to JSON-friendly shapes — read_at stays
+				// `null | number`, kind is the typed enum, snippet is
+				// `string | null`.  No transform needed today, but
+				// kept explicit so future schema additions don't leak
+				// internal columns by accident.
+				return json({
+					notifications: rows.map(r => ({
+						id: r.id,
+						event_id: r.event_id,
+						room_id: r.room_id,
+						kind: r.kind,
+						sender: r.sender,
+						snippet: r.snippet,
+						created_at: r.created_at,
+						read_at: r.read_at,
+					})),
+				});
+			}
+
+			// GET /api/notifications/unread-count
+			// Cheap point query for the bell badge.  Polled every
+			// ~30s by the client so it's wired to be a single
+			// indexed lookup (idx_notifications_user_unread).
+			if (req.method === "GET" && path === "/api/notifications/unread-count") {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				return json({ count: unreadNotificationCount(userId) });
+			}
+
+			// POST /api/notifications/read-all
+			// Idempotent — marks every unread row for this user as
+			// read.  Returns the number of rows updated so the
+			// client can optimistically zero out its badge.
+			if (req.method === "POST" && path === "/api/notifications/read-all") {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				const updated = markAllNotificationsRead(userId, Date.now());
+				return json({ ok: true, updated });
+			}
+
+			// POST /api/notifications/read-by-room { room_id }
+			// Bulk-marks every unread notification for the given
+			// room as read.  Called by the bell client when the
+			// user enters a room with the tab focused — they see
+			// messages land in real time, so accumulating unread
+			// for the room they're literally watching is wrong UX.
+			// Idempotent: returns 0 if there's nothing to clear.
+			if (req.method === "POST" && path === "/api/notifications/read-by-room") {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				const body = (await req.json().catch(() => ({}))) as { room_id?: unknown };
+				const roomId = typeof body.room_id === "string" ? body.room_id : "";
+				if (!roomId.startsWith("!") || !roomId.includes(":")) {
+					return json({ errcode: "M_INVALID_PARAM", error: "room_id required" }, { status: 400 });
+				}
+				const updated = markRoomNotificationsRead({ userId, roomId, readAt: Date.now() });
+				return json({ ok: true, updated });
+			}
+
+			// POST /api/notifications/dismiss-all
+			// Hard-delete every notification for this user.  Used by
+			// the "Clear all" affordance in the bell.  Doesn't
+			// affect the underlying Matrix events, just the bell
+			// log.
+			if (req.method === "POST" && path === "/api/notifications/dismiss-all") {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				const deleted = deleteAllNotifications(userId);
+				return json({ ok: true, deleted });
+			}
+
+			// POST /api/notifications/:id/read
+			// POST /api/notifications/:id/dismiss
+			// Both are user-scoped (UPDATE / DELETE both include
+			// `user_id = ?` so a known id from another user's
+			// notification can't be touched).  Return 200 even when
+			// the row didn't exist or was already in the desired
+			// state — the desired post-condition is the same and
+			// the client doesn't need to error-handle a no-op.
+			{
+				const m = path.match(/^\/api\/notifications\/(\d+)\/(read|dismiss)$/);
+				if (m && req.method === "POST") {
+					const userId = await whoami(extractToken(req));
+					if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+					const id = Number(m[1]);
+					const action = m[2];
+					if (!Number.isInteger(id) || id <= 0) {
+						return json({ errcode: "M_INVALID_PARAM", error: "id must be a positive integer" }, { status: 400 });
+					}
+					if (action === "read") {
+						markNotificationRead({ id, userId, readAt: Date.now() });
+					} else {
+						deleteNotification({ id, userId });
+					}
+					return json({ ok: true });
+				}
 			}
 
 			// ─── Bots ────────────────────────────────────────────────

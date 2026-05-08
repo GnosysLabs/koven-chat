@@ -147,6 +147,16 @@ export const config = {
 	// appservice as_token can't hit those endpoints — only a real
 	// admin user.  Setup script provisions this on first boot.
 	synapseAdminToken: process.env.SYNAPSE_ADMIN_TOKEN ?? tokens.as_token,
+	// Admin user credentials used to re-mint `synapseAdminToken` if
+	// Synapse rejects it with `M_UNKNOWN_TOKEN` (rotated by
+	// Synapse, manually revoked, expired in a future Synapse
+	// version, etc.).  Both written to .env by `bin/koven
+	// bootstrap-admin`.  Without these the engine has no way to
+	// self-heal a stale admin token — every login flow blocks until
+	// an operator manually re-runs the bootstrap script.  When set,
+	// `adminFetch` transparently re-logs-in on 401 and retries.
+	synapseAdminUser: process.env.SYNAPSE_ADMIN_USER ?? "",
+	synapseAdminPassword: process.env.SYNAPSE_ADMIN_PASSWORD ?? "",
 
 	// ─── Bot platform ───────────────────────────────────────────────
 	// AES-256-GCM key (64 hex chars / 32 bytes) used to encrypt

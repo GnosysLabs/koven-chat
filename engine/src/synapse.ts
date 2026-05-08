@@ -133,16 +133,85 @@ export async function deactivateUser(userId: string, erase: boolean = true): Pro
 // for arbitrary accounts or set passwords.  We provision a dedicated
 // admin user at install time and store its token in SYNAPSE_ADMIN_TOKEN.
 
+// In-memory live token.  Initialised from `config.synapseAdminToken`
+// (env / .env), but `adminFetch` will rotate this in place by
+// re-logging-in as the admin user whenever Synapse rejects the
+// current value with `M_UNKNOWN_TOKEN`.  Avoids requiring an
+// operator restart whenever Synapse expires/rotates the token.
+let liveAdminToken: string = config.synapseAdminToken;
+
+/// Mint a fresh admin token by logging in as the admin user.
+/// Returns null if admin credentials aren't configured (older
+/// installs that pre-date the username/password env vars), in
+/// which case `adminFetch` falls back to surfacing the 401.
+async function refreshAdminToken(): Promise<string | null> {
+	if (!config.synapseAdminUser || !config.synapseAdminPassword) {
+		console.warn(
+			"engine: admin token rejected by Synapse but no SYNAPSE_ADMIN_USER + SYNAPSE_ADMIN_PASSWORD configured to re-mint — re-run `bin/koven bootstrap-admin`",
+		);
+		return null;
+	}
+	const url = `${config.homeserverUrl}/_matrix/client/v3/login`;
+	const r = await fetch(url, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			type: "m.login.password",
+			identifier: { type: "m.id.user", user: config.synapseAdminUser },
+			password: config.synapseAdminPassword,
+			device_id: "koven-engine-admin",
+			initial_device_display_name: "Koven engine (admin)",
+		}),
+	});
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		console.error(
+			`engine: admin re-login failed → ${r.status} ${txt.slice(0, 200)}`,
+		);
+		return null;
+	}
+	const body = (await r.json().catch(() => null)) as { access_token?: string } | null;
+	const token = body?.access_token;
+	if (!token) {
+		console.error("engine: admin re-login response missing access_token");
+		return null;
+	}
+	console.log("engine: minted fresh admin token via re-login");
+	return token;
+}
+
 async function adminFetch(path: string, init: RequestInit = {}): Promise<Response> {
 	const url = `${config.homeserverUrl}${path}`;
-	return fetch(url, {
+	const send = (token: string) => fetch(url, {
 		...init,
 		headers: {
 			"Content-Type": "application/json",
-			Authorization: `Bearer ${config.synapseAdminToken}`,
+			Authorization: `Bearer ${token}`,
 			...(init.headers ?? {}),
 		},
 	});
+
+	let r = await send(liveAdminToken);
+
+	// Self-heal on the only failure mode where re-login could plausibly
+	// help — Synapse explicitly rejecting our token.  Every other
+	// non-2xx status (404, 409, 502, …) means the call is bad for
+	// reasons re-login won't fix; surface it to the caller as-is.
+	if (r.status === 401 || r.status === 403) {
+		// Peek at the body to confirm it's a token problem (vs a per-
+		// request authz failure).  Clone so the caller still gets the
+		// original response if we don't end up retrying.
+		const peek = await r.clone().text().catch(() => "");
+		if (/M_UNKNOWN_TOKEN/.test(peek)) {
+			const fresh = await refreshAdminToken();
+			if (fresh) {
+				liveAdminToken = fresh;
+				r = await send(liveAdminToken);
+			}
+		}
+	}
+
+	return r;
 }
 
 /**
@@ -442,7 +511,71 @@ export async function adminSetUserEmail(userId: string, email: string): Promise<
  * carries `password` so we don't accidentally clobber displayname or
  * 3PIDs.  Returns false on any HTTP error.
  */
-export async function adminResetPassword(userId: string, password: string): Promise<boolean> {
+export type AdminResetPasswordResult =
+	| { ok: true }
+	| { ok: false; status: number; detail: string };
+
+// MXID of the engine's own service account, computed once.  Empty if
+// SYNAPSE_ADMIN_USER isn't configured, in which case the self-rotation
+// guard below is effectively disabled — better than firing on the
+// wrong target.
+const SERVICE_ACCOUNT_MXID = config.synapseAdminUser
+	? `@${config.synapseAdminUser}:${config.homeserverName}`
+	: "";
+
+export async function adminResetPassword(
+	userId: string,
+	password: string,
+): Promise<AdminResetPasswordResult> {
+	// Defensive guard: refuse to rotate the engine's OWN service-
+	// account password.  The engine authenticates every admin call
+	// with SYNAPSE_ADMIN_TOKEN — minted for whichever user holds it
+	// (the user named in SYNAPSE_ADMIN_USER).  Rotating that user's
+	// password breaks two invariants:
+	//
+	//   1. .env's SYNAPSE_ADMIN_PASSWORD goes stale, so adminFetch's
+	//      self-heal path (re-login-as-admin on M_UNKNOWN_TOKEN)
+	//      can't recover — one external disturbance and we're
+	//      locked out for good.
+	//   2. The current `logout_devices: false` keeps the in-memory
+	//      token alive across rotations, but that's a fragile
+	//      contract — any future code path that passes
+	//      `logout_devices: true` (operator manually rotates,
+	//      Synapse upgrade default change, etc.) instantly nukes
+	//      the engine's auth.
+	//
+	// In a correctly-configured install this guard never fires:
+	// `bin/koven bootstrap-admin` separates the engine's service
+	// account (@koven-svc by default) from the operator's email-
+	// bound account (@admin / @<derived> by default), and the only
+	// caller of this function — the email-code login flow — looks
+	// up the email→user_id binding which resolves to the operator,
+	// never the service account.
+	//
+	// If you're seeing this refusal in logs, your install has the
+	// operator's email bound directly to the service-account user
+	// (the historical pre-split shape).  Fix:
+	//
+	//   bin/koven migrate-prod-svc-account
+	//
+	// — provisions a separate service account and swaps the engine's
+	// SYNAPSE_ADMIN_TOKEN onto it without touching operator history.
+	if (SERVICE_ACCOUNT_MXID && userId === SERVICE_ACCOUNT_MXID) {
+		console.error(
+			`engine: REFUSED to rotate password for ${userId} — that's this engine's own service account. ` +
+			`Operator email is bound to the service-account user (broken historical shape). ` +
+			`Run \`bin/koven migrate-prod-svc-account\` to split them.`,
+		);
+		return {
+			ok: false,
+			status: 0,
+			detail:
+				"engine refused to rotate its own service-account password — " +
+				"the operator's email is misconfigured.  " +
+				"Run `bin/koven migrate-prod-svc-account` to fix.",
+		};
+	}
+
 	const path = `/_synapse/admin/v2/users/${encodeURIComponent(userId)}`;
 	const r = await adminFetch(path, {
 		method: "PUT",
@@ -451,9 +584,9 @@ export async function adminResetPassword(userId: string, password: string): Prom
 	if (!r.ok) {
 		const txt = await r.text().catch(() => "");
 		console.warn(`engine: adminResetPassword ${userId} → ${r.status} ${txt.slice(0, 200)}`);
-		return false;
+		return { ok: false, status: r.status, detail: txt.slice(0, 200) };
 	}
-	return true;
+	return { ok: true };
 }
 
 /**

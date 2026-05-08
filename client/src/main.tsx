@@ -108,3 +108,28 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
 void setupMacChrome()
 	.then(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
 	.then(revealApp);
+
+// Register the service worker that backs notifications + (later)
+// offline caching.  Done after the React tree mounts so the
+// installation cost (network request for /sw.js, parse, install
+// event) doesn't compete with first paint.  iOS Safari requires the
+// SW to fire notifications; modern Chromium / Firefox / Safari
+// desktop all also work fine via the SW path, so we use it
+// universally.  Skipped silently if `serviceWorker` isn't on
+// `navigator` (older browsers, sandbox modes that disable workers).
+if (typeof window !== "undefined" && "serviceWorker" in navigator) {
+	window.addEventListener("load", () => {
+		// `scope: "/"` — the default — lets the SW intercept any
+		// future fetch from the SPA, even though we don't intercept
+		// fetches today.  Future-proofs the install: extending the
+		// SW with a fetch handler doesn't require a re-registration
+		// dance.
+		navigator.serviceWorker
+			.register("/sw.js", { scope: "/" })
+			.catch((err) => {
+				// Don't escalate — a missing SW falls back to page-
+				// side `new Notification(...)` (see lib/notifications.ts).
+				console.warn("sw: registration failed", err);
+			});
+	});
+}

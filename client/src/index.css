@@ -89,6 +89,60 @@
 			radial-gradient(ellipse at bottom, hsl(245 30% 10% / 0.4) 0%, transparent 65%);
 	}
 
+	/* ── Force-midnight scope ──────────────────────────────────────
+	 *
+	 * Applied to any subtree that should ALWAYS render in the
+	 * midnight palette regardless of the user's chosen theme.
+	 * Pre-auth surfaces use this — login + encryption-unlock —
+	 * because:
+	 *
+	 *   1. The brand background image is colour-tuned for a dark
+	 *      canvas; the daylight / sand / mint palettes turn the
+	 *      scrim into a muddy mid-grey wash.
+	 *   2. Theme settings live in `localStorage` per-user; before
+	 *      sign-in we don't reliably know whose preferences to
+	 *      honour, so we shouldn't honour anyone's.
+	 *   3. The login is the brand handshake — every user should
+	 *      see the same first impression.
+	 *
+	 * Carries the full set of CSS-var values: stock `.dark`
+	 * defaults UNION midnight's overrides.  Self-contained so
+	 * scoping the class to a single subtree is enough.
+	 */
+	.force-midnight {
+		/* From `.dark` — values midnight inherits unchanged. */
+		--primary: 0 0% 98%;
+		--primary-foreground: 240 5.9% 10%;
+		--destructive: 0 84.2% 60.2%;
+		--destructive-foreground: 0 0% 98%;
+		--ring: 240 4.9% 83.9%;
+		--radius: 0.5rem;
+
+		/* From `[data-theme="midnight"].dark` — full midnight palette. */
+		--background: 235 18% 5%;
+		--foreground: 235 8% 96%;
+		--card: 235 18% 7%;
+		--card-foreground: 235 8% 96%;
+		--popover: 235 18% 7%;
+		--popover-foreground: 235 8% 96%;
+		--secondary: 235 14% 13%;
+		--secondary-foreground: 235 8% 96%;
+		--muted: 235 14% 11%;
+		--muted-foreground: 235 8% 70%;
+		--accent: 235 16% 14%;
+		--accent-foreground: 235 8% 96%;
+		--border: 235 14% 14%;
+		--input: 235 14% 12%;
+		--bg-gradient:
+			radial-gradient(ellipse at top, hsl(225 40% 14% / 0.55) 0%, transparent 60%),
+			radial-gradient(ellipse at bottom, hsl(245 30% 10% / 0.4) 0%, transparent 65%);
+
+		/* Force dark-mode form / scrollbar rendering inside the
+		 * subtree — the scoped vars are dark, so iOS / browsers
+		 * should know the surface is dark-themed too. */
+		color-scheme: dark;
+	}
+
 	/* ── Plum (dark) — purple/indigo with a magenta accent ────────── */
 	[data-theme="plum"].dark {
 		--background: 270 25% 7%;
@@ -429,15 +483,304 @@
 	}
 	html, body, #root {
 		height: 100%;
+		/* `100dvh` accounts for the iOS notch / Dynamic Island /
+		 * home-indicator regions that `viewport-fit=cover` makes
+		 * us draw under.  Without this, `height: 100%` is the
+		 * inner viewport (excludes safe areas) and the background
+		 * stops short of the screen edges — visible as bright
+		 * white bars at the top + bottom on iOS, which is the
+		 * WKWebView's default unstyled surface peeking through.
+		 */
+		min-height: 100dvh;
+	}
+	html {
+		/* Tells the WKWebView's status-bar overlay to render in
+		 * light style (white time / icons) when the page is dark.
+		 * Combined with the dark `background-color` below, the
+		 * status bar reads as part of the app instead of a
+		 * white slab at the top.
+		 *
+		 * Light themes (daylight / sand / mint / blush / lilac /
+		 * seaglass) override this with `color-scheme: light` in
+		 * their per-theme block.
+		 */
+		color-scheme: dark;
+		/* Belt-and-suspenders: paint the html background dark so
+		 * even before the body's `bg-background` resolves, the
+		 * safe-area regions paint dark.  Light themes override.
+		 * The actual full-viewport gradient is painted by
+		 * body::before below — this is a fallback for the moment
+		 * before that pseudo-element has rendered.
+		 */
+		background-color: hsl(var(--background));
 	}
 
 	body {
-		@apply bg-background text-foreground;
+		@apply text-foreground;
+		/* Body itself is transparent — the aura is painted by
+		 * body::before which is position: fixed and reaches the
+		 * actual viewport edges (including the safe-area regions
+		 * that iOS PWA WKWebView doesn't extend body's
+		 * background-attachment: fixed into).  Dropping the bg
+		 * here lets the pseudo-element show through. */
+		background: transparent;
+		font-feature-settings: "rlig" 1, "calt" 1;
+	}
+
+	/* Full-viewport aura — paints the body's solid colour AND the
+	 * theme-driven --bg-gradient on a fixed-position pseudo-element
+	 * that extends edge-to-edge.  Why not just put the gradient on
+	 * body (the obvious approach)?  iOS WKWebView in PWA standalone
+	 * mode doesn't always extend body's `background-attachment:
+	 * fixed` into the bottom safe-area zone — the home-indicator
+	 * strip ends up painted by html's solid colour instead, leaving
+	 * a black band under the floating tab pill.  A real fixed-
+	 * position element with explicit `inset: 0` is laid out against
+	 * the layout viewport, which on iOS PWA includes the safe-area
+	 * regions; the gradient then bleeds all the way to the screen
+	 * edge.  Sits at z-index -1 + pointer-events: none so it can't
+	 * intercept clicks or paint over content. */
+	body::before {
+		content: "";
+		position: fixed;
+		inset: 0;
+		background-color: hsl(var(--background));
 		background-image: var(--bg-gradient, none);
-		background-attachment: fixed;
 		background-repeat: no-repeat;
 		background-size: cover;
-		font-feature-settings: "rlig" 1, "calt" 1;
+		z-index: -1;
+		pointer-events: none;
+	}
+
+	/* Light-theme overrides for color-scheme so iOS picks dark
+	 * status-bar text on light canvases.  Theme palettes for light
+	 * variants live further up in this file under
+	 * `[data-theme="<name>"]:not(.dark)`. */
+	[data-theme="daylight"]:not(.dark),
+	[data-theme="sand"]:not(.dark),
+	[data-theme="mint"]:not(.dark),
+	[data-theme="blush"]:not(.dark),
+	[data-theme="lilac"]:not(.dark),
+	[data-theme="seaglass"]:not(.dark) {
+		color-scheme: light;
+	}
+
+	/* ── Mobile shell hook ─────────────────────────────────────────
+	 *
+	 * The Tauri mobile shell injects an init script that adds
+	 * `class="mobile-shell"` to `<html>` BEFORE any SPA script
+	 * runs (see `apps/mobile/src-tauri/src/lib.rs`).  Use this
+	 * selector to keep mobile-only styles entirely in CSS,
+	 * avoiding the per-component `isMobileShell` import dance.
+	 * Plain web + Tauri desktop never get this class, so any
+	 * rule scoped under it is automatically gated.
+	 *
+	 * Component-by-component mobile rules live alongside the
+	 * components they target (search for `.mobile-shell`); this
+	 * block is just the base overrides every mobile screen needs.
+	 */
+	.mobile-shell {
+		/* Block iOS's tap-to-zoom + double-tap delays so touches
+		 * feel synchronous.  Already implied by viewport
+		 * `maximum-scale=1`, but the touch-action hint shaves
+		 * the residual 300ms in older WKWebView paths. */
+		touch-action: manipulation;
+		/* iOS adds a translucent gray flash when an element is
+		 * tapped — fine for native, looks broken in a custom
+		 * UI.  Suppressing it doesn't break our explicit
+		 * `:active` styles where we add them. */
+		-webkit-tap-highlight-color: transparent;
+	}
+	.mobile-shell body {
+		/* Disable iOS rubber-band overscroll at the document
+		 * level.  Individual scroll containers (chat pane, room
+		 * list) keep their own momentum scrolling.  Without this,
+		 * the whole SPA shifts up/down on a stray scroll, which
+		 * peeks at the WebView's white default behind the canvas.
+		 */
+		overscroll-behavior-y: none;
+	}
+
+	/* ── Installed PWA — lock the document so iOS can't rubber-
+	 *     band the whole page ───────────────────────────────────
+	 *
+	 * When the SPA is installed to the home screen and launched
+	 * in standalone mode, iOS treats the entire <html> as
+	 * scrollable even when there's nothing to scroll — every
+	 * vertical drag reveals the safe-area regions or shifts the
+	 * page upward, especially after focusing an input.  Anchoring
+	 * `html` and `body` in `position: fixed` removes that root-
+	 * level scrolling entirely; the SPA's own scroll containers
+	 * (room list, chat timeline) handle their own scroll
+	 * internally and feel native.
+	 *
+	 * Conditions:
+	 *   - `(display-mode: standalone)` — installed PWA, hides
+	 *     Safari chrome.
+	 *   - `(display-mode: fullscreen)` — same on Android.
+	 *   - `(-webkit-touch-callout: none)` — old-iOS fallback for
+	 *     PWA mode that doesn't honour the display-mode query.
+	 *
+	 * Heights stay at `100dvh` (dynamic viewport height) so when
+	 * the iOS keyboard slides up, the available area shrinks,
+	 * letting the composer pin itself just above the keyboard
+	 * via the existing flex layout — no JavaScript needed.
+	 */
+	@media all and (display-mode: standalone),
+	       all and (display-mode: fullscreen) {
+		/* DON'T put height/overflow on html or body.  Earlier
+		 * iterations did that — it was the immediate cause of the
+		 * black bar above the home indicator.  iOS WebKit in PWA
+		 * standalone mode measures `height: 100%` against the
+		 * VISUAL viewport (which excludes safe-area-bottom), so
+		 * body got clamped short and `body::before`'s aura plus
+		 * any `background-image` got truncated above the home
+		 * indicator zone — that gap then painted as html's solid
+		 * fallback colour, reading as a flat black strip below
+		 * the floating tab pill.
+		 *
+		 * The fix that actually reaches the safe-area is to leave
+		 * html/body in normal flow and lock down scrolling on
+		 * `#root` via `position: fixed; inset: 0`.  A real fixed-
+		 * position element with explicit `inset: 0` IS laid out
+		 * against the layout viewport (which on iOS PWA with
+		 * `viewport-fit=cover` includes safe-area) — so #root
+		 * physically reaches all four screen edges.  body's
+		 * ::before pseudo-element with the same fixed positioning
+		 * paints the gradient edge-to-edge underneath.
+		 *
+		 * iOS keyboard handling still works: the SPA's flex
+		 * layout inside #root uses 100dvh on its inner containers
+		 * (chat shell, etc.), so when the keyboard slides up the
+		 * dvh shrinks and the composer pins itself naturally.
+		 */
+		html, body {
+			margin: 0;
+			overscroll-behavior: none;
+			/* Let the OS handle horizontal swipes (back gesture
+			 * on Android Chrome PWAs); we don't intercept them.
+			 * Vertical pans inside the page are kept by scroll
+			 * containers' own touch handling. */
+			touch-action: pan-x pan-y;
+		}
+		#root {
+			position: fixed;
+			inset: 0;
+			overflow: hidden;
+		}
+	}
+
+	/* ── Mobile shell layout — single-column pane swap ─────────────
+	 *
+	 * Desktop renders all four panes side-by-side:
+	 *
+	 *   [SpaceBar | RoomList | ChatPane | MemberList]
+	 *
+	 * Phones can't fit that.  App.tsx tags each pane with a
+	 * `data-mobile-pane="sidebar|list|main|aux"` wrapper
+	 * (`display: contents` so layout is unchanged on desktop) and
+	 * tags the inner flex container with
+	 * `data-mobile-view="rooms|chat"` based on whether a room is
+	 * open.  Mobile rules below collapse to a single visible pane.
+	 *
+	 *   View "rooms" — list of conversations             → list
+	 *   View "chat"  — open conversation, full-bleed     → main
+	 *
+	 * Sidebar (SpaceBar) and aux (MemberList / DmProfile) are
+	 * hidden on mobile entirely; their content surfaces through
+	 * the MobileTopBar's menu / room-info actions in a follow-up.
+	 *
+	 * Wrappers go from `display: contents` (no-op on desktop) to
+	 * `display: block` on mobile so the `display: none` rules
+	 * actually take effect.
+	 */
+	.mobile-shell [data-mobile-pane] {
+		display: block;
+	}
+	.mobile-shell [data-mobile-pane="sidebar"],
+	.mobile-shell [data-mobile-pane="aux"] {
+		display: none;
+	}
+	.mobile-shell [data-mobile-view="rooms"] [data-mobile-pane="main"] {
+		display: none;
+	}
+	.mobile-shell [data-mobile-view="chat"] [data-mobile-pane="list"] {
+		display: none;
+	}
+	/* The visible pane fills the row.
+	 *
+	 * Wrapper rules:
+	 *   - `display: flex; flex-direction: column` — so the child
+	 *     panel (ChatPane / RoomList / ExplorePane / ...) can use
+	 *     `flex-1` to fill the wrapper's vertical axis.  Without
+	 *     this the wrapper falls back to `display: block`, the
+	 *     panel's `flex-1` references a non-flex parent (no
+	 *     effect), and the panel sprawls to its content height —
+	 *     pushing the MobileTopBar above and the composer below
+	 *     past the viewport.
+	 *   - `flex: 1 1 0` so the wrapper itself fills the parent
+	 *     flex-row's main axis.
+	 *   - `min-height: 0` so the wrapper can shrink (default
+	 *     `min-height: auto` would lock it to content height).
+	 *
+	 * Child rules — `!important` because panel components carry
+	 * Tailwind width classes (`w-72`, `w-60`, etc.) for desktop
+	 * that need overriding on mobile.  Targeting `> *` (direct
+	 * child) keeps the override surgical to the panel root.
+	 */
+	.mobile-shell [data-mobile-pane="list"],
+	.mobile-shell [data-mobile-pane="main"] {
+		display: flex;
+		flex-direction: column;
+		flex: 1 1 0;
+		min-width: 0;
+		min-height: 0;
+	}
+	.mobile-shell [data-mobile-pane="list"] > *,
+	.mobile-shell [data-mobile-pane="main"] > * {
+		width: 100% !important;
+		max-width: none !important;
+		flex: 1 1 0 !important;
+		min-height: 0;
+	}
+
+	/* Let the body's --bg-gradient bleed through every pane.  Each
+	 * panel component (RoomList's <aside class="bg-card">, ChatPane's
+	 * own bg, etc.) sets its own opaque background for the desktop
+	 * multi-pane layout, where adjacent panels need separation.  On
+	 * mobile we're single-pane and the floating glass pill expects a
+	 * coloured backdrop underneath — solid bg-card / bg-background on
+	 * the pane just hides the gradient and makes the pill look pasted
+	 * onto a flat black canvas.  Force the pane's direct child (the
+	 * panel root) transparent and let cards / rows inside still be
+	 * opaque if they want.
+	 *
+	 * Border-right gets nuked too — the desktop split between
+	 * RoomList and ChatPane is irrelevant in single-pane mode and a
+	 * stray vertical hairline at the screen edge reads as broken. */
+	.mobile-shell [data-mobile-pane="list"] > *,
+	.mobile-shell [data-mobile-pane="main"] > * {
+		background-color: transparent !important;
+		background-image: none !important;
+		border-right-width: 0 !important;
+		border-left-width: 0 !important;
+	}
+
+	/* Room-list rows — desktop is dense (py-1.5 + text-sm) for an
+	 * information-rich sidebar, but at phone touch-target size
+	 * those 30pt rows miss-fire constantly.  Bump to a 56pt min-
+	 * height row + 1rem text on mobile so each row reads as its
+	 * own tap target.  Only the room rows — the list header,
+	 * section dividers, and pin/leave action buttons keep their
+	 * compact desktop metrics. */
+	.mobile-shell [data-room-row] {
+		min-height: 56px;
+		padding-left: 0.75rem !important;
+		/* Don't touch padding-right — the original `pr-8` on rows
+		 * with a pin slot keeps the room name from sliding under
+		 * the absolute-positioned pin icon. */
+		font-size: 1rem !important;
+		gap: 0.75rem;
 	}
 
 	/* Hide scrollbars site-wide while preserving scroll behaviour.

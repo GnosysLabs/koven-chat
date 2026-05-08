@@ -7,7 +7,7 @@
     },
     "apps/desktop": {
       "name": "@koven/desktop",
-      "version": "0.1.5",
+      "version": "0.1.7",
       "dependencies": {
         "@cloudworxx/tauri-plugin-mac-rounded-corners": "^1.1.1",
       },

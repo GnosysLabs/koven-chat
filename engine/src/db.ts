@@ -331,6 +331,60 @@ db.exec(`
 		uploaded_at INTEGER NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_bot_knowledge_bot ON bot_knowledge(bot_id);
+
+	-- ─── Room membership tracker ─────────────────────────────────────
+	-- Updated on every m.room.member state event the engine sees via
+	-- the appservice transaction stream.  Used by the notification
+	-- engine to:
+	--   - decide whether a room is a DM (two members + both joined)
+	--   - resolve @localpart in plaintext mentions to a full MXID
+	--     present in the room (notification fan-out target lookup)
+	--   - detect invite events to fan out an invite notification
+	-- Membership values track the Matrix spec literally: 'join' |
+	-- 'leave' | 'invite' | 'ban' | 'knock'.  We don't garbage-collect
+	-- 'leave' rows because that history is occasionally useful (e.g.
+	-- "was this user in the room when X happened") and the table
+	-- stays small even for active instances — proportional to active
+	-- room participation, not message volume.
+	CREATE TABLE IF NOT EXISTS room_members (
+		room_id      TEXT NOT NULL,
+		user_id      TEXT NOT NULL,
+		membership   TEXT NOT NULL,
+		last_updated INTEGER NOT NULL,
+		PRIMARY KEY (room_id, user_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_room_members_room
+		ON room_members(room_id, membership);
+	CREATE INDEX IF NOT EXISTS idx_room_members_user
+		ON room_members(user_id, membership);
+
+	-- ─── In-app notification log ─────────────────────────────────────
+	-- One row per (recipient, source-event) pair.  The engine writes
+	-- these in real time as it processes the appservice transaction
+	-- stream, picking the highest-priority kind that matches the
+	-- (recipient, event) pair: invite > dm > mention > reply > system.
+	-- Encrypted rooms can only emit 'dm' rows (the engine cannot read
+	-- the body to detect mentions/replies); for those the snippet is
+	-- a placeholder rather than message content.
+	-- The bell UI reads this table via the /api/notifications surface
+	-- and posts mark-read / dismiss writes back through the same
+	-- endpoints.  See engine/src/server.ts.
+	CREATE TABLE IF NOT EXISTS notifications (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id     TEXT NOT NULL,         -- recipient (whose bell this lights up)
+		event_id    TEXT NOT NULL,         -- triggering Matrix event id
+		room_id     TEXT NOT NULL,
+		kind        TEXT NOT NULL CHECK(kind IN ('dm','mention','reply','invite','system')),
+		sender      TEXT NOT NULL,         -- who triggered the notification
+		snippet     TEXT,                  -- excerpt or placeholder; client also has live data
+		created_at  INTEGER NOT NULL,
+		read_at     INTEGER,                -- nullable; null = unread
+		UNIQUE(user_id, event_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_notifications_user_created
+		ON notifications(user_id, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_notifications_user_unread
+		ON notifications(user_id, read_at, created_at DESC);
 `);
 
 // SQLite ships with foreign-key enforcement OFF by default; flip it
@@ -1727,4 +1781,197 @@ export function deleteBotKnowledge(fileId: number, botId: number): boolean {
 export function totalBotKnowledgeBytes(botId: number): number {
 	const row = totalBotKnowledgeBytesStmt.get(botId) as { total: number };
 	return row.total ?? 0;
+}
+
+// ─── Room members ─────────────────────────────────────────────────
+//
+// Real-time membership index, populated from m.room.member state
+// events.  Used by the notification engine for DM detection +
+// localpart→mxid resolution.  See aggregate.ts handleMember.
+
+const upsertRoomMemberStmt = db.prepare(`
+	INSERT INTO room_members (room_id, user_id, membership, last_updated)
+	VALUES (?, ?, ?, ?)
+	ON CONFLICT(room_id, user_id) DO UPDATE SET
+		membership   = excluded.membership,
+		last_updated = excluded.last_updated
+`);
+
+const joinedMembersStmt = db.prepare(`
+	SELECT user_id FROM room_members
+	WHERE room_id = ? AND membership = 'join'
+`);
+
+const joinedMemberCountStmt = db.prepare(`
+	SELECT COUNT(*) AS n FROM room_members
+	WHERE room_id = ? AND membership = 'join'
+`);
+
+export function upsertRoomMember(opts: {
+	roomId: string;
+	userId: string;
+	membership: string;
+	ts: number;
+}): void {
+	upsertRoomMemberStmt.run(opts.roomId, opts.userId, opts.membership, opts.ts);
+}
+
+/** All currently-joined members of a room.  Used by the notification
+ * fan-out to know who to potentially notify on a message event. */
+export function listJoinedRoomMembers(roomId: string): string[] {
+	const rows = joinedMembersStmt.all(roomId) as Array<{ user_id: string }>;
+	return rows.map(r => r.user_id);
+}
+
+/** Joined member count for DM detection.  Two-and-only-two joined
+ * members + room is_direct = DM, but we don't have is_direct on the
+ * engine side; member count is the strongest signal we have without
+ * per-user account data. */
+export function joinedMemberCount(roomId: string): number {
+	const row = joinedMemberCountStmt.get(roomId) as { n: number } | undefined;
+	return row?.n ?? 0;
+}
+
+// ─── Notifications ────────────────────────────────────────────────
+//
+// In-app notification log.  Written by the notification fan-out in
+// aggregate.ts whenever an event matches a recipient's notification
+// criteria; read/marked/cleared via the /api/notifications surface.
+
+const insertNotificationStmt = db.prepare(`
+	INSERT OR IGNORE INTO notifications
+		(user_id, event_id, room_id, kind, sender, snippet, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?)
+`);
+
+const listNotificationsStmt = db.prepare(`
+	SELECT id, user_id, event_id, room_id, kind, sender, snippet, created_at, read_at
+	FROM notifications
+	WHERE user_id = ? AND created_at < ?
+	ORDER BY created_at DESC
+	LIMIT ?
+`);
+
+const unreadCountStmt = db.prepare(`
+	SELECT COUNT(*) AS n FROM notifications
+	WHERE user_id = ? AND read_at IS NULL
+`);
+
+const markNotificationReadStmt = db.prepare(`
+	UPDATE notifications SET read_at = ?
+	WHERE id = ? AND user_id = ? AND read_at IS NULL
+`);
+
+const markAllNotificationsReadStmt = db.prepare(`
+	UPDATE notifications SET read_at = ?
+	WHERE user_id = ? AND read_at IS NULL
+`);
+
+const markRoomNotificationsReadStmt = db.prepare(`
+	UPDATE notifications SET read_at = ?
+	WHERE user_id = ? AND room_id = ? AND read_at IS NULL
+`);
+
+const deleteNotificationStmt = db.prepare(`
+	DELETE FROM notifications WHERE id = ? AND user_id = ?
+`);
+
+const deleteAllNotificationsStmt = db.prepare(`
+	DELETE FROM notifications WHERE user_id = ?
+`);
+
+export interface NotificationRow {
+	id: number;
+	user_id: string;
+	event_id: string;
+	room_id: string;
+	kind: "dm" | "mention" | "reply" | "invite" | "system";
+	sender: string;
+	snippet: string | null;
+	created_at: number;
+	read_at: number | null;
+}
+
+/** Insert a notification.  Idempotent — UNIQUE(user_id, event_id)
+ * absorbs the duplicate when a re-delivered transaction or a
+ * backfill scan tries to write the same row again.  Caller should
+ * have already filtered out self-notifications (recipient == sender)
+ * and bot recipients. */
+export function insertNotification(opts: {
+	userId: string;
+	eventId: string;
+	roomId: string;
+	kind: NotificationRow["kind"];
+	sender: string;
+	snippet: string | null;
+	createdAt: number;
+}): void {
+	insertNotificationStmt.run(
+		opts.userId,
+		opts.eventId,
+		opts.roomId,
+		opts.kind,
+		opts.sender,
+		opts.snippet,
+		opts.createdAt,
+	);
+}
+
+/** Paginated list, newest first.  `before` is the exclusive upper
+ * bound on `created_at` — pass Number.MAX_SAFE_INTEGER for the first
+ * page, then the last row's `created_at` for the next. */
+export function listNotifications(opts: {
+	userId: string;
+	limit: number;
+	before: number;
+}): NotificationRow[] {
+	return listNotificationsStmt.all(opts.userId, opts.before, opts.limit) as NotificationRow[];
+}
+
+export function unreadNotificationCount(userId: string): number {
+	const row = unreadCountStmt.get(userId) as { n: number } | undefined;
+	return row?.n ?? 0;
+}
+
+/** Returns true if a row was updated (notification existed + was
+ * unread); false if it didn't exist, was already read, or belonged
+ * to a different user.  Caller can treat `false` as a no-op success
+ * — the desired end state ("user no longer sees this as unread") is
+ * already true regardless. */
+export function markNotificationRead(opts: {
+	id: number;
+	userId: string;
+	readAt: number;
+}): boolean {
+	const r = markNotificationReadStmt.run(opts.readAt, opts.id, opts.userId);
+	return r.changes > 0;
+}
+
+export function markAllNotificationsRead(userId: string, readAt: number): number {
+	const r = markAllNotificationsReadStmt.run(readAt, userId);
+	return Number(r.changes);
+}
+
+/** Mark every unread notification in `roomId` as read for `userId`.
+ * Used by the bell when the user enters a room while focused — they
+ * see messages land in real time, so accumulating unread for the
+ * room they're literally watching reads as broken UX.  Returns the
+ * count updated. */
+export function markRoomNotificationsRead(opts: {
+	userId: string;
+	roomId: string;
+	readAt: number;
+}): number {
+	const r = markRoomNotificationsReadStmt.run(opts.readAt, opts.userId, opts.roomId);
+	return Number(r.changes);
+}
+
+export function deleteNotification(opts: { id: number; userId: string }): boolean {
+	const r = deleteNotificationStmt.run(opts.id, opts.userId);
+	return r.changes > 0;
+}
+
+export function deleteAllNotifications(userId: string): number {
+	const r = deleteAllNotificationsStmt.run(userId);
+	return Number(r.changes);
 }

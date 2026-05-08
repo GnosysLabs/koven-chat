@@ -107,6 +107,54 @@ export interface NotifyOptions {
 }
 
 /**
+ * Try to fire the notification through the registered service worker.
+ * iOS Safari (browser tab on iOS 16.4+ AND installed PWA on 16.4+)
+ * REQUIRES this path — page-side `new Notification(title, opts)`
+ * either no-ops or throws on iOS.  Chromium / Firefox / Safari
+ * desktop all also support `registration.showNotification`, so we
+ * prefer it everywhere and only fall back to the page-side
+ * constructor if there's no SW (older browsers, sandbox modes).
+ *
+ * Returns true if a notification was successfully shown via the SW
+ * path; false to signal "fall back to the legacy path".  Click
+ * handling on this path is async — the SW intercepts the
+ * notificationclick event and posts an `open-room` message back to
+ * the page (see public/sw.js + the postMessage listener in App.tsx).
+ */
+async function showViaServiceWorker(opts: NotifyOptions): Promise<boolean> {
+	if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) {
+		return false;
+	}
+	try {
+		// `serviceWorker.ready` resolves with the *active* SW
+		// registration; if registration is still in progress (first
+		// page load before /sw.js install completes) this awaits it.
+		// Bounded with a 2s race so a stuck registration can't
+		// silently swallow the notification — fall back to the page
+		// path instead.
+		const reg = await Promise.race([
+			navigator.serviceWorker.ready,
+			new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000)),
+		]);
+		if (!reg) return false;
+		await reg.showNotification(opts.title, {
+			body: opts.body,
+			tag: opts.tag,
+			icon: "/favicon.png",
+			// Carries the room id back to the SW's notificationclick
+			// handler, which posts {type: "open-room", roomId} to all
+			// SPA tabs.  App.tsx's listener picks that up and
+			// dispatches `set_active_room`.
+			data: opts.roomId ? { roomId: opts.roomId } : undefined,
+		});
+		return true;
+	} catch (err) {
+		console.warn("notifications: SW showNotification failed", err);
+		return false;
+	}
+}
+
+/**
  * Fire a notification.  Drops silently when permission isn't
  * granted (caller should have probed via `ensureNotificationPermission`
  * but we don't want unhandled errors).  Also drops when the document
@@ -125,13 +173,33 @@ export async function notify(opts: NotifyOptions): Promise<void> {
 	if (isDesktop) {
 		try {
 			const { sendNotification } = await import("@tauri-apps/plugin-notification");
-			sendNotification({ title: opts.title, body: opts.body });
+			// AWAIT — Tauri's plugin-notification IPC returns a Promise
+			// that resolves once the Rust side has dispatched to the OS.
+			// Without await, a rejected promise (capability missing,
+			// macOS permission revoked, IPC channel closed, etc.) is
+			// swallowed by the runtime and the caller sees a silent
+			// "fired" status with nothing in the OS notification centre.
+			// Awaiting routes the rejection through this try/catch so
+			// it actually surfaces in the console.
+			await sendNotification({ title: opts.title, body: opts.body });
+			console.debug("notifications: Tauri sendNotification resolved", {
+				title: opts.title,
+			});
 		} catch (err) {
 			console.warn("notifications: Tauri sendNotification failed", err);
 		}
 		return;
 	}
 
+	// Prefer the service-worker path.  Required on iOS, harmless
+	// (and equivalent in behaviour) on every other browser.
+	if (await showViaServiceWorker(opts)) return;
+
+	// Fall back to the page-side Notification constructor — only
+	// reached on browsers without `serviceWorker` support, or when
+	// SW registration silently failed.  Click handling here works
+	// in-page (no SW round-trip needed); the SW path uses
+	// postMessage back to the SPA instead.
 	if (typeof Notification === "undefined") return;
 	try {
 		const n = new Notification(opts.title, {

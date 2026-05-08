@@ -16,7 +16,9 @@ import {
 	markFlagRetracted,
 	recordRoomCreation,
 	updateSuspensionStatus,
+	upsertRoomMember,
 } from "./db";
+import { fanOutMember, fanOutMessage } from "./notification-fanout";
 
 // Minimal shape of a Matrix client-server event coming through
 // /transactions.  We only assert on fields we actually read.
@@ -31,10 +33,33 @@ export interface MatrixEvent {
 	content?: Record<string, unknown> & {
 		body?: string;
 		msgtype?: string;
+		// HTML-formatted body — set by clients alongside `body` when
+		// the message has rich formatting (mentions, bold, links).
+		// Notification fan-out reads this to extract MXIDs from
+		// matrix.to mention links.
+		formatted_body?: string;
+		// Matrix 1.7+ intentional mentions.  Authoritative when
+		// present; fan-out's mention detection prefers it over
+		// formatted_body / plaintext heuristics.
+		"m.mentions"?: { user_ids?: string[] };
+		// m.room.member's membership state.  Updated on every
+		// member-event we see; populates the room_members index
+		// the notification fan-out + DM detection rely on.
+		membership?: string;
+		// `is_direct: true` on a member-event with membership
+		// `invite` flags the invite as a DM (Matrix clients set
+		// this when starting a 1:1 conversation).  Notification
+		// fan-out reads it to label the row as kind=dm rather
+		// than kind=invite — the latter reads as "you joined a
+		// community", which is wrong for DM rooms.
+		is_direct?: boolean;
 		"m.relates_to"?: {
 			rel_type?: string;
 			event_id?: string;
 			key?: string;
+			// Reply relation (Matrix 1.4+ formal name).  Notification
+			// fan-out reads this to detect reply-to-me events.
+			"m.in_reply_to"?: { event_id?: string };
 		};
 	};
 }
@@ -43,6 +68,16 @@ export function applyEvent(ev: MatrixEvent): void {
 	switch (ev.type) {
 		case "m.room.message":
 			handleMessage(ev);
+			return;
+		case "m.room.encrypted":
+			// Encrypted messages: we can't read the body but we can
+			// still detect DMs (member count) and fan out a `dm`
+			// notification with a placeholder snippet.  Mention /
+			// reply detection is impossible without decryption, so
+			// fanOutMessage handles those silently.  No insertPost
+			// because the engine has no plaintext body to index for
+			// reply-target lookup later.
+			fanOutMessage(ev);
 			return;
 		case "m.reaction":
 			handleReaction(ev);
@@ -56,7 +91,30 @@ export function applyEvent(ev: MatrixEvent): void {
 		case "m.room.create":
 			handleRoomCreate(ev);
 			return;
+		case "m.room.member":
+			handleMember(ev);
+			return;
 	}
+}
+
+// ─── Membership tracking ─────────────────────────────────────────────
+//
+// m.room.member is a state event keyed on the user the membership
+// applies to (`state_key`).  We mirror it into `room_members` so the
+// notification fan-out can answer "who's in this room right now?"
+// without a Synapse round-trip per message event.  Also fans out an
+// invite notification when membership transitions to `invite`.
+function handleMember(ev: MatrixEvent): void {
+	if (ev.state_key === undefined) return; // not a state event (shouldn't happen)
+	const membership = ev.content?.membership;
+	if (typeof membership !== "string") return;
+	upsertRoomMember({
+		roomId: ev.room_id,
+		userId: ev.state_key,
+		membership,
+		ts: ev.origin_server_ts,
+	});
+	fanOutMember(ev);
 }
 
 function handleRoomCreate(ev: MatrixEvent): void {
@@ -133,6 +191,12 @@ function handleMessage(ev: MatrixEvent): void {
 		room_id: ev.room_id,
 		ts: ev.origin_server_ts,
 	});
+	// Notification fan-out — emits one `notifications` row per
+	// recipient that should see this in their bell.  See
+	// notification-fanout.ts for the kind-priority logic + encrypted-
+	// room handling.  Idempotent at the DB layer (UNIQUE on
+	// user_id+event_id) so re-delivery doesn't double-emit.
+	fanOutMessage(ev);
 }
 
 function handleReaction(ev: MatrixEvent): void {

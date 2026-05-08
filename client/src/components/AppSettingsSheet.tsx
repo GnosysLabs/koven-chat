@@ -17,6 +17,7 @@ import { InstanceAdminSection } from "@/components/InstanceAdminSection";
 import { AccountSection } from "@/components/AccountSection";
 import { SessionsSection } from "@/components/SessionsSection";
 import { fetchAdminStatus } from "@/lib/instance";
+import { ensureNotificationPermission, notify } from "@/lib/notifications";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
 
@@ -145,6 +146,19 @@ export function AppSettingsSheet({ open, onOpenChange, settings, onSettingsChang
 										activeId={settings.theme}
 										onPick={(id) => update("theme", id)}
 									/>
+
+									{/* Debug: diagnostic notification trigger.
+									    Bypasses the onMessage gate (live-only,
+									    not-self, mention/DM/reply) so we can
+									    bisect "is the gate broken" vs. "is the
+									    Tauri / browser plumbing broken".  If
+									    this button fires a notification, the
+									    plumbing's fine; if not, lib/
+									    notifications is the problem (Tauri
+									    permission, plugin import, browser SW
+									    registration, etc.).  Remove once
+									    notifications are confirmed working. */}
+									<NotificationDebug />
 								</div>
 							)}
 
@@ -180,6 +194,60 @@ export function AppSettingsSheet({ open, onOpenChange, settings, onSettingsChang
 				</div>
 			</DialogContent>
 		</Dialog>
+	);
+}
+
+function NotificationDebug() {
+	const [status, setStatus] = useState<string>("(not tested)");
+	const [pending, setPending] = useState(false);
+
+	async function fire() {
+		setPending(true);
+		setStatus("→ requesting permission…");
+		const perm = await ensureNotificationPermission();
+		setStatus(`permission: ${perm}` + (perm !== "granted" ? " — denied / dismissed; can't notify" : ""));
+		if (perm !== "granted") {
+			setPending(false);
+			return;
+		}
+		// Bypass the gate.  Pass a synthetic roomId so the SW path
+		// has data to round-trip on click.
+		await notify({
+			title: "Koven test notification",
+			body: "Plumbing works.  If you see this in your OS notification center, the only thing left to debug is the onMessage gate in App.tsx.",
+			tag: "debug-test",
+			roomId: undefined,
+		});
+		setStatus(`fired at ${new Date().toLocaleTimeString()} — check your OS notification center`);
+		setPending(false);
+	}
+
+	return (
+		<section className="border-t border-border/40 pt-4 mt-4">
+			<div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">
+				Debug
+			</div>
+			<div className="flex items-center justify-between gap-3">
+				<div className="flex-1 min-w-0">
+					<div className="text-sm font-medium">Test notification</div>
+					<div className="text-xs text-muted-foreground leading-snug mt-0.5 break-words">
+						{status}
+					</div>
+				</div>
+				<button
+					type="button"
+					onClick={fire}
+					disabled={pending}
+					className={cn(
+						"shrink-0 px-3 py-1.5 rounded-md text-xs font-medium",
+						"bg-primary text-primary-foreground",
+						"disabled:opacity-50",
+					)}
+				>
+					{pending ? "Sending…" : "Send"}
+				</button>
+			</div>
+		</section>
 	);
 }
 

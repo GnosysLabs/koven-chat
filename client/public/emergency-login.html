@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<title>Koven · Emergency login</title>
+	<style>
+		html, body { margin: 0; padding: 0; background: #0a0a0c; color: #fff; font-family: -apple-system, system-ui, sans-serif; min-height: 100vh; }
+		body { display: flex; align-items: center; justify-content: center; padding: 24px; }
+		.card { max-width: 360px; width: 100%; background: #18181b; border: 1px solid #27272a; border-radius: 12px; padding: 24px; }
+		h1 { margin: 0 0 8px; font-size: 18px; }
+		p { color: #a1a1aa; font-size: 14px; line-height: 1.5; margin: 0 0 16px; }
+		.btn { display: block; width: 100%; padding: 14px; background: #fff; color: #000; border: 0; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; -webkit-appearance: none; }
+		.btn:active { opacity: 0.8; }
+		.note { margin-top: 16px; font-size: 12px; color: #71717a; }
+		code { background: #27272a; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+		.err { margin-top: 12px; padding: 10px; background: #7f1d1d33; border: 1px solid #b91c1c; border-radius: 6px; color: #fca5a5; font-size: 13px; }
+	</style>
+</head>
+<body>
+	<div class="card">
+		<h1>Emergency login</h1>
+		<p>Tap the button below to inject session credentials into this browser and open Koven.  You'll be logged in immediately, no email code required.</p>
+		<button id="go" class="btn">Sign me in</button>
+		<div id="err"></div>
+		<p class="note">If you installed Koven as a PWA on your home screen, you'll need to repeat this in Safari — installed apps and Safari have separate storage.  After the redirect, re-add to home screen if you want.</p>
+	</div>
+	<script>
+		(function () {
+			const params = new URLSearchParams(window.location.search);
+			const token = params.get("token");
+			const userId = params.get("user_id");
+			const deviceId = params.get("device_id") || "emergency-login";
+			const homeserver = params.get("homeserver") || window.location.origin;
+			const errEl = document.getElementById("err");
+			const btn = document.getElementById("go");
+			if (!token || !userId) {
+				errEl.className = "err";
+				errEl.textContent = "Missing ?token= and ?user_id= URL parameters.  Re-open with the full link.";
+				btn.disabled = true;
+				btn.style.opacity = 0.4;
+				return;
+			}
+			btn.addEventListener("click", function () {
+				try {
+					localStorage.setItem("koven:matrix-credentials", JSON.stringify({
+						homeserver: homeserver,
+						user_id: userId,
+						access_token: token,
+						device_id: deviceId,
+					}));
+					window.location.replace("/");
+				} catch (err) {
+					errEl.className = "err";
+					errEl.textContent = "Failed to save credentials: " + (err && err.message ? err.message : String(err));
+				}
+			});
+		})();
+	</script>
+</body>
+</html>

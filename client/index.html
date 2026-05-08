@@ -2,18 +2,43 @@
 <html lang="en">
 	<head>
 		<meta charset="UTF-8" />
-		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<!--
+			`viewport-fit=cover` extends the SPA's background under the
+			iOS notch / Dynamic Island and under the home-indicator /
+			Android system bars; without it, those regions render in
+			the WebView's default white while the dark canvas stops at
+			the safe-area edges.  Components that touch the screen edge
+			are responsible for adding `env(safe-area-inset-*)` padding
+			so interactive UI doesn't end up under a system overlay.
+
+			`maximum-scale=1, user-scalable=no` mirrors what every
+			native chat app does — pinch-to-zoom inside a chat view
+			behaves badly (selects text, zooms past the nav, double-
+			triggers gestures), and the platform UI is already sized
+			for accessibility.
+		-->
+		<meta
+			name="viewport"
+			content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+		/>
 		<title>Koven</title>
 		<link rel="icon" type="image/png" href="/favicon.png" />
 		<!-- "Add to Home Screen" support.  apple-touch-icon is what iOS
 		     Safari uses for the home-screen icon; manifest.webmanifest +
-		     theme-color cover Android Chrome / installable PWA. -->
-		<link rel="apple-touch-icon" href="/favicon.png" />
+		     theme-color cover Android Chrome / installable PWA.  Both
+		     point at /appicon.png — a 1024×1024 PNG sized + safe-area-
+		     padded for Apple's rounded-square crop. -->
+		<link rel="apple-touch-icon" href="/appicon.png" />
 		<link rel="manifest" href="/manifest.webmanifest" />
 		<meta name="apple-mobile-web-app-capable" content="yes" />
 		<meta name="mobile-web-app-capable" content="yes" />
 		<meta name="apple-mobile-web-app-title" content="Koven" />
 		<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+		<!-- `theme-color` would paint iOS / Android system bars in PWA
+		     standalone mode, but iOS 26.x ignores it entirely for the
+		     home-indicator safe-area zone (multiple WebKit bugs filed,
+		     none fixed as of 26.4).  Kept dark to match the rest of the
+		     app's chrome rather than random pink that reads as broken. -->
 		<meta name="theme-color" content="#0a0a0c" />
 		<style>
 			/* Lock html/body bg to the SPA's dark colour from the

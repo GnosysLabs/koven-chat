@@ -46,7 +46,14 @@ const DialogContent = React.forwardRef<
         // stretching to fill the container.
         "fixed z-50 grid gap-4 content-start overflow-y-auto bg-background shadow-lg duration-200",
         "left-[50%] top-[50%] w-full max-w-lg max-h-[90dvh] translate-x-[-50%] translate-y-[-50%] rounded-lg border p-6",
-        "max-sm:inset-0 max-sm:left-0 max-sm:top-0 max-sm:max-w-none max-sm:max-h-dvh max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-none max-sm:border-0 max-sm:p-4 max-sm:pt-16",
+        // Mobile fullscreen path.  `pt-[calc(...)]` reserves space
+        // for the iOS notch / Dynamic Island on top of the existing
+        // 4rem header gutter so the back arrow + content land below
+        // the status bar instead of under it.  Bottom padding picks
+        // up the home-indicator inset for the same reason.
+        "max-sm:inset-0 max-sm:left-0 max-sm:top-0 max-sm:max-w-none max-sm:max-h-dvh max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-none max-sm:border-0 max-sm:p-4",
+        "max-sm:pt-[calc(env(safe-area-inset-top)+4rem)]",
+        "max-sm:pb-[calc(env(safe-area-inset-bottom)+1rem)]",
         "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
         "data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%]",
         "max-sm:data-[state=open]:slide-in-from-right-4 max-sm:data-[state=closed]:slide-out-to-right-4 max-sm:data-[state=closed]:zoom-out-100 max-sm:data-[state=open]:zoom-in-100",
@@ -54,10 +61,15 @@ const DialogContent = React.forwardRef<
       )}
       {...props}
     >
-      {/* Mobile: native-page back arrow at top-left (sticky so it stays
-          visible while the form scrolls).  Desktop: hidden, the corner X
-          handles dismissal. */}
-      <DialogPrimitive.Close className="sm:hidden fixed top-2 left-2 z-10 flex items-center gap-1 px-2 py-2 -ml-1 rounded text-muted-foreground hover:text-foreground hover:bg-secondary outline-none focus-visible:ring-2 focus-visible:ring-ring">
+      {/* Mobile: native-page back arrow at top-left.  `top` uses
+          safe-area-inset so the arrow lands BELOW the iOS notch /
+          Dynamic Island instead of behind the status bar (where
+          taps go to the system, not the button).  `fixed` keeps
+          it visible while the form scrolls. */}
+      <DialogPrimitive.Close
+        className="sm:hidden fixed left-2 z-10 flex items-center gap-1 px-2 py-2 -ml-1 rounded text-muted-foreground hover:text-foreground hover:bg-secondary outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        style={{ top: "calc(env(safe-area-inset-top) + 0.5rem)" }}
+      >
         <ChevronLeft className="h-5 w-5" />
         <span className="text-sm">Back</span>
       </DialogPrimitive.Close>

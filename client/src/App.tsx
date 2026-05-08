@@ -14,6 +14,11 @@ import {
 import { Login } from "@/components/Login";
 import { SpaceBar } from "@/components/SpaceBar";
 import { RoomList } from "@/components/RoomList";
+import { MobileTopBar } from "@/components/MobileTopBar";
+import { MobileTabBar, type MobileTab } from "@/components/MobileTabBar";
+import { MobileSpacesList } from "@/components/MobileSpacesList";
+import { MobileMeScreen } from "@/components/MobileMeScreen";
+import { isMobileShell } from "@/lib/mobile";
 import { ChatPane } from "@/components/ChatPane";
 import { SpaceLanding } from "@/components/SpaceLanding";
 import { ExplorePane } from "@/components/ExplorePane";
@@ -48,6 +53,8 @@ import type { Room, UserId } from "@koven/shared";
 import { ensureNotificationPermission, notify } from "@/lib/notifications";
 import { initialState, reduce } from "@/state/store";
 import type { RoomId, SpaceId } from "@koven/shared";
+import { NotificationBell } from "@/components/NotificationBell";
+import { useNotifications } from "@/state/use-notifications";
 
 /**
  * Resolve a call's peer identity from the DM's room data.  Used to
@@ -83,6 +90,64 @@ export default function App() {
 	// name pipeline.  Polled every 5 min + on focus; we also call
 	// `refresh()` immediately after a flag submission.
 	const { ids: collapsedRoomIds, refresh: refreshCollapsedRooms } = useCollapsedRooms();
+	// In-app notification bell.  Polls /api/notifications/unread-count
+	// every ~30s; full list is fetched on bell open.  Hook is a no-op
+	// until creds resolve, so it's safe to mount unconditionally.
+	// `activeRoomId` lets the hook auto-clear unread for the room
+	// the user is actively viewing (with tab focused) — symmetric
+	// with the OS-notification gate, so neither surface lights up
+	// for messages the user is watching land in real time.
+	const notifications = useNotifications(
+		creds?.access_token ?? null,
+		state.activeRoomId,
+	);
+
+	// Click handler shared by both bell instances (mobile topbar
+	// icon + desktop FAB).  Two responsibilities:
+	//
+	//   1. Switch the activeSpace to the right container so
+	//      whatever opens lands under the correct tab.  Without
+	//      this, clicking a DM notification from the "Rooms" tab
+	//      shows the DM rendered inside the rooms list — broken UX.
+	//        - room.kind === "dm"           → activeSpace = {dms}
+	//        - room.parentSpaceIds.length>0 → activeSpace = parent
+	//        - orphan room                  → leave activeSpace alone
+	//
+	//   2. Open the room IFF it's a normal joined room.  For
+	//      invite-state rooms (room.isInvite), we deliberately
+	//      DON'T set active_room — opening would dump the user
+	//      into a not-yet-joined room with the awkward join/
+	//      decline overlay.  Instead we just navigate to the
+	//      right tab/space so the user sees the invite listed in
+	//      "Requests" at the top of the room list, where they can
+	//      accept or decline cleanly.
+	//
+	// On mobile, also closes the Me overlay — the notification
+	// click is a stronger nav signal than "stay on Me."
+	const openRoomFromNotification = useCallback(
+		(roomId: string) => {
+			const room = roomsRef.current.find(r => r.id === roomId);
+			if (room) {
+				if (room.kind === "dm") {
+					dispatch({ type: "set_active_space", space: { kind: "dms" } });
+				} else if (room.parentSpaceIds.length > 0) {
+					dispatch({
+						type: "set_active_space",
+						space: { kind: "space", id: room.parentSpaceIds[0] as SpaceId },
+					});
+				}
+				// Else: orphan room — leave activeSpace as-is.
+			}
+			setMobileMeOpen(false);
+
+			// Invite state — just land in the right tab, don't
+			// auto-open the room.
+			if (room?.isInvite) return;
+
+			dispatch({ type: "set_active_room", roomId: roomId as RoomId });
+		},
+		[],
+	);
 	const [transport, setTransport] = useState<MatrixTransport | null>(null);
 	const [bootError, setBootError] = useState<string | null>(null);
 	const [createRoomOpen, setCreateRoomOpen] = useState(false);
@@ -99,6 +164,12 @@ export default function App() {
 	// linking an already-existing room, not creating a new one.
 	const [addExistingRoomTo, setAddExistingRoomTo] = useState<SpaceId | null>(null);
 	const [startDmOpen, setStartDmOpen] = useState(false);
+	// Mobile-only "Me" tab — when true, the bottom-tab "Me" view
+	// covers the panels with the profile + settings list.  Kept
+	// as a separate flag (rather than another `ActiveSpace` kind)
+	// because it isn't really a chat surface; pressing any other
+	// tab clears it without disturbing the underlying activeSpace.
+	const [mobileMeOpen, setMobileMeOpen] = useState(false);
 	const [editingSpaceId, setEditingSpaceId] = useState<SpaceId | null>(null);
 	const [editingRoomId, setEditingRoomId] = useState<RoomId | null>(null);
 	// Target of the active invite dialog: a room or space id.  Null
@@ -237,6 +308,18 @@ export default function App() {
 		}
 	}, [state.activeSpace?.kind, refreshMyBots]);
 
+	// Mobile gatekeeper: the Bots pane is desktop-only (dense
+	// management UI: mxid copy, token rotation, config sheets).
+	// If a stored session from a prior desktop run lands here on
+	// mobile — or any future code path tries to enter it —
+	// quietly bounce back to DMs so the user isn't stuck in a
+	// sub-par view with no entry point in the drawer.
+	useEffect(() => {
+		if (isMobileShell && state.activeSpace?.kind === "bots") {
+			dispatch({ type: "set_active_space", space: { kind: "dms" } });
+		}
+	}, [state.activeSpace?.kind]);
+
 	// Eager-load the user's own bot roster once the access token is
 	// available, regardless of which view they're on.  The Bots-view
 	// effect above only fires when the user navigates *into* Bots, but
@@ -326,6 +409,23 @@ export default function App() {
 		};
 	}, [creds]);
 
+	// Listen for `open-room` messages posted by the service worker
+	// when the user taps a notification.  The SW can't navigate the
+	// SPA on its own — it focuses an existing tab + posts the room
+	// id, and we dispatch the active-room change here.  Without this
+	// listener, tapped notifications focus the tab but leave the user
+	// on whatever screen they had open before.
+	useEffect(() => {
+		if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+		const onMessage = (e: MessageEvent) => {
+			const data = e.data as { type?: string; roomId?: string } | undefined;
+			if (data?.type !== "open-room" || typeof data.roomId !== "string") return;
+			dispatch({ type: "set_active_room", roomId: data.roomId as RoomId });
+		};
+		navigator.serviceWorker.addEventListener("message", onMessage);
+		return () => navigator.serviceWorker.removeEventListener("message", onMessage);
+	}, []);
+
 	// Bootstrap (and re-bootstrap) the transport whenever creds change.
 	useEffect(() => {
 		if (!creds) return;
@@ -353,10 +453,13 @@ export default function App() {
 					t.markAsRead(message.roomId).catch(() => {});
 				}
 
-				// Notification gate.  Live, not-from-me, and either:
+				// Notification gate.  Live, not-from-me, and ANY of:
 				//   * the room is a DM, OR
 				//   * the message text mentions the viewer (full mxid
-				//     or local @localpart).
+				//     or local @localpart), OR
+				//   * the message is a reply whose target sender is the
+				//     viewer (someone hit "Reply" on one of your
+				//     messages — same intent signal as a mention).
 				// AND not the room they're currently looking at while
 				// the tab is focused — popping a notification for a
 				// message that's already on their screen is noise.
@@ -372,9 +475,10 @@ export default function App() {
 				// is small.
 				const mentionsMe = text.includes(myMxid) ||
 					(localpart.length > 1 && new RegExp(`(^|\\W)${escapeRegex(localpart)}(\\W|$)`).test(text));
+				const repliesToMe = message.replyTo?.sender === myMxid;
 				const room = roomsRef.current.find(r => r.id === message.roomId);
 				const isDm = room?.kind === "dm";
-				if (!isDm && !mentionsMe) return;
+				if (!isDm && !mentionsMe && !repliesToMe) return;
 
 				// Skip if the user is already looking at this room
 				// AND the tab is focused / visible.
@@ -757,6 +861,9 @@ export default function App() {
 		if (!state.activeSpace) return null;
 		if (state.activeSpace.kind === "explore") return null;
 		if (state.activeSpace.kind === "bots") return null;
+		// Mobile-only "Spaces" tab landing — no synthetic Space
+		// object; the MobileSpacesList renders its own UI.
+		if (state.activeSpace.kind === "spaces_overview") return null;
 		if (state.activeSpace.kind === "dms") {
 			return {
 				id: "__dms__",
@@ -792,6 +899,7 @@ export default function App() {
 		if (state.activeSpace.kind === "rooms") {
 			return state.rooms.filter(r => r.kind !== "dm" && r.parentSpaceIds.length === 0);
 		}
+		if (state.activeSpace.kind === "spaces_overview") return [];
 		const id = state.activeSpace.id;
 		return state.rooms.filter(r => r.parentSpaceIds.includes(id));
 	}, [state.activeSpace, state.rooms]);
@@ -931,7 +1039,55 @@ export default function App() {
 					{bootError ? `Connection error: ${bootError}` : `Sync: ${state.syncState}`}
 				</div>
 			)}
-			<div className="flex-1 flex min-h-0">
+			{/* Mobile-only top bar.  Single-column shell can't show
+			    list + chat side-by-side, so we provide explicit
+			    back navigation:
+			      - in a room    → back to the space's room list
+			      - in a space   → back to DMs (the mobile "home")
+			      - at DMs       → no back, this is the root
+			    Desktop relies on the multi-pane layout where "back"
+			    is implicit (click another room or close the panel).
+			    The bar itself is just brand chrome — per-view title
+			    + actions live in each panel's own header below. */}
+			{isMobileShell && (
+				<MobileTopBar
+					onBack={
+						state.activeRoomId
+							? () => dispatch({ type: "set_active_room", roomId: null })
+							: undefined
+					}
+					rightSlot={
+						<NotificationBell
+							notifications={notifications}
+							onOpenRoom={openRoomFromNotification}
+							resolveDisplayName={(userId) => {
+								// Best-effort: scan rooms for a member
+								// row matching the MXID and pick its
+								// display name.  Cheap (member arrays are
+								// small) and avoids hitting the transport
+								// for a /profile call we'd then have to
+								// cache.  Falls through to localpart in
+								// the bell when nothing matches.
+								if (!transport) return null;
+								for (const r of state.rooms) {
+									const members = transport.getRoomMembers(r.id) ?? [];
+									const m = members.find(mb => mb.userId === userId);
+									if (m?.displayName) return m.displayName;
+								}
+								return null;
+							}}
+							resolveRoomName={(roomId) =>
+								state.rooms.find(r => r.id === roomId)?.name ?? null
+							}
+						/>
+					}
+				/>
+			)}
+			<div
+				className="flex-1 flex min-h-0"
+				data-mobile-view={state.activeRoomId ? "chat" : "rooms"}
+			>
+				<div className="contents" data-mobile-pane="sidebar">
 				<SpaceBar
 					currentUserId={creds.user_id}
 					currentUserAvatarMxc={myAvatarMxc}
@@ -968,7 +1124,9 @@ export default function App() {
 					onOpenReview={isAdmin ? () => setReviewSheetOpen(true) : undefined}
 					pendingReviewCount={pendingReviewCount}
 				/>
+				</div>
 				{state.activeSpace?.kind === "bots" ? (
+					<div className="contents" data-mobile-pane="list">
 					<BotList
 						bots={myBots}
 						loading={myBotsLoading}
@@ -978,8 +1136,26 @@ export default function App() {
 						onSelectBot={id => setSelectedBotId(id)}
 						onNewBot={() => setSelectedBotId("new")}
 					/>
+					</div>
 				) : null}
-				{state.activeSpace?.kind !== "explore" && state.activeSpace?.kind !== "bots" && (
+				{state.activeSpace?.kind === "spaces_overview" ? (
+					<div className="contents" data-mobile-pane="list">
+						<MobileSpacesList
+							spaces={state.spaces}
+							rooms={state.rooms}
+							onSelectSpace={(id) =>
+								dispatch({ type: "set_active_space", space: { kind: "space", id: id as SpaceId } })
+							}
+							onSelectExplore={() =>
+								dispatch({ type: "set_active_space", space: { kind: "explore" } })
+							}
+						/>
+					</div>
+				) : null}
+				{state.activeSpace?.kind !== "explore"
+					&& state.activeSpace?.kind !== "bots"
+					&& state.activeSpace?.kind !== "spaces_overview" && (
+				<div className="contents" data-mobile-pane="list">
 				<RoomList
 					rooms={state.rooms}
 					spaces={state.spaces}
@@ -1040,7 +1216,9 @@ export default function App() {
 						}
 					}}
 				/>
+				</div>
 				)}
+				<div className="contents" data-mobile-pane="main">
 				{state.activeSpace?.kind === "explore" ? (
 					<ExplorePane
 						transport={transport}
@@ -1275,6 +1453,8 @@ export default function App() {
 					onOpenModLog={(roomId) => setModLogRoomId(roomId as RoomId)}
 				/>
 				)}
+				</div>
+				<div className="contents" data-mobile-pane="aux">
 				{activeRoom && (
 					activeRoom.kind === "dm" && activeRoom.dmUserId ? (
 						<DmProfilePanel
@@ -1311,7 +1491,117 @@ export default function App() {
 						/>
 					)
 				)}
+				</div>
 			</div>
+			{/* Mobile bottom tab bar + Me overlay.  The Me screen
+			    is rendered as an absolute-positioned overlay above
+			    the panels (rather than a sheet) so the bottom tab
+			    bar stays visible while it's open — same pattern
+			    iMessage / Telegram use for their "Me" / Settings
+			    tab.  Z-index just above the FAB so it covers the
+			    chat composer too. */}
+			{isMobileShell && mobileMeOpen && (
+				// The Me overlay sits above the underlying pane (z-30),
+				// so it MUST paint a solid bg or the chat list bleeds
+				// through behind the rows.  Repaint the body's gradient
+				// on top of bg-background so this overlay has the same
+				// coloured aura every other mobile screen has.
+				<div className="fixed inset-x-0 z-30 flex flex-col bg-background"
+				     style={{
+				         top: "calc(env(safe-area-inset-top) + 48px)",
+				         bottom: "calc(env(safe-area-inset-bottom) + 56px)",
+				         backgroundImage: "var(--bg-gradient)",
+				         backgroundAttachment: "fixed",
+				         backgroundRepeat: "no-repeat",
+				         backgroundSize: "cover",
+				     }}
+				>
+					<MobileMeScreen
+						userId={creds.user_id}
+						avatarMxc={myAvatarMxc}
+						onOpenProfile={() => setViewedUserId(creds.user_id as UserId)}
+						onOpenSettings={() => setSettingsOpen(true)}
+						onSignOut={handleSignOut}
+					/>
+				</div>
+			)}
+			{/* Hide the tab bar in a chat — chats are "push" views
+			    that take over the screen until the user pops back
+			    via the top-bar arrow.  iMessage / Telegram / Slack
+			    all do this; persistent tabs over a chat read as
+			    cluttered. */}
+			{isMobileShell && !state.activeRoomId && (
+				<MobileTabBar
+					active={
+						mobileMeOpen
+							? "me"
+							: state.activeSpace?.kind === "explore"
+								? "explore"
+								: state.activeSpace?.kind === "space"
+									|| state.activeSpace?.kind === "spaces_overview"
+									? "spaces"
+									: "chats"
+					}
+					onChange={(tab: MobileTab) => {
+						// Switching tabs always clears the Me overlay
+						// + drops any open chat so the user sees the
+						// tab's landing screen on first tap.
+						setMobileMeOpen(tab === "me");
+						if (tab === "me") return;
+						dispatch({ type: "set_active_room", roomId: null });
+						if (tab === "chats") {
+							dispatch({ type: "set_active_space", space: { kind: "dms" } });
+						} else if (tab === "spaces") {
+							// Stay in the current space if we already
+							// have one selected — only drop into the
+							// overview when the tab is "fresh".
+							if (state.activeSpace?.kind !== "space") {
+								dispatch({ type: "set_active_space", space: { kind: "spaces_overview" } });
+							}
+						} else if (tab === "explore") {
+							dispatch({ type: "set_active_space", space: { kind: "explore" } });
+						}
+					}}
+					unreadByTab={{
+						chats: state.rooms.filter(
+							r => (r.kind === "dm" || r.parentSpaceIds.length === 0)
+								&& !r.isInvite
+								&& r.unreadCount > 0,
+						).length,
+						spaces: state.rooms.filter(
+							r => r.parentSpaceIds.length > 0
+								&& !r.isInvite
+								&& r.unreadCount > 0,
+						).length,
+					}}
+				/>
+			)}
+			{/* Desktop notification bell — fixed-position FAB in
+			    the bottom-right corner.  Only renders outside the
+			    mobile shell (mobile already has its own bell in
+			    the MobileTopBar's right slot, plus a FAB would
+			    visually compete with the floating tab pill).
+			    Same NotificationBell component, different visual
+			    treatment via the `variant` prop. */}
+			{!isMobileShell && (
+				<NotificationBell
+					variant="fab"
+					notifications={notifications}
+					onOpenRoom={openRoomFromNotification}
+					resolveDisplayName={(userId) => {
+						if (!transport) return null;
+						for (const r of state.rooms) {
+							const members = transport.getRoomMembers(r.id) ?? [];
+							const m = members.find(mb => mb.userId === userId);
+							if (m?.displayName) return m.displayName;
+						}
+						return null;
+					}}
+					resolveRoomName={(roomId) =>
+						state.rooms.find(r => r.id === roomId)?.name ?? null
+					}
+				/>
+			)}
 			<CreateRoomSheet
 				open={createRoomOpen}
 				onOpenChange={setCreateRoomOpen}

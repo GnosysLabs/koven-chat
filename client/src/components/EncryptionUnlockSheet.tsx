@@ -63,9 +63,13 @@ export function EncryptionUnlockSheet({ open, onUnlock, onUnlocked, onSignOut }:
 			    close buttons.  Same rationale as EncryptionSetupSheet:
 			    the dialog is non-dismissible by design, leaving a
 			    visible-but-inert X reads as a broken button.  The
-			    "Sign out instead" link below is the proper escape. */}
+			    "Sign out instead" link below is the proper escape.
+			    `force-midnight` keeps this pre-auth surface visually
+			    consistent with the login screen no matter what theme
+			    the user has stashed in localStorage; the same recipe
+			    runs on desktop AND mobile so we don't fork the UI. */}
 			<DialogContent
-				className="sm:max-w-md [&>button]:hidden"
+				className="sm:max-w-md [&>button]:hidden force-midnight"
 				onInteractOutside={(e) => e.preventDefault()}
 				onEscapeKeyDown={(e) => e.preventDefault()}
 			>

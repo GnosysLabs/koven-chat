@@ -885,26 +885,27 @@ export function ChatPane({
 							placeholder={
 								isSuspended
 									? "Posting paused while your account is under review"
-									: pendingAttachment
-										? "Add a caption…"
-										: replyTarget
-											? `Reply to ${replyTarget.senderDisplayName}`
-											: `Message ${room.name}`
+									: uploading
+										? "Sending…"
+										: pendingAttachment
+											? "Add a caption…"
+											: replyTarget
+												? `Reply to ${replyTarget.senderDisplayName}`
+												: `Message ${room.name}`
 							}
-							disabled={isSuspended}
+							// Disabled during upload so Enter doesn't double-submit
+							// or queue another message while the previous one's
+							// attachment is still being uploaded.
+							disabled={isSuspended || uploading}
 							autoFocus={!isSuspended}
 							className="w-full"
 						/>
 					</div>
-					<Button
-						type="submit"
-						disabled={
-							isSuspended || uploading ||
-							(!pendingAttachment && !draft.trim())
-						}
-					>
-						{uploading ? "Sending…" : "Send"}
-					</Button>
+					{/* Send button removed — Enter on the input submits the
+					    form, same flow modern chat clients (Discord,
+					    Telegram, iMessage) use.  The placeholder swaps to
+					    "Sending…" while an attachment uploads so we still
+					    have a visible "in flight" indicator. */}
 				</form>
 			</div>
 			)}

@@ -181,6 +181,7 @@ function filterRooms(rooms: Room[], activeSpace: ActiveSpace): Room[] {
 		// space, excluding DMs (which live in their own tile).
 		return rooms.filter(r => r.kind !== "dm" && r.parentSpaceIds.length === 0);
 	}
+	if (activeSpace.kind === "spaces_overview") return [];
 	const id = activeSpace.id;
 	return rooms.filter(r => r.parentSpaceIds.includes(id));
 }
@@ -191,6 +192,7 @@ function headerFor(activeSpace: ActiveSpace, spaces: Space[]): string {
 	if (activeSpace.kind === "bots") return "Bots";
 	if (activeSpace.kind === "dms") return "Direct messages";
 	if (activeSpace.kind === "rooms") return "Rooms";
+	if (activeSpace.kind === "spaces_overview") return "Spaces";
 	const space = spaces.find(s => s.id === activeSpace.id);
 	return space?.name ?? "Space";
 }
@@ -317,6 +319,7 @@ function RoomRow({
 			<button
 				type="button"
 				onClick={onSelect}
+				data-room-row=""
 				className={cn(
 					"w-full flex items-center gap-2 py-1.5 pl-2 text-sm text-left min-w-0",
 					reservePinSlot ? "pr-8" : "pr-2",
