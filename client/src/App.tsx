@@ -614,6 +614,7 @@ export default function App() {
 				kind: "private" as const,
 				childRoomIds: [],
 				pinnedRoomIds: [],
+				nsfw: false,
 			};
 		}
 		if (state.activeSpace.kind === "rooms") {
@@ -625,6 +626,7 @@ export default function App() {
 				kind: "public" as const,
 				childRoomIds: [],
 				pinnedRoomIds: [],
+				nsfw: false,
 			};
 		}
 		const id = state.activeSpace.id;
@@ -877,6 +879,7 @@ export default function App() {
 						accessToken={creds?.access_token ?? null}
 						collapsedRoomIds={collapsedRoomIds}
 						onCollapseRefresh={refreshCollapsedRooms}
+						showNsfw={!!settings.showNsfw}
 						onJoined={(roomId, isSpace) => {
 							// Joining a room → switch to Rooms view + open
 							// it.  Joining a space → switch to that space.
@@ -1120,6 +1123,7 @@ export default function App() {
 			<CreateRoomSheet
 				open={createRoomOpen}
 				onOpenChange={setCreateRoomOpen}
+				showNsfw={!!settings.showNsfw}
 				onCreate={async (opts) => {
 					if (!transport) throw new Error("Not connected");
 					// If a space is currently selected, the new room joins
@@ -1144,6 +1148,7 @@ export default function App() {
 			<SpaceEditSheet
 				space={editingSpaceId ? state.spaces.find(s => s.id === editingSpaceId) ?? null : null}
 				currentUserId={creds.user_id}
+				showNsfw={!!settings.showNsfw}
 				onClose={() => setEditingSpaceId(null)}
 				onSave={async (opts) => {
 					if (!transport) throw new Error("Not connected");
@@ -1155,6 +1160,7 @@ export default function App() {
 						clearAvatar: opts.clearAvatar,
 						iconEmoji: opts.iconEmoji,
 						visibility: opts.visibility,
+						nsfw: opts.nsfw,
 					});
 				}}
 				onLeave={async (spaceId) => {
@@ -1194,6 +1200,7 @@ export default function App() {
 			<RoomEditSheet
 				room={editingRoomId ? state.rooms.find(r => r.id === editingRoomId) ?? null : null}
 				currentUserId={creds.user_id}
+				showNsfw={!!settings.showNsfw}
 				onClose={() => setEditingRoomId(null)}
 				onSave={async (opts) => {
 					if (!transport) throw new Error("Not connected");
@@ -1205,6 +1212,7 @@ export default function App() {
 						clearAvatar: opts.clearAvatar,
 						iconEmoji: opts.iconEmoji,
 						visibility: opts.visibility,
+						nsfw: opts.nsfw,
 					});
 				}}
 				onLeave={async (roomId) => {

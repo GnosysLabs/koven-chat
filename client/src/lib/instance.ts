@@ -267,16 +267,17 @@ export type ModLogEntry =
  */
 export async function fetchRoomIcons(
 	roomIds: string[],
-): Promise<Record<string, string>> {
-	if (roomIds.length === 0) return {};
+): Promise<{ icons: Record<string, string>; nsfw: Set<string> }> {
+	if (roomIds.length === 0) return { icons: {}, nsfw: new Set() };
 	const r = await fetch(`${ENGINE_URL}/api/rooms/icons`, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ room_ids: roomIds }),
 	});
-	if (!r.ok) return {};
-	const body = (await r.json()) as { icons?: Record<string, string> };
-	return body.icons ?? {};
+	if (!r.ok) return { icons: {}, nsfw: new Set() };
+	const body = (await r.json()) as { icons?: Record<string, string>; nsfw?: unknown };
+	const nsfw = Array.isArray(body.nsfw) ? new Set(body.nsfw as string[]) : new Set<string>();
+	return { icons: body.icons ?? {}, nsfw };
 }
 
 export async function fetchRoomModLog(roomId: string): Promise<ModLogEntry[]> {

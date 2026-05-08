@@ -25,10 +25,12 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { Ban, ShieldAlert, Trash2, UserCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
+import type { Settings } from "@/state/settings";
 import { fetchAdminStatus, purgeMyEngineState } from "@/lib/instance";
 import { fetchUiaPassword } from "@/lib/auth";
 
@@ -39,9 +41,15 @@ export interface AccountSectionProps {
 	// Fired after a successful self-deactivation so the parent can
 	// drop credentials and route back to login.
 	onSignedOut(): void;
+	// Per-device user settings, passed through so this tab can host
+	// account-level discovery/content prefs (NSFW gate, etc.) next
+	// to the blocked-users + delete-account primitives that already
+	// live here.
+	settings: Settings;
+	onSettingsChange(next: Settings): void;
 }
 
-export function AccountSection({ accessToken, transport, ignoredUsers, onSignedOut }: AccountSectionProps) {
+export function AccountSection({ accessToken, transport, ignoredUsers, onSignedOut, settings, onSettingsChange }: AccountSectionProps) {
 	const blocked = useMemo(() => Array.from(ignoredUsers), [ignoredUsers]);
 	const [unblockingUser, setUnblockingUser] = useState<UserId | null>(null);
 	const [unblockError, setUnblockError] = useState<string | null>(null);
@@ -115,6 +123,32 @@ export function AccountSection({ accessToken, transport, ignoredUsers, onSignedO
 
 	return (
 		<div className="space-y-8">
+			{/* ─── Content ──────────────────────────────────────────
+			    Discovery preferences that aren't tied to a single
+			    room or DM.  Currently just the NSFW gate; future
+			    knobs (autoplay, link previews, mature-language
+			    filter) would land here too. */}
+			<section className="space-y-3">
+				<div>
+					<div className="text-sm font-medium">Content</div>
+					<p className="text-xs text-muted-foreground leading-snug mt-0.5">
+						Choose what's discoverable in Explore. These don't affect rooms you've already joined — once you're in, you're in.
+					</p>
+				</div>
+				<div className="flex items-start justify-between gap-4 px-3 py-3 rounded-md border border-border bg-muted/30">
+					<div className="flex-1 min-w-0">
+						<div className="text-sm font-medium">Show NSFW rooms</div>
+						<p className="text-xs text-muted-foreground leading-snug mt-0.5">
+							Adult-content rooms and spaces stay hidden from search and browse until you turn this on.
+						</p>
+					</div>
+					<Switch
+						checked={!!settings.showNsfw}
+						onCheckedChange={(checked) => onSettingsChange({ ...settings, showNsfw: checked })}
+					/>
+				</div>
+			</section>
+
 			{/* ─── Blocked users ──────────────────────────────────── */}
 			<section className="space-y-3">
 				<div>

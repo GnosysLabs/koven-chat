@@ -15,6 +15,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { cn } from "@/lib/utils";
 import { EmojiPicker } from "@/components/EmojiPicker";
@@ -33,7 +34,11 @@ export interface SpaceEditSheetProps {
 		clearAvatar?: boolean;
 		iconEmoji?: string;
 		visibility?: "public" | "private";
+		nsfw?: boolean;
 	}): Promise<void>;
+	// Drives visibility of the NSFW toggle.  See RoomEditSheet for
+	// the full rationale.
+	showNsfw: boolean;
 	// See RoomEditSheet for the Leave-vs-Delete creator rule.
 	onLeave?(spaceId: string): Promise<void>;
 	// Delete the space + every child room in `childIds`.  The dialog
@@ -48,7 +53,7 @@ export interface SpaceEditSheetProps {
 	lookupChildName?(roomId: string): string;
 }
 
-export function SpaceEditSheet({ space, currentUserId, onClose, onSave, onLeave, onDelete, lookupChildName }: SpaceEditSheetProps) {
+export function SpaceEditSheet({ space, currentUserId, onClose, onSave, onLeave, onDelete, lookupChildName, showNsfw }: SpaceEditSheetProps) {
 	const [name, setName] = useState("");
 	const [topic, setTopic] = useState("");
 	const [visibility, setVisibility] = useState<"public" | "private">("public");
@@ -58,6 +63,7 @@ export function SpaceEditSheet({ space, currentUserId, onClose, onSave, onLeave,
 	// Emoji icon — empty string means "no emoji set" (we send "" on
 	// clear and a non-empty trimmed glyph on set).
 	const [iconEmoji, setIconEmoji] = useState("");
+	const [nsfw, setNsfw] = useState(false);
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
@@ -80,6 +86,7 @@ export function SpaceEditSheet({ space, currentUserId, onClose, onSave, onLeave,
 		setAvatarPreview(undefined);
 		setClearAvatar(false);
 		setIconEmoji(space.iconEmoji ?? "");
+		setNsfw(!!space.nsfw);
 		setError(null);
 		setPending(false);
 		setConfirmingLeave(false);
@@ -151,6 +158,7 @@ export function SpaceEditSheet({ space, currentUserId, onClose, onSave, onLeave,
 		else if (clearAvatar) opts.clearAvatar = true;
 		const trimmedEmoji = iconEmoji.trim();
 		if (trimmedEmoji !== (space.iconEmoji ?? "")) opts.iconEmoji = trimmedEmoji;
+		if (nsfw !== !!space.nsfw) opts.nsfw = nsfw;
 
 		// If nothing changed, just close.
 		const hasChanges =
@@ -159,7 +167,8 @@ export function SpaceEditSheet({ space, currentUserId, onClose, onSave, onLeave,
 			opts.visibility !== undefined ||
 			opts.avatarFile !== undefined ||
 			opts.clearAvatar ||
-			opts.iconEmoji !== undefined;
+			opts.iconEmoji !== undefined ||
+			opts.nsfw !== undefined;
 		if (!hasChanges) {
 			onClose();
 			return;
@@ -404,6 +413,38 @@ export function SpaceEditSheet({ space, currentUserId, onClose, onSave, onLeave,
 							/>
 						</div>
 					</div>
+
+					{/* NSFW marker — one-way (see RoomEditSheet for the
+					    full rationale).  Locked pill once set, toggle
+					    visible only when the viewer can mark a not-
+					    yet-marked space. */}
+					{space?.nsfw ? (
+						<div className="flex items-start justify-between gap-3 rounded-md border border-border p-3">
+							<div className="space-y-0.5 flex-1 min-w-0">
+								<div className="text-sm font-medium">Marked NSFW</div>
+								<p className="text-xs text-muted-foreground leading-relaxed">
+									This marker is permanent. Hides the space from Explore for users who haven&rsquo;t opted into NSFW content; existing members keep their access.
+								</p>
+							</div>
+							<span className="text-[10px] uppercase tracking-wide text-destructive bg-destructive/10 border border-destructive/30 px-1.5 py-0.5 rounded shrink-0 mt-0.5">
+								NSFW
+							</span>
+						</div>
+					) : isCreator && showNsfw && (
+						<div className="flex items-start justify-between gap-3 rounded-md border border-border p-3">
+							<div className="space-y-0.5 flex-1 min-w-0">
+								<Label htmlFor="space-edit-nsfw" className="cursor-pointer">Mark as NSFW</Label>
+								<p className="text-xs text-muted-foreground leading-relaxed">
+									Hides the space from Explore for users who haven&rsquo;t opted into NSFW content. <strong className="text-foreground">This can&rsquo;t be reversed</strong> — once marked, the space stays marked.
+								</p>
+							</div>
+							<Switch
+								id="space-edit-nsfw"
+								checked={nsfw}
+								onCheckedChange={setNsfw}
+							/>
+						</div>
+					)}
 
 					{error && (
 						<div className="text-xs text-destructive border border-destructive/40 bg-destructive/10 rounded px-3 py-2">

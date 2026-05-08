@@ -689,6 +689,25 @@ export async function kickOrBanAs(opts: {
  * yet (e.g. a freshly-created room that hasn't seen its first
  * timeline event the appservice gets pushed into yet).
  */
+/**
+ * Read the room's NSFW flag from its `chat.koven.nsfw` state event.
+ * Used by the Explore-page enrichment endpoint so the directory can
+ * filter NSFW rooms for users who haven't opted into adult-content
+ * discovery.  Same admin-token pattern as getRoomIconEmoji — the
+ * engine isn't necessarily a member of every public room, so we
+ * bypass membership-gated /state by going through admin.
+ *
+ * Returns false on any error or missing/malformed state event;
+ * defaulting to "not NSFW" is the safer fallback.
+ */
+export async function getRoomNsfw(roomId: string): Promise<boolean> {
+	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/chat.koven.nsfw/`;
+	const r = await adminFetch(path);
+	if (!r.ok) return false;
+	const body = (await r.json().catch(() => null)) as { enabled?: unknown } | null;
+	return body?.enabled === true;
+}
+
 export async function getRoomIconEmoji(roomId: string): Promise<string | null> {
 	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/chat.koven.room_icon/`;
 	const r = await adminFetch(path);

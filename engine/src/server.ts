@@ -89,6 +89,7 @@ import {
 	getJoinedMembers,
 	getRoomIconEmoji,
 	getRoomJoinRule,
+	getRoomNsfw,
 	getRoomNameAndCreator,
 	getSpaceChildRoomIds,
 	isSpaceRoom,
@@ -1505,14 +1506,30 @@ export function startServer(): void {
 				// Per-room failures are silently dropped — a room with
 				// no icon set, or one we can't read state for, just
 				// doesn't appear in the response map.
+				//
+				// Also returns the room's NSFW flag in the same call
+				// (one more state read per room, same admin-token).
+				// The Explore page uses both — icon for the tile
+				// avatar, nsfw to filter the directory and badge the
+				// remaining tiles.  Bundling them into one batched
+				// call keeps the wire round-trips down vs. spinning
+				// up a separate /api/rooms/nsfw endpoint.
 				const results = await Promise.all(
-					roomIds.map(async (id) => [id, await getRoomIconEmoji(id)] as const),
+					roomIds.map(async (id) => {
+						const [emoji, nsfw] = await Promise.all([
+							getRoomIconEmoji(id),
+							getRoomNsfw(id),
+						]);
+						return [id, { emoji, nsfw }] as const;
+					}),
 				);
 				const icons: Record<string, string> = {};
-				for (const [id, emoji] of results) {
-					if (emoji) icons[id] = emoji;
+				const nsfw: string[] = [];
+				for (const [id, meta] of results) {
+					if (meta.emoji) icons[id] = meta.emoji;
+					if (meta.nsfw) nsfw.push(id);
 				}
-				return json({ icons });
+				return json({ icons, nsfw });
 			}
 
 			// ─── Currently-collapsed rooms list (public) ───────────

@@ -17,6 +17,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { cn } from "@/lib/utils";
 import { EmojiPicker } from "@/components/EmojiPicker";
@@ -35,7 +36,13 @@ export interface RoomEditSheetProps {
 		clearAvatar?: boolean;
 		iconEmoji?: string;
 		visibility?: "public" | "private";
+		nsfw?: boolean;
 	}): Promise<void>;
+	// Drives visibility of the NSFW toggle.  Hidden unless the
+	// viewer has the "Show NSFW rooms" preference on, OR the room is
+	// already NSFW (so a founder who toggled their pref off can
+	// still untoggle the room).
+	showNsfw: boolean;
 	// Membership exit handlers.  The dialog shows EXACTLY ONE of
 	// these based on whether the viewer is the room's creator:
 	//
@@ -52,7 +59,7 @@ export interface RoomEditSheetProps {
 	onDelete?(roomId: string): Promise<void>;
 }
 
-export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, onDelete }: RoomEditSheetProps) {
+export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, onDelete, showNsfw }: RoomEditSheetProps) {
 	const [name, setName] = useState("");
 	const [topic, setTopic] = useState("");
 	const [visibility, setVisibility] = useState<"public" | "private">("public");
@@ -60,6 +67,7 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 	const [avatarPreview, setAvatarPreview] = useState<string | undefined>(undefined);
 	const [clearAvatar, setClearAvatar] = useState(false);
 	const [iconEmoji, setIconEmoji] = useState("");
+	const [nsfw, setNsfw] = useState(false);
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
@@ -92,6 +100,7 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 		setAvatarPreview(undefined);
 		setClearAvatar(false);
 		setIconEmoji(room.iconEmoji ?? "");
+		setNsfw(!!room.nsfw);
 		setError(null);
 		setPending(false);
 		setConfirmingLeave(false);
@@ -163,6 +172,7 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 		else if (clearAvatar) opts.clearAvatar = true;
 		const trimmedEmoji = iconEmoji.trim();
 		if (trimmedEmoji !== (room.iconEmoji ?? "")) opts.iconEmoji = trimmedEmoji;
+		if (nsfw !== !!room.nsfw) opts.nsfw = nsfw;
 
 		// If nothing changed, just close.
 		const hasChanges =
@@ -171,7 +181,8 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 			opts.visibility !== undefined ||
 			opts.avatarFile !== undefined ||
 			opts.clearAvatar ||
-			opts.iconEmoji !== undefined;
+			opts.iconEmoji !== undefined ||
+			opts.nsfw !== undefined;
 		if (!hasChanges) {
 			onClose();
 			return;
@@ -442,6 +453,45 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 							/>
 						</div>
 					</div>
+
+					{/* NSFW marker — one-way by design.  Once a room is
+					    flagged, the toggle disappears and the marker
+					    becomes a permanent informational pill.  Members
+					    joined under the "this is NSFW" assumption and
+					    quietly flipping it off would catch them out-
+					    of-band.  Branching:
+					      * room.nsfw === true → locked status pill,
+					        visible to anyone (not just creators).
+					      * room.nsfw === false + creator + viewer has
+					        "Show NSFW rooms" on → toggle to mark.
+					      * otherwise → nothing rendered. */}
+					{room?.nsfw ? (
+						<div className="flex items-start justify-between gap-3 rounded-md border border-border p-3">
+							<div className="space-y-0.5 flex-1 min-w-0">
+								<div className="text-sm font-medium">Marked NSFW</div>
+								<p className="text-xs text-muted-foreground leading-relaxed">
+									This marker is permanent. Hides the room from Explore for users who haven&rsquo;t opted into NSFW content; existing members keep their access.
+								</p>
+							</div>
+							<span className="text-[10px] uppercase tracking-wide text-destructive bg-destructive/10 border border-destructive/30 px-1.5 py-0.5 rounded shrink-0 mt-0.5">
+								NSFW
+							</span>
+						</div>
+					) : isCreator && showNsfw && (
+						<div className="flex items-start justify-between gap-3 rounded-md border border-border p-3">
+							<div className="space-y-0.5 flex-1 min-w-0">
+								<Label htmlFor="room-edit-nsfw" className="cursor-pointer">Mark as NSFW</Label>
+								<p className="text-xs text-muted-foreground leading-relaxed">
+									Hides the room from Explore for users who haven&rsquo;t opted into NSFW content. <strong className="text-foreground">This can&rsquo;t be reversed</strong> — once marked, the room stays marked.
+								</p>
+							</div>
+							<Switch
+								id="room-edit-nsfw"
+								checked={nsfw}
+								onCheckedChange={setNsfw}
+							/>
+						</div>
+					)}
 
 					{error && (
 						<div className="text-xs text-destructive border border-destructive/40 bg-destructive/10 rounded px-3 py-2">

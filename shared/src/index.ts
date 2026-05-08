@@ -67,6 +67,12 @@ export interface Room {
 	// promoting a successor would orphan the room with no founder.
 	// Other PL-100 admins (delegates) are exempt; they Leave normally.
 	creatorId?: UserId;
+	// Founder marked this room as adult-content via the
+	// `chat.koven.nsfw` state event.  Drives Explore-directory
+	// filtering (hidden unless the viewer's "Show NSFW rooms"
+	// preference is on) + the NSFW badge on Explore tiles.  Has
+	// no effect on joined rooms — once you're in, you're in.
+	nsfw: boolean;
 }
 
 // Spaces are Matrix rooms with `type: "m.space"`.  They don't have
@@ -99,6 +105,9 @@ export interface Space {
 	// this order, with unpinned rooms sorted normally below them.
 	// Editing requires PL ≥ 50 in the space (state_default).
 	pinnedRoomIds: RoomId[];
+	// Founder marked this space as adult-content via
+	// `chat.koven.nsfw`.  Same Explore filtering / badge as Room.nsfw.
+	nsfw: boolean;
 }
 
 export interface Member {

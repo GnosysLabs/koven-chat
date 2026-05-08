@@ -1246,6 +1246,10 @@ export class MatrixTransport {
 		//     space members can re-join without invitation if they
 		//     ever leave the room (Discord-channel-like semantics).
 		parentSpaceId?: SpaceId;
+		// Mark the new room as NSFW via the `chat.koven.nsfw` state
+		// event.  Hides the room from Explore for users who haven't
+		// opted into NSFW discovery; doesn't affect existing members.
+		nsfw?: boolean;
 	}): Promise<RoomId> {
 		const c = this.requireClient();
 		// Public + encrypted is forbidden by Koven's governance model:
@@ -1358,6 +1362,21 @@ export class MatrixTransport {
 			await this.linkRoomToSpace(opts.parentSpaceId, newRoomId).catch(err => {
 				console.warn("createRoom: failed to link to parent space", err);
 			});
+		}
+		if (opts.nsfw) {
+			// Best-effort NSFW marker.  Failure here just leaves the
+			// room un-flagged — the founder can fix it later via
+			// RoomEditSheet.  No reason to abort room creation over it.
+			try {
+				await c.sendStateEvent(
+					newRoomId,
+					"chat.koven.nsfw" as any,
+					{ enabled: true },
+					"",
+				);
+			} catch (err) {
+				console.warn("createRoom: failed to set nsfw flag", err);
+			}
 		}
 		this.emitRoomList();
 		this.emitSpaceList();
@@ -1792,6 +1811,11 @@ export class MatrixTransport {
 		// custom `chat.koven.room_icon` state event with `state_key=""`.
 		iconEmoji?: string;
 		visibility?: "public" | "private";
+		// Mark/unmark the space as adult-content via the
+		// `chat.koven.nsfw` state event.  true → write { enabled: true };
+		// false → write {} (the canonical "cleared" form).  Undefined
+		// leaves the state alone.
+		nsfw?: boolean;
 	}): Promise<void> {
 		const c = this.requireClient();
 		if (opts.name !== undefined) {
@@ -1833,6 +1857,28 @@ export class MatrixTransport {
 				console.warn("updateSpace: directory visibility update failed", err);
 			}
 		}
+		if (opts.nsfw !== undefined) {
+			// One-way: NSFW is permanent.  If the space is already
+			// flagged, refuse to clear it client-side.  Members joined
+			// under "this is NSFW" — quietly flipping it off would
+			// strand them out-of-band.  Defense in depth; the UI also
+			// hides the toggle once flagged.
+			const room = c.getRoom(opts.spaceId);
+			const currentNsfw = room?.currentState
+				.getStateEvents("chat.koven.nsfw", "")
+				?.getContent()?.enabled === true;
+			if (currentNsfw && !opts.nsfw) {
+				throw new Error("NSFW marker is permanent and can't be reversed.");
+			}
+			if (opts.nsfw) {
+				await c.sendStateEvent(
+					opts.spaceId,
+					"chat.koven.nsfw" as any,
+					{ enabled: true },
+					"",
+				);
+			}
+		}
 		this.emitSpaceList();
 	}
 
@@ -1853,6 +1899,8 @@ export class MatrixTransport {
 		// See updateSpace.iconEmoji — same semantics, same state event.
 		iconEmoji?: string;
 		visibility?: "public" | "private";
+		// See updateSpace.nsfw — same semantics, same state event.
+		nsfw?: boolean;
 	}): Promise<void> {
 		const c = this.requireClient();
 		// Defense-in-depth: refuse to flip an encrypted room to public.
@@ -1898,6 +1946,24 @@ export class MatrixTransport {
 				await c.setRoomDirectoryVisibility(opts.roomId, opts.visibility as any);
 			} catch (err) {
 				console.warn("updateRoom: directory visibility update failed", err);
+			}
+		}
+		if (opts.nsfw !== undefined) {
+			// See updateSpace — NSFW is one-way.
+			const room = c.getRoom(opts.roomId);
+			const currentNsfw = room?.currentState
+				.getStateEvents("chat.koven.nsfw", "")
+				?.getContent()?.enabled === true;
+			if (currentNsfw && !opts.nsfw) {
+				throw new Error("NSFW marker is permanent and can't be reversed.");
+			}
+			if (opts.nsfw) {
+				await c.sendStateEvent(
+					opts.roomId,
+					"chat.koven.nsfw" as any,
+					{ enabled: true },
+					"",
+				);
 			}
 		}
 		this.emitRoomList();
@@ -2553,6 +2619,7 @@ export class MatrixTransport {
 			myPowerLevel,
 			creatorId,
 			pinnedRoomIds,
+			nsfw: readKovenNsfw(r),
 		};
 	}
 
@@ -3046,6 +3113,7 @@ export class MatrixTransport {
 			isFederated,
 			myPowerLevel,
 			creatorId,
+			nsfw: readKovenNsfw(r),
 		};
 	}
 
@@ -3372,6 +3440,17 @@ function readKovenIconEmoji(r: SdkRoom): string | undefined {
 	if (!trimmed) return undefined;
 	if (trimmed.length > 16) return undefined;
 	return trimmed;
+}
+
+// Read the room's NSFW flag from its `chat.koven.nsfw` state event.
+// Empty content (the canonical "cleared" form) reads as false.
+// Anything but `enabled: true` also reads as false — defensive
+// against a malformed write.
+function readKovenNsfw(r: SdkRoom): boolean {
+	const ev = r.currentState.getStateEvents("chat.koven.nsfw", "");
+	if (!ev) return false;
+	const content = ev.getContent() as { enabled?: unknown };
+	return content.enabled === true;
 }
 
 /**

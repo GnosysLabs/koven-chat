@@ -137,6 +137,13 @@ const THEME_IDS = new Set(THEMES.map(t => t.id));
 
 export interface Settings {
 	theme: Theme;
+	// Show NSFW-flagged rooms and spaces in Explore (search + browse).
+	// Default false — adult-content rooms stay invisible from
+	// discovery until the user opts in.  Has no effect on rooms the
+	// user is already joined to: once you're in, you're in.  Stored
+	// in localStorage rather than m.account_data because it's a
+	// per-device discovery preference, not a profile property.
+	showNsfw?: boolean;
 	// Bump every time we change theme ids so loadSettings can migrate
 	// existing localStorage forward.  Don't read this elsewhere.
 	_v?: number;
@@ -156,6 +163,7 @@ const SETTINGS_VERSION = 3;
 
 export const DEFAULT_SETTINGS: Settings = {
 	theme: "midnight",
+	showNsfw: false,
 	_v: SETTINGS_VERSION,
 };
 

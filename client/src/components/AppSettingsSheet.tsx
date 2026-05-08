@@ -154,6 +154,8 @@ export function AppSettingsSheet({ open, onOpenChange, settings, onSettingsChang
 										onOpenChange(false);
 										onSignedOut?.();
 									}}
+									settings={settings}
+									onSettingsChange={onSettingsChange}
 								/>
 							)}
 

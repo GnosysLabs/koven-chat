@@ -43,7 +43,7 @@ function looksLikeMarkdown(s: string): boolean {
 import { useMatrixAttachment } from "@/lib/useMatrixAttachment";
 import { useMatrixMedia } from "@/lib/useMatrixMedia";
 import { useUrlPreview } from "@/lib/useUrlPreview";
-import { CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Lock, Network, Paperclip, Phone, Scale, Settings, UserPlus, Video, X } from "lucide-react";
+import { AlertTriangle, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Lock, Network, Paperclip, Phone, Scale, Settings, UserPlus, Video, X } from "lucide-react";
 
 export interface ChatPaneProps {
 	room: Room | null;
@@ -491,6 +491,14 @@ export function ChatPane({
 							label="Encrypted"
 							tone="success"
 							title="End-to-end encrypted. Koven moderation does not apply in this room."
+						/>
+					)}
+					{room.nsfw && (
+						<RoomBadge
+							icon={<AlertTriangle className="h-3 w-3" />}
+							label="NSFW"
+							tone="danger"
+							title="Marked as adult content. Hidden from Explore for users who haven't opted into NSFW discovery."
 						/>
 					)}
 					{room.isFederated && (
@@ -1188,7 +1196,7 @@ function AvatarSlot({ mxc, seed, hidden, isBot }: { mxc?: string; seed: string; 
 function RoomBadge({ icon, label, tone, title }: {
 	icon: React.ReactNode;
 	label: string;
-	tone: "default" | "success" | "warn";
+	tone: "default" | "success" | "warn" | "danger";
 	title?: string;
 }) {
 	return (
@@ -1200,6 +1208,8 @@ function RoomBadge({ icon, label, tone, title }: {
 					? "border-emerald-500/30 text-emerald-500/90 bg-emerald-500/5"
 				: tone === "warn"
 					? "border-amber-500/30 text-amber-500/90 bg-amber-500/5"
+				: tone === "danger"
+					? "border-destructive/40 text-destructive bg-destructive/10"
 				: "border-border text-muted-foreground bg-background/40"
 			)}
 		>

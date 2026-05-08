@@ -171,9 +171,9 @@ export function Login({ onLoggedIn }: LoginProps) {
 					{step === "email" ? (
 						<form onSubmit={submitEmail} className="p-5 space-y-3">
 							<div className="space-y-1">
-								<div className="text-sm font-medium">Sign in or create your account</div>
+								<div className="text-sm font-medium">Sign In/Create Account</div>
 								<p className="text-xs text-muted-foreground leading-snug">
-									We'll email you a 6-digit code. No password needed.
+									We'll email you a 6-digit code.
 								</p>
 							</div>
 							<div className="space-y-1.5">

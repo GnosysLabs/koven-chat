@@ -32,6 +32,9 @@ interface PublicEntry {
 	// Only set for spaces — number of leaf rooms inside the space.
 	// undefined for non-spaces.
 	roomCount?: number;
+	// Founder marked this room/space as adult-content via
+	// `chat.koven.nsfw`.  Same batched backfill as iconEmoji.
+	nsfw?: boolean;
 }
 
 type Filter = "all" | "spaces" | "rooms";
@@ -51,11 +54,17 @@ export interface ExplorePaneProps {
 	// collapse pipeline, the SPA polls this list to refresh.
 	collapsedRoomIds: Set<string>;
 	onCollapseRefresh?(): void | Promise<void>;
+	// Whether the viewer has opted into seeing NSFW-flagged rooms +
+	// spaces.  When false (the default), Explore filters them out
+	// entirely.  When true, they appear with a small badge so the
+	// flag is visible at a glance.
+	showNsfw: boolean;
 }
 
 export function ExplorePane({
 	transport, rooms, spaces, onJoined,
 	accessToken, collapsedRoomIds, onCollapseRefresh,
+	showNsfw,
 }: ExplorePaneProps) {
 	const [query, setQuery] = useState("");
 	const [results, setResults] = useState<PublicEntry[]>([]);
@@ -103,10 +112,14 @@ export function ExplorePane({
 					...soloRooms.map(r => ({ ...r, isSpace: false })),
 				];
 				const ids = merged.map(e => e.roomId);
-				const icons = await fetchRoomIcons(ids).catch(() => ({} as Record<string, string>));
-				const enriched = merged.map(e =>
-					icons[e.roomId] ? { ...e, iconEmoji: icons[e.roomId] } : e
+				const meta = await fetchRoomIcons(ids).catch(
+					() => ({ icons: {} as Record<string, string>, nsfw: new Set<string>() }),
 				);
+				const enriched = merged.map(e => ({
+					...e,
+					iconEmoji: meta.icons[e.roomId] ?? e.iconEmoji,
+					nsfw: meta.nsfw.has(e.roomId),
+				}));
 				setResults(enriched);
 			} catch (err) {
 				setError(err instanceof Error ? err.message : String(err));
@@ -133,13 +146,21 @@ export function ExplorePane({
 		// Joined users still see the override in their room list (via
 		// displayRoomName); Explore is the discovery surface, so we
 		// just hide them.
-		const liveResults = collapsedRoomIds.size === 0
+		let liveResults = collapsedRoomIds.size === 0
 			? results
 			: results.filter(r => !collapsedRoomIds.has(r.roomId));
+		// NSFW gate.  When the viewer hasn't opted in, drop every
+		// NSFW-flagged entry from the directory entirely — same shape
+		// as collapsed rooms.  When they have opted in, all entries
+		// flow through; the badge on each tile communicates which
+		// ones carry the flag.
+		if (!showNsfw) {
+			liveResults = liveResults.filter(r => !r.nsfw);
+		}
 		if (filter === "spaces") return liveResults.filter(r => r.isSpace);
 		if (filter === "rooms") return liveResults.filter(r => !r.isSpace);
 		return liveResults;
-	}, [results, filter, collapsedRoomIds]);
+	}, [results, filter, collapsedRoomIds, showNsfw]);
 
 	const counts = useMemo(() => ({
 		all: results.length,
@@ -294,6 +315,11 @@ function EntryRow({
 					<span className="text-[10px] uppercase tracking-wide text-muted-foreground bg-muted/50 px-1.5 py-0.5 rounded">
 						{entry.isSpace ? "Space" : "Room"}
 					</span>
+					{entry.nsfw && (
+						<span className="text-[10px] uppercase tracking-wide text-destructive bg-destructive/10 border border-destructive/30 px-1.5 py-0.5 rounded">
+							NSFW
+						</span>
+					)}
 				</div>
 				<div className="flex items-center gap-1.5 text-xs text-muted-foreground mt-0.5">
 					<Users className="h-3 w-3" />

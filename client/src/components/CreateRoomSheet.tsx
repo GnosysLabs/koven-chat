@@ -29,14 +29,22 @@ export interface CreateRoomSheetProps {
 		topic: string;
 		visibility: "public" | "private";
 		encrypted: boolean;
+		nsfw: boolean;
 	}): Promise<void>;
+	// True iff the viewer has the "Show NSFW rooms" preference on.
+	// Gates visibility of the NSFW toggle: you can only create an
+	// adult-content room if you've opted into seeing them yourself.
+	// Stops "I marked the room NSFW without realizing what that
+	// means" — explicit opt-in upstream.
+	showNsfw: boolean;
 }
 
-export function CreateRoomSheet({ open, onOpenChange, onCreate }: CreateRoomSheetProps) {
+export function CreateRoomSheet({ open, onOpenChange, onCreate, showNsfw }: CreateRoomSheetProps) {
 	const [name, setName] = useState("");
 	const [topic, setTopic] = useState("");
 	const [visibility, setVisibility] = useState<"public" | "private">("public");
 	const [encrypted, setEncrypted] = useState(false);
+	const [nsfw, setNsfw] = useState(false);
 	// Public + encrypted is a contradiction in Koven: the room is open
 	// to anyone but the engine + admins can't see content, so consensus
 	// moderation can't run.  When the user flips to public, we force
@@ -51,6 +59,7 @@ export function CreateRoomSheet({ open, onOpenChange, onCreate }: CreateRoomShee
 		setTopic("");
 		setVisibility("public");
 		setEncrypted(false);
+		setNsfw(false);
 		setError(null);
 		setPending(false);
 	}
@@ -62,7 +71,7 @@ export function CreateRoomSheet({ open, onOpenChange, onCreate }: CreateRoomShee
 		setPending(true);
 		setError(null);
 		try {
-			await onCreate({ name: trimmed, topic: topic.trim(), visibility, encrypted: effectiveEncrypted });
+			await onCreate({ name: trimmed, topic: topic.trim(), visibility, encrypted: effectiveEncrypted, nsfw });
 			reset();
 			onOpenChange(false);
 		} catch (err) {
@@ -73,7 +82,11 @@ export function CreateRoomSheet({ open, onOpenChange, onCreate }: CreateRoomShee
 
 	return (
 		<Dialog open={open} onOpenChange={(o) => { if (!o) reset(); onOpenChange(o); }}>
-			<DialogContent className="sm:max-w-md">
+			{/* Wider than the default sm:max-w-md so the encryption +
+			    NSFW toggle blocks (each a paragraph of explanatory copy)
+			    can sit side-by-side without forcing the dialog to
+			    scroll.  Falls back to default mobile sizing under sm. */}
+			<DialogContent className="sm:max-w-2xl">
 				<DialogHeader>
 					<DialogTitle>Create a room</DialogTitle>
 					<DialogDescription>
@@ -128,30 +141,53 @@ export function CreateRoomSheet({ open, onOpenChange, onCreate }: CreateRoomShee
 						</div>
 					</div>
 
-					<div className={cn(
-						"flex items-start justify-between gap-3 rounded-md border border-border p-3",
-						!canEncrypt && "opacity-60",
-					)}>
-						<div className="space-y-0.5">
-							<Label htmlFor="room-encrypted" className="cursor-pointer">End-to-end encryption</Label>
-							<p className="text-xs text-muted-foreground leading-relaxed">
-								{canEncrypt ? (
-									<>
-										Encrypted rooms are unreadable by the server. <strong className="text-foreground">Koven moderation cannot apply to encrypted rooms</strong> &mdash; flags, collapse, and the public mod log all go silent. Use only for trusted private spaces.
-									</>
-								) : (
-									<>
-										Encryption is only available on private rooms. Public rooms must stay readable so consensus moderation, flags, and the public mod log can work.
-									</>
-								)}
-							</p>
+					{/* Toggle row: encryption is always present, NSFW is
+					    conditional.  Lay out side-by-side when both are
+					    visible so the dialog doesn't grow tall enough
+					    to need scrolling — falls back to single-column
+					    when NSFW is hidden. */}
+					<div className={cn("grid gap-3", showNsfw ? "grid-cols-2" : "grid-cols-1")}>
+						<div className={cn(
+							"flex items-start justify-between gap-3 rounded-md border border-border p-3",
+							!canEncrypt && "opacity-60",
+						)}>
+							<div className="space-y-0.5 flex-1 min-w-0">
+								<Label htmlFor="room-encrypted" className="cursor-pointer">End-to-end encryption</Label>
+								<p className="text-xs text-muted-foreground leading-relaxed">
+									{canEncrypt ? (
+										<>
+											Encrypted rooms are unreadable by the server. <strong className="text-foreground">Koven moderation cannot apply</strong> &mdash; flags, collapse, and the mod log go silent. Use only for trusted private spaces.
+										</>
+									) : (
+										<>
+											Encryption is only available on private rooms. Public rooms must stay readable so consensus moderation can work.
+										</>
+									)}
+								</p>
+							</div>
+							<Switch
+								id="room-encrypted"
+								checked={effectiveEncrypted}
+								onCheckedChange={setEncrypted}
+								disabled={!canEncrypt}
+							/>
 						</div>
-						<Switch
-							id="room-encrypted"
-							checked={effectiveEncrypted}
-							onCheckedChange={setEncrypted}
-							disabled={!canEncrypt}
-						/>
+
+						{showNsfw && (
+							<div className="flex items-start justify-between gap-3 rounded-md border border-border p-3">
+								<div className="space-y-0.5 flex-1 min-w-0">
+									<Label htmlFor="room-nsfw" className="cursor-pointer">Mark as NSFW</Label>
+									<p className="text-xs text-muted-foreground leading-relaxed">
+										Hides the room from Explore for users who haven&rsquo;t opted into NSFW content. <strong className="text-foreground">This can&rsquo;t be reversed</strong> — once marked, the room stays marked.
+									</p>
+								</div>
+								<Switch
+									id="room-nsfw"
+									checked={nsfw}
+									onCheckedChange={setNsfw}
+								/>
+							</div>
+						)}
 					</div>
 
 					{error && (
