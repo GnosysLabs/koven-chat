@@ -838,17 +838,14 @@ function MessageRow({
 	// move the cursor up to the popover content).
 	const [reactOpen, setReactOpen] = useState(false);
 	const showActions = isHovered || reactOpen;
-	// Single-step confirm: native dialog.  No modal-component
-	// gymnastics — Matrix redaction is irreversible by Matrix design,
-	// and the row will visibly disappear (or render as a redacted
-	// stub) within a render or two of the engine acknowledging.  A
-	// confirm() is the right friction for "are you sure?" without
-	// adding component state machinery for a one-button surface.
-	const handleDelete = onDelete
-		? () => {
-			if (window.confirm("Delete this message?")) onDelete();
-		}
-		: undefined;
+	// Confirmation friction lives inside MessageActions's trash
+	// button now (a small Popover — see DeleteAction there).  We
+	// used to wrap onDelete in `window.confirm("Delete this
+	// message?")` here, but Tauri 2's WebView suppresses the native
+	// dialog without warning, so on the desktop app the "are you
+	// sure?" prompt silently returned undefined and the click
+	// looked like it did nothing.  Pass onDelete through as-is.
+	const handleDelete = onDelete;
 	const myFlagId = flags?.myFlagId;
 	// You can't flag your own messages — both because the consensus
 	// vote is meaningless on yourself and because it'd let users

@@ -112,17 +112,58 @@ export function MessageActions({
 				</button>
 			)}
 
-			{onDelete && (
+			{onDelete && <DeleteAction onConfirm={onDelete} />}
+		</div>
+	);
+}
+
+// Inline confirmation popover for the trash button.
+//
+// We DON'T use `window.confirm()` here — Tauri 2's WebView
+// suppresses the native dialog without a runtime warning, so on the
+// desktop app the "are you sure?" prompt silently returns undefined
+// and the click looks like it does nothing.  Some browser extensions
+// and corporate policies do the same in the web client.  An in-app
+// Popover is reliable across every environment we ship to and
+// matches the affordance pattern of the React picker right next to
+// it (so the muscle memory of "click, get a small pop-up, click
+// the action" is consistent across the toolbar).
+function DeleteAction({ onConfirm }: { onConfirm: () => void }) {
+	const [open, setOpen] = useState(false);
+	return (
+		<Popover open={open} onOpenChange={setOpen}>
+			<PopoverTrigger asChild>
 				<button
 					type="button"
-					onClick={onDelete}
 					className="p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
 					title="Delete"
 					aria-label="Delete"
 				>
 					<Trash2 className="h-3.5 w-3.5" />
 				</button>
-			)}
-		</div>
+			</PopoverTrigger>
+			<PopoverContent side="top" align="end" sideOffset={4} className="w-auto p-2">
+				<div className="flex items-center gap-2">
+					<span className="text-xs text-foreground">Delete this message?</span>
+					<button
+						type="button"
+						onClick={() => setOpen(false)}
+						className="text-xs px-2 py-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+					>
+						Cancel
+					</button>
+					<button
+						type="button"
+						onClick={() => {
+							setOpen(false);
+							onConfirm();
+						}}
+						className="text-xs px-2 py-1 rounded bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+					>
+						Delete
+					</button>
+				</div>
+			</PopoverContent>
+		</Popover>
 	);
 }
