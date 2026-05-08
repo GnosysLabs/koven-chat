@@ -3091,8 +3091,22 @@ export class MatrixTransport {
 			text = stripReplyFallback(text);
 		}
 
+		// Pending = anything matrix-js-sdk hasn't confirmed as live
+		// timeline yet.  EventStatus is non-null for SENDING /
+		// ENCRYPTING / QUEUED / NOT_SENT / CANCELLED — all states
+		// where the event id is the SDK's local-echo synthetic
+		// (typically `~`-prefixed) rather than a real homeserver
+		// event id.  Server-side actions (redact, react, flag) keyed
+		// on this id will 404; UI gates them off via this flag.
+		// Belt-and-suspenders: we also accept ids that literally
+		// start with `~` in case the SDK clears status before the id
+		// is replaced (which we've seen happen on flaky networks).
+		const sdkStatus = event.status; // null when fully sent
+		const eventId = event.getId();
+		const pending = sdkStatus !== null || (typeof eventId === "string" && eventId.startsWith("~"));
+
 		return {
-			id: event.getId() as EventId,
+			id: eventId as EventId,
 			roomId: room.roomId as RoomId,
 			sender: sender as UserId,
 			senderDisplayName: displayName,
@@ -3109,6 +3123,7 @@ export class MatrixTransport {
 			mediaEncrypted,
 			edited: !!event.replacingEvent(),
 			replyTo,
+			pending,
 		};
 	}
 

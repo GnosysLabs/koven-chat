@@ -175,6 +175,16 @@ export interface Message {
 		senderDisplayName: string;
 		snippet: string;
 	};
+	// True for events whose send hasn't been confirmed by the homeserver
+	// yet — local echoes still in flight, queued retries after a network
+	// drop, encryption-in-progress, or hard-failed sends matrix-js-sdk
+	// is keeping around for a manual retry.  The `id` of a pending
+	// message is a synthetic SDK-side identifier (typically `~`-prefixed)
+	// that no other client or server endpoint knows about, so any
+	// server-side action keyed on the id (redaction, reaction, flag)
+	// will 404 until the real event id arrives via /sync.  UI components
+	// that expose those actions should suppress them while pending.
+	pending?: boolean;
 }
 
 // Per-message reaction aggregate.  One entry per distinct emoji key.

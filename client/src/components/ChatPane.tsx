@@ -589,6 +589,15 @@ export function ChatPane({
 									onDeleteMessage && !collapsesByMessage.get(m.id) && (
 										m.isSelf || !!myOwnedBotMxids?.has(m.sender)
 									)
+										// Suppress delete on pending (local-echo)
+										// events — their id is a SDK-synthetic
+										// stand-in until /sync acks the real
+										// homeserver event id, so a redaction
+										// would 404 with M_NOT_FOUND.  Once the
+										// event flips to confirmed, the row
+										// re-renders with pending=false and the
+										// trash icon comes back automatically.
+										&& !m.pending
 										// Return the promise (don't `void` it) so
 										// the DeleteAction dialog can await the
 										// real network call and surface errors
