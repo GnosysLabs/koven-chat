@@ -22,6 +22,7 @@ import {
 } from "@/components/MentionAutocomplete";
 import { serverOf } from "@/lib/mxid";
 import { FlagDialog } from "@/components/FlagDialog";
+import { DeleteMessageDialog } from "@/components/DeleteMessageDialog";
 import { firstLink, linkify } from "@/lib/linkify";
 import { MarkdownContent } from "@/components/MarkdownContent";
 
@@ -846,15 +847,19 @@ function MessageRow({
 	// an emoji (otherwise the toolbar would fade out the moment they
 	// move the cursor up to the popover content).
 	const [reactOpen, setReactOpen] = useState(false);
-	const showActions = isHovered || reactOpen;
-	// Confirmation friction lives inside MessageActions's trash
-	// button now (a small Popover — see DeleteAction there).  We
-	// used to wrap onDelete in `window.confirm("Delete this
-	// message?")` here, but Tauri 2's WebView suppresses the native
-	// dialog without warning, so on the desktop app the "are you
-	// sure?" prompt silently returned undefined and the click
-	// looked like it did nothing.  Pass onDelete through as-is.
-	const handleDelete = onDelete;
+	// Same pattern for the delete-confirmation dialog: the trash
+	// button lives inside the hover-gated toolbar, but the dialog
+	// itself MUST stay mounted while open even though the user's
+	// cursor has moved off the message row to interact with it.
+	// First attempt put the Dialog inside MessageActions, which
+	// unmounted the moment the row un-hovered (making the dialog
+	// "pop up then disappear after a second"); lifting the open
+	// state to the row level + including it in `showActions` keeps
+	// both the toolbar and the dialog rendered until the user
+	// commits or cancels.
+	const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+	const showActions = isHovered || reactOpen || deleteDialogOpen;
+	const handleDelete = onDelete ? () => setDeleteDialogOpen(true) : undefined;
 	const myFlagId = flags?.myFlagId;
 	// You can't flag your own messages — both because the consensus
 	// vote is meaningless on yourself and because it'd let users
@@ -928,6 +933,13 @@ function MessageRow({
 						open={flagDialogOpen}
 						onOpenChange={setFlagDialogOpen}
 						onSubmit={onFlag}
+					/>
+				)}
+				{onDelete && (
+					<DeleteMessageDialog
+						open={deleteDialogOpen}
+						onOpenChange={setDeleteDialogOpen}
+						onConfirm={onDelete}
 					/>
 				)}
 			</div>
@@ -1005,6 +1017,13 @@ function MessageRow({
 					open={flagDialogOpen}
 					onOpenChange={setFlagDialogOpen}
 					onSubmit={onFlag}
+				/>
+			)}
+			{onDelete && (
+				<DeleteMessageDialog
+					open={deleteDialogOpen}
+					onOpenChange={setDeleteDialogOpen}
+					onConfirm={onDelete}
 				/>
 			)}
 		</div>
