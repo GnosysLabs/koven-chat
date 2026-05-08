@@ -167,6 +167,7 @@ export function ChatPane({
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
 	const composeInputRef = useRef<HTMLInputElement | null>(null);
 	const scrollRef = useRef<HTMLDivElement | null>(null);
+	const scrollContentRef = useRef<HTMLDivElement | null>(null);
 	// Cursor position in the compose box.  Tracked separately from
 	// `draft` because keyboard shortcuts (Tab, Enter for send) fire
 	// before React syncs the input's selectionStart.  Updated on
@@ -176,11 +177,74 @@ export function ChatPane({
 	// every query change so arrow-down behaves intuitively.
 	const [mentionIndex, setMentionIndex] = useState(0);
 
+	// Whether the timeline should auto-scroll to bottom when content
+	// changes.  Starts true on every room enter; flipped false when
+	// the user manually scrolls up past the bottom-stick threshold so
+	// reading older history doesn't keep yanking them down to the
+	// latest message.  Re-armed when they scroll back to (or near)
+	// the bottom themselves.
+	const followBottomRef = useRef(true);
+	const prevRoomIdRef = useRef<string | undefined>(undefined);
+
+	// Room change: re-arm the lock and snap to bottom now.  We don't
+	// know the final scrollHeight here (images / avatars decode
+	// async) but the ResizeObserver below catches every subsequent
+	// growth and re-snaps.  `prevRoomIdRef` distinguishes "fresh
+	// room enter" from "messages.length changed in the same room."
 	useEffect(() => {
 		const el = scrollRef.current;
 		if (!el) return;
-		el.scrollTop = el.scrollHeight;
+		const isRoomChange = prevRoomIdRef.current !== room?.id;
+		prevRoomIdRef.current = room?.id;
+		if (isRoomChange) {
+			followBottomRef.current = true;
+		}
+		if (followBottomRef.current) {
+			el.scrollTop = el.scrollHeight;
+		}
 	}, [messages.length, room?.id]);
+
+	// Continuous re-snap on content resize.  ResizeObserver fires
+	// every time the inner content's height changes — the most
+	// common cases are async image / avatar decodes growing rows
+	// AFTER we already set scrollTop, paginated history loading
+	// from getRoomMessages, and reactions / flags getting added to
+	// existing rows.  As long as `followBottomRef.current` is true
+	// (user hasn't scrolled up), we keep the viewport pinned to the
+	// new bottom regardless of what's growing or how long it takes.
+	//
+	// Wrapper element exists only because ResizeObserver on the
+	// scroll container itself watches the BORDER box (clientHeight),
+	// not scrollHeight.  Observing the inner content gives us the
+	// timeline's true rendered height.
+	useEffect(() => {
+		const inner = scrollContentRef.current;
+		const el = scrollRef.current;
+		if (!inner || !el) return;
+		const ro = new ResizeObserver(() => {
+			if (followBottomRef.current && scrollRef.current) {
+				scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+			}
+		});
+		ro.observe(inner);
+		return () => ro.disconnect();
+	}, []);
+
+	// Watch user scroll position to maintain followBottomRef.  Flip
+	// false when they scroll above the bottom-stick threshold; flip
+	// true when they scroll back into it.  100px feels generous —
+	// matches the visual "I'm basically at the bottom" intuition
+	// without requiring exact pixel-perfect anchoring.
+	useEffect(() => {
+		const el = scrollRef.current;
+		if (!el) return;
+		const onScroll = () => {
+			const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+			followBottomRef.current = distance < 100;
+		};
+		el.addEventListener("scroll", onScroll, { passive: true });
+		return () => el.removeEventListener("scroll", onScroll);
+	}, [room?.id]);
 
 	// Global hover tracking for the message-action toolbar.
 	//
@@ -520,6 +584,14 @@ export function ChatPane({
 			</header>
 
 			<div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4">
+				{/* Inner content wrapper exists ONLY so the
+				    ResizeObserver in the auto-scroll effect has a
+				    single observable element whose size reflects the
+				    full timeline height (including async image
+				    decodes).  Without it the observer would only
+				    track the first message row.  Layout-neutral —
+				    block-level div, no margins/padding. */}
+				<div ref={scrollContentRef}>
 				{!messagesLoaded ? (
 					// Initial timeline still loading.  Render nothing
 					// rather than flashing "No messages yet." — the
@@ -606,6 +678,7 @@ export function ChatPane({
 						);
 					})
 				)}
+				</div>
 			</div>
 
 			{room.isInvite ? (
