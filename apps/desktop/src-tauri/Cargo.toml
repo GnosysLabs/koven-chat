@@ -1,6 +1,6 @@
 [package]
 name = "koven-desktop"
-version = "0.1.3"
+version = "0.1.2"
 description = "Koven desktop shell — Tauri WebView wrapping client.koven.chat with native window chrome, OS-routed external links, and a minisign-signed in-app updater."
 authors = ["Gnosys Labs"]
 edition = "2021"
@@ -44,20 +44,6 @@ url = "2"
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"
 objc = "0.2.7"
-
-# Windows-only: DWM bindings for `DwmSetWindowAttribute` —
-# specifically `DWMWA_WINDOW_CORNER_PREFERENCE` so we can opt the
-# (frameless) main window into the OS's native Win11 rounded-corner
-# treatment.  Without this a `decorations(false)` window paints
-# square corners.  windows-sys is the no-runtime, lean FFI binding
-# (vs. the `windows` crate, which pulls a heavier wrapper layer);
-# we only need raw FFI here.  Win10 ignores the attribute and
-# falls through to square corners — that's the documented behaviour
-# and acceptable: Win10 reaches EOL Oct 2025 and the visual mismatch
-# is small (ROUND adds ~8px radius vs. our 14px Mac target — both
-# are clearly "rounded" rather than "sharp").
-[target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
 
 # Smaller release binary — strip symbols, opt for size.  Tauri bundles
 # webview2 / webkit on the host so the binary itself is dominated by

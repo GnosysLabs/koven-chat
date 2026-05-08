@@ -16,24 +16,14 @@ use tauri_plugin_updater::UpdaterExt;
 #[cfg(target_os = "macos")]
 use tauri::menu::{AboutMetadataBuilder, MenuBuilder, SubmenuBuilder};
 
-// Platform-specific rounded-corner plugins.  Split per-OS:
-//
-//   * macOS (mac_rounded_corners) — sets the NSWindow contentView's
-//     layer cornerRadius + masksToBounds via Cocoa, plus hides the
-//     native traffic-light buttons so DesktopTitleBar can render
-//     replacements.  Sourced from cloudworxx/tauri-plugin-mac-
-//     rounded-corners and vendored here.
-//   * Windows (win_rounded_corners) — opts a frameless window into
-//     DWM's native Win11 rounded-corner treatment via
-//     `DwmSetWindowAttribute(DWMWA_WINDOW_CORNER_PREFERENCE)`.
-//
-// Both expose #[tauri::command]s the SPA invokes during boot.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+// macOS rounded-corner plugin (cloudworxx/tauri-plugin-mac-rounded-corners).
+// Copied into ./plugins/mac_rounded_corners.rs by the npm postinstall hook;
+// exposes #[tauri::command]s the SPA invokes to set the NSWindow's
+// contentView layer corner radius via Cocoa.
+#[cfg(target_os = "macos")]
 mod plugins;
 #[cfg(target_os = "macos")]
 use plugins::mac_rounded_corners;
-#[cfg(target_os = "windows")]
-use plugins::win_rounded_corners;
 
 /// Close the floating splash window + reveal the (already styled)
 /// main window.  Invoked from the SPA's main.tsx after the
@@ -217,12 +207,11 @@ pub fn run() {
 		// Signed auto-update from GitHub Releases via the manifest
 		// URL declared in tauri.conf.json.
 		.plugin(tauri_plugin_updater::Builder::new().build())
-		// Platform-specific rounded-corner commands plus reveal_app
-		// (which runs on every OS).  Per-OS branches here so we
-		// don't compile Cocoa bindings into the Linux build or DWM
-		// bindings into the macOS build.  The SPA picks the right
-		// invoke target based on `__KOVEN_PLATFORM__` (see
-		// client/src/main.tsx).
+		// Rounded-corner plugin commands.  macOS-only — guarded so
+		// the invoke_handler isn't compiled into Linux / Windows
+		// builds that don't need it.  The SPA invokes
+		// `enable_modern_window_style` once on mount (see
+		// DesktopTitleBar.tsx) to apply the layer mask.
 		.invoke_handler({
 			#[cfg(target_os = "macos")]
 			{
@@ -234,14 +223,7 @@ pub fn run() {
 					reveal_app,
 				]
 			}
-			#[cfg(target_os = "windows")]
-			{
-				tauri::generate_handler![
-					win_rounded_corners::enable_windows_rounded_corners,
-					reveal_app,
-				]
-			}
-			#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+			#[cfg(not(target_os = "macos"))]
 			{
 				tauri::generate_handler![reveal_app]
 			}
@@ -316,18 +298,13 @@ pub fn run() {
 			// Splash window — tiny transparent floater that shows the
 			// favicon over the desktop wallpaper while the main
 			// window builds + the SPA runs its rounded-corner setup.
-			// macOS AND Windows: both build the main window with
-			// `decorations(false)` (custom SPA chrome), and both
-			// would otherwise show a square-flash → rounded sequence
-			// during launch.  The splash mask absorbs that.
-			//
-			// Linux keeps native decorations and shows the main
-			// window directly — no splash needed there.
-			//
-			// Splash is closed by the JS-invoked `reveal_app` command
-			// once the main UI is ready, OR by a 3-second fallback
-			// timer if the reveal call never lands.
-			#[cfg(any(target_os = "macos", target_os = "windows"))]
+			// macOS only because Linux / Windows builds don't have
+			// the same square-white-flash problem (their native
+			// chrome is what users expect during launch).  Splash is
+			// closed by the JS-invoked `reveal_app` command once
+			// the main UI is ready, OR by a 3-second fallback timer
+			// if the reveal call never lands.
+			#[cfg(target_os = "macos")]
 			{
 				let splash_url = if cfg!(debug_assertions) {
 					WebviewUrl::External("http://localhost:1420/splash.html".parse().unwrap())
@@ -351,21 +328,14 @@ pub fn run() {
 				// circle/oval around our floating favicon.
 				// setHasShadow:NO removes it so the favicon really
 				// does float against the bare desktop.
-				//
-				// Windows: DWM doesn't draw a shadow for `transparent`
-				// frameless windows, so no equivalent call needed.
-				#[cfg(target_os = "macos")]
-				{
-					use cocoa::base::id;
-					use objc::{msg_send, sel, sel_impl};
-					if let Ok(ptr) = splash.ns_window() {
-						unsafe {
-							let ns_window: id = ptr as id;
-							let _: () = msg_send![ns_window, setHasShadow: false];
-						}
+				use cocoa::base::id;
+				use objc::{msg_send, sel, sel_impl};
+				if let Ok(ptr) = splash.ns_window() {
+					unsafe {
+						let ns_window: id = ptr as id;
+						let _: () = msg_send![ns_window, setHasShadow: false];
 					}
 				}
-				let _ = &splash; // silence unused warning on Windows where the binding isn't used after build()
 
 				// Fallback: 3 seconds after launch, force-reveal even
 				// if `reveal_app` never fires.  Without this, any
@@ -433,48 +403,45 @@ pub fn run() {
 				// with mutter and never re-reads it.
 				.visible(false);
 
-			// macOS + Windows: kill ALL native chrome and render our
-			// own title bar in the SPA.  Tauri's stock chrome options
-			// (Visible / Transparent / Overlay) all have problems for
-			// our case:
+			// macOS: kill ALL native chrome and render our own title
+			// bar in the SPA.  Tauri's stock options (Visible /
+			// Transparent / Overlay) all have problems for our case:
 			//
 			//   * Visible — chunky opaque bar with "Koven" text
 			//     centered.  Doesn't blend with the dark gradient,
-			//     reads like an early-2010s desktop app on either OS.
-			//   * Transparent + hiddenTitle — Mac-only, and past
-			//     attempts had drag-region issues where clicks on
-			//     the SPA's leftmost column ate the drag handle.
-			//   * Overlay — Mac-only; traffic lights overlay the
-			//     SpaceBar.  Same drag problem.
+			//     reads like an early-2010s desktop app.
+			//   * Transparent + hiddenTitle — bar exists but is
+			//     invisible.  Past attempts had drag-region issues
+			//     where clicks on the SPA's leftmost column ate the
+			//     drag handle.
+			//   * Overlay — no allocated chrome, traffic lights
+			//     overlay the SpaceBar.  Same drag problem.
 			//
-			// `decorations(false)` removes everything: no native
-			// window controls, no title bar, no chrome.  The SPA
-			// fills the entire window edge-to-edge.  We then render
-			// a custom `<DesktopTitleBar />` inside the SPA that:
+			// `decorations(false)` removes everything: no traffic
+			// lights, no title bar, no chrome.  The SPA fills the
+			// entire window edge-to-edge.  We then render a custom
+			// `<DesktopTitleBar />` inside the SPA (see
+			// client/src/components/DesktopTitleBar.tsx) that:
 			//
-			//   * On macOS, draws traffic-light buttons (close /
-			//     minimize / zoom) on the left, like every native
-			//     Mac window.
-			//   * On Windows, draws minimize / maximize / close
-			//     buttons on the right with the standard
-			//     gray-hover-on-min/max + red-hover-on-close
-			//     treatment.
+			//   * Draws our own three macOS-style traffic-light
+			//     buttons that call window.close() / minimize() /
+			//     toggleMaximize() via the Tauri JS API,
 			//   * Carries `data-tauri-drag-region` on the strip
-			//     between the buttons and the empty side so window
-			//     drag works the way users expect on each OS.
+			//     between the buttons and the right edge so window
+			//     drag still works the way users expect.
 			//
-			// Linux keeps native decorations — its drag-region story
-			// is more work for less benefit and the various WMs (GNOME,
-			// KDE, etc.) all have well-loved native chrome.
-			#[cfg(any(target_os = "macos", target_os = "windows"))]
+			// Linux + Windows keep default decorations — they have
+			// less ugly defaults and the drag-region story would be
+			// more work for less benefit.  Custom chrome on Mac
+			// only.
+			#[cfg(target_os = "macos")]
 			{
-				// Strip native chrome (no window controls, no title
-				// bar).  On macOS the window stays OPAQUE — corners
-				// get rounded via NSView.layer.cornerRadius in a
-				// post-build step (`transparent(true)` is documented
-				// as breaking layer corner-masking on macOS, Tauri
-				// issue #14165).  On Windows the corners get rounded
-				// via DWM after the window mounts.
+				// Strip native chrome (no traffic lights from OS, no
+				// title bar).  Window stays OPAQUE — we'll round its
+				// corners via NSView.layer.cornerRadius in a post-
+				// build step.  `transparent(true)` is documented as
+				// actively breaking layer corner-masking on macOS
+				// (Tauri issue #14165), so don't go there.
 				builder = builder.decorations(false);
 			}
 
@@ -591,15 +558,13 @@ pub fn run() {
 				log::warn!("set_icon: PNG decode failed (image-png feature missing?)");
 			}
 
-			// On macOS + Windows the main window stays hidden until
-			// the SPA invokes `reveal_app` — the splash window is
-			// what the user sees during boot, and the rounded-corner
-			// setup runs against an off-screen window so the
-			// square→round transition isn't visible.  On Linux there's
-			// no splash and the window keeps native chrome, so show
-			// it now (icon attached, content loading; native chrome
-			// handles the launch look).
-			#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+			// On macOS the main window stays hidden until the SPA
+			// invokes `reveal_app` — the splash window is what the
+			// user sees during boot.  On Linux / Windows there's no
+			// splash, so show the main window now (icon attached,
+			// content loading; native chrome handles the launch
+			// look).
+			#[cfg(not(target_os = "macos"))]
 			{
 				if let Err(err) = win.show() {
 					log::warn!("window.show failed: {err}");

@@ -18,72 +18,60 @@ import App from "./App";
 import { DesktopTitleBar } from "./components/DesktopTitleBar";
 import "./index.css";
 
-// Per-platform desktop chrome setup.  Both branches run BEFORE the
-// reveal sequence so when the splash hands off to the main window
-// it's already fully chromed (rounded corners applied, native
-// controls hidden where needed) — no square-flash → rounded-final
-// transition.  Browsers and Linux desktop builds short-circuit
-// immediately; the Tauri-API chunks only get pulled when actually
-// running inside the Tauri shell.
-//
-// macOS:
+// macOS desktop only: round the NSWindow corners via cloudworxx's
+// plugin, then immediately hide the native traffic lights it
+// re-enabled — we want the rounded window but the SPA renders its
+// own traffic-light buttons (DesktopTitleBar) for pixel-perfect
+// alignment with the rest of the chrome.  Two invokes:
 //   1. enable_modern_window_style — sets contentView.layer.cornerRadius
-//      (cloudworxx plugin invokes this via #[tauri::command]).
-//   2. hide_traffic_lights — setHidden:YES on close/min/zoom because
-//      the plugin's style-mask change re-enabled them; we render
-//      our own in DesktopTitleBar instead.
+//   2. hide_traffic_lights        — setHidden:YES on close/min/zoom
+// Lazy-imported so browsers / Linux / Windows don't pull the
+// Tauri-API chunk.
 //
-// Windows:
-//   1. enable_windows_rounded_corners — DWM `WINDOW_CORNER_PREFERENCE`
-//      = ROUND, which gives the frameless window the OS's native
-//      Win11 rounded-corner treatment with proper anti-aliasing
-//      and shadow.  Win10 silently no-ops (square corners).
-async function setupDesktopChrome(): Promise<void> {
-	if (typeof window === "undefined") return;
-	const platform = (window as { __KOVEN_PLATFORM__?: string }).__KOVEN_PLATFORM__;
-	if (platform === "macos") {
-		try {
-			const [cloudworxx, tauriCore] = await Promise.all([
-				import("@cloudworxx/tauri-plugin-mac-rounded-corners"),
-				import("@tauri-apps/api/core"),
-			]);
-			await cloudworxx.enableModernWindowStyle({
-				cornerRadius: 14,
-				offsetX: 0,
-				offsetY: 0,
-			});
-			await tauriCore.invoke("hide_traffic_lights");
-		} catch (err) {
-			console.error("macOS rounded-corner setup failed", err);
-		}
+// Returns a Promise so the splash teardown below can await the
+// chrome being fully ready before fading the splash out — without
+// the await we'd briefly see a square dark window before the
+// corners round.
+async function setupMacChrome(): Promise<void> {
+	if (
+		typeof window === "undefined" ||
+		(window as { __KOVEN_PLATFORM__?: string }).__KOVEN_PLATFORM__ !== "macos"
+	) {
 		return;
 	}
-	if (platform === "windows") {
-		try {
-			const tauriCore = await import("@tauri-apps/api/core");
-			await tauriCore.invoke("enable_windows_rounded_corners");
-		} catch (err) {
-			console.error("Windows rounded-corner setup failed", err);
-		}
-		return;
+	try {
+		const [cloudworxx, tauriCore] = await Promise.all([
+			import("@cloudworxx/tauri-plugin-mac-rounded-corners"),
+			import("@tauri-apps/api/core"),
+		]);
+		await cloudworxx.enableModernWindowStyle({
+			cornerRadius: 14,
+			offsetX: 0,
+			offsetY: 0,
+		});
+		await tauriCore.invoke("hide_traffic_lights");
+	} catch (err) {
+		console.error("rounded-corner setup failed", err);
 	}
 }
 
 // Reveal sequence: ask Rust to close the floating splash window
 // and show the main window.  By this point the main window is
-// fully styled (rounded corners applied, custom chrome rendered,
-// React mounted) so the swap from splash to main is a single
-// transition with no in-between state visible.
+// fully styled (rounded corners, traffic lights hidden, custom
+// chrome rendered, React mounted) so the swap from splash to
+// main is a single transition with no in-between state visible.
 //
-// Runs on macOS + Windows — both build the main window with
-// `decorations(false)` and need the splash mask to hide the
-// chrome-setup transition.  Linux desktop and browser builds
-// short-circuit (no splash exists; main window is either already
-// visible or doesn't apply).
+// On non-macOS-desktop platforms there's no splash window and the
+// main window was shown by lib.rs's setup() — invoking reveal_app
+// there is a cheap no-op (splash window not found, main already
+// visible) and keeps the codepath uniform.
 async function revealApp(): Promise<void> {
-	if (typeof window === "undefined") return;
-	const platform = (window as { __KOVEN_PLATFORM__?: string }).__KOVEN_PLATFORM__;
-	if (platform !== "macos" && platform !== "windows") return;
+	if (
+		typeof window === "undefined" ||
+		(window as { __KOVEN_PLATFORM__?: string }).__KOVEN_PLATFORM__ !== "macos"
+	) {
+		return;
+	}
 	try {
 		const { invoke } = await import("@tauri-apps/api/core");
 		await invoke("reveal_app");
@@ -94,13 +82,13 @@ async function revealApp(): Promise<void> {
 
 // SPA fills the entire window.  No title-bar gutter at the top —
 // individual views are responsible for their own top inset on
-// macOS / Windows where the custom chrome reserves the top 40px
-// as a drag zone with the window controls.  The login screen
-// leaves it empty (so its wallpaper extends edge-to-edge under
-// the floating window controls); the authed app layout adds the
-// gutter explicitly.  DesktopTitleBar stays absolute-positioned
-// at the top so the controls paint over whatever the SPA renders
-// below.
+// macOS where the OS reserves the top 28px as a drag zone.  The
+// login screen leaves it empty (so its wallpaper extends edge-to-
+// edge under the floating traffic lights); the authed app layout
+// adds pt-7 to its main content row so chat-header buttons clear
+// the drag zone.  DesktopTitleBar stays absolute-positioned at
+// the top so the traffic lights paint over whatever the SPA
+// renders below.
 ReactDOM.createRoot(document.getElementById("root")!).render(
 	<React.StrictMode>
 		<div className="h-full relative">
@@ -111,13 +99,12 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
 );
 
 // Boot sequence:
-//   1. setupDesktopChrome — round the corners (and hide native
-//      traffic lights on macOS).  No-op for browsers / Linux.
+//   1. setupMacChrome — round the corners, hide native traffic lights
 //   2. wait one frame so React's first commit has actually painted
 //   3. revealApp — close splash window, show main window
 // All three are sequenced so the user only sees: floating favicon
 // over the desktop → fully styled main window.  No square flash,
 // no half-painted intermediate.
-void setupDesktopChrome()
+void setupMacChrome()
 	.then(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
 	.then(revealApp);
