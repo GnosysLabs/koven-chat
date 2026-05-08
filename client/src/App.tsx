@@ -41,6 +41,7 @@ import { useCollapsedRooms } from "@/lib/collapsedRooms";
 import { fetchAllBotMxids } from "@/lib/bots-cache";
 import { fetchUiaPassword } from "@/lib/auth";
 import { TransportContext } from "@/lib/transportContext";
+import { DesktopTitleBar } from "@/components/DesktopTitleBar";
 import { applyTheme, loadSettings, saveSettings, type Settings } from "@/state/settings";
 import type { UserId } from "@koven/shared";
 import { initialState, reduce } from "@/state/store";
@@ -693,6 +694,14 @@ export default function App() {
 	return (
 		<TransportContext.Provider value={transport}>
 		<div className="h-full flex flex-col">
+			{/* Custom macOS title bar (decorations(false) in lib.rs
+			    removed the native one).  Renders nothing on browser /
+			    Linux / Windows builds, so it's safe at the very top
+			    of the chrome stack — banner / sync indicator slot in
+			    underneath.  Sits ABOVE the suspension banner so the
+			    title bar always reads cleanly even when the user's
+			    account is paused. */}
+			<DesktopTitleBar />
 			{suspension && <SuspendedBanner suspension={suspension} />}
 			{state.syncState !== "ready" && state.syncState !== "syncing" && (
 				<div className="text-xs px-3 py-1 bg-muted text-muted-foreground border-b border-border">
