@@ -2387,6 +2387,28 @@ export class MatrixTransport {
 		const room = c.getRoom(roomId);
 		if (!room) throw new Error(`deleteRoom: room ${roomId} not in store`);
 
+		// Strip the room from every parent space's child list BEFORE
+		// kicking + leaving.  Without this, the m.space.child state
+		// event on each parent space stays pointing at a now-empty
+		// room — it shows up in the space as a ghost child tile that
+		// nobody can join (Synapse refuses admin-join into a 0-member
+		// room with "no servers in the room have been provided").
+		// Send `{}` content (Matrix's idiomatic "child removed" — an
+		// m.space.child with no `via`) on each parent.  Best-effort:
+		// a parent we lack PL on stays linked, but the room itself is
+		// still deleted; the broken link can be cleaned up by that
+		// parent's admin later.
+		const parentEvents = room.currentState.getStateEvents("m.space.parent") ?? [];
+		for (const ev of parentEvents) {
+			const parentSpaceId = ev.getStateKey();
+			if (!parentSpaceId) continue;
+			try {
+				await c.sendStateEvent(parentSpaceId, "m.space.child" as any, {}, roomId);
+			} catch (err) {
+				console.warn(`deleteRoom: failed to unlink from space ${parentSpaceId}`, err);
+			}
+		}
+
 		// Kick everyone except self.  matrix-js-sdk's `kick` takes the
 		// reason as an optional second arg; we pass a short marker so
 		// kicked members understand why they're seeing a kick event.
@@ -2406,6 +2428,7 @@ export class MatrixTransport {
 		await c.leave(roomId);
 		await c.forget(roomId).catch(() => {/* ok if not supported */});
 		this.emitRoomList();
+		this.emitSpaceList();
 	}
 
 	/**
