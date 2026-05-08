@@ -541,6 +541,25 @@ export default function App() {
 		setCreds(null);
 		setEncState(null);
 		dispatch({ type: "set_active_room", roomId: null });
+		// Wipe matrix-js-sdk's IndexedDB state — both the rust-crypto
+		// stores AND the regular sync store — so the NEXT login (which
+		// might be as a different user) doesn't trip the "rust-crypto
+		// store mismatch" recovery path on the way in.  That path
+		// catches the mismatch error, wipes, and retries init from
+		// scratch, which on slow devices takes 30-90s and strands the
+		// user on the "Connecting…" screen.  Doing the wipe at
+		// sign-out time means we pay the cost during "signing out…"
+		// (a UX moment where users already expect to wait) instead of
+		// at the next login.
+		//
+		// Fire-and-forget: the wipe is async (IndexedDB) but signing
+		// out is otherwise instantaneous — we don't want to make the
+		// user stare at the login screen waiting for IndexedDB to
+		// drain.  Errors are tolerated by the recovery path on the
+		// next login.
+		void import("@/lib/matrix").then(({ wipeAllMatrixIndexedDB }) => {
+			void wipeAllMatrixIndexedDB();
+		});
 	}
 
 	const activeRoom = useMemo(

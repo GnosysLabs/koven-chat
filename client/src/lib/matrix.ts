@@ -131,6 +131,62 @@ async function wipeRustCryptoIndexedDB(): Promise<void> {
 	})));
 }
 
+/**
+ * Wipe ALL matrix-js-sdk IndexedDB state for this origin — both the
+ * rust-crypto stores and the regular SDK store (rooms, events, sync
+ * tokens).  Called from sign-out so the NEXT login (which may be as
+ * a completely different user, e.g. account switching) starts from
+ * a clean slate.
+ *
+ * Without this, switching accounts on the same browser triggers the
+ * "rust-crypto store mismatch" recovery path on the new login —
+ * initRustCrypto throws, we catch it, wipe, and retry.  The catch +
+ * wipe + fresh-init sequence takes 30-90s on busy accounts because
+ * fresh init regenerates the olm account from scratch (curve25519 +
+ * ed25519 keys + ~100 pre-keys, all CPU-bound on the WASM side).
+ * Doing the wipe at sign-out time means we pay that cost during a
+ * UX moment where the user already expects "signing out…", not on
+ * the next login where they're staring at a "Connecting…" screen.
+ *
+ * matrix-js-sdk picks IndexedDB DB names with the
+ * `matrix-js-sdk::` prefix.  We enumerate every existing DB on this
+ * origin and drop anything matching that prefix; safer than a fixed
+ * list because the SDK has added new stores between minor versions
+ * (sliding-sync, key-backup metadata) that a hardcoded list would
+ * miss.
+ */
+export async function wipeAllMatrixIndexedDB(): Promise<void> {
+	if (typeof indexedDB === "undefined") return;
+	// indexedDB.databases() is supported in all modern browsers we
+	// target (Chromium, Safari 14+, Firefox 126+) but not in some
+	// older Firefox.  Fall back to the known-name list there.
+	let names: string[] = [];
+	try {
+		const dbs = await (indexedDB as unknown as { databases?(): Promise<{ name?: string }[]> })
+			.databases?.() ?? [];
+		names = dbs
+			.map(d => d.name)
+			.filter((n): n is string => typeof n === "string" && n.startsWith("matrix-js-sdk"));
+	} catch {
+		// fall through
+	}
+	if (names.length === 0) {
+		names = [
+			"matrix-js-sdk::matrix-sdk-crypto",
+			"matrix-js-sdk::matrix-sdk-crypto-meta",
+			"matrix-js-sdk:crypto",
+			"matrix-js-sdk:riot-web-sync",
+			"matrix-js-sdk:default",
+		];
+	}
+	await Promise.all(names.map(name => new Promise<void>((resolve) => {
+		const req = indexedDB.deleteDatabase(name);
+		req.onsuccess = () => resolve();
+		req.onerror = () => resolve();
+		req.onblocked = () => resolve();
+	})));
+}
+
 export interface MatrixHandlers {
 	onSyncState(state: SyncState): void;
 	onRoomsUpdated(rooms: Room[]): void;
@@ -253,6 +309,45 @@ export class MatrixTransport {
 	async start(creds: MatrixCredentials): Promise<void> {
 		this.stopped = false;
 		this.creds = creds;
+		// Preemptive store-mismatch check.  Compare the user_id we're
+		// about to log in as against the one we last logged in as
+		// (stored in localStorage by this same code path).  If they
+		// differ, the rust-crypto IndexedDB still has the previous
+		// user's olm account — initRustCrypto will throw, we'd catch,
+		// wipe, and retry, but the catch + wipe + fresh init takes
+		// 30-90s on slow devices because rust-crypto regenerates the
+		// olm keypairs from scratch.  Wiping BEFORE initRustCrypto
+		// is much faster: indexedDB.deleteDatabase doesn't have to
+		// fight the half-loaded WASM-side handle, and initRustCrypto
+		// runs once instead of twice.
+		//
+		// Only triggers when the user actually changed.  The hot path
+		// (same user logging in fresh, or restoring an existing
+		// session) hits the localStorage read and compare and is
+		// done — no IndexedDB churn, no extra latency.
+		const LAST_USER_KEY = "koven.lastLoggedInUserId";
+		try {
+			const prev = typeof localStorage !== "undefined"
+				? localStorage.getItem(LAST_USER_KEY)
+				: null;
+			if (prev && prev !== creds.user_id) {
+				console.info(
+					"matrix.start: detected user switch (%s → %s), wiping crypto store preemptively",
+					prev,
+					creds.user_id,
+				);
+				await wipeRustCryptoIndexedDB();
+			}
+			if (typeof localStorage !== "undefined") {
+				localStorage.setItem(LAST_USER_KEY, creds.user_id);
+			}
+		} catch (err) {
+			// localStorage / IndexedDB might be unavailable in private
+			// modes; the catch-and-retry path inside initRustCrypto
+			// below is the same flow's fallback, so failure here just
+			// means the user hits the slow path on this one login.
+			console.warn("matrix.start: preemptive store check failed", err);
+		}
 		const buildClient = () => sdk.createClient({
 			baseUrl: creds.homeserver,
 			accessToken: creds.access_token,
