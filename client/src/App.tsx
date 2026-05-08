@@ -1155,6 +1155,11 @@ export default function App() {
 				// affordance stays hidden — including for instance
 				// admins; admin-delete is a separate capability.
 				canKickBanBots={!!(activeRoom?.creatorId && creds.user_id && activeRoom.creatorId === creds.user_id)}
+				// Suppress kick/ban affordance when the bot in question
+				// is one the viewer owns.  Founder-of-room === bot-
+				// owner is allowed (the affordance just hides);
+				// they can manage the bot from Settings → Bots.
+				isMyBot={!!viewedUserId && myOwnedBotMxids.has(viewedUserId)}
 				onBotMembership={async (action, botMxid) => {
 					if (!creds?.access_token || !state.activeRoomId) return;
 					try {

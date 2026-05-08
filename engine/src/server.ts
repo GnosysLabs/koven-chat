@@ -1789,6 +1789,21 @@ export function startServer(): void {
 						}, { status: 403 });
 					}
 
+					// Belt-and-suspenders: refuse when the founder is
+					// also the bot's owner.  The SPA already hides the
+					// kick/ban affordance for owned bots (see
+					// ProfileSheet.isMyBot), but a tampered client
+					// shouldn't be able to bypass that — banning your
+					// own bot is incoherent (manage it from Settings →
+					// Bots) and would just lock you out of your own
+					// bot's room membership.
+					if (bot.owner_id === userId) {
+						return json({
+							errcode: "M_FORBIDDEN",
+							error: "you can't kick or ban a bot you own; manage it from Settings → Bots instead",
+						}, { status: 403 });
+					}
+
 					const ok = await kickOrBanAs({
 						bearerToken: token,
 						roomId,
