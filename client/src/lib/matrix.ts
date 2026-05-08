@@ -288,6 +288,31 @@ export class MatrixTransport {
 	// the point of having a separate encryption secret.
 	private ssssKey: { keyId: string; privateKey: Uint8Array } | null = null;
 
+	// Optimistic local mirror of `m.direct` for rooms whose membership
+	// was just changed in a way that should make them DMs but where the
+	// server-side account_data hasn't echoed back through /sync yet.
+	// Two flows write here:
+	//
+	//   * acceptInvite — receiving side of a DM invite.  Synapse's
+	//     setAccountData("m.direct", …) returns 200 quickly but the
+	//     SDK's local cache only updates when the AccountData event
+	//     comes back through sync (a few hundred ms to a few seconds
+	//     depending on long-poll timing).  Without this map the room
+	//     is misclassified as a regular private room during that
+	//     window, lands in the Rooms tile instead of DMs, and looks
+	//     to the user like the conversation vanished after they
+	//     navigate away from it.
+	//
+	//   * startDm — sender side, when the inviter creates a fresh DM
+	//     room.  Same gap: createRoom returns the new room id, we
+	//     setAccountData immediately, but classification reads from a
+	//     stale local m.direct until sync.
+	//
+	// Cleared per-roomId when the m.direct AccountData event echoes
+	// back through sync — at that point the SDK's own cache has the
+	// truth and we don't need our shim anymore.
+	private pendingDmMappings: Map<string, string> = new Map();
+
 	// Latch flipped by stop().  start() awaits initRustCrypto and
 	// startClient — both can take seconds.  React's <StrictMode> double-
 	// invokes effects in dev, so a transport can be stopped mid-start.
@@ -542,14 +567,39 @@ export class MatrixTransport {
 		});
 
 		// Account data fires on every map change in account_data — most
-		// of which we don't care about.  We re-broadcast only when the
-		// ignored-user list changes, so the Settings sheet's blocked-users
-		// section + ChatPane's per-message filter both re-render live.
+		// of which we don't care about.  We branch on the type:
+		//
+		//   * m.ignored_user_list — re-broadcast to the Settings sheet's
+		//     blocked-users section + ChatPane's per-message filter so
+		//     they re-render live.
+		//
+		//   * m.direct — server-side has now caught up with whatever
+		//     setAccountData("m.direct", …) we fired earlier.  Clear
+		//     any pendingDmMappings entries that are now in the real
+		//     map, then re-emit the room list so DM classification
+		//     refreshes.  Without this re-emit, a DM that was being
+		//     classified via the optimistic mirror stays in the mirror
+		//     (correct but redundant) until something else triggers
+		//     emitRoomList; harmless but wasteful.
 		this.client.on(ClientEvent.AccountData, (event: MatrixEvent) => {
-			if (event.getType() === "m.ignored_user_list") {
+			const type = event.getType();
+			if (type === "m.ignored_user_list") {
 				for (const fn of this.ignoreListeners) {
 					try { fn(); } catch (err) { console.warn("ignore listener threw", err); }
 				}
+				return;
+			}
+			if (type === "m.direct") {
+				const content = event.getContent() as Record<string, string[]>;
+				const allDmRoomIds = new Set<string>();
+				for (const ids of Object.values(content)) {
+					if (Array.isArray(ids)) for (const id of ids) allDmRoomIds.add(id);
+				}
+				for (const roomId of Array.from(this.pendingDmMappings.keys())) {
+					if (allDmRoomIds.has(roomId)) this.pendingDmMappings.delete(roomId);
+				}
+				this.emitRoomList();
+				return;
 			}
 		});
 
@@ -1450,6 +1500,12 @@ export class MatrixTransport {
 		await c.setAccountData("m.direct" as any, updated as any).catch(err => {
 			console.warn("startDm: setAccountData failed", err);
 		});
+		// Optimistic local mirror — see pendingDmMappings docstring.
+		// The is_direct member-event fallback in sdkRoomToRoom also
+		// covers the sender side, but adding it here too means
+		// classification doesn't depend on Synapse stamping is_direct
+		// onto the invitee's member event in time for the next emit.
+		this.pendingDmMappings.set(roomId, targetUserId);
 		this.emitRoomList();
 		return roomId;
 	}
@@ -1884,6 +1940,12 @@ export class MatrixTransport {
 					console.warn("acceptInvite: setAccountData failed", err);
 				});
 			}
+			// Optimistic mirror so the next emitRoomList classifies
+			// this room as a DM even though the SDK's local m.direct
+			// hasn't echoed yet.  Cleared by the m.direct AccountData
+			// listener once sync catches up.  See the field's docstring
+			// for the full rationale.
+			this.pendingDmMappings.set(roomId, dmInviter);
 		}
 		this.emitRoomList();
 	}
@@ -2691,6 +2753,19 @@ export class MatrixTransport {
 		const isInvite = myMembership === "invite";
 		const dmInviter = r.getDMInviter() ?? undefined;
 		if (!dmUserId && isInvite && dmInviter) dmUserId = dmInviter;
+
+		// Optimistic DM mirror — covers the post-accept and post-
+		// startDm window between calling setAccountData("m.direct", …)
+		// and the resulting AccountData event echoing back through
+		// /sync.  Without this, an accepted DM is briefly misclassified
+		// as a private room and lands under the "Rooms" tile, looking
+		// to the user like the conversation disappeared.  Cleared in
+		// the m.direct AccountData listener once the real map catches
+		// up.
+		if (!dmUserId) {
+			const pending = this.pendingDmMappings.get(r.roomId);
+			if (pending) dmUserId = pending;
+		}
 
 		const isDm = !!dmUserId;
 
