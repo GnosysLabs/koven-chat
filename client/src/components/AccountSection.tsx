@@ -170,7 +170,17 @@ export function AccountSection({ accessToken, transport, ignoredUsers, onSignedO
 					</p>
 				</div>
 
-				{isOnlyAdmin ? (
+				{isOnlyAdmin === null ? (
+					// Probe in flight — render nothing rather than
+					// flashing the Delete button (which would imply
+					// "go ahead, delete") followed by the
+					// only-admin warning a moment later when the
+					// fetch lands.  The delete account flow is
+					// destructive, so a one-frame "click here to
+					// destroy your account" before "wait, you can't"
+					// is the wrong UX even if it's brief.
+					null
+				) : isOnlyAdmin ? (
 					<div className="text-xs border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400 rounded px-3 py-2 leading-relaxed">
 						You're the only admin on this instance. Promote another admin before deleting your account, or floor-violation review on this instance will become impossible.
 					</div>

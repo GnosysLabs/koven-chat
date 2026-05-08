@@ -13,7 +13,13 @@ import { BotBadge } from "@/components/BotBadge";
 import type { Member } from "@koven/shared";
 
 export interface MemberListProps {
-	members: Member[];
+	// `null` = the room's member list hasn't loaded yet (e.g. just
+	// switched into the room, member-summary fetch in flight).
+	// `[]` = loaded, room is genuinely empty.
+	// The distinction matters because the empty-state placeholder
+	// ("No members.") would otherwise flash for the brief window
+	// between activeRoomId changing and `members_loaded` dispatching.
+	members: Member[] | null;
 	currentUserId: string | null;
 	onSelectMember(userId: string): void;
 	// mxids in this Set render with a BOT pill next to the name AND
@@ -38,6 +44,22 @@ function isInOnlineSection(p: ReturnType<typeof effectivePresence>): boolean {
 }
 
 export function MemberList({ members, currentUserId, onSelectMember, botMxids }: MemberListProps) {
+	// Pre-load: render the chrome (header, scroll container) but
+	// nothing inside.  Avoids flashing "No members." or a header
+	// reading "Members · 0" while the fetch is still in flight.
+	if (members === null) {
+		return (
+			<aside className="w-56 border-l border-border bg-card flex flex-col">
+				<div className="px-4 h-12 flex items-center border-b border-border">
+					<span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+						Members
+					</span>
+				</div>
+				<div className="flex-1 overflow-y-auto py-2" />
+			</aside>
+		);
+	}
+
 	const decorated = members.map(m => {
 		const isBot = !!botMxids?.has(m.userId);
 		return { m, isBot, presence: effectivePresence(m, isBot) };

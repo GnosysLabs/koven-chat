@@ -85,7 +85,12 @@ export default function App() {
 	const [viewedUserId, setViewedUserId] = useState<UserId | null>(null);
 	const [settingsOpen, setSettingsOpen] = useState(false);
 	const [settings, setSettings] = useState<Settings>(loadSettings);
-	const [myAvatarMxc, setMyAvatarMxc] = useState<string | undefined>(undefined);
+	// Three-valued: undefined = profile not yet probed (suppress the
+	// SpaceBar avatar tile so we don't flash DiceBear); null = probed,
+	// no avatar set; string = real mxc.  The probe runs on every auth
+	// change in the effect below — until it lands the SpaceBar tile
+	// renders a neutral placeholder rather than the auto-avatar.
+	const [myAvatarMxc, setMyAvatarMxc] = useState<string | null | undefined>(undefined);
 	// Public set of bot mxids — drives the BOT badge wherever a user
 	// is rendered.  Refreshed periodically so newly-created bots show
 	// up without a page reload.  Default empty Set so first-render
@@ -97,7 +102,13 @@ export default function App() {
 	// stay in sync.  Refreshed on activeSpace=="bots" entry and after
 	// every save / delete.  selectedBotId drives the right-pane view:
 	// number = edit, "new" = create form, null = picker / empty state.
-	const [myBots, setMyBots] = useState<BotSummary[]>([]);
+	// Initialised to `null` rather than `[]` so consumers can tell
+	// "fetch hasn't returned yet" from "fetched, user has no bots."
+	// BotList / BotsPane render nothing while null and only flip to
+	// the empty-state UI once we've confirmed the roster is genuinely
+	// empty — without this, the first paint flashes "No bots yet" +
+	// CTA before snapping to the populated list.
+	const [myBots, setMyBots] = useState<BotSummary[] | null>(null);
 	const [myBotsLoading, setMyBotsLoading] = useState(false);
 	const [myBotsError, setMyBotsError] = useState<string | null>(null);
 	const [selectedBotId, setSelectedBotId] = useState<number | "new" | null>(null);
@@ -203,6 +214,19 @@ export default function App() {
 			setSelectedBotId(null);
 		}
 	}, [state.activeSpace?.kind, refreshMyBots]);
+
+	// Eager-load the user's own bot roster once the access token is
+	// available, regardless of which view they're on.  The Bots-view
+	// effect above only fires when the user navigates *into* Bots, but
+	// `myOwnedBotMxids` (derived from `myBots`) gates the trash button
+	// on bot messages everywhere in the app — without this fetch, a
+	// user who's never opened Bots in this session sees no delete
+	// affordance on their own bot's chat output.  Fires once per
+	// access-token change (which is what `refreshMyBots`'s identity
+	// is keyed on).
+	useEffect(() => {
+		void refreshMyBots();
+	}, [refreshMyBots]);
 
 	// Admin status + pending-review-queue length poll.  Cheap two-call
 	// fan-out on the same cadence as the suspension poll: first probe
@@ -367,8 +391,14 @@ export default function App() {
 		t.start(creds).then(async () => {
 			if (cancelled) return;
 			// Pull my avatar mxc once so the SpaceBar tile resolves to my
-			// real avatar instead of the DiceBear fallback.
-			t.getMyProfile().then(p => { if (!cancelled) setMyAvatarMxc(p.avatarUrl); }).catch(() => {});
+			// real avatar instead of the DiceBear fallback.  Map an
+			// undefined `avatarUrl` to `null` so SpaceBar can tell
+			// "probe completed, no avatar" from the still-pending
+			// `undefined` initial state — the SpaceBar tile renders a
+			// muted placeholder until this fires.
+			t.getMyProfile()
+				.then(p => { if (!cancelled) setMyAvatarMxc(p.avatarUrl ?? null); })
+				.catch(() => { if (!cancelled) setMyAvatarMxc(null); });
 			// Encryption probe — gates app rendering.  See encState above.
 			try {
 				const status = await t.encryptionStatus();
@@ -497,7 +527,11 @@ export default function App() {
 	// content.  The engine re-checks server-side so a tampered SPA
 	// can't actually exceed its rights.
 	const myOwnedBotMxids = useMemo(
-		() => new Set(myBots.map(b => b.mxid as UserId)),
+		// While myBots is null (fetch in flight) we treat the owned
+		// set as empty — the trash icon stays hidden until the real
+		// roster arrives, at which point owned-bot rows pick it up
+		// on the next paint.
+		() => new Set((myBots ?? []).map(b => b.mxid as UserId)),
 		[myBots],
 	);
 	const allMessages = state.activeRoomId
@@ -694,7 +728,7 @@ export default function App() {
 						loading={myBotsLoading}
 						error={myBotsError}
 						selectedBotId={selectedBotId}
-						atLimit={myBots.length >= 30}
+						atLimit={(myBots ?? []).length >= 30}
 						onSelectBot={id => setSelectedBotId(id)}
 						onNewBot={() => setSelectedBotId("new")}
 					/>
@@ -706,6 +740,14 @@ export default function App() {
 					activeSpace={state.activeSpace}
 					activeRoomId={state.activeRoomId}
 					collapsedRoomIds={collapsedRoomIds}
+					// True once initial sync has reached the "syncing"
+					// or "ready" state — at that point matrix-js-sdk
+					// has populated `state.rooms` with whatever the
+					// user has, and an empty list is genuinely empty.
+					// While "preparing" we leave the empty hint
+					// suppressed so the sidebar paints clean during
+					// boot.
+					roomsLoaded={state.syncState === "syncing" || state.syncState === "ready"}
 					onSelectRoom={(roomId: RoomId) => dispatch({ type: "set_active_room", roomId })}
 					onCreateRoom={() => {
 						// "+" in the list header is context-aware: DMs
@@ -773,7 +815,7 @@ export default function App() {
 						currentUserId={creds?.user_id ?? null}
 						bots={myBots}
 						selectedBotId={selectedBotId}
-						atLimit={myBots.length >= 30}
+						atLimit={(myBots ?? []).length >= 30}
 						onNewBot={() => setSelectedBotId("new")}
 						onSelectionCleared={() => setSelectedBotId(null)}
 						onSaved={async (saved) => {
@@ -843,6 +885,13 @@ export default function App() {
 						}
 					}}
 					members={state.activeRoomId ? state.membersByRoom.get(state.activeRoomId) ?? [] : []}
+					// True once the active room's initial timeline has
+					// landed.  Suppresses ChatPane's "No messages yet."
+					// banner during the brief window between switching
+					// into a room and the first timeline batch
+					// arriving — without this, every room enter
+					// flashes the banner.
+					messagesLoaded={!!state.activeRoomId && state.loadedTimelines.has(state.activeRoomId)}
 					viewerServer={creds.user_id ? creds.user_id.split(":")[1] ?? null : null}
 					onSendMessage={(text, replyTo) => {
 						if (!state.activeRoomId || !transport) return;
@@ -962,7 +1011,16 @@ export default function App() {
 						/>
 					) : (
 						<MemberList
-							members={state.activeRoomId ? state.membersByRoom.get(state.activeRoomId) ?? [] : []}
+							// null while the room's first member fetch
+							// is in flight; MemberList suppresses its
+							// chrome and the empty-state hint while
+							// null so we don't flash "Members · 0" /
+							// "No members." before the list arrives.
+							members={
+								state.activeRoomId && state.loadedMembers.has(state.activeRoomId)
+									? state.membersByRoom.get(state.activeRoomId) ?? []
+									: null
+							}
 							currentUserId={creds.user_id}
 							onSelectMember={(userId) => setViewedUserId(userId as UserId)}
 							botMxids={botMxids}

@@ -79,6 +79,21 @@ export function ExplorePane({
 			setLoading(true);
 			setError(null);
 			try {
+				// Directory query first — icon fetch needs the room id
+				// list to know what to look up.  Two-step rather than
+				// truly parallel because the engine endpoint takes a
+				// list and we don't have the list until publicRooms
+				// returns.  In practice the directory call dominates;
+				// the icons call is a single batched state-event read
+				// per room (sub-100ms typical) tacked onto the end.
+				//
+				// We await both before setResults so the entries paint
+				// once, with the right icon already attached.  The
+				// earlier fire-and-forget version flashed DiceBear
+				// avatars and then snapped to emojis a moment later,
+				// which read as jank.  A failed icons fetch falls
+				// through to the empty map — emoji-iconed rooms then
+				// briefly show DiceBear, but only on engine outage.
 				const { spaces: dirSpaces, soloRooms } = await transport.discoverDirectory({
 					search: query.trim() || undefined,
 					limit: 50,
@@ -87,26 +102,12 @@ export function ExplorePane({
 					...dirSpaces.map(s => ({ ...s, isSpace: true })),
 					...soloRooms.map(r => ({ ...r, isSpace: false })),
 				];
-				// Render the directory results immediately, even before
-				// the icon backfill returns.  An emoji-iconed room
-				// briefly shows the DiceBear fallback for the duration
-				// of one engine round-trip — better than blocking the
-				// whole list on a secondary fetch that could fail.
-				setResults(merged);
-				// Enrich with founder-picked emojis.  We're not
-				// awaiting this inside the try/catch above because a
-				// failure here shouldn't bubble up as an Explore
-				// error: the directory itself loaded fine, we just
-				// don't have icons.  An empty/failed icons response
-				// is indistinguishable from "no icons set" — both
-				// fall through to DiceBear.
 				const ids = merged.map(e => e.roomId);
-				fetchRoomIcons(ids).then(icons => {
-					if (Object.keys(icons).length === 0) return;
-					setResults(prev => prev.map(e =>
-						icons[e.roomId] ? { ...e, iconEmoji: icons[e.roomId] } : e
-					));
-				}).catch(() => { /* see comment above */ });
+				const icons = await fetchRoomIcons(ids).catch(() => ({} as Record<string, string>));
+				const enriched = merged.map(e =>
+					icons[e.roomId] ? { ...e, iconEmoji: icons[e.roomId] } : e
+				);
+				setResults(enriched);
 			} catch (err) {
 				setError(err instanceof Error ? err.message : String(err));
 			} finally {

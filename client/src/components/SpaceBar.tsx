@@ -13,7 +13,13 @@ import type { ActiveSpace } from "@/state/store";
 
 export interface SpaceBarProps {
 	currentUserId: string | null;
-	currentUserAvatarMxc?: string;
+	// Three-valued: `undefined` = profile fetch hasn't returned yet
+	// (suppress the avatar tile to avoid a DiceBear flash);
+	// `null` = probe completed, user has no avatar set;
+	// `string` = real mxc URL.  The first paint after sign-in is
+	// `undefined`, then flips to one of the other two once
+	// `transport.getMyProfile()` resolves.
+	currentUserAvatarMxc?: string | null;
 	spaces: Space[];
 	// All joined rooms — used to compute the per-tile unread indicators.
 	// We don't filter here; each tile picks the slice it cares about.
@@ -88,11 +94,23 @@ export function SpaceBar({
 				title={currentUserId ?? "Profile"}
 				aria-label="Profile"
 			>
-				<MatrixAvatar
-					mxc={currentUserAvatarMxc}
-					seed={currentUserId ?? "self"}
-					className="h-10 w-10"
-				/>
+				{currentUserAvatarMxc === undefined ? (
+					// Profile probe still in flight — render a neutral
+					// muted disc instead of the DiceBear fallback that
+					// MatrixAvatar would otherwise produce for a
+					// no-mxc seed.  Same dimensions as the real
+					// avatar so layout doesn't shift on resolve.
+					<span
+						className="block h-10 w-10 rounded-full bg-muted"
+						aria-hidden
+					/>
+				) : (
+					<MatrixAvatar
+						mxc={currentUserAvatarMxc ?? undefined}
+						seed={currentUserId ?? "self"}
+						className="h-10 w-10"
+					/>
+				)}
 			</button>
 
 			<TileButton

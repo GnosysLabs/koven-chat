@@ -54,7 +54,22 @@ export interface AppState {
 	rooms: Room[];
 	spaces: Space[];
 	messagesByRoom: Map<RoomId, Message[]>;
+	// Set of room ids whose initial timeline page has finished
+	// loading.  Distinct from `messagesByRoom.has(roomId)` because
+	// the messages-arrived path adds a single live event to a
+	// previously-untouched room (e.g. a brand-new invite chunk),
+	// which would otherwise misregister as "loaded" while only one
+	// event has actually arrived.  ChatPane reads this to suppress
+	// "No messages yet." during the brief window between switching
+	// into a room and matrix-js-sdk's first timeline batch
+	// delivering — without it, every fresh room enter flashes the
+	// banner.
+	loadedTimelines: Set<RoomId>;
 	membersByRoom: Map<RoomId, Member[]>;
+	// Mirror of `loadedTimelines` for room membership.  Set the
+	// first time `members_loaded` fires for a room id; MemberList
+	// reads this to suppress its "No members." flash on first paint.
+	loadedMembers: Set<RoomId>;
 	reactionsByMessage: ReactionsByMessage;
 	reactionRefs: Map<EventId, ReactionRef>;
 	flagsByMessage: FlagsByMessage;
@@ -70,7 +85,9 @@ export const initialState: AppState = {
 	rooms: [],
 	spaces: [],
 	messagesByRoom: new Map(),
+	loadedTimelines: new Set(),
 	membersByRoom: new Map(),
+	loadedMembers: new Set(),
 	reactionsByMessage: new Map(),
 	reactionRefs: new Map(),
 	flagsByMessage: new Map(),
@@ -114,7 +131,13 @@ export function reduce(state: AppState, action: Action): AppState {
 		case "messages_loaded": {
 			const next = new Map(state.messagesByRoom);
 			next.set(action.roomId, action.messages);
-			return { ...state, messagesByRoom: next };
+			// Mark the initial-timeline-load complete for this room.
+			// Idempotent: subsequent pagination loads also dispatch
+			// `messages_loaded` and re-add the same id, which is a
+			// no-op on a Set.
+			const loaded = new Set(state.loadedTimelines);
+			loaded.add(action.roomId);
+			return { ...state, messagesByRoom: next, loadedTimelines: loaded };
 		}
 
 		case "message_arrived": {
@@ -149,9 +172,11 @@ export function reduce(state: AppState, action: Action): AppState {
 		}
 
 		case "members_loaded": {
+			const loaded = new Set(state.loadedMembers);
+			loaded.add(action.roomId);
 			const next = new Map(state.membersByRoom);
 			next.set(action.roomId, action.members);
-			return { ...state, membersByRoom: next };
+			return { ...state, membersByRoom: next, loadedMembers: loaded };
 		}
 
 		case "reactions_loaded": {

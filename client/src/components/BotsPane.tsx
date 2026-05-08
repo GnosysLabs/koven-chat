@@ -22,7 +22,11 @@ import type { BotSummary } from "@/lib/bots";
 export interface BotsPaneProps {
 	accessToken: string | null;
 	currentUserId: string | null;
-	bots: BotSummary[];
+	// `null` = roster fetch hasn't returned yet (caller's initial
+	// state).  Pane renders nothing in the picker until the real
+	// list lands — without this gate, the "No bots yet" CTA flashes
+	// for the user that DOES have bots, on every Bots-view entry.
+	bots: BotSummary[] | null;
 	selectedBotId: number | "new" | null;
 	atLimit: boolean;
 	onNewBot(): void;
@@ -64,7 +68,7 @@ export function BotsPane({
 	}
 
 	if (typeof selectedBotId === "number") {
-		const bot = bots.find(b => b.id === selectedBotId);
+		const bot = (bots ?? []).find(b => b.id === selectedBotId);
 		if (!bot) {
 			// Selection points at a bot we no longer have (e.g. the
 			// list refresh removed it after a delete).  Show the
@@ -92,10 +96,16 @@ function PickerState({
 	onNewBot,
 	atLimit,
 }: {
-	bots: BotSummary[];
+	bots: BotSummary[] | null;
 	onNewBot(): void;
 	atLimit: boolean;
 }) {
+	// Roster fetch in flight — render an empty pane (no "No bots
+	// yet" splash) so the first paint after navigating into Bots
+	// matches the final state.
+	if (bots === null) {
+		return <div className="flex-1 min-w-0" />;
+	}
 	if (bots.length === 0) {
 		return (
 			<div className="flex-1 min-w-0 flex flex-col items-center justify-center text-center px-6 gap-4">

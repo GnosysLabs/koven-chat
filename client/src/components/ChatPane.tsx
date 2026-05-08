@@ -99,6 +99,14 @@ export interface ChatPaneProps {
 	// here.  Always passed as a Set so MessageRow can do O(1) lookups
 	// without re-deriving from BotSummary[].
 	myOwnedBotMxids?: Set<string>;
+	// True once the active room's initial timeline page has finished
+	// loading.  When false, ChatPane suppresses the "No messages yet"
+	// banner — without this, switching into a fresh room flashes the
+	// banner during the brief window between activeRoomId changing
+	// and matrix-js-sdk delivering the first timeline batch through
+	// the reducer.  The parent threads this from a Set of
+	// known-loaded room ids.
+	messagesLoaded?: boolean;
 	// Self-delete a message.  Returns once the engine has redacted
 	// the underlying Matrix event AND written the audit row.  Errors
 	// bubble up to the parent error dispatcher.  Optional — when
@@ -129,6 +137,7 @@ export function ChatPane({
 	botMxids,
 	myOwnedBotMxids,
 	onDeleteMessage,
+	messagesLoaded,
 	members,
 	viewerServer,
 }: ChatPaneProps) {
@@ -515,7 +524,13 @@ export function ChatPane({
 			</header>
 
 			<div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4">
-				{messages.length === 0 ? (
+				{!messagesLoaded ? (
+					// Initial timeline still loading.  Render nothing
+					// rather than flashing "No messages yet." — the
+					// banner only fires when we've genuinely confirmed
+					// the room is empty (load completed, list length 0).
+					null
+				) : messages.length === 0 ? (
 					<div className="text-xs text-muted-foreground italic mt-8 text-center">No messages yet.</div>
 				) : (
 					messages.map((m, i) => {
@@ -548,6 +563,12 @@ export function ChatPane({
 									// MessageRow below.
 								}}
 								isBot={!!botMxids?.has(m.sender)}
+								// True when the sender is a bot the viewer owns —
+								// drives the flag→delete swap on the action toolbar
+								// (you can't flag your own bot's output, you delete
+								// it instead).  Computed at the parent because
+								// `myOwnedBotMxids` lives up here; cheap O(1) lookup.
+								isOwnedBot={!!myOwnedBotMxids?.has(m.sender)}
 								isHovered={hoveredMessageId === m.id}
 								onToggleReactionPill={(reaction) => {
 									if (reaction.myReactionId) onUnreact(reaction);
@@ -762,7 +783,7 @@ export function ChatPane({
 function MessageRow({
 	message, avatarMxc, continuesGroup, isFirst, flaggable, roomEncrypted,
 	reactions, flags, collapse, onReact, onReply, onFlag, onTogglePillFlag, onToggleReactionPill, isBot,
-	isHovered, onDelete,
+	isOwnedBot, isHovered, onDelete,
 }: {
 	message: Message;
 	avatarMxc: string | undefined;
@@ -785,6 +806,14 @@ function MessageRow({
 	// changes, so users still mention bots and react to bot messages
 	// the same way.
 	isBot: boolean;
+	// True when the message sender is a bot the VIEWER owns.  Hides
+	// the flag affordance on the action toolbar — flagging your own
+	// bot's output is incoherent (you control its prompt + config;
+	// just delete the message instead).  The trash icon is already
+	// gated by `onDelete` from the parent on the same condition, so
+	// the visual swap is "flag, except on your own bots, where it's
+	// trash."
+	isOwnedBot: boolean;
 	onReact(emoji: string): void;
 	onReply(): void;
 	onFlag(category: FlagCategory, rationale?: string): void | Promise<void>;
@@ -827,7 +856,13 @@ function MessageRow({
 	// (count of flags FROM others) so a user can see they've been
 	// reported, but the action surface (hover button + click-to-open
 	// dialog from the pill) is gated.
-	const canFlag = flaggable && !message.isSelf;
+	//
+	// Same gate applies to bots the viewer owns: the owner controls
+	// the bot's prompt and configuration, so flagging is the wrong
+	// remedy — they should just delete the message.  The trash icon
+	// (provided by ChatPane via `onDelete` on the same condition)
+	// takes its place on the toolbar.
+	const canFlag = flaggable && !message.isSelf && !isOwnedBot;
 	function handlePillClick() {
 		if (!canFlag) return;
 		// Click on the flag pill: if you've already flagged, withdraw

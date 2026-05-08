@@ -33,6 +33,12 @@ export interface RoomListProps {
 	// "Name Removed by Community Review" placeholder instead of the
 	// verbatim name.
 	collapsedRoomIds?: Set<string>;
+	// True once matrix-js-sdk's initial /sync has produced a populated
+	// rooms list at least once.  RoomList suppresses the "No rooms in
+	// this space yet" hint while false — without this gate, switching
+	// space tabs (or first-paint after sign-in) flashes the empty
+	// hint for a frame before the reducer fans the rooms in.
+	roomsLoaded?: boolean;
 }
 
 // PL gate for editing the space's `chat.koven.pinned_rooms` state
@@ -46,6 +52,7 @@ export function RoomList({
 	rooms, spaces, activeSpace, activeRoomId,
 	onSelectRoom, onCreateRoom, onAcceptInvite, onDeclineInvite,
 	onPinRoom, onUnpinRoom, collapsedRoomIds,
+	roomsLoaded,
 }: RoomListProps) {
 	const activeSpaceObj = activeSpace?.kind === "space"
 		? spaces.find(s => s.id === activeSpace.id) ?? null
@@ -114,9 +121,16 @@ export function RoomList({
 				)}
 
 				{joinedRooms.length === 0 && inviteRooms.length === 0 ? (
-					<div className="text-xs text-muted-foreground px-2 py-4 leading-relaxed">
-						{emptyHintFor(activeSpace)}
-					</div>
+					// Empty hint is suppressed until the initial sync
+					// has actually produced a rooms list.  Otherwise
+					// every fresh-app-boot or space-switch flashes the
+					// "No rooms in this space yet" copy for a frame
+					// before the rooms fan in from the reducer.
+					roomsLoaded ? (
+						<div className="text-xs text-muted-foreground px-2 py-4 leading-relaxed">
+							{emptyHintFor(activeSpace)}
+						</div>
+					) : null
 				) : (
 					joinedRooms.map(room => {
 						const isPinned = pinnedRoomIdSet.has(room.id);

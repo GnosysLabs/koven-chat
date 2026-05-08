@@ -15,7 +15,10 @@ import { BotBadge } from "@/components/BotBadge";
 import type { BotSummary } from "@/lib/bots";
 
 export interface BotListProps {
-	bots: BotSummary[];
+	// `null` = roster fetch hasn't returned yet; component renders
+	// the chrome but no list / no empty-state.  `[]` = loaded, user
+	// has no bots → "No bots yet" hint shown.
+	bots: BotSummary[] | null;
 	loading: boolean;
 	error: string | null;
 	// Currently-selected bot id, or "new" when the create form is
@@ -57,8 +60,13 @@ export function BotList({
 			</div>
 
 			<div className="flex-1 overflow-y-auto py-1">
-				{loading ? (
-					<div className="px-3 py-3 text-xs text-muted-foreground">Loading…</div>
+				{bots === null || loading ? (
+					// Pre-load: render an empty body rather than a
+					// "Loading…" string OR the "No bots yet" CTA.
+					// Either text would flash for the brief window
+					// before the engine returns the roster, then snap
+					// to the real list.
+					null
 				) : error ? (
 					<div className="px-3 py-3 text-xs text-destructive">{error}</div>
 				) : bots.length === 0 ? (

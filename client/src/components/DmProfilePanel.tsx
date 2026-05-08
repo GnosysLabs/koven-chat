@@ -36,7 +36,12 @@ export interface DmProfilePanelProps {
 }
 
 export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenProfile, onDeleteDm, isBot }: DmProfilePanelProps) {
+	// `userId` lives on the profile record so we can detect "the
+	// cached profile is stale because we switched DMs" — without it,
+	// switching from a DM with @alice to a DM with @bob would render
+	// alice's avatar/name briefly before bob's fetch returns.
 	const [profile, setProfile] = useState<{
+		userId: UserId;
 		displayName: string;
 		avatarUrl?: string;
 		homeserver: string;
@@ -54,6 +59,14 @@ export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenPro
 	useEffect(() => {
 		if (!transport) return;
 		let cancelled = false;
+		// Stale-while-revalidate: only blank the profile when we're
+		// switching to a DIFFERENT user.  Re-rendering for the same
+		// user (e.g. ignoredUsers updated) keeps the existing data on
+		// screen so the right pane doesn't blink.
+		if (profile?.userId !== otherUserId) {
+			setProfile(null);
+			setBio("");
+		}
 		// Matrix profile (display name, avatar) and engine bio in
 		// parallel — they're independent calls and showing one without
 		// the other is fine if the slower one fails.
@@ -62,10 +75,20 @@ export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenPro
 			fetchUserBio(otherUserId).catch(() => ""),
 		]).then(([p, fetchedBio]) => {
 			if (cancelled) return;
-			setProfile(p ?? { displayName: otherUserId, homeserver: "" });
+			setProfile({
+				userId: otherUserId,
+				displayName: p?.displayName ?? otherUserId,
+				avatarUrl: p?.avatarUrl,
+				homeserver: p?.homeserver ?? "",
+			});
 			setBio(fetchedBio);
 		});
 		return () => { cancelled = true; };
+		// `profile?.userId` is read for the staleness check but
+		// shouldn't drive re-runs — the effect already retriggers on
+		// otherUserId change, which is the only thing that should
+		// invalidate the cached profile.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [otherUserId, transport]);
 
 	// Reset the confirm state when the DM target changes — switching to
@@ -104,6 +127,17 @@ export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenPro
 		}
 	}
 
+	// Pre-load: render the chrome but no body content.  Without this
+	// gate, the panel would paint with a DiceBear avatar (because
+	// `profile?.avatarUrl` is undefined while the fetch is pending),
+	// the mxid as the display name, and "Reputation unavailable."
+	// for the rep block — then snap to the real values once
+	// Promise.all resolves.  Holding back the body avoids that
+	// triple-flash.  The avatar/name still render once `profile` is
+	// non-null AND matches the current `otherUserId` — same gate
+	// keeps stale values off-screen during DM switches.
+	const haveProfile = !!profile && profile.userId === otherUserId;
+
 	return (
 		<aside className="w-56 border-l border-border bg-card flex flex-col">
 			<div className="px-4 h-12 flex items-center border-b border-border">
@@ -112,6 +146,7 @@ export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenPro
 				</span>
 			</div>
 			<div className="flex-1 overflow-y-auto p-4">
+				{haveProfile && (<>
 				<button
 					type="button"
 					onClick={() => onOpenProfile(otherUserId)}
@@ -221,6 +256,7 @@ export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenPro
 						</div>
 					)}
 				</div>
+				</>)}
 			</div>
 		</aside>
 	);
@@ -228,12 +264,15 @@ export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenPro
 
 function ReputationBlock({ userId }: { userId: string }) {
 	const rep = useReputation(userId);
+	// While the reputation hook is still resolving, render nothing
+	// rather than flashing "Reputation unavailable." — the engine
+	// usually responds within ~50ms, so the flash is annoyingly
+	// visible.  The italic-fallback text only really applies to a
+	// genuine engine outage; that case will rectify on the next
+	// hook re-fetch and is rare enough we accept a momentary blank
+	// over a wrong-looking "unavailable" pop-in.
 	if (!rep) {
-		return (
-			<div className="text-[11px] text-muted-foreground italic">
-				Reputation unavailable.
-			</div>
-		);
+		return null;
 	}
 	const desc = descriptorFor(rep.weight);
 	// Floor → 0 ticks (brand-new user just past 0.5); cap → 5.
