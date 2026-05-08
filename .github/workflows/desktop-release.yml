@@ -23,12 +23,19 @@
 name: Desktop release
 
 on:
+  # Tag pushes always release.  Branch pushes only build when the
+  # change is actually about the desktop shell — `client/**` was
+  # in here previously to keep the bundled SPA fresh, but in
+  # practice every client commit then burned a 5+ min build that
+  # never shipped anywhere (the user has to push a `desktop-v*`
+  # tag for a real release anyway).  When the bundled SPA needs
+  # to be rebuilt outside a tagged release, run the workflow
+  # manually via `workflow_dispatch` or push a fresh tag.
   push:
     tags: ["desktop-v*"]
     branches: [main]
     paths:
       - "apps/desktop/**"
-      - "client/**"
       - ".github/workflows/desktop-release.yml"
   workflow_dispatch:
 

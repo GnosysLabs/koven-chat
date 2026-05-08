@@ -270,6 +270,16 @@ pub fn run() {
 				.min_inner_size(720.0, 480.0)
 				.resizable(true)
 				.center()
+				// Build hidden so we can set the icon BEFORE the window
+				// registers with the WM (see the long comment by the
+				// set_icon call below).  We call `win.show()` after
+				// set_icon — net effect: the window pops up exactly
+				// once, with the right icon already on it, no flicker.
+				// macOS / Windows are fine either way; this matters
+				// specifically for GNOME, which snapshots the dock /
+				// Activities icon at the moment the window registers
+				// with mutter and never re-reads it.
+				.visible(false)
 				// Inject a click + window.open interceptor that routes
 				// external URLs through the opener plugin.  Required
 				// because WKWebView (macOS) and WebKitGTK (Linux)
@@ -333,6 +343,17 @@ pub fn run() {
 			// the title bar at all), so this is a no-op there — but
 			// it's cheap and keeps the codepath uniform across OSes.
 			//
+			// **Order matters on Linux.**  The window is built with
+			// `visible: false`; we set the icon, THEN call show().
+			// GNOME's mutter snapshots the icon when the window first
+			// appears in the dock and never re-reads — calling
+			// set_icon AFTER show() leaves the cog in place even
+			// though the window's GTK icon is now correct.  Doing
+			// it pre-show means the icon is already on the window
+			// before mutter looks at it.  Windows / macOS don't care
+			// about ordering; the early-show + late-icon path works
+			// there regardless.
+			//
 			// `image-png` is enabled in Cargo.toml so the runtime PNG
 			// decoder is available; without that feature
 			// `Image::from_bytes` errors out and we'd silently fall
@@ -344,6 +365,14 @@ pub fn run() {
 				}
 			} else {
 				log::warn!("set_icon: PNG decode failed (image-png feature missing?)");
+			}
+
+			// Now the window has the right icon attached — surface it.
+			// Failure here is non-fatal: log and proceed (a hidden
+			// window the user can't see is recoverable via the
+			// single-instance focus path; a panic isn't).
+			if let Err(err) = win.show() {
+				log::warn!("window.show failed: {err}");
 			}
 
 			// Kick off an update check after the window is up.

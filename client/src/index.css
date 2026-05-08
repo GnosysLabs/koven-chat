@@ -438,4 +438,35 @@
 		background-size: cover;
 		font-feature-settings: "rlig" 1, "calt" 1;
 	}
+
+	/* Hide scrollbars site-wide while preserving scroll behaviour.
+	 *
+	 * Why: WebView2 (Tauri's Windows backend) renders the default
+	 * Windows 11 scrollbar — a chunky white track with a grey thumb
+	 * — over our dark-themed UI, and it ignores `prefers-color-scheme`
+	 * because the WebView's own chrome isn't part of the page.  The
+	 * result is a bright vertical bar on the right of the chat that
+	 * looks unfinished.  WebKitGTK on Linux has a similar issue with
+	 * the native GTK scrollbar overlay, and macOS WKWebView shows a
+	 * thin overlay that's fine but inconsistent with the other two.
+	 *
+	 * Suppressing the visual indicator is OS-conventional for chat
+	 * apps (Slack, Discord, iMessage all hide them) — users still
+	 * scroll via wheel, trackpad, touch, arrow keys, and Page Up/
+	 * Down.  We're not removing scroll, just the chrome.
+	 *
+	 * `*` because we have a lot of locally-scrolling containers
+	 * (sidebar, room list, chat scroll, dialogs) and threading a
+	 * `.no-scrollbar` utility into every one of them would miss a
+	 * spot inevitably.  Targeting all elements is one rule, blast-
+	 * radius zero — the worst case is "user can't see scroll
+	 * position" which we accept across the app.
+	 */
+	* {
+		scrollbar-width: none;        /* Firefox */
+		-ms-overflow-style: none;     /* legacy Edge / IE */
+	}
+	*::-webkit-scrollbar {
+		display: none;                /* WebKit / Blink (Chrome, Safari, WebView2) */
+	}
 }
