@@ -37,6 +37,7 @@ import {
 	createSuspension,
 	deleteBio,
 	deleteBot,
+	lookupPostUser,
 	deleteInstanceConfig,
 	deleteRoomCollapse,
 	flagsForRoom,
@@ -1682,20 +1683,57 @@ export function startServer(): void {
 					const roomId = decodeURIComponent(m[1]!);
 					const eventId = decodeURIComponent(m[2]!);
 
-					const ev = await getEventSender(roomId, eventId);
-					if (!ev) {
-						return json({ errcode: "M_NOT_FOUND", error: "event not found" }, { status: 404 });
-					}
-					// Refuse to redact non-message events.  Reactions,
-					// flags, redactions themselves all have their own
-					// retract paths; routing them through the trash
-					// button would let a user retract a flag they
-					// didn't submit, etc.
-					if (ev.type !== "m.room.message") {
-						return json({
-							errcode: "M_FORBIDDEN",
-							error: "only m.room.message events can be deleted via this endpoint",
-						}, { status: 403 });
+					// Resolve the event's sender.  Local-first lookup
+					// against the engine's own posts table — the engine
+					// indexes every m.room.message it observes via
+					// /transactions, so this is the canonical authority
+					// for "who sent this" without round-tripping to
+					// Synapse.
+					//
+					// Why not just ask Synapse: /rooms/{id}/event/{id}
+					// requires the caller (the engine bot, via the
+					// appservice as_token) to be a member of the room.
+					// The appservice's `regex .*` namespace makes
+					// Synapse FORWARD events to /transactions but does
+					// NOT auto-join the bot user, so most user-created
+					// rooms aren't readable that way and every delete
+					// attempt 404'd.  Posts are recorded eagerly the
+					// moment the engine sees them, so the local table
+					// is both faster and reliable for any room the
+					// engine could observe (which is every non-encrypted
+					// room on the homeserver).
+					//
+					// Fallback to Synapse only when the local table
+					// has no row — events from before the engine
+					// started indexing, manually-injected events, etc.
+					// That fallback still requires bot membership and
+					// will 404 the same way; it just lets us keep the
+					// pre-existing code path for the rare case it
+					// works.
+					let senderId: string;
+					const localSender = lookupPostUser(eventId);
+					if (localSender) {
+						senderId = localSender;
+						// Type is implicitly m.room.message — the only
+						// event kind we record into posts (handleMessage
+						// in aggregate.ts skips state events).
+					} else {
+						const ev = await getEventSender(roomId, eventId);
+						if (!ev) {
+							return json({ errcode: "M_NOT_FOUND", error: "event not found" }, { status: 404 });
+						}
+						// Refuse to redact non-message events.  Reactions,
+						// flags, redactions themselves all have their own
+						// retract paths; routing them through the trash
+						// button would let a user retract a flag they
+						// didn't submit, etc.
+						if (ev.type !== "m.room.message") {
+							return json({
+								errcode: "M_FORBIDDEN",
+								error: "only m.room.message events can be deleted via this endpoint",
+							}, { status: 403 });
+						}
+						senderId = ev.sender;
 					}
 
 					// Authorization branch.  `kind` distinguishes which
@@ -1704,11 +1742,11 @@ export function startServer(): void {
 					let kind: "self" | "bot_owner";
 					let bearerForRedact: string;
 					let botId: number | null = null;
-					if (ev.sender === userId) {
+					if (senderId === userId) {
 						kind = "self";
 						bearerForRedact = token;
 					} else {
-						const bot = getBotByMxid(ev.sender);
+						const bot = getBotByMxid(senderId);
 						if (!bot || bot.owner_id !== userId) {
 							return json({
 								errcode: "M_FORBIDDEN",
@@ -1736,7 +1774,7 @@ export function startServer(): void {
 						roomId,
 						targetEventId: eventId,
 						redactedBy: userId,
-						targetSender: ev.sender,
+						targetSender: senderId,
 						kind,
 						botId,
 					});
