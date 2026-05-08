@@ -233,7 +233,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # `--latest=true` is critical: the in-app auto-updater
+          # polls /releases/latest/download/latest.json, which
+          # GitHub only redirects to a release marked "Latest".
+          # Without this flag the release publishes but the
+          # updater URL 404s forever — every shipped binary then
+          # quietly stops auto-updating.
           gh release edit "${{ github.ref_name }}" \
             --draft=false \
-            --latest=false \
+            --latest=true \
             -R ${{ github.repository }}

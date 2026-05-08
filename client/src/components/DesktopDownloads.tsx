@@ -91,11 +91,7 @@ export function DesktopDownloads() {
 					<DlButton
 						icon={<Terminal className="h-3.5 w-3.5" />}
 						label="Linux"
-						onClick={
-							(releases.linuxAppImage || releases.linuxDeb)
-								? () => setOpenModal("linux")
-								: undefined
-						}
+						onClick={releases.linuxAppImage ? () => setOpenModal("linux") : undefined}
 						fallbackHref={RELEASES_PAGE}
 					/>
 				</div>
@@ -223,49 +219,30 @@ function LinuxModal({
 				<DialogHeader>
 					<DialogTitle>Download Koven for Linux</DialogTitle>
 					<DialogDescription>
-						Two formats — pick whichever fits your distro best.
+						Native AppImage — runs on any modern x86_64 distro.
 					</DialogDescription>
 				</DialogHeader>
 
-				<div className="space-y-2">
-					{releases.linuxDeb && (
-						<a
-							href={releases.linuxDeb}
-							className="flex items-center justify-between gap-3 px-4 py-3 rounded-lg border border-border hover:bg-accent transition-colors"
-						>
-							<div className="text-left min-w-0">
-								<div className="text-sm font-semibold">.deb (Debian / Ubuntu)</div>
-								<div className="text-xs text-muted-foreground mt-0.5">
-									Recommended on apt-based distros — installs proper dock icon and menu entry.
-								</div>
+				{releases.linuxAppImage && (
+					<a
+						href={releases.linuxAppImage}
+						className="flex items-center justify-between gap-3 px-4 py-3 rounded-lg border border-border hover:bg-accent transition-colors"
+					>
+						<div className="text-left min-w-0">
+							<div className="text-sm font-semibold">Intel / AMD (x86_64)</div>
+							<div className="text-xs text-muted-foreground mt-0.5">
+								Most desktops &amp; laptops, NUCs, cloud VMs
 							</div>
-							<span className="text-xs text-primary inline-flex items-center gap-1 shrink-0">
-								<Download className="h-3.5 w-3.5" />
-								Download
-							</span>
-						</a>
-					)}
-					{releases.linuxAppImage && (
-						<a
-							href={releases.linuxAppImage}
-							className="flex items-center justify-between gap-3 px-4 py-3 rounded-lg border border-border hover:bg-accent transition-colors"
-						>
-							<div className="text-left min-w-0">
-								<div className="text-sm font-semibold">.AppImage (any x86_64 distro)</div>
-								<div className="text-xs text-muted-foreground mt-0.5">
-									Portable single file — no install required.
-								</div>
-							</div>
-							<span className="text-xs text-primary inline-flex items-center gap-1 shrink-0">
-								<Download className="h-3.5 w-3.5" />
-								Download
-							</span>
-						</a>
-					)}
-				</div>
+						</div>
+						<span className="text-xs text-primary inline-flex items-center gap-1 shrink-0">
+							<Download className="h-3.5 w-3.5" />
+							Download
+						</span>
+					</a>
+				)}
 
 				<div className="rounded-md border border-border bg-muted/30 px-4 py-3 text-xs leading-relaxed">
-					<div className="font-semibold mb-1.5">How to run the AppImage</div>
+					<div className="font-semibold mb-1.5">How to run</div>
 					<ol className="list-decimal pl-5 space-y-1 text-muted-foreground">
 						<li>
 							Right-click the downloaded file → <strong>Properties</strong> →{" "}
@@ -274,8 +251,6 @@ function LinuxModal({
 						</li>
 						<li>Double-click the file to launch Koven.</li>
 					</ol>
-					<div className="font-semibold mt-3 mb-1.5">How to install the .deb</div>
-					<pre className="bg-background border border-border rounded px-2 py-1.5 text-[11px] font-mono overflow-x-auto">sudo apt install ./koven-desktop_{releases.version}_amd64.deb</pre>
 				</div>
 
 				<DialogFooter>

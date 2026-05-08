@@ -16,7 +16,7 @@
 	},
 	"bundle": {
 		"active": true,
-		"targets": ["app", "msi", "nsis", "appimage", "deb"],
+		"targets": ["app", "nsis", "appimage"],
 		"icon": [
 			"icons/32x32.png",
 			"icons/128x128.png",
@@ -39,18 +39,13 @@
 			"frameworks": [],
 			"entitlements": null
 		},
-		"windows": {},
-		"linux": {
-			"deb": {
-				"depends": ["libwebkit2gtk-4.1-0", "libssl3"]
-			}
-		}
+		"windows": {}
 	},
 	"plugins": {
 		"updater": {
 			"active": true,
 			"endpoints": [
-				"https://github.com/GnosysLabs/koven-chat/releases/latest/download/desktop-latest.json"
+				"https://github.com/GnosysLabs/koven-chat/releases/latest/download/latest.json"
 			],
 			"pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcwRjAxNTk2RDMxOTlEOTIKUldTU25SblRsaFh3Y0R2Q1YzOTdDWEZLZysyVzJFZEpMZ0ZoQWVERjBQdmFMT010MElOczhxUEwK",
 			"windows": {

@@ -22,7 +22,6 @@ export interface DesktopReleases {
 	macos?: string;          // .app.tar.gz
 	windows?: string;        // -setup.exe (NSIS)
 	linuxAppImage?: string;
-	linuxDeb?: string;
 }
 
 const REPO = "GnosysLabs/koven-chat";
@@ -64,7 +63,6 @@ async function fetchOnce(): Promise<DesktopReleases | null> {
 		if (name.endsWith(".app.tar.gz")) out.macos = url;
 		else if (name.endsWith("-setup.exe")) out.windows = url;
 		else if (name.endsWith(".AppImage")) out.linuxAppImage = url;
-		else if (name.endsWith(".deb")) out.linuxDeb = url;
 	}
 	return out;
 }
