@@ -146,6 +146,14 @@ jobs:
       # branch / dispatch runs skip the upload step entirely.
       - uses: tauri-apps/tauri-action@v0
         env:
+          # tauri-action calls the GitHub REST API to create the
+          # draft release + upload assets; without GITHUB_TOKEN in
+          # env it produces all bundles correctly and then fails
+          # at the upload step with "GITHUB_TOKEN is required".
+          # `permissions: contents: write` at the workflow level
+          # gives the auto-issued GITHUB_TOKEN write access; the
+          # env injection is what hands it to the action.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Tauri updater signing.  Private key + (empty) password
           # come from repo secrets.  pubkey is committed in
           # tauri.conf.json — that's correct, minisign pubkeys are
