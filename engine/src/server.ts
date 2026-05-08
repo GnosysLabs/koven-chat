@@ -85,10 +85,12 @@ import {
 	adminSetUserEmail,
 	deactivateUser,
 	getEventSender,
+	getJoinedMembers,
 	getRoomIconEmoji,
 	getRoomJoinRule,
 	getRoomNameAndCreator,
 	getSpaceChildRoomIds,
+	isSpaceRoom,
 	kickOrBanAs,
 	loginAsUser,
 	redactEventAs,
@@ -1940,10 +1942,30 @@ export function startServer(): void {
 				const body = (await req.json()) as { events?: MatrixEvent[] };
 				const events = body.events ?? [];
 				let sawFlag = false;
+				const newSpaceChildren: { spaceId: string; childId: string; sender: string }[] = [];
 				for (const ev of events) {
 					try {
 						applyEvent(ev);
 						if (ev.type === "chat.koven.flag.v1") sawFlag = true;
+						// Capture m.space.child events with non-empty `via` for
+						// the post-loop auto-join cascade.  We do the actual
+						// joining outside the loop so the transaction response
+						// goes back to Synapse without waiting on N admin/v1
+						// /join round-trips.
+						if (
+							ev.type === "m.space.child" &&
+							ev.room_id &&
+							typeof ev.state_key === "string" && ev.state_key &&
+							ev.sender &&
+							Array.isArray((ev.content as { via?: unknown })?.via) &&
+							((ev.content as { via?: unknown[] }).via ?? []).length > 0
+						) {
+							newSpaceChildren.push({
+								spaceId: ev.room_id,
+								childId: ev.state_key,
+								sender: ev.sender,
+							});
+						}
 					} catch (err) {
 						console.error("engine: applyEvent failed", err, ev);
 					}
@@ -1956,6 +1978,65 @@ export function startServer(): void {
 					evaluateCollapses().catch(err => {
 						console.error("engine: post-transaction evaluateCollapses failed", err);
 					});
+				}
+				// Discord-style: when an admin links a room into a space
+				// (whether by creating-in-space or by adding an existing
+				// room), force-join every local member of the space to
+				// the new child room.  This used to live only on the
+				// linker's client, which meant federated members and
+				// anyone whose client was offline silently missed the
+				// auto-join.  Doing it engine-side means it works
+				// regardless of who's connected — every server's engine
+				// independently pulls its OWN local members in.
+				//
+				// Fired async after we respond to Synapse's transaction
+				// so /transactions returns a 200 promptly even when the
+				// space has dozens of members.
+				if (newSpaceChildren.length > 0) {
+					void (async () => {
+						for (const { spaceId, childId, sender } of newSpaceChildren) {
+							try {
+								// Sub-spaces stay explicit opt-in, mirroring
+								// the joinSpaceWithChildren rule on the
+								// client.  An admin can still file a sub-
+								// space under a parent space without
+								// dragging every member into the sub-space.
+								if (await isSpaceRoom(childId)) continue;
+								const members = await getJoinedMembers(spaceId);
+								const localSuffix = `:${config.homeserverName}`;
+								for (const userId of members) {
+									// Only act on local users — admin/v1/join
+									// can't cross-federate.  Federated
+									// members get auto-joined by their own
+									// homeserver's engine processing the
+									// same m.space.child event.
+									if (!userId.endsWith(localSuffix)) continue;
+									// The linker is already in the room
+									// (they wrote the m.space.child),
+									// adminJoinUserToRoom is idempotent so
+									// this is a no-op anyway, but the
+									// explicit skip saves a round-trip.
+									if (userId === sender) continue;
+									const result = await adminJoinUserToRoom(userId, childId);
+									if ("error" in result) {
+										// Log per-user failures but don't
+										// abort — getting most members in is
+										// better than rolling back any.
+										console.warn(
+											`engine: auto-join ${userId} → ${childId} failed:`,
+											result.error,
+											result.detail ?? "",
+										);
+									}
+								}
+							} catch (err) {
+								console.error(
+									`engine: auto-join cascade for child=${childId} parent=${spaceId} failed`,
+									err,
+								);
+							}
+						}
+					})();
 				}
 				seenTransactions.add(txnId);
 				// Trim the dedup set so it doesn't grow forever — the last

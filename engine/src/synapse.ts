@@ -248,6 +248,68 @@ export async function getSpaceChildRoomIds(spaceId: string): Promise<string[]> {
 }
 
 /**
+ * True iff the given room id is a Matrix space (m.room.create with
+ * `type: "m.space"`).  Used to skip sub-space cascades when
+ * auto-joining everyone-in-a-server to its rooms — sub-spaces stay
+ * an explicit opt-in, mirroring the client-side
+ * joinSpaceWithChildren / leaveSpaceWithChildren rules.
+ *
+ * Returns false on any error (room unreadable, type field missing,
+ * etc.) so the auto-join path defaults to "treat as a regular room"
+ * and goes ahead with the join.  Wrong direction would be auto-
+ * joining everyone to a sub-space they didn't ask for.
+ */
+export async function isSpaceRoom(roomId: string): Promise<boolean> {
+	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state`;
+	const r = await adminFetch(path);
+	if (!r.ok) return false;
+	const events = (await r.json().catch(() => null)) as
+		| Array<{ type?: string; state_key?: string; content?: { type?: unknown } }>
+		| null;
+	if (!Array.isArray(events)) return false;
+	for (const ev of events) {
+		if (ev.type === "m.room.create" && ev.state_key === "") {
+			return ev.content?.type === "m.space";
+		}
+	}
+	return false;
+}
+
+/**
+ * Read the user ids of the room's currently-joined members.  Uses
+ * the appservice as_token via /state because Synapse's
+ * /joined_members endpoint requires a real session (and we don't
+ * want to mint one just for this).  We're already a member of
+ * every room (regex `.*` namespace), so /state is authorized.
+ *
+ * Filters to `membership: "join"` and skips @bot-* service users
+ * (they're managed via the engine's bot runtime, not the
+ * "everyone in this server gets every channel" auto-join path)
+ * plus the appservice's own user.
+ *
+ * Returns [] on any error so callers don't have to special-case.
+ */
+export async function getJoinedMembers(roomId: string): Promise<string[]> {
+	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state`;
+	const r = await adminFetch(path);
+	if (!r.ok) return [];
+	const events = (await r.json().catch(() => null)) as
+		| Array<{ type?: string; state_key?: string; content?: { membership?: unknown } }>
+		| null;
+	if (!Array.isArray(events)) return [];
+	const ids: string[] = [];
+	for (const ev of events) {
+		if (ev.type !== "m.room.member") continue;
+		if (typeof ev.state_key !== "string" || !ev.state_key) continue;
+		if (ev.content?.membership !== "join") continue;
+		if (/^@bot-/.test(ev.state_key)) continue;
+		if (/^@koven-engine[:_]/.test(ev.state_key)) continue;
+		ids.push(ev.state_key);
+	}
+	return ids;
+}
+
+/**
  * Read a room's current m.room.name + m.room.create from a single
  * /state pull.  Used by the room-flag pipeline:
  *   - `name` becomes `original_name` on the collapse row so an admin
