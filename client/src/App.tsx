@@ -336,6 +336,11 @@ export default function App() {
 				reaction,
 				myUserId: creds.user_id as UserId,
 			}),
+			onMessageRedacted: (roomId, eventId) => dispatch({
+				type: "message_redacted",
+				roomId,
+				eventId,
+			}),
 			onReactionRedacted: (_roomId, reactionEventId) => dispatch({
 				type: "reaction_redacted",
 				reactionEventId,

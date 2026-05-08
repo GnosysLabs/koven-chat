@@ -192,6 +192,14 @@ export interface MatrixHandlers {
 	onRoomsUpdated(rooms: Room[]): void;
 	onSpacesUpdated(spaces: Space[]): void;
 	onMessage(msg: Message, options: { live: boolean }): void;
+	// Fires when a redaction event arrives that targets a real
+	// message bubble (self-delete, bot-owner-delete, mod kick of a
+	// post, etc.).  Distinct from reaction / flag redactions, which
+	// have their own dedicated handlers; we don't know which kind
+	// the redaction targets up front, so the transport dispatches
+	// to all three in parallel and lets each reducer no-op if the
+	// id isn't in its map.
+	onMessageRedacted(roomId: RoomId, eventId: EventId): void;
 	onReaction(reaction: ReactionEvent, options: { live: boolean }): void;
 	onReactionRedacted(roomId: RoomId, reactionEventId: EventId): void;
 	onFlag(flag: FlagEventLite, options: { live: boolean }): void;
@@ -3151,6 +3159,15 @@ export class MatrixTransport {
 				(typeof ev.redacts === "string" ? ev.redacts : undefined) ??
 				(typeof content?.redacts === "string" ? content.redacts : undefined);
 			if (redactedId) {
+				// Dispatch to all three target-type reducers in parallel:
+				// we don't know whether the redaction targets a message,
+				// a reaction, or a flag, and the reducers each no-op if
+				// the id isn't in their map.  Without the message-side
+				// dispatch the bubble would stay rendered until the user
+				// refreshed (matrix-js-sdk applies the redaction to its
+				// internal event copy, but our local message-list
+				// snapshot is what actually drives the timeline render).
+				this.handlers.onMessageRedacted(room.roomId as RoomId, redactedId as EventId);
 				this.handlers.onReactionRedacted(room.roomId as RoomId, redactedId as EventId);
 				this.handlers.onFlagRedacted(room.roomId as RoomId, redactedId as EventId);
 			}

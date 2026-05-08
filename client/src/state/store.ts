@@ -104,6 +104,7 @@ export type Action =
 	| { type: "spaces_updated"; spaces: Space[] }
 	| { type: "messages_loaded"; roomId: RoomId; messages: Message[] }
 	| { type: "message_arrived"; message: Message; live: boolean }
+	| { type: "message_redacted"; roomId: RoomId; eventId: EventId }
 	| { type: "members_loaded"; roomId: RoomId; members: Member[] }
 	| { type: "reactions_loaded"; reactions: ReactionEvent[]; myUserId: UserId }
 	| { type: "reaction_arrived"; reaction: ReactionEvent; myUserId: UserId }
@@ -138,6 +139,25 @@ export function reduce(state: AppState, action: Action): AppState {
 			const loaded = new Set(state.loadedTimelines);
 			loaded.add(action.roomId);
 			return { ...state, messagesByRoom: next, loadedTimelines: loaded };
+		}
+
+		case "message_redacted": {
+			// Remove the redacted message from the room's timeline so
+			// the bubble disappears immediately when a self/bot-owner
+			// delete completes.  Without this, matrix-js-sdk applies
+			// the redaction internally (event.isRedacted() goes true)
+			// but our local message-list snapshot still has the row,
+			// so the UI keeps showing it until something else triggers
+			// a re-emit (page refresh, room switch).  Reactions and
+			// flags have their own redaction reducers; this one is
+			// scoped to the actual message-bubble timeline.
+			const existing = state.messagesByRoom.get(action.roomId);
+			if (!existing) return state;
+			const filtered = existing.filter(m => m.id !== action.eventId);
+			if (filtered.length === existing.length) return state;
+			const next = new Map(state.messagesByRoom);
+			next.set(action.roomId, filtered);
+			return { ...state, messagesByRoom: next };
 		}
 
 		case "message_arrived": {
