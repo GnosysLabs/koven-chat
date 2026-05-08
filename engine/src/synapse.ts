@@ -612,6 +612,36 @@ export async function kickOrBanAs(opts: {
 }
 
 /**
+ * Read a room's Koven icon emoji from the `chat.koven.room_icon`
+ * state event.  Returns the trimmed emoji string when set + valid,
+ * or null when the event doesn't exist / the content is malformed /
+ * Synapse rejects the read (admin token unavailable, room missing,
+ * etc.).
+ *
+ * Used by the Explore-page enrichment endpoint: the public rooms
+ * directory chunk only returns standard fields (name, topic,
+ * avatar_url, member count), so we have to fetch this state event
+ * per-room to mirror what `readKovenIconEmoji` does inside the
+ * client SDK.  Admin token bypasses room-membership gating, which
+ * matters since the engine may not be joined to every public room
+ * yet (e.g. a freshly-created room that hasn't seen its first
+ * timeline event the appservice gets pushed into yet).
+ */
+export async function getRoomIconEmoji(roomId: string): Promise<string | null> {
+	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/chat.koven.room_icon/`;
+	const r = await adminFetch(path);
+	if (!r.ok) return null;
+	const body = (await r.json().catch(() => null)) as { emoji?: unknown } | null;
+	if (!body || typeof body.emoji !== "string") return null;
+	const trimmed = body.emoji.trim();
+	if (!trimmed) return null;
+	// Mirror the client-side cap in `readKovenIconEmoji` so a malformed
+	// state event with a 10kB string doesn't make it onto the wire.
+	if (trimmed.length > 16) return null;
+	return trimmed;
+}
+
+/**
  * Read a single timeline event's sender + minimal metadata.  Used by
  * the self-delete authorization check: the engine needs to know who
  * originally sent a message before it'll let someone redact it.

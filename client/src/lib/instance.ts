@@ -252,6 +252,33 @@ export type ModLogEntry =
 		founder: string;
 	};
 
+/**
+ * Bulk-fetch the Koven `chat.koven.room_icon` emoji for a list of
+ * room ids.  Used by the Explore page to enrich the public rooms
+ * directory results: Synapse's /publicRooms chunk doesn't include
+ * custom state events, so without this call Explore tiles would
+ * fall back to the DiceBear auto-avatar even when the room's
+ * founder picked an emoji.
+ *
+ * Returns a partial map: only rooms with an emoji set appear as
+ * keys.  Failures silently drop rooms from the response (engine
+ * decides), so the caller defaults to undefined when a key is
+ * missing.  Empty-input fast-path skips the fetch entirely.
+ */
+export async function fetchRoomIcons(
+	roomIds: string[],
+): Promise<Record<string, string>> {
+	if (roomIds.length === 0) return {};
+	const r = await fetch(`${ENGINE_URL}/api/rooms/icons`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ room_ids: roomIds }),
+	});
+	if (!r.ok) return {};
+	const body = (await r.json()) as { icons?: Record<string, string> };
+	return body.icons ?? {};
+}
+
 export async function fetchRoomModLog(roomId: string): Promise<ModLogEntry[]> {
 	const r = await fetch(`${ENGINE_URL}/api/rooms/${encodeURIComponent(roomId)}/mod-log`);
 	if (!r.ok) return [];

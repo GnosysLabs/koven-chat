@@ -85,6 +85,7 @@ import {
 	adminSetUserEmail,
 	deactivateUser,
 	getEventSender,
+	getRoomIconEmoji,
 	getRoomJoinRule,
 	getRoomNameAndCreator,
 	getSpaceChildRoomIds,
@@ -1450,6 +1451,56 @@ export function startServer(): void {
 						return json({ ok: true });
 					}
 				}
+			}
+
+			// ─── Bulk room-icon lookup ──────────────────────────────
+			// Synapse's /publicRooms directory chunk only returns
+			// standard room fields (name, topic, avatar, member count).
+			// Koven stores its room emoji in a custom
+			// `chat.koven.room_icon` state event, which the directory
+			// can't surface — so the Explore page would fall back to
+			// the DiceBear avatar instead of the founder-picked emoji.
+			//
+			// This endpoint takes a list of room ids and returns the
+			// icon emoji for every one that has one set, in a single
+			// batched call.  Public read because the data it exposes
+			// is already public (anyone can join the room and read the
+			// state event themselves) — keeping it unauthenticated
+			// means the Explore page can show emojis to logged-out
+			// visitors too.
+			//
+			// Bounded to 200 ids per call so a malicious caller can't
+			// spin up thousands of parallel state fetches against
+			// Synapse.  The Explore page's default page size is 50.
+			if (req.method === "POST" && path === "/api/rooms/icons") {
+				const body = (await req.json().catch(() => null)) as
+					| { room_ids?: unknown }
+					| null;
+				const roomIds = Array.isArray(body?.room_ids)
+					? (body!.room_ids as unknown[]).filter((x): x is string => typeof x === "string")
+					: [];
+				if (roomIds.length === 0) return json({ icons: {} });
+				if (roomIds.length > 200) {
+					return json({
+						errcode: "M_LIMIT_EXCEEDED",
+						error: "max 200 room_ids per request",
+					}, { status: 400 });
+				}
+				// Parallel state fetches.  Synapse handles each in
+				// constant time (state read, no walk), and we cap the
+				// fan-out via the 200 cap above; on a healthy install
+				// 50 concurrent fetches finish in well under a second.
+				// Per-room failures are silently dropped — a room with
+				// no icon set, or one we can't read state for, just
+				// doesn't appear in the response map.
+				const results = await Promise.all(
+					roomIds.map(async (id) => [id, await getRoomIconEmoji(id)] as const),
+				);
+				const icons: Record<string, string> = {};
+				for (const [id, emoji] of results) {
+					if (emoji) icons[id] = emoji;
+				}
+				return json({ icons });
 			}
 
 			// ─── Currently-collapsed rooms list (public) ───────────

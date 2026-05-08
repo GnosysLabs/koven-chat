@@ -13,13 +13,19 @@ import { cn } from "@/lib/utils";
 import { Check, Compass, Flag, Hash, Search, Users } from "lucide-react";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { FlagCategory, Room, RoomId, Space } from "@koven/shared";
-import { flagRoom } from "@/lib/instance";
+import { fetchRoomIcons, flagRoom } from "@/lib/instance";
 
 interface PublicEntry {
 	roomId: RoomId;
 	name: string;
 	topic?: string;
 	avatarUrl?: string;
+	// Founder-picked emoji icon.  Synapse's public-rooms directory
+	// doesn't surface custom state events, so we backfill this from
+	// the engine's /api/rooms/icons batch endpoint after the directory
+	// query lands.  Undefined means either no emoji is set or we
+	// haven't fetched yet — MatrixAvatar treats it the same way.
+	iconEmoji?: string;
 	memberCount: number;
 	isSpace: boolean;
 	joinRule: string;
@@ -81,7 +87,26 @@ export function ExplorePane({
 					...dirSpaces.map(s => ({ ...s, isSpace: true })),
 					...soloRooms.map(r => ({ ...r, isSpace: false })),
 				];
+				// Render the directory results immediately, even before
+				// the icon backfill returns.  An emoji-iconed room
+				// briefly shows the DiceBear fallback for the duration
+				// of one engine round-trip — better than blocking the
+				// whole list on a secondary fetch that could fail.
 				setResults(merged);
+				// Enrich with founder-picked emojis.  We're not
+				// awaiting this inside the try/catch above because a
+				// failure here shouldn't bubble up as an Explore
+				// error: the directory itself loaded fine, we just
+				// don't have icons.  An empty/failed icons response
+				// is indistinguishable from "no icons set" — both
+				// fall through to DiceBear.
+				const ids = merged.map(e => e.roomId);
+				fetchRoomIcons(ids).then(icons => {
+					if (Object.keys(icons).length === 0) return;
+					setResults(prev => prev.map(e =>
+						icons[e.roomId] ? { ...e, iconEmoji: icons[e.roomId] } : e
+					));
+				}).catch(() => { /* see comment above */ });
 			} catch (err) {
 				setError(err instanceof Error ? err.message : String(err));
 			} finally {
@@ -257,6 +282,7 @@ function EntryRow({
 		<div className="flex items-start gap-3 px-3 py-3">
 			<MatrixAvatar
 				mxc={entry.avatarUrl}
+				emoji={entry.iconEmoji}
 				seed={entry.roomId}
 				kind={entry.isSpace ? "space" : "room"}
 				className={cn("shrink-0", entry.isSpace ? "h-10 w-10 rounded-lg" : "h-10 w-10 rounded-md")}
