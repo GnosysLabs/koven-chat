@@ -109,27 +109,20 @@ void setupMacChrome()
 	.then(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
 	.then(revealApp);
 
-// Register the service worker that backs notifications + (later)
-// offline caching.  Done after the React tree mounts so the
-// installation cost (network request for /sw.js, parse, install
-// event) doesn't compete with first paint.  iOS Safari requires the
-// SW to fire notifications; modern Chromium / Firefox / Safari
-// desktop all also work fine via the SW path, so we use it
-// universally.  Skipped silently if `serviceWorker` isn't on
-// `navigator` (older browsers, sandbox modes that disable workers).
+// SW registration DISABLED — investigating a fleet-wide regression
+// where /sync, message send, read receipts, and profile fetch broke
+// across all platforms after the bell/SW deploy.  Until we isolate
+// whether the SW was the cause, we don't register it — AND we
+// actively unregister any SW that a previous page load installed,
+// so a stale SW can't keep controlling the tab.
+//
+// Notifications fall back to page-side `new Notification(...)` on
+// browsers that support it.  iOS PWA notifications regress until
+// the SW can be re-introduced safely.
 if (typeof window !== "undefined" && "serviceWorker" in navigator) {
 	window.addEventListener("load", () => {
-		// `scope: "/"` — the default — lets the SW intercept any
-		// future fetch from the SPA, even though we don't intercept
-		// fetches today.  Future-proofs the install: extending the
-		// SW with a fetch handler doesn't require a re-registration
-		// dance.
-		navigator.serviceWorker
-			.register("/sw.js", { scope: "/" })
-			.catch((err) => {
-				// Don't escalate — a missing SW falls back to page-
-				// side `new Notification(...)` (see lib/notifications.ts).
-				console.warn("sw: registration failed", err);
-			});
+		navigator.serviceWorker.getRegistrations()
+			.then((regs) => Promise.all(regs.map((r) => r.unregister())))
+			.catch(() => { /* silent — no-op on browsers without SW */ });
 	});
 }
