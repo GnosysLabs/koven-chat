@@ -974,10 +974,20 @@ export default function App() {
 							: transport.sendText(state.activeRoomId, text);
 						send.catch(e => dispatch({ type: "error", message: e.message }));
 					}}
-					onSendAttachment={async (file) => {
+					onSendAttachment={async (file, _replyTo, caption) => {
 						if (!state.activeRoomId || !transport) return;
 						try {
-							await transport.uploadAndSendAttachment(state.activeRoomId, file);
+							// caption is the text the user typed alongside
+							// the attachment in the composer.  When set,
+							// uploadAndSendAttachment writes it MSC2530-
+							// style (body=caption, filename=file.name) so
+							// the renderer can show it underneath the
+							// media bubble on every connected client.
+							await transport.uploadAndSendAttachment(
+								state.activeRoomId,
+								file,
+								caption ?? undefined,
+							);
 						} catch (e) {
 							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
 							throw e;

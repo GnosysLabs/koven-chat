@@ -175,6 +175,14 @@ export interface Message {
 		senderDisplayName: string;
 		snippet: string;
 	};
+	// Caption for media messages — separate from the filename (which
+	// goes in `mediaName`) per MSC2530.  When the sender attached a
+	// file AND typed text in the same compose action, the m.image /
+	// m.video / m.file event carries `body` = caption and
+	// `filename` = the actual filename; absent the explicit
+	// `filename` field, `body` IS the filename and there's no caption.
+	// The renderer surfaces this as text underneath the media bubble.
+	caption?: string;
 	// True for events whose send hasn't been confirmed by the homeserver
 	// yet — local echoes still in flight, queued retries after a network
 	// drop, encryption-in-progress, or hard-failed sends matrix-js-sdk

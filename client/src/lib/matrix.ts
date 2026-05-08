@@ -1063,7 +1063,11 @@ export class MatrixTransport {
 	 * client-side, and routes through the encrypted-attachment path
 	 * when the target room is end-to-end encrypted.
 	 */
-	async uploadAndSendAttachment(roomId: RoomId, file: File): Promise<EventId> {
+	async uploadAndSendAttachment(
+		roomId: RoomId,
+		file: File,
+		caption?: string,
+	): Promise<EventId> {
 		const c = this.requireClient();
 		const room = c.getRoom(roomId);
 		const isEncrypted = !!room && (room as any).hasEncryptionStateEvent?.() === true;
@@ -1087,6 +1091,17 @@ export class MatrixTransport {
 			} catch { /* dimensions are optional */ }
 		}
 
+		// MSC2530 caption form: when the user typed text alongside the
+		// attachment, `body` carries the caption and `filename` carries
+		// the real filename.  Receivers that know MSC2530 surface the
+		// caption underneath the media; older clients just see body
+		// (caption) as the message text — better fallback than showing
+		// a raw IMG_1234.jpg.  Without a caption we keep the legacy
+		// shape (body == filename, no `filename` field).
+		const trimmedCaption = caption?.trim();
+		const body = trimmedCaption || file.name;
+		const includeFilename = !!trimmedCaption;
+
 		let content: Record<string, unknown>;
 		if (isEncrypted) {
 			// Encrypt → upload ciphertext → send event with `file:` blob.
@@ -1099,7 +1114,7 @@ export class MatrixTransport {
 			} as any);
 			content = {
 				msgtype,
-				body: file.name,
+				body,
 				info,
 				file: { ...encInfo, url: upload.content_uri },
 			};
@@ -1111,11 +1126,12 @@ export class MatrixTransport {
 			} as any);
 			content = {
 				msgtype,
-				body: file.name,
+				body,
 				info,
 				url: upload.content_uri,
 			};
 		}
+		if (includeFilename) content.filename = file.name;
 
 		const res = await c.sendEvent(roomId, "m.room.message" as any, content as any);
 		return res.event_id as EventId;
@@ -3027,6 +3043,7 @@ export class MatrixTransport {
 		let mediaHeight: number | undefined;
 		let mediaEncrypted: import("@koven/shared").MediaEncryption | undefined;
 		let text = (content.body as string | undefined) ?? "";
+		let caption: string | undefined;
 
 		const mediaKind: MessageKind | null =
 			msgtype === "m.image" ? "image" :
@@ -3055,8 +3072,30 @@ export class MatrixTransport {
 			mediaSize = info?.size as number | undefined;
 			mediaWidth = info?.w as number | undefined;
 			mediaHeight = info?.h as number | undefined;
-			// `body` on m.image/m.file is conventionally the filename.
-			mediaName = text || undefined;
+			// MSC2530: when a media event carries an explicit `filename`
+			// field, `body` is the caption and `filename` is the real
+			// filename.  Absent `filename`, `body` IS the filename
+			// (the legacy/default path Matrix clients have always used).
+			//
+			// We use this to let users send an image with attached
+			// text: the composer's draft goes into body (caption), the
+			// File.name goes into filename.  Receivers that don't know
+			// about MSC2530 still read body as the message text — which
+			// is the right fallback (caption beats a raw IMG_1234.jpg).
+			const filenameField = typeof content.filename === "string" ? content.filename : undefined;
+			if (filenameField && filenameField !== text) {
+				// MSC2530 form: body is the caption.
+				mediaName = filenameField;
+				caption = text;
+			} else {
+				// Legacy form: body is the filename.
+				mediaName = text || undefined;
+			}
+			// Media kinds carry their text payload in `caption`, not
+			// `text` — the latter is reserved for plain message bodies.
+			// Renderer paths fork on `kind`, so blanking `text` here
+			// keeps the contract clean and avoids double-rendering.
+			text = "";
 		}
 
 		// Replies: extract the m.in_reply_to relation and look up the
@@ -3121,6 +3160,7 @@ export class MatrixTransport {
 			mediaWidth,
 			mediaHeight,
 			mediaEncrypted,
+			caption,
 			edited: !!event.replacingEvent(),
 			replyTo,
 			pending,

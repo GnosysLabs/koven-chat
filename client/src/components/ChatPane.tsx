@@ -56,7 +56,7 @@ export interface ChatPaneProps {
 	// Upload + send a file attachment.  Returns once the event has been
 	// dispatched; the parent handles errors via the global error
 	// dispatcher.  Optional — when omitted the attach button is hidden.
-	onSendAttachment?(file: File, replyTo: EventId | null): Promise<void>;
+	onSendAttachment?(file: File, replyTo: EventId | null, caption: string | null): Promise<void>;
 	onReact(eventId: EventId, emoji: string): void;
 	onUnreact(reaction: ReactionAggregate): void;
 	onFlag(eventId: EventId, category: FlagCategory, rationale?: string): void | Promise<void>;
@@ -331,18 +331,21 @@ export function ChatPane({
 	};
 
 	function send() {
-		// Attachment send: ignores draft text for now (Matrix carries
-		// the filename as the body of an m.image/m.file event; supporting
-		// a separate caption would mean two events per send, which we
-		// can layer on later).  Plain text path stays as it was.
+		// Attachment send: any text in the composer travels as a
+		// caption on the same event (MSC2530 — body becomes the
+		// caption, filename carries the real filename).  Receivers
+		// that know MSC2530 render caption under the media; older
+		// clients fall back to showing body as the message text.
 		if (pendingAttachment && onSendAttachment) {
 			const file = pendingAttachment;
 			const replyToId = replyTarget?.id ?? null;
+			const captionText = draft.trim();
 			setUploading(true);
-			onSendAttachment(file, replyToId)
+			onSendAttachment(file, replyToId, captionText || null)
 				.then(() => {
 					setPendingAttachment(null);
 					setReplyTarget(null);
+					setDraft("");
 				})
 				.finally(() => setUploading(false));
 			return;
@@ -755,12 +758,12 @@ export function ChatPane({
 								isSuspended
 									? "Posting paused while your account is under review"
 									: pendingAttachment
-										? "Press send to share the file"
+										? "Add a caption…"
 										: replyTarget
 											? `Reply to ${replyTarget.senderDisplayName}`
 											: `Message ${room.name}`
 							}
-							disabled={isSuspended || !!pendingAttachment}
+							disabled={isSuspended}
 							autoFocus={!isSuspended}
 							className="w-full"
 						/>
@@ -1150,18 +1153,38 @@ function MessageBubble({ message }: { message: Message }) {
 	const selfBubble = "bg-primary text-primary-foreground";
 	const otherBubble = "bg-muted text-foreground";
 
+	// Image + video render flush — no surrounding bubble.  The
+	// previous design wrapped them in the same colored bubble we use
+	// for text messages, which on self-sent messages painted a
+	// 4px-thick cyan frame around every shared photo and read as
+	// "this image has been highlighted/selected" rather than "this is
+	// my message".  Discord, Slack, and Element all render media
+	// without a bubble for the same reason; the rounded corners on
+	// the media itself are framing enough.  Caption (MSC2530) renders
+	// underneath as a normal text bubble so the visual hierarchy
+	// stays consistent — image first, your words second.
 	if (message.kind === "image" && message.mediaMxc) {
 		return (
-			<div className={cn(baseBubble, "p-1", message.isSelf ? selfBubble : otherBubble)}>
+			<div className="inline-flex flex-col gap-1.5 max-w-md">
 				<AttachmentImage message={message} />
+				{message.caption && (
+					<div className={cn(baseBubble, message.isSelf ? selfBubble : otherBubble, "self-start")}>
+						{message.caption}
+					</div>
+				)}
 			</div>
 		);
 	}
 
 	if (message.kind === "video" && message.mediaMxc) {
 		return (
-			<div className={cn(baseBubble, "p-1", message.isSelf ? selfBubble : otherBubble)}>
+			<div className="inline-flex flex-col gap-1.5 max-w-md">
 				<AttachmentVideo message={message} />
+				{message.caption && (
+					<div className={cn(baseBubble, message.isSelf ? selfBubble : otherBubble, "self-start")}>
+						{message.caption}
+					</div>
+				)}
 			</div>
 		);
 	}
