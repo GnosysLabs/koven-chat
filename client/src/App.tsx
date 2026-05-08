@@ -699,27 +699,30 @@ export default function App() {
 		);
 	}
 
-	// macOS desktop builds need a 40px chrome gutter at the top of
-	// the authed app: it (a) clears the OS-reserved title-bar drag
-	// zone so chat-header buttons stay clickable, (b) carries the
-	// hairline divider between chrome and content, and (c) hosts
-	// the centered Koven mark.  Login + early-return screens skip
-	// the gutter so their backgrounds extend edge-to-edge.
-	const isMacDesktop = typeof window !== "undefined"
-		&& (window as { __KOVEN_PLATFORM__?: string }).__KOVEN_PLATFORM__ === "macos";
+	// macOS + Windows desktop builds need a 40px chrome gutter at
+	// the top of the authed app: it (a) clears the custom-chrome
+	// drag zone so chat-header buttons stay clickable, (b) carries
+	// the hairline divider between chrome and content, and (c)
+	// hosts the centered Koven mark.  Login + early-return screens
+	// skip the gutter so their backgrounds extend edge-to-edge.
+	// Linux desktop and browser builds have native chrome (Linux)
+	// or no extra chrome (browser), so no gutter needed.
+	const isCustomChromeDesktop = typeof window !== "undefined"
+		&& (((window as { __KOVEN_PLATFORM__?: string }).__KOVEN_PLATFORM__ === "macos")
+			|| ((window as { __KOVEN_PLATFORM__?: string }).__KOVEN_PLATFORM__ === "windows"));
 
 	return (
 		<TransportContext.Provider value={transport}>
 		<div className="h-full flex flex-col">
-			{/* DesktopTitleBar (traffic lights) is rendered absolute-
+			{/* DesktopTitleBar (window controls) is rendered absolute-
 			    positioned at the top of main.tsx so it floats over
 			    every screen.  The 40px chrome gutter below — with
 			    the centered Koven mark + a hairline divider —
 			    appears ONLY in the authed app: the login screen
 			    deliberately leaves the top empty so its background
 			    image extends edge-to-edge under the floating
-			    traffic lights. */}
-			{isMacDesktop && (
+			    window controls. */}
+			{isCustomChromeDesktop && (
 				<div className="h-10 shrink-0 border-b border-border flex items-center justify-center relative">
 					<img
 						src="/favicon.png"

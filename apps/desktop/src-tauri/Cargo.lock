@@ -1999,7 +1999,7 @@ dependencies = [
 
 [[package]]
 name = "koven-desktop"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "cocoa",
  "log",
@@ -2013,6 +2013,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "url",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
