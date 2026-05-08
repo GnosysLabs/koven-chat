@@ -459,19 +459,43 @@ export class MatrixTransport {
 		});
 
 		if (this.stopped || !this.client) return;
-		// Fire-and-forget: matrix-js-sdk's startClient() returns a
-		// Promise that resolves AFTER the first /sync completes —
-		// which on a populated account can take 10-30s while Synapse
-		// computes initial timeline events across every joined room.
-		// Awaiting it would block start() for that whole window,
-		// stranding the user on the "Connecting…" screen even though
-		// everything that gates app rendering (crypto init, account-
-		// data reads for the encryption probe, listeners) is already
-		// done.  Letting startClient run in the background means the
-		// encryption setup / unlock UI shows up in ~2s instead, and
-		// sync state continues to flow through the onSyncState
-		// callback as the loop progresses.  Any rejection would be a
-		// SDK bug we'd want to know about, so log loudly on .catch.
+		// NOTE: we deliberately do NOT call startClient() here anymore.
+		// Even fire-and-forget, it kicks off heavy synchronous work the
+		// moment Synapse's first /sync response arrives — JSON-parsing
+		// thousands of events, decrypting via rust-crypto WASM,
+		// dispatching React state updates per-room.  All of that runs
+		// on the JS main thread and starves React's commit phase, so
+		// the setEncState() that fires after start() resolves DOES
+		// land in state but can't paint until the sync work yields.
+		// That's the "Connecting… for a minute, then a click forces
+		// the encryption sheet to appear" symptom users were hitting
+		// — clicks are discrete events React flushes at high priority,
+		// which is the only thing that can interrupt the sync hog.
+		//
+		// The fix is to let the caller decide when sync starts.  start()
+		// now returns once the crypto + listeners are wired up; the
+		// caller (App.tsx) runs the encryption probe, sets state, lets
+		// React commit, THEN calls beginSync().  By that point the
+		// user is already past the Connecting screen and either in a
+		// setup/unlock sheet or the main UI — sync hogging the thread
+		// from there on is acceptable: the existing "Sync: preparing /
+		// syncing" banner already explains the wait, and rooms paint
+		// progressively as sync emits Timeline events.
+	}
+
+	/**
+	 * Kick off the sync loop.  Called by App.tsx after the encryption
+	 * probe completes and the corresponding UI (setup sheet, unlock
+	 * sheet, or the main app for already-unlocked users) has had a
+	 * chance to render.  Idempotent + cancellable: re-calling after
+	 * start() is fine; if stop() ran first this no-ops.
+	 */
+	beginSync(): void {
+		if (this.stopped || !this.client) return;
+		// startClient resolves after the FIRST /sync completes; we
+		// don't await it here either, since callers of beginSync don't
+		// need a "sync is fully ready" barrier — they listen for
+		// SyncState transitions on the transport instead.
 		void this.client.startClient({
 			initialSyncLimit: 30,
 			// "detached" lets us call redactEvent (unreact, unflag).  The

@@ -416,6 +416,24 @@ export default function App() {
 			} finally {
 				console.timeEnd("app.boot: transport.start → encState");
 			}
+			// Kick off /sync AFTER the encryption probe + setEncState.
+			// Doing it here (not inside start()) gives React a clean
+			// commit window to paint the setup sheet / unlock sheet /
+			// main UI before the SDK starts hammering the JS thread
+			// with first-sync event processing.  Two requestAnimationFrame
+			// hops yield to the browser's compositor twice — first to
+			// run the React commit, second to actually paint — so by
+			// the time beginSync runs the user is already looking at
+			// the right screen and the heavy sync work happens
+			// invisibly in the background.
+			if (cancelled) return;
+			requestAnimationFrame(() => {
+				if (cancelled) return;
+				requestAnimationFrame(() => {
+					if (cancelled) return;
+					t.beginSync();
+				});
+			});
 		}).catch(e => {
 			if (cancelled) return;
 			console.timeEnd("app.boot: transport.start → encState");
