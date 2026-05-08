@@ -44,7 +44,7 @@ See [GOVERNANCE.md](GOVERNANCE.md) for the full mechanics.
 
 ## What's in this repo
 
-The web client + server-side governance engine, plus a complete self-hosting bundle (Synapse with our federation gate, Postgres, coturn, Caddy with auto-TLS).
+The web client + server-side governance engine, plus a complete self-hosting bundle (Synapse with our federation gate, Postgres, coturn, and your choice of Caddy with auto-TLS or an existing host nginx + certbot).
 
 ```
 ┌─────────────────────┐
@@ -152,6 +152,40 @@ Caddy fetches Let's Encrypt certs for whichever hostname(s) you used. First user
 
 The first user to register on a fresh install automatically becomes the instance admin. There's no special "create the first admin" step. Sign up through the web client like any other user, and the engine promotes you on your first authenticated request.
 
+### Using nginx instead of Caddy
+
+If the host already runs nginx + certbot (e.g. for other services on the same VPS), you can have nginx terminate TLS and proxy to the Koven stack instead of bringing up the bundled Caddy. The bundle ships a compose override and a config template for this.
+
+**Activate the override** by adding this line to `.env` so every `docker compose ...` invocation merges it automatically:
+
+```sh
+COMPOSE_FILE=docker-compose.yml:docker-compose.nginx.yml
+```
+
+(or pass `-f docker-compose.yml -f docker-compose.nginx.yml` to every command if you'd rather not set it persistently). The override does two things: skips the Caddy service entirely, and binds Synapse + the engine to `127.0.0.1` so the public internet can't reach them directly — only the host nginx can.
+
+**Render the nginx config** by running `./bin/koven setup` as usual. It produces `docker/nginx/koven.conf` from the template, with your `KOVEN_HOSTNAME`, `SERVER_NAME`, and `ADMIN_EMAIL` filled in.
+
+**Install it** into nginx and ask certbot for certs:
+
+```sh
+sudo cp docker/nginx/koven.conf /etc/nginx/sites-available/koven
+sudo ln -s /etc/nginx/sites-available/koven /etc/nginx/sites-enabled/koven
+sudo nginx -t && sudo systemctl reload nginx
+sudo certbot --nginx -d $KOVEN_HOSTNAME -d $SERVER_NAME \
+  --redirect --agree-tos --email $ADMIN_EMAIL --non-interactive
+```
+
+(drop the second `-d` flag for layout C — there's no apex hostname to certify.)
+
+certbot rewrites `/etc/nginx/sites-available/koven` in place to add TLS listen lines and cert paths. Subsequent `./bin/koven setup` re-runs only re-render the template at `docker/nginx/koven.conf` — they don't touch the live `/etc/nginx/sites-available/koven`, so certbot's edits stick. If you change `.env` or the template and want the live nginx config updated, re-cp it and re-run certbot (certbot is idempotent and will preserve existing certs).
+
+Bring the Koven stack up the same way as the Caddy path:
+
+```sh
+docker compose up -d
+```
+
 ### Updating
 
 ```sh
@@ -165,7 +199,7 @@ docker compose up -d
 
 Koven instances federate **only with other Koven instances**. No manual whitelisting, no admin friction. Synapse's outgoing federation is gated by the `koven-federation-gate` Python module that ships in our Synapse image. On first contact with a new domain, it probes `https://<domain>/.well-known/koven`. A valid Koven response means allowed (and cached for 10 minutes); anything else is denied.
 
-This means `@alice:other-koven.chat` works the moment you type it, while vanilla Matrix homeservers are silently isolated. Every Koven instance auto-serves `/.well-known/koven` via Caddy so peer discovery is symmetric.
+This means `@alice:other-koven.chat` works the moment you type it, while vanilla Matrix homeservers are silently isolated. Every Koven instance auto-serves `/.well-known/koven` from its reverse proxy (Caddy or nginx) so peer discovery is symmetric.
 
 ## Dev
 
