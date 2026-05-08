@@ -25,6 +25,11 @@ export interface SpaceLandingProps {
 	rooms: Room[];                     // rooms in this space (already filtered)
 	variant?: SpaceLandingVariant;     // defaults to "real"
 	onAddRoom(): void;
+	// Open the picker that adds a room the user is already in to this
+	// space.  Distinct from `onAddRoom` (which creates a brand-new room
+	// inside the space) — many users have rooms that exist outside any
+	// server and want to file them under one without recreating.
+	onAddExistingRoom?(): void;
 	onInvite(): void;
 	onOpenSettings(): void;
 	onSelectRoom(roomId: RoomId): void;
@@ -32,7 +37,7 @@ export interface SpaceLandingProps {
 }
 
 export function SpaceLanding({
-	space, rooms, variant = "real", onAddRoom, onInvite, onOpenSettings, onSelectRoom, onStartDm,
+	space, rooms, variant = "real", onAddRoom, onAddExistingRoom, onInvite, onOpenSettings, onSelectRoom, onStartDm,
 }: SpaceLandingProps) {
 	const heading = variant === "real" ? `Welcome to ${space.name}` : space.name;
 	// Founder / mod actions — gated on Matrix power level.  PL ≥ 50 is
@@ -68,18 +73,37 @@ export function SpaceLanding({
 						</div>
 					)}
 					{(showAddRoom || showInvite || showSettings || showStartDm) && (
-						<div className="flex items-center gap-1.5 mt-3">
-							{showStartDm && onStartDm && (
-								<HeaderAction icon={<UserPlus className="h-4 w-4" />} label="Start a DM" onClick={onStartDm} />
+						<div className="flex flex-col items-center gap-1.5 mt-3">
+							{/* Primary row: ambient actions (Start DM,
+							    Invite, Settings) — the things you do
+							    on a healthy, populated space.  Add-
+							    room actions live below as their own
+							    row since they're a setup gesture
+							    rather than ongoing-management. */}
+							{(showStartDm || showInvite || showSettings) && (
+								<div className="flex items-center gap-1.5">
+									{showStartDm && onStartDm && (
+										<HeaderAction icon={<UserPlus className="h-4 w-4" />} label="Start a DM" onClick={onStartDm} />
+									)}
+									{showInvite && (
+										<HeaderAction icon={<UserPlus className="h-4 w-4" />} label="Invite" onClick={onInvite} />
+									)}
+									{showSettings && (
+										<HeaderAction icon={<Settings className="h-4 w-4" />} label="Settings" onClick={onOpenSettings} />
+									)}
+								</div>
 							)}
+							{/* Secondary row: room-creation gestures.
+							    Stacked under the primary row to read
+							    as "build out the space" rather than
+							    "use the space." */}
 							{showAddRoom && (
-								<HeaderAction icon={<Plus className="h-4 w-4" />} label="Add room" onClick={onAddRoom} />
-							)}
-							{showInvite && (
-								<HeaderAction icon={<UserPlus className="h-4 w-4" />} label="Invite" onClick={onInvite} />
-							)}
-							{showSettings && (
-								<HeaderAction icon={<Settings className="h-4 w-4" />} label="Settings" onClick={onOpenSettings} />
+								<div className="flex items-center gap-1.5">
+									<HeaderAction icon={<Plus className="h-4 w-4" />} label="Add new room" onClick={onAddRoom} />
+									{onAddExistingRoom && (
+										<HeaderAction icon={<Plus className="h-4 w-4" />} label="Add existing room" onClick={onAddExistingRoom} />
+									)}
+								</div>
 							)}
 						</div>
 					)}

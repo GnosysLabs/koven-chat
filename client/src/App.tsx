@@ -36,7 +36,9 @@ import { ActiveCallView } from "@/components/ActiveCallView";
 import { SuspendedBanner } from "@/components/SuspendedBanner";
 import { ModLogSheet } from "@/components/ModLogSheet";
 import { FloorReviewSheet } from "@/components/FloorReviewSheet";
-import { botKickBan, deleteOwnMessage, fetchAdminStatus, fetchFloorQueue, fetchMyStatus, flagRoom, type SuspensionSummary } from "@/lib/instance";
+import { botKickBan, deleteOwnMessage, fetchAdminStatus, fetchFloorQueue, fetchMyStatus, fetchPublishQuota, flagRoom, type PublishQuota, type SuspensionSummary } from "@/lib/instance";
+import { PublishLimitDialog } from "@/components/PublishLimitDialog";
+import { AddExistingRoomDialog } from "@/components/AddExistingRoomDialog";
 import { useCollapsedRooms } from "@/lib/collapsedRooms";
 import { fetchAllBotMxids } from "@/lib/bots-cache";
 import { fetchUiaPassword } from "@/lib/auth";
@@ -84,6 +86,18 @@ export default function App() {
 	const [transport, setTransport] = useState<MatrixTransport | null>(null);
 	const [bootError, setBootError] = useState<string | null>(null);
 	const [createRoomOpen, setCreateRoomOpen] = useState(false);
+	// Surfaced when the user clicks Create room / Create space but
+	// the engine's pre-flight publish-quota check returns
+	// `allowed: false`.  Holds the quota payload (count, threshold,
+	// retry-after) so the dialog can render the per-tier ladder
+	// with the user's row highlighted.  Cleared by closing the
+	// dialog.
+	const [publishLimitInfo, setPublishLimitInfo] = useState<PublishQuota | null>(null);
+	// SpaceLanding's "Add existing room" affordance opens a picker
+	// dialog scoped to the space whose id is held here.  Cleared on
+	// dialog close.  Distinct from the createRoom path because we're
+	// linking an already-existing room, not creating a new one.
+	const [addExistingRoomTo, setAddExistingRoomTo] = useState<SpaceId | null>(null);
 	const [startDmOpen, setStartDmOpen] = useState(false);
 	const [editingSpaceId, setEditingSpaceId] = useState<SpaceId | null>(null);
 	const [editingRoomId, setEditingRoomId] = useState<RoomId | null>(null);
@@ -520,9 +534,29 @@ export default function App() {
 		// after PREPARED, and re-reading on the first
 		// onIgnoredUsersChanged catches us up regardless.
 		setIgnoredUsers(new Set(t.getIgnoredUsers()));
+
+		// Cross-device NSFW preference sync.  account_data is the
+		// source of truth; localStorage is just a per-device cache so
+		// the toggle has correct state on first paint before sync
+		// catches up.  Listener fires on every change (this client +
+		// other devices) and mirrors the value into Settings.
+		const unsubscribeNsfw = t.onNsfwPreferenceChanged((show) => {
+			if (cancelled) return;
+			setSettings(prev => prev.showNsfw === show ? prev : { ...prev, showNsfw: show });
+		});
+		// Initial reconcile — once /sync has populated account_data,
+		// pull the server-side value and override local state.  Wrap
+		// in a microtask so we don't fight the start() promise chain.
+		queueMicrotask(() => {
+			if (cancelled) return;
+			const serverShow = t.getNsfwPreference();
+			setSettings(prev => prev.showNsfw === serverShow ? prev : { ...prev, showNsfw: serverShow });
+		});
+
 		return () => {
 			cancelled = true;
 			unsubscribe();
+			unsubscribeNsfw();
 			t.stop();
 			setTransport(null);
 			setIgnoredUsers(new Set());
@@ -614,6 +648,26 @@ export default function App() {
 		pendingUiaPasswordRef.current = uiaPassword;
 		setCreds(newCreds);
 	}
+
+	// Pre-flight rate-limit check before opening CreateRoomSheet.  If
+	// the user's over their daily cap, surface the explanatory dialog
+	// with the per-tier ladder instead of opening the create form for
+	// nothing.  Called from every "Create room" entry point — keeps
+	// the gate logic in one place so adding a new entry point
+	// elsewhere doesn't accidentally bypass it.  Soft-fails to "open
+	// the form" on quota fetch errors — better to let the user
+	// proceed and hit a real engine error at submit than block them
+	// on a transient health blip.
+	const openCreateRoomGated = useCallback(async () => {
+		if (creds?.access_token) {
+			const quota = await fetchPublishQuota(creds.access_token, "room");
+			if (quota && !quota.allowed && quota.reason === "rate_limited") {
+				setPublishLimitInfo(quota);
+				return;
+			}
+		}
+		setCreateRoomOpen(true);
+	}, [creds?.access_token]);
 
 	function handleSignOut() {
 		saveCredentials(null);
@@ -870,6 +924,20 @@ export default function App() {
 						const spaceId = await transport.createSpace(opts);
 						dispatch({ type: "set_active_space", space: { kind: "space", id: spaceId } });
 					}}
+					onBeforeOpenCreateSpace={async () => {
+						// Pre-flight rate-limit check before the
+						// create-space popover opens.  See onCreateRoom
+						// upstream for the same pattern + rationale.
+						// Soft-fail on quota fetch errors so a transient
+						// engine blip doesn't block creation.
+						if (!creds?.access_token) return true;
+						const quota = await fetchPublishQuota(creds.access_token, "space");
+						if (quota && !quota.allowed && quota.reason === "rate_limited") {
+							setPublishLimitInfo(quota);
+							return false;
+						}
+						return true;
+					}}
 					onOpenProfile={() => setViewedUserId(creds.user_id as UserId)}
 					onOpenSettings={() => setSettingsOpen(true)}
 					onSignOut={handleSignOut}
@@ -903,12 +971,16 @@ export default function App() {
 					// boot.
 					roomsLoaded={state.syncState === "syncing" || state.syncState === "ready"}
 					onSelectRoom={(roomId: RoomId) => dispatch({ type: "set_active_room", roomId })}
-					onCreateRoom={() => {
+					onCreateRoom={async () => {
 						// "+" in the list header is context-aware: DMs
 						// opens the start-a-DM dialog, every other view
-						// opens the create-room dialog.
-						if (state.activeSpace?.kind === "dms") setStartDmOpen(true);
-						else setCreateRoomOpen(true);
+						// opens the create-room dialog (gated by the
+						// publish-quota precheck — see openCreateRoom).
+						if (state.activeSpace?.kind === "dms") {
+							setStartDmOpen(true);
+							return;
+						}
+						await openCreateRoomGated();
 					}}
 					onAcceptInvite={async (roomId) => {
 						if (!transport) return;
@@ -1001,7 +1073,12 @@ export default function App() {
 						space={activeSpaceObj}
 						rooms={roomsInActiveSpace}
 						variant={landingVariant}
-						onAddRoom={() => setCreateRoomOpen(true)}
+						onAddRoom={() => { void openCreateRoomGated(); }}
+						onAddExistingRoom={
+							landingVariant === "real"
+								? () => setAddExistingRoomTo(activeSpaceObj.id as SpaceId)
+								: undefined
+						}
 						onInvite={() => {
 							if (state.activeSpace?.kind === "space") setInvitingRoomId(state.activeSpace.id as unknown as RoomId);
 						}}
@@ -1406,11 +1483,48 @@ export default function App() {
 				open={settingsOpen}
 				onOpenChange={setSettingsOpen}
 				settings={settings}
-				onSettingsChange={setSettings}
+				onSettingsChange={(next) => {
+					// Apply locally first for instant UI feedback;
+					// account_data round-trip happens in the
+					// background.  When the server echoes the change
+					// back through /sync, our subscriber re-applies
+					// it (idempotent — same value, no-op).
+					setSettings(next);
+					// Cross-device sync: only the showNsfw field is
+					// account_data-backed today.  Theme stays
+					// per-device (localStorage); flipping the theme
+					// on a phone shouldn't change your laptop's look.
+					if (transport && next.showNsfw !== settings.showNsfw) {
+						transport.setNsfwPreference(!!next.showNsfw).catch(err => {
+							console.warn("App: setNsfwPreference failed", err);
+						});
+					}
+				}}
 				accessToken={creds.access_token}
 				transport={transport}
 				ignoredUsers={ignoredUsers}
 				onSignedOut={handleSignOut}
+			/>
+			<PublishLimitDialog
+				open={!!publishLimitInfo}
+				onOpenChange={(o) => { if (!o) setPublishLimitInfo(null); }}
+				quota={publishLimitInfo}
+			/>
+			<AddExistingRoomDialog
+				open={!!addExistingRoomTo}
+				onOpenChange={(o) => { if (!o) setAddExistingRoomTo(null); }}
+				space={
+					addExistingRoomTo
+						? state.spaces.find(s => s.id === addExistingRoomTo) ?? null
+						: null
+				}
+				rooms={state.rooms}
+				otherSpaces={state.spaces}
+				currentUserId={creds.user_id}
+				onAdd={async (roomId) => {
+					if (!transport || !addExistingRoomTo) return;
+					await transport.linkRoomToSpace(addExistingRoomTo, roomId);
+				}}
 			/>
 			{/* Call overlays — top-level so they survive room navigation.
 			    Peer info is resolved from the DM's known partner data so

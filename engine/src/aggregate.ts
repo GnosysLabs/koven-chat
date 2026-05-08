@@ -63,15 +63,23 @@ function handleRoomCreate(ev: MatrixEvent): void {
 	// m.room.create is a state event with state_key="" and the creator
 	// is the sender.  We use this to populate the room_creations log
 	// the rate-limit gate consults — fires once per room, idempotent
-	// via INSERT OR IGNORE.  Visibility comes from the create event
-	// content's "preset" or via the room's directory listing later
-	// (we don't have it in scope here); default to 'unknown' and
-	// upstream callers can refine if needed.
+	// via INSERT OR IGNORE.
+	//
+	// `kind` discriminates regular rooms from Matrix spaces (which
+	// carry `content.type === "m.space"`).  Both ladder through the
+	// same per-tier daily caps but the counters are independent —
+	// creating a server doesn't burn through your channel quota and
+	// vice versa.  See engine/src/db.ts countRoomCreationsByUser for
+	// the per-kind counter and server.ts /api/internal/can-publish-
+	// room for the gate that consults both.
 	if (ev.state_key === undefined) return;
+	const content = ev.content as { type?: unknown } | undefined;
+	const kind: "room" | "space" = content?.type === "m.space" ? "space" : "room";
 	recordRoomCreation({
 		room_id: ev.room_id,
 		creator_id: ev.sender,
 		created_at: ev.origin_server_ts,
+		kind,
 	});
 }
 

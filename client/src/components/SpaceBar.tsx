@@ -36,6 +36,11 @@ export interface SpaceBarProps {
 		visibility: "public" | "private";
 		avatarFile?: File;
 	}): Promise<void>;
+	// Pre-flight rate-limit gate fired before the create-space
+	// popover opens.  Same shape as SpaceCreateMenu.onBeforeOpen —
+	// just threaded through this layer.  Resolves true to proceed,
+	// false to swallow the click; parent shows denial UI.
+	onBeforeOpenCreateSpace?(): Promise<boolean>;
 	onOpenProfile(): void;
 	onOpenSettings(): void;
 	onSignOut(): void;
@@ -58,6 +63,7 @@ export function SpaceBar({
 	onSelectRooms,
 	onSelectSpace,
 	onCreateSpace,
+	onBeforeOpenCreateSpace,
 	onOpenProfile,
 	onOpenSettings,
 	onSignOut,
@@ -176,6 +182,7 @@ export function SpaceBar({
 				})}
 				<SpaceCreateMenu
 					onCreate={onCreateSpace}
+					onBeforeOpen={onBeforeOpenCreateSpace}
 					trigger={
 						<TileButton
 							title="Create a space"

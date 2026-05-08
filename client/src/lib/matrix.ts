@@ -288,6 +288,13 @@ export class MatrixTransport {
 	// blocking takes visible effect without a refresh.
 	private ignoreListeners: Set<() => void> = new Set();
 
+	// Listeners attached via onNsfwPreferenceChanged.  Fired whenever
+	// the `chat.koven.nsfw_preference` account_data event updates —
+	// either by this client or by another device the same user is
+	// signed in on.  Drives App.tsx → Settings sync so flipping the
+	// toggle on a phone flips it on the desktop instantly.
+	private nsfwPrefListeners: Set<(show: boolean) => void> = new Set();
+
 	// SSSS private key, cached after setup or unlock.  matrix-js-sdk
 	// asks for it via the cryptoCallbacks.getSecretStorageKey hook
 	// whenever it needs to read or write a secret (cross-signing keys,
@@ -648,6 +655,20 @@ export class MatrixTransport {
 				this.emitRoomList();
 				return;
 			}
+			if (type === "chat.koven.nsfw_preference") {
+				// Cross-device sync of the NSFW discovery toggle.  Fires
+				// for changes from THIS client (round-trip echo) and
+				// from any other device the same user is signed in on.
+				// App.tsx subscribes via onNsfwPreferenceChanged and
+				// mirrors the value into local Settings so the next
+				// render uses it.
+				const content = event.getContent() as { show?: unknown };
+				const show = content.show === true;
+				for (const fn of this.nsfwPrefListeners) {
+					try { fn(show); } catch (err) { console.warn("nsfw-pref listener threw", err); }
+				}
+				return;
+			}
 		});
 
 		if (this.stopped || !this.client) return;
@@ -721,6 +742,7 @@ export class MatrixTransport {
 		this.mediaCache.clear();
 		this.mediaResolved.clear();
 		this.ignoreListeners.clear();
+		this.nsfwPrefListeners.clear();
 		this.uiaPassword = null;
 	}
 
@@ -2762,6 +2784,48 @@ export class MatrixTransport {
 	onIgnoredUsersChanged(listener: () => void): () => void {
 		this.ignoreListeners.add(listener);
 		return () => { this.ignoreListeners.delete(listener); };
+	}
+
+	// ─── NSFW discovery preference (cross-device sync) ───────────────
+	//
+	// Stored as a `chat.koven.nsfw_preference` account_data event with
+	// content `{ show: true | false }`.  Account data is per-user and
+	// federates naturally to every device signed in as that user, so
+	// flipping the toggle on a phone propagates to the desktop on the
+	// next /sync poll.  Default (no event written yet) is false —
+	// matches the "off by default, must opt in" stance.
+
+	/**
+	 * Read the current NSFW discovery preference.  Returns false when
+	 * no event has been written yet (default-off).
+	 */
+	getNsfwPreference(): boolean {
+		const c = this.client;
+		if (!c) return false;
+		const ev = c.getAccountData("chat.koven.nsfw_preference" as any);
+		const content = (ev?.getContent() ?? {}) as { show?: unknown };
+		return content.show === true;
+	}
+
+	/**
+	 * Write the NSFW discovery preference.  Round-trips to the server
+	 * and the AccountData listener echoes back, so subscribers (every
+	 * other tab, every other device) update on the next /sync.
+	 */
+	async setNsfwPreference(show: boolean): Promise<void> {
+		const c = this.requireClient();
+		await c.setAccountData("chat.koven.nsfw_preference" as any, { show } as any);
+	}
+
+	/**
+	 * Subscribe to NSFW preference updates.  Listener fires after
+	 * every `chat.koven.nsfw_preference` account_data change,
+	 * including ones from other devices arriving over sync.  Returns
+	 * an unsubscribe.
+	 */
+	onNsfwPreferenceChanged(listener: (show: boolean) => void): () => void {
+		this.nsfwPrefListeners.add(listener);
+		return () => { this.nsfwPrefListeners.delete(listener); };
 	}
 
 	// ─── Self-deactivate ───────────────────────────────────────────────

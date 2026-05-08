@@ -392,6 +392,16 @@ ensureColumns("bots", [
 	// JSON array of trigger phrases — see CREATE TABLE comment above.
 	{ name: "triggers", ddl: "triggers TEXT NOT NULL DEFAULT '[]'" },
 ]);
+ensureColumns("room_creations", [
+	// Discriminate between regular chat rooms and Matrix spaces so the
+	// publish-rate gate can apply parallel ladders — same per-
+	// reputation-tier daily caps, but spaces and rooms each get their
+	// own counter so creating a server doesn't burn through your
+	// channel quota.  Default 'room' for legacy rows: existing entries
+	// from before this migration are treated as rooms (which they
+	// mostly were; the few miscategorized space rows age out in 24h).
+	{ name: "kind", ddl: "kind TEXT NOT NULL DEFAULT 'room'" },
+]);
 
 export type PostRow = {
 	event_id: string;
@@ -816,40 +826,50 @@ export function deleteRoomCollapse(roomId: string): boolean {
 // ─── Room creations (rate-limit + reputation gate) ──────────────────
 
 const recordRoomCreationStmt = db.prepare(`
-	INSERT OR IGNORE INTO room_creations (room_id, creator_id, created_at, visibility)
-	VALUES (?, ?, ?, ?)
+	INSERT OR IGNORE INTO room_creations (room_id, creator_id, created_at, visibility, kind)
+	VALUES (?, ?, ?, ?, ?)
 `);
 const countRoomCreationsByUserStmt = db.prepare(`
 	SELECT COUNT(*) AS n FROM room_creations
-	WHERE creator_id = ? AND created_at >= ?
+	WHERE creator_id = ? AND created_at >= ? AND kind = ?
 `);
 
 /** Record a room creation.  Called from aggregate.ts when the engine
  * observes an m.room.create event on the appservice transaction
- * stream — fires once per room since INSERT OR IGNORE drops repeats.
+ * stream — fires once per row since INSERT OR IGNORE drops repeats.
  * `visibility` is best-effort from the create event content; defaults
- * to 'unknown' when not in scope.  Used by the rate-limit gate below. */
+ * to 'unknown' when not in scope.  `kind` discriminates regular rooms
+ * from Matrix spaces (`type: m.space`) so the rate-limit gate can
+ * apply parallel ladders.  Used by the rate-limit gate below. */
 export function recordRoomCreation(opts: {
 	room_id: string;
 	creator_id: string;
 	created_at: number;
 	visibility?: "public" | "private" | "unknown";
+	kind?: "room" | "space";
 }): void {
 	recordRoomCreationStmt.run(
 		opts.room_id,
 		opts.creator_id,
 		opts.created_at,
 		opts.visibility ?? "unknown",
+		opts.kind ?? "room",
 	);
 }
 
-/** How many rooms `creatorId` has created at or after `sinceTs`.  The
- * spam-checker calls this each time a user attempts to create a room,
- * with `sinceTs = now - 24h` (or whatever window the engine config
- * dictates).  Returning a number plus the threshold lets the caller
- * compute "how many more they can make today" for the error message. */
-export function countRoomCreationsByUser(creatorId: string, sinceTs: number): number {
-	const row = countRoomCreationsByUserStmt.get(creatorId, sinceTs) as { n: number } | undefined;
+/** How many rooms (or spaces) `creatorId` has created of the given
+ * `kind` at or after `sinceTs`.  The spam-checker calls this each
+ * time a user attempts to publish, with `sinceTs = now - 24h` and
+ * `kind` matching the publish target — rooms and spaces have parallel
+ * counters so creating a server doesn't burn the channel quota.
+ * Returning a number plus the threshold lets the caller compute "how
+ * many more they can make today" for the error message. */
+export function countRoomCreationsByUser(
+	creatorId: string,
+	sinceTs: number,
+	kind: "room" | "space" = "room",
+): number {
+	const row = countRoomCreationsByUserStmt.get(creatorId, sinceTs, kind) as { n: number } | undefined;
 	return row?.n ?? 0;
 }
 

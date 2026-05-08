@@ -23,13 +23,21 @@ export interface SpaceCreateMenuProps {
 		visibility: "public" | "private";
 		avatarFile?: File;
 	}): Promise<void>;
+	// Optional gate fired BEFORE the popover opens.  Resolve true
+	// to proceed; resolve false to swallow the open click (the
+	// parent is responsible for showing whatever the denial UI is
+	// — e.g. the publish-quota dialog when a new user has hit
+	// their daily cap).  Without this, a rate-limited user would
+	// have to fill in the whole space form before getting denied
+	// at submit.
+	onBeforeOpen?(): Promise<boolean>;
 }
 
 type Stage =
 	| { kind: "visibility" }
 	| { kind: "details"; visibility: "public" | "private" };
 
-export function SpaceCreateMenu({ trigger, onCreate }: SpaceCreateMenuProps) {
+export function SpaceCreateMenu({ trigger, onCreate, onBeforeOpen }: SpaceCreateMenuProps) {
 	const [open, setOpen] = useState(false);
 	const [stage, setStage] = useState<Stage>({ kind: "visibility" });
 	const [name, setName] = useState("");
@@ -51,8 +59,24 @@ export function SpaceCreateMenu({ trigger, onCreate }: SpaceCreateMenuProps) {
 	}
 
 	function handleOpenChange(o: boolean) {
-		setOpen(o);
-		if (!o) reset();
+		// Closing path is unconditional — Radix can fire close on
+		// click-outside, escape, etc., and we always want to
+		// honour that.
+		if (!o) {
+			setOpen(false);
+			reset();
+			return;
+		}
+		// Opening path: gate behind onBeforeOpen if provided.  If it
+		// resolves false (e.g. user is rate-limited), swallow the
+		// open click — the parent will surface its own denial UI.
+		if (!onBeforeOpen) {
+			setOpen(true);
+			return;
+		}
+		void onBeforeOpen().then((ok) => {
+			if (ok) setOpen(true);
+		});
 	}
 
 	function pickAvatar(file: File | undefined) {

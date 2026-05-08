@@ -109,6 +109,37 @@ export async function fetchMyStatus(accessToken: string): Promise<MyStatusRespon
 	return (await r.json()) as MyStatusResponse;
 }
 
+export interface PublishQuota {
+	allowed: boolean;
+	kind: "room" | "space";
+	reason?: "admin" | "suspended" | "rate_limited";
+	weight?: number;
+	count: number;
+	threshold: number;
+	retry_after_sec?: number;
+}
+
+/**
+ * Pre-flight check for the "Create room / space" UI.  Mirrors the
+ * server-side gate at /api/internal/can-publish-room so the SPA
+ * can show an explanatory popup explaining the per-tier daily caps
+ * BEFORE the user fills in a form that would just be denied at
+ * submit.  Returns null on transport / auth failures — caller
+ * should optimistically allow in that case (the real submit will
+ * still go through the gate).
+ */
+export async function fetchPublishQuota(
+	accessToken: string,
+	kind: "room" | "space",
+): Promise<PublishQuota | null> {
+	const r = await fetch(
+		`${ENGINE_URL}/api/me/publish-quota?kind=${encodeURIComponent(kind)}`,
+		{ headers: { Authorization: `Bearer ${accessToken}` } },
+	);
+	if (!r.ok) return null;
+	return (await r.json()) as PublishQuota;
+}
+
 // ─── Admin: floor-violation review queue ─────────────────────────────
 
 export interface PendingSuspension {

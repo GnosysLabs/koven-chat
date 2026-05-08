@@ -653,12 +653,31 @@ export function startServer(): void {
 					return json({ allowed: false, reason: "suspended" });
 				}
 
+				// Determine whether this publish is for a regular room
+				// or a Matrix space.  Both ladder through the same
+				// per-reputation-tier daily cap, but the counters are
+				// independent — creating a server doesn't eat the
+				// channel quota and vice versa.  Read failure falls
+				// through to "treat as room" (the conservative default)
+				// rather than allowing through unchecked.
+				const roomId = typeof body.room_id === "string" ? body.room_id : "";
+				let kind: "room" | "space" = "room";
+				if (roomId) {
+					try {
+						if (await isSpaceRoom(roomId)) kind = "space";
+					} catch (err) {
+						console.warn("can-publish-room: isSpaceRoom check failed", err);
+					}
+				}
+
 				// Reputation-tiered rate limit per rolling 24h window.
-				// Default-weight users (1.0, what new accounts have
-				// before posting much) get the strictest cap; bumps to
-				// 3 then 10 as their reputation rises.  Offensive-name
-				// floods land entirely in the bottom tier so the cap
-				// at 1/24h here is the load-bearing rule.
+				// Default-weight users (0.5, the floor for new accounts)
+				// get the strictest cap; bumps to 3 then 10 as their
+				// reputation rises.  Offensive-name floods land entirely
+				// in the bottom tier so the cap at 1/24h here is the
+				// load-bearing rule.  Spaces use the same threshold
+				// ladder against their own counter — same defense, parallel
+				// budget.
 				const w = readWeight(userId);
 				const weight = w?.weight ?? 1.0;
 				const threshold =
@@ -667,11 +686,12 @@ export function startServer(): void {
 					: 1;
 				const windowMs = 24 * 60 * 60 * 1000;
 				const sinceTs = Date.now() - windowMs;
-				const recentCount = countRoomCreationsByUser(userId, sinceTs);
+				const recentCount = countRoomCreationsByUser(userId, sinceTs, kind);
 				if (recentCount >= threshold) {
 					return json({
 						allowed: false,
 						reason: "rate_limited",
+						kind,
 						count: recentCount,
 						threshold,
 						retry_after_sec: Math.ceil(windowMs / 1000),
@@ -679,6 +699,7 @@ export function startServer(): void {
 				}
 				return json({
 					allowed: true,
+					kind,
 					weight,
 					count: recentCount,
 					threshold,
@@ -776,6 +797,71 @@ export function startServer(): void {
 			// owner can edit / delete.  Anyone on the instance can see
 			// which bots exist (via /api/bots/all-mxids — drives the
 			// BOT badge in the UI) and can invite bots to their rooms.
+
+			// GET /api/me/publish-quota?kind=room|space
+			//
+			// User-facing version of the internal can-publish-room
+			// gate.  The client calls this BEFORE opening the
+			// "Create room" / "Create space" dialog so a rate-limited
+			// user sees an explanatory popup instead of filling in a
+			// form for nothing and getting denied at submit.
+			//
+			// Same threshold ladder as the internal gate — they have
+			// to agree, otherwise the precheck would lie and the
+			// real submit would still fail.  Returns
+			// { allowed, count, threshold, retry_after_sec, weight }
+			// so the modal can show "X / Y today, next slot in Zh."
+			if (req.method === "GET" && path === "/api/me/publish-quota") {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				const kindParam = url.searchParams.get("kind");
+				const kind: "room" | "space" = kindParam === "space" ? "space" : "room";
+				if (isAdmin(userId)) {
+					return json({
+						allowed: true,
+						kind,
+						reason: "admin",
+						count: 0,
+						threshold: Number.MAX_SAFE_INTEGER,
+					});
+				}
+				if (getActiveSuspension(userId)) {
+					return json({
+						allowed: false,
+						kind,
+						reason: "suspended",
+						count: 0,
+						threshold: 0,
+					});
+				}
+				const w = readWeight(userId);
+				const weight = w?.weight ?? 1.0;
+				const threshold =
+					weight >= 2.0 ? 10
+					: weight >= 1.5 ? 3
+					: 1;
+				const windowMs = 24 * 60 * 60 * 1000;
+				const sinceTs = Date.now() - windowMs;
+				const recentCount = countRoomCreationsByUser(userId, sinceTs, kind);
+				if (recentCount >= threshold) {
+					return json({
+						allowed: false,
+						kind,
+						reason: "rate_limited",
+						weight,
+						count: recentCount,
+						threshold,
+						retry_after_sec: Math.ceil(windowMs / 1000),
+					});
+				}
+				return json({
+					allowed: true,
+					kind,
+					weight,
+					count: recentCount,
+					threshold,
+				});
+			}
 
 			// GET /api/bots/all-mxids
 			// Public read.  Returns every enabled bot's mxid so clients
