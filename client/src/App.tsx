@@ -388,6 +388,10 @@ export default function App() {
 		// start() promise still resolves and would otherwise race the
 		// second transport's state writes.
 		let cancelled = false;
+		// Top-level timer that brackets the whole "Connecting…" → first
+		// real UI window, so the user can correlate wall-clock wait
+		// against the per-phase timers inside transport.
+		console.time("app.boot: transport.start → encState");
 		t.start(creds).then(async () => {
 			if (cancelled) return;
 			// Pull my avatar mxc once so the SpaceBar tile resolves to my
@@ -401,15 +405,20 @@ export default function App() {
 				.catch(() => { if (!cancelled) setMyAvatarMxc(null); });
 			// Encryption probe — gates app rendering.  See encState above.
 			try {
+				console.time("app.boot: encryptionStatus");
 				const status = await t.encryptionStatus();
+				console.timeEnd("app.boot: encryptionStatus");
 				if (!cancelled) setEncState(status);
 			} catch (err) {
 				if (cancelled) return;
 				console.warn("encryptionStatus probe failed", err);
 				setEncState("needs-unlock");
+			} finally {
+				console.timeEnd("app.boot: transport.start → encState");
 			}
 		}).catch(e => {
 			if (cancelled) return;
+			console.timeEnd("app.boot: transport.start → encState");
 			setBootError(e instanceof Error ? e.message : String(e));
 		});
 		// Subscribe to ignore-list changes so block/unblock takes effect
@@ -690,33 +699,43 @@ export default function App() {
 		);
 	}
 
-	// macOS desktop builds reserve the top 28px as a drag zone (OS-
-	// imposed by NSFullSizeContentView, regardless of decorations).
-	// The authed app has interactive chrome (chat header buttons,
-	// SpaceBar avatar) at the top of its columns; without an inset
-	// those buttons sit underneath the drag zone and become
-	// unclickable.  Login + early-return screens have nothing
-	// interactive in the top zone, so they don't need the inset
-	// — that's why this lives here in App.tsx (authed branch),
-	// not at the main.tsx layer that wraps everything.
+	// macOS desktop builds need a 40px chrome gutter at the top of
+	// the authed app: it (a) clears the OS-reserved title-bar drag
+	// zone so chat-header buttons stay clickable, (b) carries the
+	// hairline divider between chrome and content, and (c) hosts
+	// the centered Koven mark.  Login + early-return screens skip
+	// the gutter so their backgrounds extend edge-to-edge.
 	const isMacDesktop = typeof window !== "undefined"
 		&& (window as { __KOVEN_PLATFORM__?: string }).__KOVEN_PLATFORM__ === "macos";
 
 	return (
 		<TransportContext.Provider value={transport}>
 		<div className="h-full flex flex-col">
-			{/* DesktopTitleBar lives in main.tsx (one-level-up from
-			    App) so the same chrome strip stays present on the
-			    login screen, the encryption-setup sheet, and every
-			    other early-return path — not just the authed flow
-			    rendered below.  No need to render it again here. */}
+			{/* DesktopTitleBar (traffic lights) is rendered absolute-
+			    positioned at the top of main.tsx so it floats over
+			    every screen.  The 40px chrome gutter below — with
+			    the centered Koven mark + a hairline divider —
+			    appears ONLY in the authed app: the login screen
+			    deliberately leaves the top empty so its background
+			    image extends edge-to-edge under the floating
+			    traffic lights. */}
+			{isMacDesktop && (
+				<div className="h-10 shrink-0 border-b border-border flex items-center justify-center relative">
+					<img
+						src="/favicon.png"
+						alt=""
+						aria-hidden
+						className="h-6 w-6 pointer-events-none select-none"
+					/>
+				</div>
+			)}
 			{suspension && <SuspendedBanner suspension={suspension} />}
 			{state.syncState !== "ready" && state.syncState !== "syncing" && (
 				<div className="text-xs px-3 py-1 bg-muted text-muted-foreground border-b border-border">
 					{bootError ? `Connection error: ${bootError}` : `Sync: ${state.syncState}`}
 				</div>
 			)}
-			<div className={`flex-1 flex min-h-0${isMacDesktop ? " pt-7" : ""}`}>
+			<div className="flex-1 flex min-h-0">
 				<SpaceBar
 					currentUserId={creds.user_id}
 					currentUserAvatarMxc={myAvatarMxc}

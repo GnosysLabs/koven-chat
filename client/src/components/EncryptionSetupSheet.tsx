@@ -103,8 +103,19 @@ export function EncryptionSetupSheet({ open, onSetup, onComplete, onSignOut }: E
 		// onOpenChange={() => {}} — non-dismissible.  The user must finish
 		// setup or explicitly sign out; closing the dialog mid-flow would
 		// strand them with a half-bootstrapped account.
+		//
+		// `[&>button]:hidden` suppresses shadcn's auto-rendered close
+		// buttons (mobile back arrow + desktop X).  Without this,
+		// clicking the X looks like it should dismiss the dialog but
+		// silently no-ops because onOpenChange is a no-op — confusing
+		// "broken button" UX.  The "Sign out instead" link below is
+		// the proper escape hatch and signposts itself clearly.
 		<Dialog open={open} onOpenChange={() => {}}>
-			<DialogContent className="sm:max-w-md" onInteractOutside={(e) => e.preventDefault()} onEscapeKeyDown={(e) => e.preventDefault()}>
+			<DialogContent
+				className="sm:max-w-md [&>button]:hidden"
+				onInteractOutside={(e) => e.preventDefault()}
+				onEscapeKeyDown={(e) => e.preventDefault()}
+			>
 				<DialogHeader>
 					<DialogTitle className="flex items-center gap-2">
 						<Lock className="h-4 w-4 text-primary" />

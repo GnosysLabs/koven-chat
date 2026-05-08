@@ -59,7 +59,16 @@ export function EncryptionUnlockSheet({ open, onUnlock, onUnlocked, onSignOut }:
 
 	return (
 		<Dialog open={open} onOpenChange={() => {}}>
-			<DialogContent className="sm:max-w-md" onInteractOutside={(e) => e.preventDefault()} onEscapeKeyDown={(e) => e.preventDefault()}>
+			{/* `[&>button]:hidden` suppresses shadcn's auto-rendered
+			    close buttons.  Same rationale as EncryptionSetupSheet:
+			    the dialog is non-dismissible by design, leaving a
+			    visible-but-inert X reads as a broken button.  The
+			    "Sign out instead" link below is the proper escape. */}
+			<DialogContent
+				className="sm:max-w-md [&>button]:hidden"
+				onInteractOutside={(e) => e.preventDefault()}
+				onEscapeKeyDown={(e) => e.preventDefault()}
+			>
 				<DialogHeader>
 					<DialogTitle className="flex items-center gap-2">
 						<Lock className="h-4 w-4 text-primary" />

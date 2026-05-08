@@ -300,6 +300,12 @@ export class MatrixTransport {
 		// safe in our usage: we don't yet support multiple sessions
 		// per browser, and key backup means losing the local crypto
 		// store doesn't lose message history.
+		// Timing markers for the "Connecting…" screen.  initRustCrypto
+		// loads the WASM bundle, opens the rust-crypto IndexedDBs, and
+		// brings up the olm account — first run on a new device can be
+		// several seconds.  console.time tags so the user can pinpoint
+		// the bottleneck in DevTools without us guessing.
+		console.time("matrix.start: initRustCrypto");
 		try {
 			await this.client.initRustCrypto();
 		} catch (err) {
@@ -307,15 +313,20 @@ export class MatrixTransport {
 			if (/account in the (store|constructor)|doesn'?t match/i.test(msg)) {
 				console.warn("rust-crypto store mismatch — wiping and retrying", msg);
 				await wipeRustCryptoIndexedDB();
-				if (this.stopped) return;
+				if (this.stopped) {
+					console.timeEnd("matrix.start: initRustCrypto");
+					return;
+				}
 				// initRustCrypto leaves the client in a half-init state on
 				// failure; recreate from scratch before retrying.
 				this.client = buildClient();
 				await this.client.initRustCrypto();
 			} else {
+				console.timeEnd("matrix.start: initRustCrypto");
 				throw err;
 			}
 		}
+		console.timeEnd("matrix.start: initRustCrypto");
 		// Bail if stop() ran while we were awaiting crypto init.  Without
 		// this guard, a stale strict-mode-cleanup'd transport runs the
 		// rest of start() and trips over its now-null this.client.
@@ -448,13 +459,28 @@ export class MatrixTransport {
 		});
 
 		if (this.stopped || !this.client) return;
-		await this.client.startClient({
+		// Fire-and-forget: matrix-js-sdk's startClient() returns a
+		// Promise that resolves AFTER the first /sync completes —
+		// which on a populated account can take 10-30s while Synapse
+		// computes initial timeline events across every joined room.
+		// Awaiting it would block start() for that whole window,
+		// stranding the user on the "Connecting…" screen even though
+		// everything that gates app rendering (crypto init, account-
+		// data reads for the encryption probe, listeners) is already
+		// done.  Letting startClient run in the background means the
+		// encryption setup / unlock UI shows up in ~2s instead, and
+		// sync state continues to flow through the onSyncState
+		// callback as the loop progresses.  Any rejection would be a
+		// SDK bug we'd want to know about, so log loudly on .catch.
+		void this.client.startClient({
 			initialSyncLimit: 30,
 			// "detached" lets us call redactEvent (unreact, unflag).  The
 			// default "chronological" mode keeps pending events on a
 			// per-room queue that redactEvent's getPendingEvents helper
 			// refuses to read from — see matrix-js-sdk Room.getPendingEvents.
 			pendingEventOrdering: sdk.PendingEventOrdering.Detached,
+		}).catch(err => {
+			console.warn("matrix: startClient failed", err);
 		});
 	}
 
@@ -687,12 +713,22 @@ export class MatrixTransport {
 		const c = this.requireClient();
 		const crypto = c.getCrypto();
 		if (!crypto) return "needs-setup";
+		// Two phases of timing — the SSSS account-data probe and the
+		// cross-signing status read.  Both run before the first /sync
+		// completes, so secretStorage.getKey falls through to a direct
+		// HTTP GET rather than reading the synced cache.  If either
+		// shows up as the slow phase in the user's console, we know
+		// where to optimize.
+		console.time("matrix.encryptionStatus: secretStorage.getKey");
 		const keyInfo = await c.secretStorage.getKey();
+		console.timeEnd("matrix.encryptionStatus: secretStorage.getKey");
 		if (!keyInfo) return "needs-setup";
 		// Cross-signing readiness is the cleanest "this device is set
 		// up" signal — true iff cross-signing private keys are cached
 		// locally.  Anything less means we need the user to unlock.
+		console.time("matrix.encryptionStatus: getCrossSigningStatus");
 		const status = await crypto.getCrossSigningStatus();
+		console.timeEnd("matrix.encryptionStatus: getCrossSigningStatus");
 		const cached = status.privateKeysCachedLocally;
 		if (cached.masterKey && cached.selfSigningKey && cached.userSigningKey) {
 			return "ready";
