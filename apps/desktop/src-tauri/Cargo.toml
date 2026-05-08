@@ -22,7 +22,7 @@ tauri-build = { version = "2", features = [] }
 # a properly-bundled .AppImage with icons in the right places ends
 # up showing the generic placeholder.  Mirrors iris-linux; the cost
 # is a few KB on the release binary.
-tauri = { version = "2", features = ["image-png"] }
+tauri = { version = "2", features = ["image-png", "macos-private-api"] }
 tauri-plugin-opener = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-single-instance = "2"

@@ -15,6 +15,20 @@
 		<meta name="apple-mobile-web-app-title" content="Koven" />
 		<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 		<meta name="theme-color" content="#0a0a0c" />
+		<style>
+			/* Lock html/body bg to the SPA's dark colour from the
+			 * very first frame — without this the WKWebView's
+			 * default white shows through during the brief gap
+			 * between window-creation and first paint.  The macOS
+			 * desktop builds keep the main window HIDDEN during
+			 * that gap (a separate splash window with the favicon
+			 * floats over the desktop instead — see lib.rs and
+			 * splash.html), but Linux / Windows / browsers see
+			 * the main window directly so dark-bg-from-frame-zero
+			 * still matters.
+			 */
+			html, body { margin: 0; background: #0a0a0a; }
+		</style>
 		<link rel="preconnect" href="https://fonts.googleapis.com" />
 		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 		<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Kanit:wght@500;600;700&display=swap" />

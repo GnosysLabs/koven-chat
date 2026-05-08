@@ -89,18 +89,6 @@ export function DesktopTitleBar() {
 				isFocused={isFocused}
 				onClick={withWindow("toggleMaximize", (w) => w.toggleMaximize())}
 			/>
-			{/* Centered Koven mark.  Absolute-positioned so the
-			    traffic-light gutter on the left doesn't bias the
-			    centering, and `pointer-events-none` so a click on
-			    the icon area still falls through to the parent's
-			    drag-region handler (icon stays drag-active just
-			    like the rest of the strip). */}
-			<img
-				src="/favicon.png"
-				alt=""
-				aria-hidden
-				className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 h-6 w-6 pointer-events-none select-none"
-			/>
 		</div>
 	);
 }
@@ -124,6 +112,13 @@ function TrafficLight({
 			className={cn(
 				"h-3 w-3 rounded-full transition-colors",
 				"shadow-[inset_0_0_0_0.5px_rgba(0,0,0,0.18)]",
+				// Default arrow cursor — never pointer-hand.  Native
+				// macOS traffic lights don't change the cursor when
+				// hovered (you click them with the same default
+				// pointer you'd use to drag the window); matching
+				// that behaviour means the buttons feel like part
+				// of the chrome rather than web-page elements.
+				"cursor-default",
 				isFocused ? colorClass : "bg-[#4d4d4d]",
 			)}
 		/>

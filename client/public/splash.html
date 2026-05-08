@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Koven</title>
+<style>
+  /* Splash window: a tiny transparent macOS window that floats the
+   * favicon directly over the desktop wallpaper while the main
+   * window builds + the SPA boots.  Once the main window is fully
+   * styled (rounded corners + traffic lights + first React paint),
+   * the Rust `reveal_app` command closes this window and shows
+   * the main one.
+   *
+   * Window itself is `transparent: true + decorations: false`, so
+   * the only thing painted is whatever the body draws.  Body is
+   * fully transparent; only the favicon paints.  Drop-shadow on
+   * the image to give it a subtle floating presence against
+   * arbitrary wallpapers.
+   */
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .mark {
+    width: 96px;
+    height: 96px;
+    animation: koven-pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes koven-pulse {
+    0%, 100% { opacity: 0.85; transform: scale(1); }
+    50%      { opacity: 1;    transform: scale(1.04); }
+  }
+</style>
+</head>
+<body>
+  <img class="mark" src="/favicon.png" alt="" aria-hidden />
+</body>
+</html>

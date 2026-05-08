@@ -25,6 +25,25 @@ mod plugins;
 #[cfg(target_os = "macos")]
 use plugins::mac_rounded_corners;
 
+/// Close the floating splash window + reveal the (already styled)
+/// main window.  Invoked from the SPA's main.tsx after the
+/// rounded-corner setup has run AND React has finished its first
+/// render — by that point the main window is fully chromed and
+/// painting the real UI, so swapping the splash for it is a single
+/// invisible transition rather than the white-flash → square-dark
+/// → rounded-dark sequence we saw with an in-window splash.
+#[tauri::command]
+fn reveal_app(app: tauri::AppHandle) -> Result<(), String> {
+	if let Some(splash) = app.get_webview_window("splash") {
+		let _ = splash.close();
+	}
+	if let Some(main) = app.get_webview_window("main") {
+		let _ = main.show();
+		let _ = main.set_focus();
+	}
+	Ok(())
+}
+
 /// JS injected into every page before the SPA scripts run.  Catches
 /// `<a target="_blank">` clicks and `window.open()` calls and routes
 /// the URL through the WebView's top-level navigation, where the Rust
@@ -201,11 +220,12 @@ pub fn run() {
 					mac_rounded_corners::enable_modern_window_style,
 					mac_rounded_corners::reposition_traffic_lights,
 					mac_rounded_corners::hide_traffic_lights,
+					reveal_app,
 				]
 			}
 			#[cfg(not(target_os = "macos"))]
 			{
-				tauri::generate_handler![]
+				tauri::generate_handler![reveal_app]
 			}
 		})
 		.setup(|app| {
@@ -273,6 +293,68 @@ pub fn run() {
 					.items(&[&app_menu, &edit_menu, &window_menu])
 					.build()?;
 				app.set_menu(menu)?;
+			}
+
+			// Splash window — tiny transparent floater that shows the
+			// favicon over the desktop wallpaper while the main
+			// window builds + the SPA runs its rounded-corner setup.
+			// macOS only because Linux / Windows builds don't have
+			// the same square-white-flash problem (their native
+			// chrome is what users expect during launch).  Splash is
+			// closed by the JS-invoked `reveal_app` command once
+			// the main UI is ready, OR by a 3-second fallback timer
+			// if the reveal call never lands.
+			#[cfg(target_os = "macos")]
+			{
+				let splash_url = if cfg!(debug_assertions) {
+					WebviewUrl::External("http://localhost:1420/splash.html".parse().unwrap())
+				} else {
+					WebviewUrl::App("splash.html".into())
+				};
+				let splash = WebviewWindowBuilder::new(app, "splash", splash_url)
+					.title("")
+					.decorations(false)
+					.transparent(true)
+					.always_on_top(true)
+					.resizable(false)
+					.skip_taskbar(true)
+					.inner_size(200.0, 200.0)
+					.center()
+					.build()?;
+
+				// Kill the NSWindow's auto-drawn shadow rectangle —
+				// macOS gives every undecorated transparent window a
+				// soft drop shadow, which renders as a faint dark
+				// circle/oval around our floating favicon.
+				// setHasShadow:NO removes it so the favicon really
+				// does float against the bare desktop.
+				use cocoa::base::id;
+				use objc::{msg_send, sel, sel_impl};
+				if let Ok(ptr) = splash.ns_window() {
+					unsafe {
+						let ns_window: id = ptr as id;
+						let _: () = msg_send![ns_window, setHasShadow: false];
+					}
+				}
+
+				// Fallback: 3 seconds after launch, force-reveal even
+				// if `reveal_app` never fires.  Without this, any
+				// silent failure in the SPA's chrome-setup chain
+				// leaves the main window hidden forever and the user
+				// just stares at the splash.  Plain std::thread is
+				// fine — Tauri's WebviewWindow handles are Send +
+				// Sync so we can poke them from any thread.
+				let app_handle = app.handle().clone();
+				std::thread::spawn(move || {
+					std::thread::sleep(std::time::Duration::from_secs(3));
+					if let Some(s) = app_handle.get_webview_window("splash") {
+						let _ = s.close();
+					}
+					if let Some(m) = app_handle.get_webview_window("main") {
+						let _ = m.show();
+						let _ = m.set_focus();
+					}
+				});
 			}
 
 			// Build the main window in code rather than declaring it
@@ -476,12 +558,17 @@ pub fn run() {
 				log::warn!("set_icon: PNG decode failed (image-png feature missing?)");
 			}
 
-			// Now the window has the right icon attached — surface it.
-			// Failure here is non-fatal: log and proceed (a hidden
-			// window the user can't see is recoverable via the
-			// single-instance focus path; a panic isn't).
-			if let Err(err) = win.show() {
-				log::warn!("window.show failed: {err}");
+			// On macOS the main window stays hidden until the SPA
+			// invokes `reveal_app` — the splash window is what the
+			// user sees during boot.  On Linux / Windows there's no
+			// splash, so show the main window now (icon attached,
+			// content loading; native chrome handles the launch
+			// look).
+			#[cfg(not(target_os = "macos"))]
+			{
+				if let Err(err) = win.show() {
+					log::warn!("window.show failed: {err}");
+				}
 			}
 
 			// Kick off an update check after the window is up.

@@ -690,6 +690,18 @@ export default function App() {
 		);
 	}
 
+	// macOS desktop builds reserve the top 28px as a drag zone (OS-
+	// imposed by NSFullSizeContentView, regardless of decorations).
+	// The authed app has interactive chrome (chat header buttons,
+	// SpaceBar avatar) at the top of its columns; without an inset
+	// those buttons sit underneath the drag zone and become
+	// unclickable.  Login + early-return screens have nothing
+	// interactive in the top zone, so they don't need the inset
+	// — that's why this lives here in App.tsx (authed branch),
+	// not at the main.tsx layer that wraps everything.
+	const isMacDesktop = typeof window !== "undefined"
+		&& (window as { __KOVEN_PLATFORM__?: string }).__KOVEN_PLATFORM__ === "macos";
+
 	return (
 		<TransportContext.Provider value={transport}>
 		<div className="h-full flex flex-col">
@@ -704,7 +716,7 @@ export default function App() {
 					{bootError ? `Connection error: ${bootError}` : `Sync: ${state.syncState}`}
 				</div>
 			)}
-			<div className="flex-1 flex min-h-0">
+			<div className={`flex-1 flex min-h-0${isMacDesktop ? " pt-7" : ""}`}>
 				<SpaceBar
 					currentUserId={creds.user_id}
 					currentUserAvatarMxc={myAvatarMxc}

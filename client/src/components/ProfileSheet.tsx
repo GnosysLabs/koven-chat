@@ -24,7 +24,8 @@ import { Ban, Camera, MessageSquare, Trash2, UserCheck, UserX } from "lucide-rea
 import type { MatrixTransport } from "@/lib/matrix";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { BotBadge } from "@/components/BotBadge";
-import { useReputation } from "@/lib/useReputation";
+import { loadReputation } from "@/lib/useReputation";
+import type { ReputationData } from "@/lib/reputation";
 import { descriptorFor, nextTierUnlockLabel, tickClassForFilled, ticksFor } from "@/lib/reputation";
 import { fetchUserBio, updateMyBio } from "@/lib/profile";
 import { formatMxid, serverOf } from "@/lib/mxid";
@@ -131,6 +132,12 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 	const [profile, setProfile] = useState<BaseProfile | null>(null);
 	const [displayName, setDisplayName] = useState("");
 	const [bio, setBio] = useState("");
+	// Reputation fetched in the same Promise.all as profile + bio so
+	// the body has all three before any of it paints.  Three-valued:
+	//   undefined — fetch hasn't returned yet (suppress body render),
+	//   null      — fetched, engine returned no data (show "Engine offline"),
+	//   ReputationData — fetched + populated.
+	const [rep, setRep] = useState<ReputationData | null | undefined>(undefined);
 
 	// Avatar state: existing URL we render unless replaced by a fresh
 	// upload (kept as a File until Save), or cleared.
@@ -158,7 +165,14 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 		// (first open, or switching to a different user) we genuinely
 		// have nothing to render and the loading state is correct.
 		const haveFreshDataForThisUser = profile?.userId === viewedUserId;
-		if (!haveFreshDataForThisUser) setLoading(true);
+		if (!haveFreshDataForThisUser) {
+			setLoading(true);
+			// Reset rep to undefined too so the body waits for the
+			// new user's rep fetch to land.  Without this, switching
+			// from one profile to another would briefly show the
+			// previous user's rep block until the new fetch resolved.
+			setRep(undefined);
+		}
 
 		// Matrix profile (display name, avatar) and engine bio fetched
 		// in parallel — bio lives on the engine since Matrix has no
@@ -168,12 +182,24 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 			? transport.getMyProfile()
 			: transport.getUserProfile(viewedUserId as UserId);
 
-		Promise.all([matrixFetcher, fetchUserBio(viewedUserId)])
-			.then(([p, fetchedBio]) => {
+		// Three-way Promise.all: Matrix profile, engine bio, AND
+		// reputation are all required before the body paints.
+		// Without the rep wait the sheet would render a brief
+		// "Engine offline" rep block and then snap to the populated
+		// version — exactly the jarring flash the user reported.
+		// Reputation fetch failures resolve as `null` so we don't
+		// gate the whole sheet on a transient engine outage.
+		Promise.all([
+			matrixFetcher,
+			fetchUserBio(viewedUserId),
+			loadReputation(viewedUserId).catch(() => null),
+		])
+			.then(([p, fetchedBio, fetchedRep]) => {
 				if (cancelled) return;
 				setProfile(p);
 				setDisplayName(p.displayName);
 				setBio(fetchedBio);
+				setRep(fetchedRep);
 				setLoading(false);
 			})
 			.catch(err => {
@@ -258,13 +284,18 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 					</DialogDescription>
 				</DialogHeader>
 
-				{/* Show loading only when we genuinely don't have the
-				    right user's data — first open, or while switching
-				    to a different user.  Don't gate on the `loading`
-				    flag itself: a background re-fetch (same user, after
-				    sheet reopen) shouldn't flash the loading state
-				    over already-rendered data. */}
-				{!profile || profile.userId !== viewedUserId ? (
+				{/* Show loading until ALL three of profile + bio + rep
+				    have resolved (rep === undefined means the fetch
+				    is still in flight; null means fetched and engine
+				    returned nothing).  Without the rep gate the body
+				    renders with an "Engine offline" rep block briefly,
+				    then snaps to the populated version once the rep
+				    fetch lands — three jarring phases in a row.
+				    Stale-while-revalidate: when reopening for the same
+				    user we already have profile data for, skip the
+				    loading state and let the cached profile + cached
+				    rep paint instantly. */}
+				{!profile || profile.userId !== viewedUserId || rep === undefined ? (
 					<div className="py-8 text-center text-sm text-muted-foreground">Loading…</div>
 				) : isSelf ? (
 					// ─── Self-edit layout ──────────────────────────────────
@@ -369,7 +400,7 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 						    inline under the display name and the Status
 						    placeholder is gone. */}
 						<div className="pt-3 border-t border-border">
-							<ReputationRow userId={profile.userId} isSelf />
+							<ReputationRow rep={rep ?? null} isSelf />
 						</div>
 
 						{error && (
@@ -409,7 +440,7 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 
 						{!isBot && (
 							<div className="pt-2 border-t border-border">
-								<ReputationRow userId={profile.userId} />
+								<ReputationRow rep={rep ?? null} />
 							</div>
 						)}
 
@@ -529,8 +560,7 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 // surveillance to call out where someone is on their tier ladder).
 //
 // Falls back to a one-liner if the engine hasn't returned data yet.
-function ReputationRow({ userId, isSelf }: { userId: string; isSelf?: boolean }) {
-	const rep = useReputation(userId);
+function ReputationRow({ rep, isSelf }: { rep: ReputationData | null; isSelf?: boolean }) {
 	if (!rep) {
 		return (
 			<div className="flex items-baseline justify-between gap-3 text-xs">
