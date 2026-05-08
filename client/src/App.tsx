@@ -940,22 +940,23 @@ export default function App() {
 					botMxids={botMxids}
 					myOwnedBotMxids={myOwnedBotMxids}
 					onDeleteMessage={async (eventId) => {
-						if (!creds?.access_token || !state.activeRoomId) return;
-						try {
-							await deleteOwnMessage(
-								creds.access_token,
-								state.activeRoomId,
-								eventId,
-							);
-							// Synapse emits the redaction back through sync,
-							// matrix-js-sdk applies it, and the row re-renders
-							// as a redacted stub on the next reducer pass —
-							// no manual state update needed here.  Errors
-							// (target gone, not authorized, network) bubble
-							// up to the global error dispatcher.
-						} catch (e) {
-							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+						if (!creds?.access_token || !state.activeRoomId) {
+							throw new Error("Not connected");
 						}
+						// Let errors bubble up to MessageActions's DeleteAction
+						// dialog — it shows them inline next to the buttons
+						// so the user can see exactly why the redaction
+						// failed (403 "not your bot", 404 "event gone",
+						// 502 redaction-side failure, network drop).
+						// Synapse emits the successful redaction back
+						// through sync, matrix-js-sdk applies it, and the
+						// row re-renders as a redacted stub on the next
+						// reducer pass — no manual state update needed.
+						await deleteOwnMessage(
+							creds.access_token,
+							state.activeRoomId,
+							eventId,
+						);
 					}}
 					members={state.activeRoomId ? state.membersByRoom.get(state.activeRoomId) ?? [] : []}
 					// True once the active room's initial timeline has

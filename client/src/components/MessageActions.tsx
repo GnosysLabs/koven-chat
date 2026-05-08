@@ -10,6 +10,15 @@ import {
 	PopoverContent,
 	PopoverTrigger,
 } from "@/components/ui/popover";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Flag, Reply, SmilePlus, Trash2 } from "lucide-react";
 
@@ -24,12 +33,14 @@ export interface MessageActionsProps {
 	// apply (a 1-on-1 chat has no community to vote with you).
 	showFlag?: boolean;
 	// Self-delete affordance.  When provided, a trash icon appears at
-	// the end of the toolbar — clicking it invokes onDelete.  Shown
-	// for messages the caller is allowed to redact: their own, or
-	// their owned bot's.  The chat pane decides eligibility and only
-	// passes a handler when applicable; everyone else sees the
-	// toolbar without a trash button at all.
-	onDelete?(): void;
+	// the end of the toolbar — clicking it opens a confirmation
+	// dialog whose Delete button awaits this handler.  Returning a
+	// rejected promise surfaces the error inside the dialog so the
+	// user can see what failed (403, network, etc.) without digging
+	// into devtools.  Shown for messages the caller is allowed to
+	// redact: their own, or their owned bot's.  The chat pane
+	// decides eligibility and only passes a handler when applicable.
+	onDelete?(): void | Promise<void>;
 	className?: string;
 	// Optional controlled popover state for the React picker.  Lifted
 	// up to the parent message row so the parent can keep the action
@@ -117,53 +128,84 @@ export function MessageActions({
 	);
 }
 
-// Inline confirmation popover for the trash button.
+// Centered confirmation dialog for the trash button.
 //
-// We DON'T use `window.confirm()` here — Tauri 2's WebView
-// suppresses the native dialog without a runtime warning, so on the
-// desktop app the "are you sure?" prompt silently returns undefined
-// and the click looks like it does nothing.  Some browser extensions
-// and corporate policies do the same in the web client.  An in-app
-// Popover is reliable across every environment we ship to and
-// matches the affordance pattern of the React picker right next to
-// it (so the muscle memory of "click, get a small pop-up, click
-// the action" is consistent across the toolbar).
-function DeleteAction({ onConfirm }: { onConfirm: () => void }) {
+// Two things this is NOT: (a) `window.confirm()` — Tauri 2's WebView
+// suppresses the native dialog silently, and even where it works
+// the OS chrome looks alien against the rest of the SPA.  (b) an
+// inline popover — that's what we tried first; it works mechanically
+// but for a destructive irreversible action a proper modal with
+// backdrop reads correctly as "this is a real decision".  Discord,
+// Slack, every chat app converged on the centered-modal shape for
+// message deletion.
+//
+// onConfirm is `async` so this component can await the actual
+// redaction call and either close on success or keep the dialog
+// open + surface the error inline.  Without that the dialog would
+// close optimistically and a 403 / network failure would silently
+// leave the (still-undeleted) message on screen.
+function DeleteAction({ onConfirm }: { onConfirm: () => void | Promise<void> }) {
 	const [open, setOpen] = useState(false);
+	const [pending, setPending] = useState(false);
+	const [error, setError] = useState<string | null>(null);
+
+	async function handleConfirm() {
+		setError(null);
+		setPending(true);
+		try {
+			await onConfirm();
+			setOpen(false);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setPending(false);
+		}
+	}
+
 	return (
-		<Popover open={open} onOpenChange={setOpen}>
-			<PopoverTrigger asChild>
-				<button
-					type="button"
-					className="p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
-					title="Delete"
-					aria-label="Delete"
-				>
-					<Trash2 className="h-3.5 w-3.5" />
-				</button>
-			</PopoverTrigger>
-			<PopoverContent side="top" align="end" sideOffset={4} className="w-auto p-2">
-				<div className="flex items-center gap-2">
-					<span className="text-xs text-foreground">Delete this message?</span>
-					<button
-						type="button"
-						onClick={() => setOpen(false)}
-						className="text-xs px-2 py-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-					>
-						Cancel
-					</button>
-					<button
-						type="button"
-						onClick={() => {
-							setOpen(false);
-							onConfirm();
-						}}
-						className="text-xs px-2 py-1 rounded bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
-					>
-						Delete
-					</button>
-				</div>
-			</PopoverContent>
-		</Popover>
+		<>
+			<button
+				type="button"
+				onClick={() => { setError(null); setOpen(true); }}
+				className="p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+				title="Delete"
+				aria-label="Delete"
+			>
+				<Trash2 className="h-3.5 w-3.5" />
+			</button>
+			<Dialog open={open} onOpenChange={(o) => { if (!pending) setOpen(o); }}>
+				<DialogContent className="sm:max-w-sm">
+					<DialogHeader>
+						<DialogTitle>Delete this message?</DialogTitle>
+						<DialogDescription>
+							This can't be undone. The message content is replaced with a redaction marker on the server.
+						</DialogDescription>
+					</DialogHeader>
+					{error && (
+						<div className="text-xs text-destructive border border-destructive/40 bg-destructive/10 rounded px-3 py-2">
+							{error}
+						</div>
+					)}
+					<DialogFooter>
+						<Button
+							type="button"
+							variant="ghost"
+							onClick={() => setOpen(false)}
+							disabled={pending}
+						>
+							Cancel
+						</Button>
+						<Button
+							type="button"
+							variant="destructive"
+							onClick={handleConfirm}
+							disabled={pending}
+						>
+							{pending ? "Deleting…" : "Delete"}
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
+		</>
 	);
 }

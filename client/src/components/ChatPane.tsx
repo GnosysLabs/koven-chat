@@ -588,7 +588,13 @@ export function ChatPane({
 									onDeleteMessage && !collapsesByMessage.get(m.id) && (
 										m.isSelf || !!myOwnedBotMxids?.has(m.sender)
 									)
-										? () => { void onDeleteMessage(m.id); }
+										// Return the promise (don't `void` it) so
+										// the DeleteAction dialog can await the
+										// real network call and surface errors
+										// inline if the engine rejects (403 for
+										// "not your bot", 502 for redaction
+										// failure, network drop).
+										? () => onDeleteMessage(m.id)
 										: undefined
 								}
 							/>
@@ -827,7 +833,10 @@ function MessageRow({
 	// Trash button handler.  Provided only for rows the viewer is
 	// allowed to delete (own message OR owned-bot message); the
 	// gating logic lives in ChatPane.  When omitted, no trash icon.
-	onDelete?(): void;
+	// Returns a promise so MessageActions's DeleteAction dialog can
+	// await the real network call and show errors inline (403, 502,
+	// network) without flickering closed first.
+	onDelete?(): void | Promise<void>;
 }) {
 	const [flagDialogOpen, setFlagDialogOpen] = useState(false);
 	const [expanded, setExpanded] = useState(false);
