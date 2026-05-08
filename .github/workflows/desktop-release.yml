@@ -23,20 +23,33 @@
 name: Desktop release
 
 on:
-  # Tag pushes always release.  Branch pushes only build when the
-  # change is actually about the desktop shell — `client/**` was
-  # in here previously to keep the bundled SPA fresh, but in
-  # practice every client commit then burned a 5+ min build that
-  # never shipped anywhere (the user has to push a `desktop-v*`
-  # tag for a real release anyway).  When the bundled SPA needs
-  # to be rebuilt outside a tagged release, run the workflow
-  # manually via `workflow_dispatch` or push a fresh tag.
+  # Tag-only release strategy.  No branch triggers — pushing
+  # commits to main, even when they touch apps/desktop/ or this
+  # workflow file, never fires a build.  Two reasons:
+  #
+  #   1. Branch builds were producing duplicate runs alongside
+  #      every tag-push: the same commit produces a "sanity build"
+  #      from the branch trigger and a real release build from the
+  #      tag trigger.  The sanity build never shipped anywhere
+  #      (publish job is gated on tag refs), so it was pure CI
+  #      waste — 15+ min of compute, three platform runners, every
+  #      commit.
+  #
+  #   2. `paths:` filtering had subtle interactions with tag
+  #      pushes that we kept getting wrong (paths is computed off
+  #      the diff against the parent commit; tag pushes against
+  #      commits whose parent already touched the relevant files
+  #      would skip the tag build entirely).  Dropping the filter
+  #      side-steps the whole class of issues.
+  #
+  # If the bundled SPA changes need to be tested in a desktop
+  # context without cutting a real release, run the workflow
+  # manually via the workflow_dispatch trigger (gh workflow run
+  # "Desktop release" --ref <commit-or-branch>).  Manual dispatch
+  # produces bundles as workflow artifacts but skips the publish
+  # step — same as the old branch-push behaviour, but on demand.
   push:
     tags: ["desktop-v*"]
-    branches: [main]
-    paths:
-      - "apps/desktop/**"
-      - ".github/workflows/desktop-release.yml"
   workflow_dispatch:
 
 # One release in flight at a time per ref — cancel an in-progress run
