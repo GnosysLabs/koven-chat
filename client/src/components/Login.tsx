@@ -11,6 +11,7 @@
 
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { DesktopDownloads } from "@/components/DesktopDownloads";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
@@ -280,6 +281,14 @@ export function Login({ onLoggedIn }: LoginProps) {
 						</form>
 					)}
 				</div>
+
+				{/* Desktop-app download CTAs for web visitors.  Renders
+				    nothing inside the Tauri bundle (the user's already
+				    running the app there) and during the GitHub API
+				    fetch (no mid-paint pop-in).  Kept inside the same
+				    max-width column so the buttons sit flush under the
+				    auth card. */}
+				<DesktopDownloads />
 			</div>
 
 			{/* Koven attribution footer.  Pinned to the bottom of the
