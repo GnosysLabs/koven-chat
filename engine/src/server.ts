@@ -101,6 +101,7 @@ import { sendLoginCodeEmail } from "./email";
 import { extractToken, whoami } from "./auth";
 import { extractKnowledgeText } from "./knowledge_extract";
 import { reconcileOne, startOne, stopOne } from "./bot_manager";
+import { WEIGHT_FLOOR } from "./weight";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 // Auto-suspend the flagger if they've had this many floor flags
@@ -381,13 +382,21 @@ export function startServer(): void {
 				const userId = url.searchParams.get("user_id");
 				if (!userId) return json({ error: "user_id required" }, { status: 400 });
 				const w = readWeight(userId);
-				if (!w) return json({ user_id: userId, weight: 1.0, unseen: true });
+				// Unseen users get the canonical floor (0.5), not a 1.0
+				// fallback.  GOVERNANCE.md / weight.ts both define
+				// brand-new accounts as sitting at the floor; returning
+				// 1.0 here misclassified them in client-side renderers
+				// as "1 red tick / above-floor" until the periodic
+				// engine tick eventually wrote a real row, which left
+				// stale 1.0s in the SPA's reputation cache for up to a
+				// minute.
+				if (!w) return json({ user_id: userId, weight: WEIGHT_FLOOR, unseen: true });
 				return json(w);
 			}
 			if (req.method === "GET" && path.startsWith("/api/weight/")) {
 				const userId = decodeURIComponent(path.slice("/api/weight/".length));
 				const w = readWeight(userId);
-				if (!w) return json({ user_id: userId, weight: 1.0, unseen: true });
+				if (!w) return json({ user_id: userId, weight: WEIGHT_FLOOR, unseen: true });
 				return json(w);
 			}
 

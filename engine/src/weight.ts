@@ -27,7 +27,11 @@ import {
 } from "./db";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const WEIGHT_FLOOR = 0.5;
+// Exported so server.ts can use the same canonical floor when
+// answering /api/weight for users we haven't observed yet — keeps
+// the "unseen user" response consistent with the computed-default
+// path used everywhere else in the engine.
+export const WEIGHT_FLOOR = 0.5;
 const WEIGHT_CEIL = 5.0;
 
 // Time-gated tier ladder.  Each tier requires a minimum account
