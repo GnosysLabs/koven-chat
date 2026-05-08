@@ -514,6 +514,17 @@ export class MatrixTransport {
 		// `chat.koven.pinned_rooms` is the Koven-custom state event a
 		// space admin uses to pin rooms in that space; refresh both
 		// lists when it changes so the new ordering picks up.
+		//
+		// Also: when a NEW m.space.child arrives on a space we're
+		// joined to, auto-join the referenced child room.  Symmetric
+		// with joinSpaceWithChildren (which auto-joins children when
+		// you first join a space) — keeps the Discord-style "channels
+		// you're a server member of all show up automatically"
+		// experience working when an admin adds a channel later.
+		// Skipped for sub-spaces, tombstoned references, and rooms
+		// we've already joined.  Self-emitted events still flow
+		// through this listener but the "already a member" guard
+		// makes the auto-join an idempotent no-op there.
 		this.client.on(RoomEvent.Timeline, (event: MatrixEvent) => {
 			const t = event.getType();
 			if (
@@ -525,6 +536,34 @@ export class MatrixTransport {
 				this.emitSpaceList();
 				this.emitRoomList();
 			}
+			if (t !== "m.space.child") return;
+			const parentSpaceId = event.getRoomId();
+			const childRoomId = event.getStateKey();
+			if (!parentSpaceId || !childRoomId) return;
+			const c = this.client;
+			if (!c) return;
+			// Only act on spaces I'm currently joined to.  An invite-
+			// state space's children shouldn't get auto-joined until
+			// I actually accept the parent.
+			const parent = c.getRoom(parentSpaceId);
+			if (parent?.getMyMembership() !== "join") return;
+			// Tombstoned reference (admin removed the room from the
+			// space) — empty `via` array, skip.
+			const content = event.getContent() as { via?: string[] };
+			if (!Array.isArray(content.via) || content.via.length === 0) return;
+			// Already a member?  Nothing to do.
+			const existing = c.getRoom(childRoomId);
+			const myMembership = existing?.getMyMembership();
+			if (myMembership === "join" || myMembership === "invite") return;
+			// Sub-spaces are explicit opt-in — symmetric with
+			// joinSpaceWithChildren which doesn't auto-join sub-spaces.
+			if (existing?.isSpaceRoom?.()) return;
+			void c.joinRoom(childRoomId).then(() => {
+				this.emitRoomList();
+			}).catch(err => {
+				// Banned, room doesn't exist, etc. — log and move on.
+				console.warn(`auto-join on m.space.child(${childRoomId}) failed`, err);
+			});
 		});
 
 		this.client.on(RoomMemberEvent.Membership, (_event, member) => {
@@ -1856,18 +1895,103 @@ export class MatrixTransport {
 		this.emitRoomList();
 	}
 
-	/** Add an existing room as a child of an existing space. */
+	/**
+	 * Add an existing room as a child of an existing space.  This is
+	 * the symmetric "the channel exists, I want it in this server" gesture
+	 * to createRoom-with-parentSpaceId (which creates a new room
+	 * already filed under the space).
+	 *
+	 * Three things happen, all best-effort:
+	 *
+	 *   1. m.space.child on the space + m.space.parent on the room —
+	 *      the canonical hierarchy.  Required.
+	 *
+	 *   2. If the room is private (join_rule != public), upgrade the
+	 *      join_rule to `restricted` with the space as the allow
+	 *      list.  Mirrors what createRoom does for new private rooms
+	 *      in a space — anyone joined to the space can self-join the
+	 *      room without an explicit invite, so members who weren't
+	 *      around when we did the link can still walk in later.
+	 *      Skipped for public rooms (already openly joinable).
+	 *
+	 *   3. Invite every current member of the space who isn't already
+	 *      in the room.  This dispatches a notification to each one
+	 *      and surfaces the room in their invite list immediately.
+	 *      Combined with the auto-join-on-m.space.child listener
+	 *      below, the experience is "I was in the server, suddenly
+	 *      the new channel is just there in my sidebar."
+	 *
+	 * Per-step failures are logged and skipped — getting half the
+	 * way there (state events written but invites refused due to PL)
+	 * is better than rolling back the link entirely.
+	 */
 	async linkRoomToSpace(spaceId: SpaceId, roomId: RoomId): Promise<void> {
 		const c = this.requireClient();
 		const via = [this.serverName()];
+
+		// 1. Canonical hierarchy state events.
 		await c.sendStateEvent(spaceId, "m.space.child" as any, { via, suggested: false }, roomId);
-		// Best-effort reciprocal — fails harmlessly if we don't have PL.
 		try {
 			await c.sendStateEvent(roomId, "m.space.parent" as any, { via, canonical: true }, spaceId);
 		} catch {
 			// Power-level mismatch in the child room is fine; the canonical
 			// hierarchy lives on the space side.
 		}
+
+		// 2. Join-rule upgrade for private rooms.  Read the current
+		//    rule first; only flip if it's "invite" (private default).
+		//    "knock" rooms stay knock; public rooms stay public.
+		const room = c.getRoom(roomId);
+		const currentRule = room?.currentState
+			.getStateEvents("m.room.join_rules", "")
+			?.getContent()?.join_rule;
+		if (currentRule === "invite") {
+			try {
+				await c.sendStateEvent(
+					roomId,
+					"m.room.join_rules" as any,
+					{
+						join_rule: "restricted",
+						allow: [{ type: "m.room_membership", room_id: spaceId }],
+					},
+					"",
+				);
+			} catch (err) {
+				console.warn("linkRoomToSpace: join-rule upgrade failed (likely missing PL)", err);
+			}
+		}
+
+		// 3. Invite the space's current members to the room.  Skip
+		//    self, skip anyone already in the room (joined or invited),
+		//    skip the engine appservice's bot service users (the
+		//    @bot-* namespace) so we don't spam them with invites to
+		//    every room they're already participating in via the
+		//    engine.
+		const space = c.getRoom(spaceId);
+		const myUserId = this.creds?.user_id;
+		if (space && myUserId) {
+			const inviteTargets: string[] = [];
+			for (const member of space.getMembersWithMembership("join")) {
+				const uid = member.userId;
+				if (uid === myUserId) continue;
+				if (/^@bot-/.test(uid)) continue;
+				const existing = room?.getMember(uid);
+				const m = existing?.membership;
+				if (m === "join" || m === "invite") continue;
+				inviteTargets.push(uid);
+			}
+			// Sequential — Synapse rate-limits /invite per-user and a
+			// thundering herd on a 50-member space eats 429s.  Each
+			// failure is per-user and shouldn't abort the rest.
+			for (const uid of inviteTargets) {
+				try {
+					await c.invite(roomId, uid);
+				} catch (err) {
+					console.warn(`linkRoomToSpace: invite ${uid} failed`, err);
+				}
+			}
+		}
+
 		this.emitSpaceList();
 		this.emitRoomList();
 	}
