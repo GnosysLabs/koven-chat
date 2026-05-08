@@ -230,21 +230,38 @@ export function useNotifications(
 			const t = tokenRef.current;
 			const room = activeRoomIdRef.current;
 			if (!t || !room) return;
-			// Optimistic: flip read_at locally before the round-
-			// trip so the badge zeros instantly.  If the server
-			// rejects, the next polling tick reconciles.
-			const now = Date.now();
+
+			// Read CURRENT entries via setEntries' updater to avoid
+			// closing over a stale snapshot, AND only mutate state
+			// if there's actually something to clear.  Returning
+			// `prev` unchanged when there are no unread rows for
+			// this room is critical — otherwise we'd hand React a
+			// new array reference every run, the effect would
+			// re-fire (entries changed), call this again, hand
+			// React another new reference… an infinite loop that
+			// hammers /read-by-room and starves the connection
+			// pool that matrix-js-sdk's /sync, /send, /receipt,
+			// /profile calls share.  THIS WAS A SHIPPED BUG.
 			let cleared = 0;
-			setEntries(prev => prev.map(e => {
-				if (e.room_id === room && e.read_at === null) {
-					cleared++;
-					return { ...e, read_at: now };
-				}
-				return e;
-			}));
-			if (cleared > 0) {
-				setUnreadCount(c => Math.max(0, c - cleared));
-			}
+			const now = Date.now();
+			setEntries(prev => {
+				let mutated = false;
+				const next = prev.map(e => {
+					if (e.room_id === room && e.read_at === null) {
+						cleared++;
+						mutated = true;
+						return { ...e, read_at: now };
+					}
+					return e;
+				});
+				return mutated ? next : prev;
+			});
+
+			// Bail without firing the API call when nothing changed
+			// — same anti-loop reasoning, and saves a wasted RTT.
+			if (cleared === 0) return;
+
+			setUnreadCount(c => Math.max(0, c - cleared));
 			try {
 				await apiMarkRoomRead({ accessToken: t, roomId: room });
 			} catch {
@@ -267,6 +284,19 @@ export function useNotifications(
 			document.removeEventListener("visibilitychange", onFocus);
 			window.removeEventListener("focus", onFocus);
 		};
+		// `entries` IS in deps — combined with setEntries returning
+		// the same reference when nothing changed, this gives us:
+		//   - new unread arrives in active room → effect fires →
+		//     clearIfLooking flips it to read, fires API call,
+		//     setEntries returns NEW array (mutation happened),
+		//     React re-renders, effect fires AGAIN, clearIfLooking
+		//     finds nothing to clear, setEntries returns prev (same
+		//     identity), React skips re-render, loop stops.  One
+		//     extra effect run but bounded.
+		//   - poll tick returns identical entries → setEntries
+		//     receives a new array from the API but only updates
+		//     state if it differs from current; effect fires but
+		//     immediately bails (cleared=0).
 	}, [accessToken, activeRoomId, entries]);
 
 	return { unreadCount, entries, loading, error, refresh, markRead, markAllRead, dismiss, dismissAll };
