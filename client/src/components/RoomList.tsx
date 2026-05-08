@@ -396,18 +396,28 @@ function InviteRow({
 	onDecline(): void | Promise<void>;
 }) {
 	const inviterLabel = room.inviter ?? room.dmUserId ?? "Someone";
-	const subtitle = room.kind === "dm"
-		? "wants to chat"
-		: `invited you to ${room.name}`;
+	// DMs: the row's primary label IS the inviter's display name
+	// already, so repeating their full @mxid below would just
+	// truncate noisily.  Use a clean verb-only subtitle for those.
+	// Non-DMs: keep the inviter + action so the user can tell who
+	// invited them, but allow the text to wrap to a second line
+	// (line-clamp-2) instead of getting chopped at the first colon.
+	const isDm = room.kind === "dm";
 	return (
 		<div className="rounded-md border border-border bg-card/60 p-2 space-y-1.5">
-			<div className="flex items-center gap-2 min-w-0">
+			<div className="flex items-start gap-2 min-w-0">
 				<RoomAvatar room={room} />
 				<div className="min-w-0 flex-1">
 					<div className="text-sm font-medium truncate">{room.name}</div>
-					<div className="text-[11px] text-muted-foreground truncate">
-						<span className="font-medium text-foreground/80">{inviterLabel}</span> {subtitle}
-					</div>
+					{isDm ? (
+						<div className="text-[11px] text-muted-foreground truncate">
+							Wants to chat
+						</div>
+					) : (
+						<div className="text-[11px] text-muted-foreground line-clamp-2 break-words">
+							<span className="font-medium text-foreground/80">{inviterLabel}</span> invited you
+						</div>
+					)}
 				</div>
 			</div>
 			<div className="flex gap-1">

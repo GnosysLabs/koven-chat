@@ -31,58 +31,57 @@
 const isDesktop = typeof window !== "undefined"
 	&& (window as { __KOVEN_DESKTOP__?: boolean }).__KOVEN_DESKTOP__ === true;
 
-let permissionState: "granted" | "denied" | "default" | "unknown" = "unknown";
+/**
+ * Read the LIVE OS notification-permission state.  Don't cache —
+ * `Notification.permission` is a property read (no IPC, no syscall)
+ * and the user can change it at any time via browser settings,
+ * site-info popovers, the Brave shield, etc.  Caching even briefly
+ * means we miss the moment they grant it.
+ */
+async function currentPermission(): Promise<"granted" | "denied" | "default"> {
+	if (isDesktop) {
+		try {
+			const { isPermissionGranted } = await import("@tauri-apps/plugin-notification");
+			return (await isPermissionGranted()) ? "granted" : "default";
+		} catch {
+			return "default";
+		}
+	}
+	if (typeof Notification === "undefined") return "denied";
+	return Notification.permission;
+}
 
 /**
- * Probe (and on "default", request) the OS notification permission.
- * Idempotent — subsequent calls with the same cached state are
- * no-ops.  Call once on app boot; later calls during the session
- * just read the cached state.
+ * Surface the OS permission prompt the FIRST time the user signs in.
+ * Idempotent — once already granted, becomes a no-op (the underlying
+ * Notification.requestPermission resolves immediately when state is
+ * "granted").  When state is "denied" we don't re-prompt either:
+ * browsers ignore second-and-later requestPermission calls and the
+ * user has to grant via site settings instead.
  *
- * Returns the granted/denied result so callers can decide whether
- * to show fallback in-app affordances if denied.
+ * Returns the resolved state so callers can decide whether to show
+ * a fallback in-app affordance if denied.
  */
-export async function ensureNotificationPermission(): Promise<"granted" | "denied"> {
-	if (permissionState === "granted") return "granted";
-	if (permissionState === "denied") return "denied";
-
+export async function ensureNotificationPermission(): Promise<"granted" | "denied" | "default"> {
 	if (isDesktop) {
 		try {
 			const { isPermissionGranted, requestPermission } = await import("@tauri-apps/plugin-notification");
-			const already = await isPermissionGranted();
-			if (already) {
-				permissionState = "granted";
-				return "granted";
-			}
+			if (await isPermissionGranted()) return "granted";
 			const result = await requestPermission();
-			permissionState = result === "granted" ? "granted" : "denied";
-			return permissionState;
+			return result === "granted" ? "granted" : "denied";
 		} catch (err) {
 			console.warn("notifications: Tauri permission probe failed", err);
-			permissionState = "denied";
 			return "denied";
 		}
 	}
-
-	if (typeof Notification === "undefined") {
-		permissionState = "denied";
-		return "denied";
-	}
-	if (Notification.permission === "granted") {
-		permissionState = "granted";
-		return "granted";
-	}
-	if (Notification.permission === "denied") {
-		permissionState = "denied";
-		return "denied";
-	}
+	if (typeof Notification === "undefined") return "denied";
+	const cur = Notification.permission;
+	if (cur === "granted" || cur === "denied") return cur;
 	try {
 		const result = await Notification.requestPermission();
-		permissionState = result === "granted" ? "granted" : "denied";
-		return permissionState;
+		return result === "granted" ? "granted" : "denied";
 	} catch (err) {
 		console.warn("notifications: browser permission request failed", err);
-		permissionState = "denied";
 		return "denied";
 	}
 }
@@ -115,27 +114,13 @@ export interface NotifyOptions {
  * a desktop notification for a message you're already looking at.
  */
 export async function notify(opts: NotifyOptions): Promise<void> {
-	// Visibility gate: only suppress when the page is actually
-	// visible AND focused.  visibilityState alone isn't enough
-	// because a window can be visible but unfocused (user is in
-	// another app on the same screen).
-	if (
-		typeof document !== "undefined" &&
-		document.visibilityState === "visible" &&
-		typeof document.hasFocus === "function" &&
-		document.hasFocus()
-	) {
-		// Caller is responsible for additionally suppressing
-		// notifications for the currently-active room — we don't
-		// have that context here.
-	}
-
-	if (permissionState === "unknown") {
-		// First call with no probe — try once.  Cheap if already
-		// granted; surfaces a permission prompt if not.
-		await ensureNotificationPermission();
-	}
-	if (permissionState !== "granted") return;
+	// Read the live OS permission — don't cache.  See currentPermission
+	// above for why; tl;dr the user can flip the setting at any time
+	// via browser site-info / Brave shields / OS notification center,
+	// and a stale cached "denied" silently disables notifications even
+	// though we'd otherwise be allowed to fire.
+	const perm = await currentPermission();
+	if (perm !== "granted") return;
 
 	if (isDesktop) {
 		try {

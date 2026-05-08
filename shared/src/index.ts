@@ -192,6 +192,12 @@ export interface Message {
 	// `filename` field, `body` IS the filename and there's no caption.
 	// The renderer surfaces this as text underneath the media bubble.
 	caption?: string;
+	// True iff matrix-js-sdk reported decryption failure for this
+	// event.  Renderer uses this to swap the body text out for a
+	// friendly placeholder + dim styling, instead of leaking the raw
+	// SDK error string ("** Unable to decrypt: …. **") into the
+	// timeline.
+	decryptionFailed?: boolean;
 	// True for events whose send hasn't been confirmed by the homeserver
 	// yet — local echoes still in flight, queued retries after a network
 	// drop, encryption-in-progress, or hard-failed sends matrix-js-sdk

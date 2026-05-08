@@ -12,9 +12,10 @@ import {
 import { cn } from "@/lib/utils";
 import type { Settings, Theme } from "@/state/settings";
 import { THEMES } from "@/state/settings";
-import { Check, Palette, User, Wrench, type LucideIcon } from "lucide-react";
+import { Check, Monitor, Palette, User, Wrench, type LucideIcon } from "lucide-react";
 import { InstanceAdminSection } from "@/components/InstanceAdminSection";
 import { AccountSection } from "@/components/AccountSection";
+import { SessionsSection } from "@/components/SessionsSection";
 import { fetchAdminStatus } from "@/lib/instance";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
@@ -65,6 +66,11 @@ export function AppSettingsSheet({ open, onOpenChange, settings, onSettingsChang
 	];
 	if (accessToken) {
 		tabs.push({ id: "account", label: "Account", icon: User });
+		// Sessions = device list + bulk-revoke.  Sits next to Account
+		// because it's about the user's sign-in state, but distinct
+		// because the affordance set is wholly different (no
+		// blocked-users / delete-account ops, just a device manager).
+		tabs.push({ id: "sessions", label: "Sessions", icon: Monitor });
 	}
 	if (isAdmin && accessToken) {
 		// Pending review lives in its own dialog now (shield icon
@@ -156,6 +162,13 @@ export function AppSettingsSheet({ open, onOpenChange, settings, onSettingsChang
 									}}
 									settings={settings}
 									onSettingsChange={onSettingsChange}
+								/>
+							)}
+
+							{activeTab === "sessions" && accessToken && (
+								<SessionsSection
+									accessToken={accessToken}
+									transport={transport ?? null}
 								/>
 							)}
 

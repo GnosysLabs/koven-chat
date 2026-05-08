@@ -721,6 +721,36 @@ export class MatrixTransport {
 		});
 	}
 
+	/**
+	 * Server-side logout: invalidate the access token AND deactivate
+	 * this device on Synapse.  Called from handleSignOut so a user
+	 * doesn't accumulate stale devices on every sign-out → sign-in
+	 * cycle.  Without this, encrypted messages get encrypted to
+	 * those stale devices and recipients get "key backup is not
+	 * working" decryption failures because the live device was
+	 * never given the megolm session.
+	 *
+	 * matrix-js-sdk's `client.logout()` POSTs to
+	 * `/_matrix/client/v3/logout` which:
+	 *   * Invalidates the access token (future requests 401).
+	 *   * Removes the device from the user's device list.
+	 *   * Triggers a device-list update to other room members so
+	 *     their clients stop trying to encrypt to this device.
+	 *
+	 * Best-effort — we still proceed with the local wipe + nav even
+	 * if the server-side call fails (token already expired, network
+	 * down, etc.).
+	 */
+	async logout(): Promise<void> {
+		const c = this.client;
+		if (!c) return;
+		try {
+			await c.logout(true /* stopClient */);
+		} catch (err) {
+			console.warn("transport.logout: server-side logout failed", err);
+		}
+	}
+
 	stop(): void {
 		this.stopped = true;
 		this.client?.stopClient();
@@ -928,13 +958,27 @@ export class MatrixTransport {
 		// lets the SDK decrypt the megolm key backup.
 		await crypto.bootstrapCrossSigning({});
 		await crypto.bootstrapSecretStorage({});
+		// Key-backup restore.  Two-phase:
+		//   1. Load the backup decryption key from SSSS.  This is the
+		//      curve25519 private key that was encrypted under the
+		//      user's recovery key at setupEncryption time.
+		//   2. Pull every backed-up megolm session from /room_keys
+		//      and import them into the local rust-crypto store.
+		// Phase 1 failure usually means SSSS is malformed (legacy
+		// account, partial setup); phase 2 failure usually means
+		// network or no backup exists yet on the server.  We log
+		// loudly either way so a regression is visible — silent
+		// success that leaves history un-decryptable is the worst
+		// failure mode.
 		try {
 			await crypto.loadSessionBackupPrivateKeyFromSecretStorage();
+		} catch (err) {
+			console.error("unlockEncryption: failed to load backup decryption key from SSSS — old encrypted messages will fail to decrypt until key forwarding catches up", err);
+		}
+		try {
 			await crypto.restoreKeyBackup();
 		} catch (err) {
-			// No key backup yet, or restore failed — non-fatal; new
-			// messages will decrypt fine, only history is missing.
-			console.warn("unlockEncryption: key backup restore failed", err);
+			console.error("unlockEncryption: restoreKeyBackup failed — old encrypted messages will fail to decrypt", err);
 		}
 		return true;
 	}
@@ -2897,6 +2941,138 @@ export class MatrixTransport {
 		}
 	}
 
+	// ─── Session management ────────────────────────────────────────────
+	//
+	// Lists + revokes the user's other Matrix devices.  Useful surface
+	// because Synapse never auto-deactivates devices on its own — every
+	// sign-out + sign-in cycle (or every cross-device login) creates a
+	// new device, and an undisciplined user can easily accumulate a
+	// dozen ghost devices that encrypted messages get fanned out to,
+	// leading to "this message can't be decrypted" errors when the live
+	// device doesn't have the megolm session for one of the ghosts.
+	//
+	// We expose two operations:
+	//   * listSessions() — all devices for this user, including current.
+	//     Used by the Settings → Account → Sessions list.
+	//   * revokeOtherSessions() — bulk-deletes everything EXCEPT the
+	//     current device, satisfying Synapse's UIA challenge with the
+	//     engine-issued ephemeral password (same pattern as
+	//     deactivateMyAccount above).
+
+	/**
+	 * Async fetch of the current user's device list from Synapse.
+	 * Includes the live device count (self included) so the UI can
+	 * tell the user "you've got N sessions" and disable the revoke
+	 * button when there are no others.
+	 */
+	async fetchSessions(): Promise<Array<{
+		deviceId: string;
+		displayName: string | null;
+		lastSeenIp: string | null;
+		lastSeenTs: number | null;
+		isCurrent: boolean;
+	}>> {
+		const c = this.requireClient();
+		const myDeviceId = c.getDeviceId();
+		const res = await c.getDevices();
+		return res.devices
+			// koven-engine-bootstrap is the engine's appservice
+			// device — it's how the engine authenticates to perform
+			// admin operations (room-directory toggles, force-joins,
+			// etc.).  Surfacing it in the user-facing Sessions list
+			// is misleading (it isn't a real session the user signed
+			// into) and revoking it would break every admin path.
+			// Hide it entirely.
+			.filter(d => d.display_name !== "koven-engine-bootstrap")
+			.map(d => ({
+				deviceId: d.device_id,
+				displayName: d.display_name ?? null,
+				lastSeenIp: d.last_seen_ip ?? null,
+				lastSeenTs: d.last_seen_ts ?? null,
+				isCurrent: d.device_id === myDeviceId,
+			}));
+	}
+
+	/**
+	 * Revoke every device on this user's account except the one
+	 * currently signed in.  Uses Synapse's `delete_devices` endpoint
+	 * (POST /_matrix/client/v3/delete_devices) which, like account
+	 * deactivation, requires a UIA password challenge.  We satisfy
+	 * it with the engine-issued ephemeral password held in
+	 * `this.uiaPassword`.
+	 *
+	 * Returns the count of devices actually revoked.  Throws on UIA
+	 * failure or if the engine hasn't seeded a UIA password yet
+	 * (caller can route to the error dispatcher and prompt the
+	 * user to refresh).
+	 */
+	async revokeOtherSessions(password?: string): Promise<number> {
+		const creds = this.creds;
+		const c = this.requireClient();
+		if (!creds) throw new Error("not logged in");
+		const pw = password ?? this.uiaPassword;
+		if (!pw) throw new Error("UIA password unavailable; call setUiaPassword first");
+
+		const myDeviceId = c.getDeviceId();
+		const res = await c.getDevices();
+		const targets = res.devices
+			// Skip the current device (we're signing OUT others) and
+			// the engine bootstrap device (revoking it would break
+			// every admin operation routed through the appservice).
+			// Same filter as fetchSessions above; mirrored here so a
+			// caller can't sneak the bootstrap into the revoke list.
+			.filter(d =>
+				d.device_id !== myDeviceId &&
+				d.display_name !== "koven-engine-bootstrap"
+			)
+			.map(d => d.device_id);
+		if (targets.length === 0) return 0;
+
+		const url = `${creds.homeserver}/_matrix/client/v3/delete_devices`;
+		const headers: Record<string, string> = {
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${creds.access_token}`,
+		};
+
+		// Step 1: probe.  Synapse refuses without UIA and returns the
+		// session id we have to echo back with a password fill.
+		const probe = await fetch(url, {
+			method: "POST",
+			headers,
+			body: JSON.stringify({ devices: targets }),
+		});
+		if (probe.ok) {
+			// Rare but possible if the user already authed recently;
+			// device wipe went through on the first call.
+			return targets.length;
+		}
+		const probeJson = (await probe.json().catch(() => ({}))) as Record<string, unknown>;
+		const session = (probeJson as { session?: string }).session;
+		if (!session) {
+			throw new Error(messageFromMatrixError(probeJson, `Revoke failed (${probe.status})`));
+		}
+
+		// Step 2: re-POST with the password fill.
+		const finalRes = await fetch(url, {
+			method: "POST",
+			headers,
+			body: JSON.stringify({
+				devices: targets,
+				auth: {
+					type: "m.login.password",
+					session,
+					identifier: { type: "m.id.user", user: creds.user_id },
+					password: pw,
+				},
+			}),
+		});
+		if (!finalRes.ok) {
+			const body = (await finalRes.json().catch(() => ({}))) as Record<string, unknown>;
+			throw new Error(messageFromMatrixError(body, `Revoke failed (${finalRes.status})`));
+		}
+		return targets.length;
+	}
+
 	/** Joined members of a room, sorted by power level then name. */
 	getRoomMembers(roomId: RoomId): import("@koven/shared").Member[] {
 		const c = this.client;
@@ -3367,6 +3543,19 @@ export class MatrixTransport {
 		const member = room.getMember(sender);
 		const displayName = member?.name ?? sender;
 
+		// Decryption failures: matrix-js-sdk leaves the event in the
+		// timeline with content.body set to a raw error string like
+		// "** Unable to decrypt: DecryptionError: This message was sent
+		// before this device logged in, and key backup is not working. **".
+		// Replace with a clean placeholder so the user gets a calm
+		// "🔒 Couldn't decrypt this message" bubble instead of an
+		// alarming wall of stack-trace-ish text.  The renderer dims
+		// the bubble (decryptionFailed flag) so it reads as system
+		// metadata rather than a real chat message.
+		const decryptionFailed = typeof event.isDecryptionFailure === "function"
+			? event.isDecryptionFailure()
+			: false;
+
 		const msgtype = content.msgtype as string | undefined;
 		let kind: MessageKind = "text";
 		let mediaMxc: string | undefined;
@@ -3376,7 +3565,9 @@ export class MatrixTransport {
 		let mediaWidth: number | undefined;
 		let mediaHeight: number | undefined;
 		let mediaEncrypted: import("@koven/shared").MediaEncryption | undefined;
-		let text = (content.body as string | undefined) ?? "";
+		let text = decryptionFailed
+			? "🔒 Couldn't decrypt this message"
+			: (content.body as string | undefined) ?? "";
 		let caption: string | undefined;
 
 		const mediaKind: MessageKind | null =

@@ -670,6 +670,30 @@ export default function App() {
 	}, [creds?.access_token]);
 
 	function handleSignOut() {
+		// PROPER LOGOUT — invalidate the access token AND deactivate
+		// the device on Synapse before we drop creds locally.
+		// Without this, every sign-out + sign-in cycle creates a new
+		// Matrix device on the server while leaving the old one
+		// alive, so a single user accumulates 8+ active devices over
+		// a few sessions.  Encrypted messages get re-encrypted to
+		// every active device the sender's client can see — when one
+		// of those devices is a stale ghost without local megolm
+		// session keys, decryption fails server-side ("key backup is
+		// not working") because the message was encrypted to a key
+		// the live device never had.  Calling client.logout() before
+		// the local wipe removes the device from the server-side
+		// list, so the user's device count stays bounded.
+		//
+		// Fire-and-forget — we don't want signing out to block on a
+		// network round-trip if Synapse is slow.  The local wipe +
+		// state reset happen synchronously below so the UI flips to
+		// the login screen immediately.
+		const t = transport;
+		if (t) {
+			void t.logout().catch(err => {
+				console.warn("handleSignOut: server-side logout failed", err);
+			});
+		}
 		saveCredentials(null);
 		setCreds(null);
 		setEncState(null);
