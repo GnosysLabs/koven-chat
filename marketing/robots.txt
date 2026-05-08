@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://koven.chat/sitemap.xml

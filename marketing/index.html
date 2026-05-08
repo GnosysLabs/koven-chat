@@ -1,0 +1,1135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Koven — chat without the banhammer</title>
+<meta name="description" content="Hiding a message requires a vote from the community. Every flag, every vote, in the public log. Penalties expire. No mods, no banhammer. From Gnosys Labs." />
+<meta property="og:title" content="Koven — chat without the banhammer" />
+<meta property="og:description" content="tldr; mods suck. We fixed it. Hiding a message takes three people and a vote. Every action goes in the public log." />
+<meta property="og:image" content="https://koven.chat/assets/og.png" />
+<meta property="og:url" content="https://koven.chat" />
+<meta property="og:type" content="website" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="Koven — chat without the banhammer" />
+<meta name="twitter:description" content="tldr; mods suck. We fixed it. Hiding a message takes three people and a vote. Every action goes in the public log." />
+<meta name="twitter:image" content="https://koven.chat/assets/og.png" />
+<meta name="theme-color" content="#1a0e26" />
+<link rel="icon" type="image/png" href="favicon.png" />
+<link rel="apple-touch-icon" href="favicon.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --bg-elev: #0f0f0f;
+    --fg: #fdf6ec;
+    --fg-muted: #d8bfc9;
+    --fg-dim: #9b8a96;
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.16);
+    --card: var(--bg);
+    --card-hover: #0c0c0c;
+    --accent: #f5b16a;
+    --accent-cyan: #5fc8ff;
+    --accent-pink: #ff6bb6;
+    --accent-purple: #c66ff5;
+    --accent-hot: #ff6f6b;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html { scroll-padding-top: 80px; }
+  html, body { margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: 'Geist', ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-feature-settings: "ss01", "cv11";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    line-height: 1.55;
+    overflow-x: hidden;
+    min-height: 100vh;
+  }
+
+  ::selection { background: rgba(245, 177, 106, 0.35); color: #fff; }
+  a { color: inherit; text-decoration: none; }
+  button { font-family: inherit; }
+  .mono { font-family: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  /* ─── Background: clean dark + grid + top glow (iris-style) ─────── */
+  .bg-glow {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background: radial-gradient(ellipse 60% 40% at 50% -10%, rgba(255, 255, 255, 0.06), transparent 60%);
+  }
+
+  .bg-grid {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    background-image:
+      linear-gradient(to right, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+    background-size: 56px 56px;
+    mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 30%, transparent 75%);
+    -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 30%, transparent 75%);
+  }
+
+  main, header, footer { position: relative; z-index: 10; }
+
+  /* ─── Layout ─────────────────────────────────────────────────────── */
+  .container { width: 100%; max-width: 1180px; margin: 0 auto; padding: 0 28px; }
+
+  /* Nav */
+  .nav {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+    background: rgba(10, 10, 10, 0.6);
+    border-bottom: 1px solid transparent;
+    transition: border-color .25s ease, background .25s ease;
+  }
+
+  .nav.scrolled {
+    border-bottom-color: var(--border);
+    background: rgba(10, 10, 10, 0.78);
+  }
+
+  .nav-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 64px;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    border: 0;
+  }
+
+  .brand-img {
+    height: 32px;
+    width: auto;
+    display: block;
+    filter: drop-shadow(0 0 12px rgba(95, 200, 255, 0.25)) drop-shadow(0 0 12px rgba(255, 107, 182, 0.20));
+  }
+
+  .footer-brand .brand-img {
+    height: 36px;
+  }
+
+  .nav-links {
+    display: flex;
+    align-items: center;
+    gap: 30px;
+  }
+
+  .nav-links a {
+    color: var(--fg-muted);
+    font-size: 14px;
+    transition: color .15s;
+  }
+
+  .nav-links a:hover { color: var(--fg); }
+
+  /* Buttons */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 38px;
+    padding: 0 16px;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: -0.005em;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: background .15s ease, border-color .15s ease, color .15s ease, transform .15s ease, box-shadow .2s ease;
+    white-space: nowrap;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+
+  .btn-primary {
+    background: linear-gradient(135deg, #f5b16a 0%, #ff7a59 100%);
+    color: #2a0e1a;
+    border: 1px solid rgba(255, 230, 200, 0.25);
+    font-weight: 600;
+  }
+
+  .btn-primary:hover {
+    background: linear-gradient(135deg, #f9bc7a 0%, #ff8867 100%);
+  }
+
+  .btn-ghost {
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--fg);
+    border-color: var(--border-strong);
+  }
+
+  .btn-ghost:hover {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: rgba(255, 255, 255, 0.28);
+  }
+
+  .btn-lg {
+    height: 46px;
+    padding: 0 22px;
+    font-size: 14.5px;
+    border-radius: 11px;
+  }
+
+  /* ─── Hero ───────────────────────────────────────────────────────── */
+  .hero {
+    padding: 80px 0 40px;
+    text-align: center;
+    position: relative;
+  }
+
+  .hero-mark {
+    width: 132px;
+    height: 132px;
+    margin: 0 auto 32px;
+    background: url("assets/koven-mark.png") center / contain no-repeat;
+    filter: drop-shadow(0 0 60px rgba(255, 130, 200, 0.55))
+            drop-shadow(0 0 30px rgba(245, 177, 106, 0.5));
+    animation: float 6s ease-in-out infinite;
+  }
+
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-10px); }
+  }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 30px;
+    padding: 0 14px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border);
+    font-size: 12.5px;
+    color: var(--fg-muted);
+    margin-bottom: 24px;
+  }
+
+  .pill .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent-cyan);
+    box-shadow: 0 0 10px var(--accent-cyan);
+  }
+
+  h1.headline {
+    font-size: clamp(48px, 7.4vw, 92px);
+    line-height: 1.0;
+    letter-spacing: -0.02em;
+    font-weight: 400;
+    margin: 0 0 24px;
+    color: var(--fg);
+    font-family: 'Instrument Serif', 'Iowan Old Style', Georgia, serif;
+  }
+
+  h1.headline .accent {
+    background: linear-gradient(120deg, #5fc8ff 0%, #c66ff5 35%, #ff6bb6 65%, #f5b16a 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    font-style: italic;
+    font-weight: 400;
+  }
+
+  .subhead {
+    font-size: clamp(16px, 1.6vw, 19px);
+    color: var(--fg-muted);
+    max-width: 620px;
+    margin: 0 auto 38px;
+    line-height: 1.6;
+    letter-spacing: -0.005em;
+  }
+
+  .hero-ctas {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+
+  .hero-meta {
+    margin-top: 22px;
+    color: var(--fg-dim);
+    font-size: 12.5px;
+    display: flex;
+    gap: 18px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+
+  /* ─── Sections ───────────────────────────────────────────────────── */
+  section {
+    padding: 110px 0;
+    position: relative;
+  }
+
+  .eyebrow {
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent-cyan);
+    font-weight: 600;
+    margin-bottom: 20px;
+  }
+
+  .section-title {
+    font-size: clamp(36px, 4.2vw, 54px);
+    letter-spacing: -0.015em;
+    line-height: 1.05;
+    font-weight: 400;
+    margin: 0 0 18px;
+    max-width: 760px;
+    font-family: 'Instrument Serif', 'Iowan Old Style', Georgia, serif;
+  }
+
+  .section-sub {
+    color: var(--fg-muted);
+    font-size: 17px;
+    max-width: 620px;
+    margin: 0;
+    line-height: 1.6;
+  }
+
+  .section-head { margin-bottom: 60px; }
+
+  /* ─── Principle quote ────────────────────────────────────────────── */
+  .principle {
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 56px 40px;
+    background:
+      radial-gradient(ellipse 80% 100% at 50% 0%, rgba(255, 255, 255, 0.03), transparent 70%),
+      var(--bg-elev);
+    text-align: center;
+  }
+
+  .principle .lead {
+    font-size: clamp(24px, 3.0vw, 36px);
+    font-weight: 400;
+    line-height: 1.3;
+    letter-spacing: -0.012em;
+    color: var(--fg);
+    max-width: 780px;
+    margin: 0 auto 14px;
+    font-family: 'Instrument Serif', 'Iowan Old Style', Georgia, serif;
+  }
+
+  .principle .lead em {
+    font-style: italic;
+    background: linear-gradient(120deg, #5fc8ff 0%, #c66ff5 50%, #ff6bb6 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .principle .sub {
+    color: var(--fg-muted);
+    margin: 0;
+    max-width: 560px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  /* ─── Feature grid ───────────────────────────────────────────────── */
+  /* App screenshot hero shot */
+  .app-shot-wrap {
+    margin: 0 auto 40px;
+    max-width: 1080px;
+    padding: 0 8px;
+  }
+  .app-shot {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+
+  .features {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    overflow: hidden;
+  }
+
+  .feature {
+    background: var(--card);
+    padding: 30px 26px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 180px;
+    transition: background .2s;
+  }
+
+  .feature:hover { background: var(--card-hover); }
+
+  .feature-icon {
+    width: 26px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent);
+    margin-bottom: 10px;
+  }
+
+  .feature-icon svg {
+    width: 24px;
+    height: 24px;
+    stroke-width: 1.5;
+  }
+
+  .feature h3 {
+    font-size: 15px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: -0.01em;
+    color: var(--fg);
+  }
+
+  .feature p {
+    color: var(--fg-muted);
+    font-size: 13.5px;
+    margin: 0;
+    line-height: 1.6;
+    letter-spacing: -0.003em;
+  }
+
+  @media (max-width: 880px) {
+    .features { grid-template-columns: 1fr 1fr; }
+  }
+
+  @media (max-width: 600px) {
+    .features { grid-template-columns: 1fr; }
+  }
+
+  /* ─── Specs strip ───────────────────────────────────────────────── */
+  .specs {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .spec {
+    padding: 28px 24px;
+    border-right: 1px solid var(--border);
+  }
+
+  .spec:last-child { border-right: 0; }
+
+  .spec .k {
+    font-size: 12px;
+    color: var(--accent);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+    font-weight: 600;
+  }
+
+  .spec .v {
+    font-size: 22px;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    color: var(--fg);
+  }
+
+  .spec .v small {
+    font-size: 13px;
+    color: var(--fg-muted);
+    margin-left: 6px;
+    font-weight: 400;
+  }
+
+  @media (max-width: 760px) {
+    .specs { grid-template-columns: 1fr 1fr; }
+    .spec:nth-child(2n) { border-right: 0; }
+    .spec:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
+  }
+
+  /* ─── How it works ───────────────────────────────────────────────── */
+  .steps {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+  }
+
+  .step {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 24px 22px;
+  }
+
+  .step .num {
+    font-family: 'Geist Mono', monospace;
+    font-size: 13px;
+    color: var(--accent-pink);
+    letter-spacing: 0.05em;
+    margin-bottom: 14px;
+    display: block;
+  }
+
+  .step h4 {
+    font-size: 15px;
+    margin: 0 0 8px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  .step p {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: 13.5px;
+    line-height: 1.55;
+  }
+
+  @media (max-width: 880px) {
+    .steps { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 540px) {
+    .steps { grid-template-columns: 1fr; }
+  }
+
+  /* ─── CTA card ───────────────────────────────────────────────────── */
+  .cta-card {
+    text-align: center;
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 72px 28px;
+    background:
+      radial-gradient(ellipse 60% 100% at 50% 0%, rgba(255, 255, 255, 0.04), transparent 70%),
+      var(--bg-elev);
+  }
+
+  .cta-card h2 {
+    font-size: clamp(34px, 4.0vw, 50px);
+    margin: 0 0 14px;
+    letter-spacing: -0.015em;
+    line-height: 1.05;
+    font-weight: 400;
+    font-family: 'Instrument Serif', 'Iowan Old Style', Georgia, serif;
+  }
+
+  .cta-card p {
+    color: var(--fg-muted);
+    margin: 0 auto 30px;
+    max-width: 500px;
+  }
+
+  .cta-row {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+
+  /* ─── Footer ─────────────────────────────────────────────────────── */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 56px 0 40px;
+    margin-top: 60px;
+  }
+
+  .footer-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 32px;
+    margin-bottom: 32px;
+    flex-wrap: wrap;
+  }
+
+  .footer-brand p {
+    color: var(--fg-muted);
+    font-size: 13.5px;
+    max-width: 340px;
+    margin: 12px 0 0;
+    line-height: 1.6;
+  }
+
+  .footer-links {
+    display: flex;
+    gap: 26px;
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    flex-wrap: wrap;
+  }
+
+  .footer-links a {
+    color: var(--fg-muted);
+    font-size: 13.5px;
+    transition: color .15s;
+  }
+
+  .footer-links a:hover { color: var(--fg); }
+
+  .footer-bottom {
+    color: var(--fg-dim);
+    font-size: 12.5px;
+    border-top: 1px solid var(--border);
+    padding-top: 24px;
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  @media (max-width: 720px) {
+    .nav-links { display: none; }
+    section { padding: 80px 0; }
+    .hero { padding-top: 56px; }
+    .hero-mark { width: 104px; height: 104px; }
+    .palms { height: 18vh; }
+  }
+
+  /* Fade-in */
+  .fade-up {
+    opacity: 0;
+    transform: translateY(10px);
+    transition: opacity .8s ease, transform .8s ease;
+  }
+
+  .fade-up.in { opacity: 1; transform: none; }
+
+  /* ─── Download instruction modals (Windows + Linux) ─────────── */
+  .dl-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(0, 0, 0, 0.75);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+  .dl-modal.open { display: flex; }
+  .dl-modal__panel {
+    width: 100%;
+    max-width: 520px;
+    background: var(--bg-elev);
+    border: 1px solid var(--border-strong);
+    border-radius: 14px;
+    padding: 24px 24px 20px;
+    color: var(--fg);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
+  }
+  .dl-modal__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  .dl-modal__head h3 {
+    margin: 0;
+    font-size: 18px;
+    letter-spacing: -0.01em;
+  }
+  .dl-modal__close {
+    background: none;
+    border: none;
+    color: var(--fg-muted);
+    font-size: 24px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 4px 10px;
+    border-radius: 6px;
+    transition: background .15s, color .15s;
+  }
+  .dl-modal__close:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--fg);
+  }
+  .dl-modal__sub {
+    color: var(--fg-muted);
+    font-size: 13px;
+    margin: 0 0 18px;
+  }
+  .dl-arch {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 18px;
+  }
+  .dl-arch a {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    text-decoration: none;
+    color: inherit;
+    transition: background .15s, border-color .15s;
+  }
+  .dl-arch a:hover {
+    background: rgba(255, 255, 255, 0.04);
+    border-color: var(--border-strong);
+  }
+  .dl-arch__name { font-weight: 600; font-size: 14px; }
+  .dl-arch__hint {
+    color: var(--fg-muted);
+    font-size: 12px;
+    margin-top: 2px;
+  }
+  .dl-arch__cta {
+    font-size: 13px;
+    color: var(--accent);
+  }
+  .dl-modal__steps {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    font-size: 13px;
+    color: var(--fg-muted);
+  }
+  .dl-modal__steps strong { color: var(--fg); font-weight: 600; }
+  .dl-modal__steps ol { margin: 8px 0 0; padding-left: 18px; }
+  .dl-modal__steps li { margin-bottom: 6px; }
+</style>
+<!-- Fathom - beautiful, simple website analytics -->
+<script src="https://cdn.usefathom.com/script.js" data-site="IXSFCSZU" defer></script>
+<!-- / Fathom -->
+</head>
+<body>
+
+<div class="bg-glow"></div>
+<div class="bg-grid"></div>
+
+<header class="nav" id="nav">
+  <div class="container nav-inner">
+    <a class="brand" href="/">
+      <img class="brand-img" src="assets/koven-logo.png" alt="Koven" />
+    </a>
+    <nav class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#how">How it works</a>
+      <a href="/governance.html">Governance</a>
+      <a href="https://github.com/GnosysLabs/koven-chat" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+    <div class="nav-cta">
+      <a class="btn btn-primary" href="https://client.koven.chat">Open the app</a>
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <section class="hero">
+    <div class="container">
+      <div class="hero-mark fade-up" aria-hidden="true"></div>
+      <div class="pill fade-up"><span class="dot"></span> <span>federated, public log, no banhammer</span></div>
+      <h1 class="headline fade-up">
+        TLDR; mods suck.<br/>
+        <span class="accent">We fixed it.</span>
+      </h1>
+      <p class="subhead fade-up">
+        Hiding a message requires a vote from the community. Every flag, every vote, every collapse goes in the public log. Penalties expire. There's no banhammer. The math is in the docs.
+      </p>
+      <div class="hero-ctas fade-up">
+        <!-- href falls back to the releases page (always works) if the
+             client-side resolver below fails or JS is disabled.  When
+             JS runs, [data-download-platform] is upgraded to a direct
+             asset URL pulled from the GitHub Releases API so the link
+             always tracks whatever the latest tag actually shipped —
+             we used to hardcode `Koven_0.1.0_x64-setup.exe` style URLs
+             and they broke on every release. -->
+        <a class="btn btn-primary btn-lg"
+           href="https://github.com/GnosysLabs/koven-chat/releases/latest"
+           data-download-platform="mac">
+          Download for Mac
+        </a>
+        <a class="btn btn-primary btn-lg" href="#" data-open-windows-modal>
+          Download for Windows
+        </a>
+        <a class="btn btn-primary btn-lg" href="#" data-open-linux-modal>
+          Download for Linux
+        </a>
+        <a class="btn btn-ghost btn-lg" href="https://github.com/GnosysLabs/koven-chat" target="_blank" rel="noopener">Self-host</a>
+      </div>
+      <div class="hero-meta fade-up">
+        <span>Open source, MIT</span>
+        <span>·</span>
+        <span>Federates with other Koven instances</span>
+        <span>·</span>
+        <span>E2E encrypted DMs</span>
+      </div>
+    </div>
+  </section>
+
+  <section style="padding-top: 0;">
+    <div class="container">
+      <div class="principle fade-up">
+        <p class="lead">Hiding a message requires a vote from the community.<br/><em>That's the whole rule.</em></p>
+        <p class="sub">No banhammer. No founder veto. No mod nuking your message because they're having a bad day. The community votes. We just log it.</p>
+      </div>
+    </div>
+  </section>
+
+  <section style="padding-top: 0;">
+    <div class="container">
+      <div class="app-shot-wrap fade-up">
+        <img class="app-shot" src="assets/koven-app.jpg" alt="Koven web app showing channel list, governance discussion, and members panel" loading="lazy" width="1920" height="1257" />
+      </div>
+      <div class="section-head fade-up" id="features">
+        <div class="eyebrow">What's different</div>
+        <h2 class="section-title">All the polish of Discord. None of the banhammer.</h2>
+        <p class="section-sub">Voice. Video. Threads. Reactions. Files. Custom emoji. The mod role just doesn't exist.</p>
+      </div>
+
+      <div class="features fade-up">
+
+        <div class="feature">
+          <div class="feature-icon"><i data-lucide="flag"></i></div>
+          <h3>Three people. One vote.</h3>
+          <p>A message is hidden when three different people flag it AND their combined reputation weight clears the threshold. Both gates have to clear. The math is in the docs.</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon"><i data-lucide="scroll-text"></i></div>
+          <h3>Everything goes in the log</h3>
+          <p>Every flag, every vote, every collapse, with names attached. If you get silenced here, it happens in public or it doesn't happen.</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon"><i data-lucide="hourglass"></i></div>
+          <h3>Penalties expire</h3>
+          <p>Slow-mode, read-only, off-default-feed. All time-bound, all self-expiring. No path from "unpopular post" to "gone forever."</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon"><i data-lucide="ban"></i></div>
+          <h3>No bans. No shadow-bans.</h3>
+          <p>Bans don't exist on Koven, full stop. Admins keep the server running and pick a logo. That's the whole admin surface.</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon"><i data-lucide="scale"></i></div>
+          <h3>Reputation from showing up</h3>
+          <p>Weight is earned by posting, getting reactions, sticking around. Not by being friends with the founder. The math is in the docs.</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon"><i data-lucide="shield-alert"></i></div>
+          <h3>Floor violations skip the vote</h3>
+          <p>CSAM, credible threats, doxxing collapse instantly. False floor flags eat the flagger's reputation. Reviewed in public.</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon"><i data-lucide="network"></i></div>
+          <h3>Federated. Koven only.</h3>
+          <p>Other Koven servers federate in automatically. Random homeservers don't get in. Same rules everywhere on the network. No server can silence another.</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon"><i data-lucide="lock"></i></div>
+          <h3>DMs are E2E encrypted</h3>
+          <p>By default, no toggle to forget. The engine can't read encrypted rooms, so consensus moderation doesn't apply there. The UI says so when it doesn't.</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon"><i data-lucide="server"></i></div>
+          <h3>Self-host. One script.</h3>
+          <p>One <code>bin/koven setup</code> brings up the whole stack with auto-renewing TLS. Run your own server. Keep your own data. Federate with the rest.</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon"><i data-lucide="video"></i></div>
+          <h3>Voice, video, threads, the works</h3>
+          <p>Everything you'd want from a chat app. Presence, files, custom emoji, threads that actually thread. WebRTC with TURN built in.</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon"><i data-lucide="git-branch"></i></div>
+          <h3>MIT. Source on GitHub.</h3>
+          <p>Event types, schemas, reputation math, all documented. Re-implementable from scratch. No lock-in. Read the source.</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon"><i data-lucide="eye-off"></i></div>
+          <h3>No telemetry</h3>
+          <p>Koven doesn't phone home. No pixel, no analytics SDK, no Mixpanel. Your server, your logs.</p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <section id="how" style="padding-top: 0;">
+    <div class="container">
+      <div class="section-head fade-up">
+        <div class="eyebrow">How it works</div>
+        <h2 class="section-title">Flag, tally, collapse, decay.</h2>
+        <p class="section-sub">Four steps. No secret mod chats. Every step is a documented event you can grep for.</p>
+      </div>
+
+      <div class="steps fade-up">
+        <div class="step">
+          <span class="num">01 / FLAG</span>
+          <h4>Anyone flags any message</h4>
+          <p>Pick a category. Add a reason. The flag is public, signed by you, visible to the room. No silent reports.</p>
+        </div>
+        <div class="step">
+          <span class="num">02 / TALLY</span>
+          <h4>Engine tallies it up</h4>
+          <p>Distinct flaggers and their combined reputation weight. Both have to cross documented thresholds. The thresholds are in <code>GOVERNANCE.md</code>.</p>
+        </div>
+        <div class="step">
+          <span class="num">03 / COLLAPSE</span>
+          <h4>Collapsed, not deleted</h4>
+          <p>Hidden behind a click-to-expand. The original text stays. So does the link to the public flag reasons. Nothing gets nuked.</p>
+        </div>
+        <div class="step">
+          <span class="num">04 / DECAY</span>
+          <h4>Penalties expire</h4>
+          <p>Slow-mode, read-only, off-default-feed all wear off on their own. No appeal queue. No perma-bans. No exile.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section style="padding-top: 0;">
+    <div class="container">
+      <div class="specs fade-up">
+        <div class="spec">
+          <div class="k">Protocol</div>
+          <div class="v">Matrix</div>
+        </div>
+        <div class="spec">
+          <div class="k">Federation</div>
+          <div class="v">Koven-only</div>
+        </div>
+        <div class="spec">
+          <div class="k">License</div>
+          <div class="v">MIT</div>
+        </div>
+        <div class="spec">
+          <div class="k">Telemetry</div>
+          <div class="v">None</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section style="padding-top: 0;">
+    <div class="container">
+      <div class="cta-card fade-up">
+        <h2>We're at two users. Come say hi.</h2>
+        <p>Sign up at koven.chat. Or stand up your own server in five minutes and federate in.</p>
+        <div class="cta-row">
+          <a class="btn btn-primary btn-lg" href="https://client.koven.chat">Open the app</a>
+          <a class="btn btn-ghost btn-lg" href="https://github.com/GnosysLabs/koven-chat" target="_blank" rel="noopener">Self-host</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="container">
+    <div class="footer-row">
+      <div class="footer-brand">
+        <a class="brand" href="/">
+          <img class="brand-img" src="assets/koven-logo.png" alt="Koven" />
+        </a>
+        <p>Chat where hiding a message requires a vote from the community. Mods can't nuke your server. Neither can we. From <a href="https://gnosyslabs.xyz" style="border-bottom: 1px solid rgba(255,220,200,0.2); color: var(--fg);">Gnosys Labs</a>.</p>
+      </div>
+      <ul class="footer-links">
+        <li><a href="#features">Features</a></li>
+        <li><a href="#how">How it works</a></li>
+        <li><a href="/governance.html">Governance</a></li>
+        <li><a href="https://github.com/GnosysLabs/koven-chat" target="_blank" rel="noopener">GitHub</a></li>
+        <li><a href="/privacy.html">Privacy</a></li>
+        <li><a href="/terms.html">Terms</a></li>
+      </ul>
+    </div>
+    <div class="footer-bottom">
+      <span>&copy; 2026 Gnosys Labs. MIT licensed.</span>
+      <span class="mono">the math is in the docs</span>
+    </div>
+  </div>
+</footer>
+
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script>
+  (function() {
+    var nav = document.getElementById('nav');
+    var onScroll = function() { nav.classList.toggle('scrolled', window.scrollY > 8); };
+    document.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+
+    var observer = new IntersectionObserver(function(entries) {
+      entries.forEach(function(e) {
+        if (e.isIntersecting) e.target.classList.add('in');
+      });
+    }, { threshold: 0.08 });
+
+    document.querySelectorAll('.fade-up').forEach(function(el) { observer.observe(el); });
+
+    if (window.lucide) lucide.createIcons();
+  })();
+</script>
+
+<!-- Windows download modal -->
+<div class="dl-modal" id="windows-modal" role="dialog" aria-modal="true" aria-labelledby="windows-modal-title">
+  <div class="dl-modal__panel">
+    <div class="dl-modal__head">
+      <h3 id="windows-modal-title">Download Koven for Windows</h3>
+      <button class="dl-modal__close" type="button" data-close-modal aria-label="Close">×</button>
+    </div>
+    <p class="dl-modal__sub">Native NSIS installer &mdash; works on Windows 10 &amp; 11.</p>
+    <div class="dl-arch">
+      <a href="https://github.com/GnosysLabs/koven-chat/releases/latest"
+         data-download-platform="windows-x64">
+        <span>
+          <span class="dl-arch__name">Intel / AMD (x86_64)</span>
+          <div class="dl-arch__hint">All modern Windows PCs</div>
+        </span>
+        <span class="dl-arch__cta">Download &darr;</span>
+      </a>
+    </div>
+    <div class="dl-modal__steps">
+      <strong>First launch</strong>
+      <ol>
+        <li>Windows shows a <em>"Windows protected your PC"</em> screen because Koven isn't code-signed yet. Click <strong>More info</strong>.</li>
+        <li>Click <strong>Run anyway</strong>. You'll only see this once &mdash; Windows remembers the choice.</li>
+      </ol>
+    </div>
+  </div>
+</div>
+
+<!-- Linux download modal -->
+<div class="dl-modal" id="linux-modal" role="dialog" aria-modal="true" aria-labelledby="linux-modal-title">
+  <div class="dl-modal__panel">
+    <div class="dl-modal__head">
+      <h3 id="linux-modal-title">Download Koven for Linux</h3>
+      <button class="dl-modal__close" type="button" data-close-modal aria-label="Close">×</button>
+    </div>
+    <p class="dl-modal__sub">Native AppImage &mdash; runs on any modern x86_64 distro.</p>
+    <div class="dl-arch">
+      <a href="https://github.com/GnosysLabs/koven-chat/releases/latest"
+         data-download-platform="linux-x64">
+        <span>
+          <span class="dl-arch__name">Intel / AMD (x86_64)</span>
+          <div class="dl-arch__hint">Most desktops &amp; laptops, NUCs, cloud VMs</div>
+        </span>
+        <span class="dl-arch__cta">Download &darr;</span>
+      </a>
+    </div>
+    <div class="dl-modal__steps">
+      <strong>How to run</strong>
+      <ol>
+        <li>Right-click the downloaded file &rarr; <strong>Properties</strong> &rarr; <strong>Permissions</strong> &rarr; tick <strong>"Allow executing as program"</strong>.</li>
+        <li>Double-click the file to launch Koven.</li>
+      </ol>
+    </div>
+  </div>
+</div>
+
+<script>
+  // Modal toggle — single delegated handler covers both modals.
+  // open: any element with data-open-windows-modal / data-open-linux-modal.
+  // close: data-close-modal inside, click on the dim backdrop, or Escape.
+  (function () {
+    function open(id) {
+      var modal = document.getElementById(id);
+      if (!modal) return;
+      modal.classList.add('open');
+      document.body.style.overflow = 'hidden';
+    }
+    function closeAll() {
+      document.querySelectorAll('.dl-modal.open').forEach(function (m) {
+        m.classList.remove('open');
+      });
+      document.body.style.overflow = '';
+    }
+    document.addEventListener('click', function (e) {
+      var t = e.target;
+      if (!(t instanceof Element)) return;
+      var openerWin = t.closest('[data-open-windows-modal]');
+      var openerLin = t.closest('[data-open-linux-modal]');
+      var closer = t.closest('[data-close-modal]');
+      if (openerWin) { e.preventDefault(); open('windows-modal'); return; }
+      if (openerLin) { e.preventDefault(); open('linux-modal'); return; }
+      if (closer) { closeAll(); return; }
+      // Click directly on the modal backdrop (NOT inside the panel).
+      if (t.classList && t.classList.contains('dl-modal')) closeAll();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') closeAll();
+    });
+  })();
+</script>
+
+<script>
+  // Download-link resolver.  Hits the GitHub Releases API on page
+  // load and rewrites every [data-download-platform="<key>"] anchor
+  // to point at the matching asset URL from the latest release.
+  // Falls back to /releases/latest (the page) if the API call fails
+  // or no asset matches — which always works, just one extra click.
+  //
+  // Why client-side: artifact filenames include the version
+  // (e.g. `Koven_0.1.2_x64-setup.exe`), so a static href goes stale
+  // every time we cut a release.  Resolving from the API on each
+  // page load means the marketing site never points at a 404 and
+  // we never have to remember to redeploy after a release.
+  (function () {
+    var matchers = {
+      'mac':         /^Koven.*aarch64\.app\.tar\.gz$/,
+      'windows-x64': /^Koven_.*_x64-setup\.exe$/,
+      'linux-x64':   /^Koven_.*_amd64\.AppImage$/,
+    };
+    var targets = document.querySelectorAll('[data-download-platform]');
+    if (!targets.length) return;
+    fetch('https://api.github.com/repos/GnosysLabs/koven-chat/releases/latest', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+      .then(function (release) {
+        var assets = (release && release.assets) || [];
+        targets.forEach(function (el) {
+          var key = el.getAttribute('data-download-platform');
+          var re = matchers[key];
+          if (!re) return;
+          var hit = assets.find(function (a) { return re.test(a.name); });
+          if (hit && hit.browser_download_url) el.href = hit.browser_download_url;
+        });
+      })
+      .catch(function (err) { console.warn('release-asset resolve failed:', err); });
+  })();
+</script>
+
+</body>
+</html>
