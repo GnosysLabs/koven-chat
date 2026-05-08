@@ -255,7 +255,13 @@ export function ChatPane({
 	const allCandidates = useMemo<AutocompleteCandidate[]>(() => {
 		const seen = new Set<string>();
 		const out: AutocompleteCandidate[] = [];
-		// Room members first.  These are always relevant.
+		// Only suggest people who are actually in this room.  We used
+		// to also fall through to the global botMxids set so users
+		// could "mention a bot to invite it", but the engine ignores
+		// any mention of a bot that isn't in the room — so the
+		// suggestion was a dead end AND it surfaced unrelated bots
+		// from rooms the viewer wasn't even in.  Clean signal: the
+		// dropdown shows who you can actually @ here.
 		for (const m of members ?? []) {
 			if (seen.has(m.userId)) continue;
 			seen.add(m.userId);
@@ -264,20 +270,6 @@ export function ChatPane({
 				displayName: m.displayName || m.userId,
 				avatarUrl: m.avatarUrl,
 				isBot: !!botMxids?.has(m.userId),
-			});
-		}
-		// Then bot mxids that aren't already in the member list — useful
-		// when the user wants to mention a bot that hasn't been invited
-		// yet (engine ignores the mention until the bot is in the room,
-		// but the typing experience matches Element).
-		for (const mxid of botMxids ?? []) {
-			if (seen.has(mxid)) continue;
-			seen.add(mxid);
-			const localpart = mxid.split(":")[0]?.slice(1) ?? mxid;
-			out.push({
-				userId: mxid as UserId,
-				displayName: localpart,
-				isBot: true,
 			});
 		}
 		return out;
