@@ -42,7 +42,8 @@ import { fetchAllBotMxids } from "@/lib/bots-cache";
 import { fetchUiaPassword } from "@/lib/auth";
 import { TransportContext } from "@/lib/transportContext";
 import { applyTheme, loadSettings, saveSettings, type Settings } from "@/state/settings";
-import type { UserId } from "@koven/shared";
+import type { Room, UserId } from "@koven/shared";
+import { ensureNotificationPermission, notify } from "@/lib/notifications";
 import { initialState, reduce } from "@/state/store";
 import type { RoomId, SpaceId } from "@koven/shared";
 
@@ -63,6 +64,13 @@ function peerForCall(roomId: string | undefined, rooms: import("@koven/shared").
 		displayName: room.name,
 		avatarMxc: room.avatarUrl,
 	};
+}
+
+// Escape a string for safe interpolation into a RegExp.  Used to
+// build the @localpart mention matcher in the notification path —
+// localparts can contain `.` and `_`, both regex meta-characters.
+function escapeRegex(s: string): string {
+	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export default function App() {
@@ -330,6 +338,54 @@ export default function App() {
 				) {
 					t.markAsRead(message.roomId).catch(() => {});
 				}
+
+				// Notification gate.  Live, not-from-me, and either:
+				//   * the room is a DM, OR
+				//   * the message text mentions the viewer (full mxid
+				//     or local @localpart).
+				// AND not the room they're currently looking at while
+				// the tab is focused — popping a notification for a
+				// message that's already on their screen is noise.
+				if (!live || message.isSelf) return;
+				const myMxid = creds.user_id;
+				const localpart = myMxid.split(":")[0] ?? ""; // includes leading @
+				const text = message.text ?? "";
+				// Match either the full mxid or the @localpart shorthand
+				// the @-mention picker inserts on same-server mentions.
+				// Simple substring matches are fine — false positives
+				// (someone typed "@alice" when they meant a different
+				// alice) are rare and the cost of an extra notification
+				// is small.
+				const mentionsMe = text.includes(myMxid) ||
+					(localpart.length > 1 && new RegExp(`(^|\\W)${escapeRegex(localpart)}(\\W|$)`).test(text));
+				const room = roomsRef.current.find(r => r.id === message.roomId);
+				const isDm = room?.kind === "dm";
+				if (!isDm && !mentionsMe) return;
+
+				// Skip if the user is already looking at this room
+				// AND the tab is focused / visible.
+				const looking =
+					activeRoomIdRef.current === message.roomId &&
+					typeof document !== "undefined" &&
+					document.visibilityState === "visible" &&
+					typeof document.hasFocus === "function" &&
+					document.hasFocus();
+				if (looking) return;
+
+				const senderName = message.senderDisplayName || message.sender;
+				const title = isDm
+					? senderName
+					: `${senderName} in ${room?.name ?? "a room"}`;
+				const body = text || (message.kind !== "text" ? `(${message.kind})` : "");
+				void notify({
+					title,
+					body,
+					tag: message.roomId, // collapse-stack per-room
+					roomId: message.roomId,
+					onClick: () => {
+						dispatch({ type: "set_active_room", roomId: message.roomId });
+					},
+				});
 			},
 			onReaction: (reaction) => dispatch({
 				type: "reaction_arrived",
@@ -385,6 +441,14 @@ export default function App() {
 		}
 		setTransport(t);
 		setBootError(null);
+		// Probe (and request once if not already decided) the OS-
+		// notification permission.  Idempotent on subsequent calls;
+		// on browsers this surfaces the permission prompt the first
+		// time the user signs in.  On Tauri it round-trips the
+		// plugin's isPermissionGranted / requestPermission flow.
+		// Fire-and-forget — failures fall through to "no
+		// notifications", which is the right graceful degrade.
+		void ensureNotificationPermission();
 		setEncState(null);
 		// Capture this transport instance so the .then/.catch below can
 		// confirm they belong to the still-current run.  React's
@@ -474,6 +538,16 @@ export default function App() {
 	useEffect(() => {
 		activeRoomIdRef.current = state.activeRoomId;
 	}, [state.activeRoomId]);
+
+	// Keep a stable reference to the current rooms list so the
+	// transport's onMessage handler (captured at boot time) can
+	// look up room metadata — specifically: is this a DM, what's
+	// the room name — without going stale across re-renders.  Same
+	// pattern as activeRoomIdRef.
+	const roomsRef = useRef<Room[]>([]);
+	useEffect(() => {
+		roomsRef.current = state.rooms;
+	}, [state.rooms]);
 
 	// Tab refocus → catch up on read receipts for the active room.
 	// While the tab is hidden we suppress receipts for incoming
@@ -975,6 +1049,23 @@ export default function App() {
 					// flashes the banner.
 					messagesLoaded={!!state.activeRoomId && state.loadedTimelines.has(state.activeRoomId)}
 					viewerServer={creds.user_id ? creds.user_id.split(":")[1] ?? null : null}
+					onLoadMoreHistory={async (roomId) => {
+						if (!transport) return false;
+						const got = await transport.loadMoreHistory(roomId, 50);
+						if (got) {
+							// Re-emit the (now-longer) message list so the
+							// timeline picks up the prepended events.  Same
+							// path as the initial messages_loaded; idempotent
+							// because the reducer overwrites the room's
+							// messages array wholesale.
+							dispatch({
+								type: "messages_loaded",
+								roomId,
+								messages: transport.getRoomMessages(roomId),
+							});
+						}
+						return got;
+					}}
 					onSendMessage={(text, replyTo) => {
 						if (!state.activeRoomId || !transport) return;
 						const send = replyTo

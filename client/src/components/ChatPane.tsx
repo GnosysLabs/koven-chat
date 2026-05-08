@@ -5,7 +5,7 @@
 // bubble color; everyone else uses the muted card color.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CollapseAggregate, EventId, FlagAggregate, FlagCategory, Member, Message, ReactionAggregate, Room, UserId } from "@koven/shared";
+import type { CollapseAggregate, EventId, FlagAggregate, FlagCategory, Member, Message, ReactionAggregate, Room, RoomId, UserId } from "@koven/shared";
 import { cn } from "@/lib/utils";
 import { COLLAPSED_NAME } from "@/lib/collapsedRooms";
 import { Input } from "@/components/ui/input";
@@ -123,6 +123,12 @@ export interface ChatPaneProps {
 	// `@bot-foo:koven.chat`.  Pulled from the current user's mxid
 	// upstream.
 	viewerServer?: string | null;
+	// Paginate the room's timeline backwards (older history).  Called
+	// by the scroll handler when the user reaches near the top of
+	// the loaded timeline.  Returns true if more events landed,
+	// false at the start-of-room.  Caller is responsible for
+	// re-emitting the message list to state after success.
+	onLoadMoreHistory?(roomId: RoomId): Promise<boolean>;
 }
 
 // Threshold for "this message is part of the same group as the
@@ -141,6 +147,7 @@ export function ChatPane({
 	messagesLoaded,
 	members,
 	viewerServer,
+	onLoadMoreHistory,
 }: ChatPaneProps) {
 	// Consensus flagging only works where the local engine can act:
 	//   - DMs are 1-on-1 — no quorum to gather, no consensus to reach.
@@ -230,21 +237,69 @@ export function ChatPane({
 		return () => ro.disconnect();
 	}, []);
 
-	// Watch user scroll position to maintain followBottomRef.  Flip
-	// false when they scroll above the bottom-stick threshold; flip
-	// true when they scroll back into it.  100px feels generous —
-	// matches the visual "I'm basically at the bottom" intuition
-	// without requiring exact pixel-perfect anchoring.
+	// Watch user scroll position to maintain followBottomRef + drive
+	// the "load more history when scrolled near the top" pagination
+	// fetch.  Flip followBottom false when scrolled above the
+	// bottom-stick threshold; flip true when back inside it.  100px
+	// feels generous — matches the visual "I'm basically at the
+	// bottom" intuition without requiring exact pixel-perfect
+	// anchoring.
+	const loadingMoreRef = useRef(false);
+	const noMoreHistoryRef = useRef<Set<string>>(new Set());
 	useEffect(() => {
 		const el = scrollRef.current;
 		if (!el) return;
 		const onScroll = () => {
 			const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
 			followBottomRef.current = distance < 100;
+
+			// Pagination trigger.  matrix-js-sdk's startClient pulls
+			// only ~30 events per room initially; without this the
+			// user can't scroll past the initial batch even though
+			// Synapse has the full history.  Fire when the user
+			// reaches the top 200px AND we're not already loading.
+			// The noMoreHistoryRef Set caches "this room has no more
+			// history" so we don't keep firing requests at the start
+			// of the room.
+			if (
+				el.scrollTop < 200 &&
+				!loadingMoreRef.current &&
+				room &&
+				onLoadMoreHistory &&
+				!noMoreHistoryRef.current.has(room.id)
+			) {
+				loadingMoreRef.current = true;
+				// Capture pre-fetch geometry so we can restore the
+				// user's visual scroll position after the SDK
+				// prepends older events to the timeline.  Without
+				// this the viewport would yank to the top because
+				// scrollHeight grew but scrollTop stayed where it
+				// was.  scrollHeight - scrollTop = "distance from
+				// the bottom"; preserving that across the resize
+				// keeps the user looking at exactly the same row.
+				const distFromBottom = el.scrollHeight - el.scrollTop;
+				const roomId = room.id;
+				onLoadMoreHistory(roomId)
+					.then((gotMore) => {
+						if (!gotMore) noMoreHistoryRef.current.add(roomId);
+						// Restore scroll position after the React
+						// re-render commits the new (taller) timeline.
+						// rAF fires after layout, when scrollHeight
+						// reflects the prepended content.
+						requestAnimationFrame(() => {
+							const cur = scrollRef.current;
+							if (!cur) return;
+							cur.scrollTop = cur.scrollHeight - distFromBottom;
+						});
+					})
+					.finally(() => {
+						loadingMoreRef.current = false;
+					});
+			}
 		};
 		el.addEventListener("scroll", onScroll, { passive: true });
 		return () => el.removeEventListener("scroll", onScroll);
-	}, [room?.id]);
+	}, [room?.id, onLoadMoreHistory]);
 
 	// Global hover tracking for the message-action toolbar.
 	//

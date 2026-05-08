@@ -2875,13 +2875,51 @@ export class MatrixTransport {
 		});
 	}
 
-	/** Recent messages for a room, oldest first.  Useful for initial render. */
-	getRoomMessages(roomId: RoomId, limit = 200): Message[] {
+	/**
+	 * Paginate the room's timeline backwards.  matrix-js-sdk's
+	 * startClient pulls only `initialSyncLimit` (30) events per room
+	 * on initial sync; older history requires explicit /messages
+	 * pagination.  Calls `scrollback(room, limit)` which fetches
+	 * earlier events from Synapse and prepends them to the room's
+	 * live timeline.  After this resolves, `getRoomMessages` returns
+	 * the longer list.
+	 *
+	 * Returns true if the homeserver had more events to give (i.e.
+	 * the timeline grew), false if we hit the start-of-room or
+	 * Synapse otherwise refused to extend.  Callers (the ChatPane
+	 * scroll handler) use the return value to stop asking once
+	 * there's nothing left to fetch.
+	 */
+	async loadMoreHistory(roomId: RoomId, limit = 50): Promise<boolean> {
+		const c = this.requireClient();
+		const room = c.getRoom(roomId);
+		if (!room) return false;
+		const before = room.getLiveTimeline().getEvents().length;
+		try {
+			await c.scrollback(room, limit);
+		} catch (err) {
+			console.warn("loadMoreHistory: scrollback failed", err);
+			return false;
+		}
+		const after = room.getLiveTimeline().getEvents().length;
+		return after > before;
+	}
+
+	/**
+	 * All messages currently in the room's live timeline, oldest
+	 * first.  Bounded only by what matrix-js-sdk has fetched —
+	 * initially `initialSyncLimit` events from /sync, growing as
+	 * `loadMoreHistory` paginates older events in.  No artificial
+	 * cap (we used to slice to the last 200 here, but that capped
+	 * how far users could scroll back even after pagination loaded
+	 * thousands of older events into the SDK).
+	 */
+	getRoomMessages(roomId: RoomId): Message[] {
 		const room = this.client?.getRoom(roomId);
 		if (!room) return [];
 		const events = room.getLiveTimeline().getEvents();
 		const msgs: Message[] = [];
-		for (const event of events.slice(-limit)) {
+		for (const event of events) {
 			const m = this.eventToMessage(event, room);
 			if (m) msgs.push(m);
 		}
