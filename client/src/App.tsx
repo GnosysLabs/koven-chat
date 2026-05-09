@@ -1201,9 +1201,13 @@ export default function App() {
 					onSelectSpace={(id: SpaceId) => dispatch({ type: "set_active_space", space: { kind: "space", id } })}
 					onCreateSpace={async (opts) => {
 						if (!transport) throw new Error("Not connected");
+						// `opts` already carries `nsfw` from the create
+						// popover; createSpace forwards it as a
+						// chat.koven.nsfw state event after creation.
 						const spaceId = await transport.createSpace(opts);
 						dispatch({ type: "set_active_space", space: { kind: "space", id: spaceId } });
 					}}
+					showNsfw={!!settings.showNsfw}
 					onBeforeOpenCreateSpace={async () => {
 						// Pre-flight rate-limit check before the
 						// create-space popover opens.  See onCreateRoom

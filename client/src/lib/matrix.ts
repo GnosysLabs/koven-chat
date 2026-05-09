@@ -1615,6 +1615,11 @@ export class MatrixTransport {
 		topic?: string;
 		visibility: "public" | "private";
 		avatarFile?: File;          // uploaded + set as space avatar after create
+		// Mark the new space as adult-content via the
+		// `chat.koven.nsfw` state event.  Same one-way semantics as
+		// rooms: once set, it stays set — members joined under the
+		// "this is NSFW" assumption can't be quietly un-flagged.
+		nsfw?: boolean;
 	}): Promise<SpaceId> {
 		const c = this.requireClient();
 		const res = await c.createRoom({
@@ -1706,6 +1711,22 @@ export class MatrixTransport {
 				// Avatar set is best-effort — we don't want to fail the
 				// whole creation flow if the upload hits an error.
 				console.warn("createSpace: avatar upload failed", err);
+			}
+		}
+		if (opts.nsfw) {
+			// Best-effort: a failure here just leaves the space
+			// unflagged.  The creator can re-mark via space settings;
+			// we don't fail the whole creation flow on a state-event
+			// hiccup.  Mirror of the createRoom NSFW path.
+			try {
+				await c.sendStateEvent(
+					spaceId,
+					"chat.koven.nsfw" as any,
+					{ enabled: true },
+					"",
+				);
+			} catch (err) {
+				console.warn("createSpace: failed to set nsfw flag", err);
 			}
 		}
 		this.emitSpaceList();

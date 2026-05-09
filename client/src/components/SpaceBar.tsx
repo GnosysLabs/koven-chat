@@ -35,7 +35,11 @@ export interface SpaceBarProps {
 		topic: string;
 		visibility: "public" | "private";
 		avatarFile?: File;
+		nsfw: boolean;
 	}): Promise<void>;
+	/** Drives visibility of the NSFW toggle in the space-create
+	 * popover.  Same gate as the room create form. */
+	showNsfw?: boolean;
 	// Pre-flight rate-limit gate fired before the create-space
 	// popover opens.  Same shape as SpaceCreateMenu.onBeforeOpen —
 	// just threaded through this layer.  Resolves true to proceed,
@@ -63,6 +67,7 @@ export function SpaceBar({
 	onSelectRooms,
 	onSelectSpace,
 	onCreateSpace,
+	showNsfw,
 	onBeforeOpenCreateSpace,
 	onOpenProfile,
 	onOpenSettings,
@@ -183,6 +188,7 @@ export function SpaceBar({
 				<SpaceCreateMenu
 					onCreate={onCreateSpace}
 					onBeforeOpen={onBeforeOpenCreateSpace}
+					showNsfw={showNsfw}
 					trigger={
 						<TileButton
 							title="Create a space"

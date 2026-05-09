@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { ChevronLeft, EyeOff, Globe, Trash2, Camera } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
 
 export interface SpaceCreateMenuProps {
 	// The thing the popover anchors to — typically the "+" tile in the SpaceBar.
@@ -22,6 +23,7 @@ export interface SpaceCreateMenuProps {
 		topic: string;
 		visibility: "public" | "private";
 		avatarFile?: File;
+		nsfw: boolean;
 	}): Promise<void>;
 	// Optional gate fired BEFORE the popover opens.  Resolve true
 	// to proceed; resolve false to swallow the open click (the
@@ -31,19 +33,25 @@ export interface SpaceCreateMenuProps {
 	// have to fill in the whole space form before getting denied
 	// at submit.
 	onBeforeOpen?(): Promise<boolean>;
+	/** Drives visibility of the NSFW toggle.  Hidden when the viewer
+	 * has the "Show NSFW rooms" preference off — same protection as
+	 * room creation, so users can't accidentally mark a space NSFW
+	 * without realizing what that means. */
+	showNsfw?: boolean;
 }
 
 type Stage =
 	| { kind: "visibility" }
 	| { kind: "details"; visibility: "public" | "private" };
 
-export function SpaceCreateMenu({ trigger, onCreate, onBeforeOpen }: SpaceCreateMenuProps) {
+export function SpaceCreateMenu({ trigger, onCreate, onBeforeOpen, showNsfw }: SpaceCreateMenuProps) {
 	const [open, setOpen] = useState(false);
 	const [stage, setStage] = useState<Stage>({ kind: "visibility" });
 	const [name, setName] = useState("");
 	const [topic, setTopic] = useState("");
 	const [avatarFile, setAvatarFile] = useState<File | undefined>(undefined);
 	const [avatarPreview, setAvatarPreview] = useState<string | undefined>(undefined);
+	const [nsfw, setNsfw] = useState(false);
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
@@ -54,6 +62,7 @@ export function SpaceCreateMenu({ trigger, onCreate, onBeforeOpen }: SpaceCreate
 		setTopic("");
 		setAvatarFile(undefined);
 		setAvatarPreview(undefined);
+		setNsfw(false);
 		setError(null);
 		setPending(false);
 	}
@@ -103,6 +112,7 @@ export function SpaceCreateMenu({ trigger, onCreate, onBeforeOpen }: SpaceCreate
 				topic: topic.trim(),
 				visibility: stage.visibility,
 				avatarFile,
+				nsfw,
 			});
 			handleOpenChange(false);
 		} catch (err) {
@@ -142,6 +152,9 @@ export function SpaceCreateMenu({ trigger, onCreate, onBeforeOpen }: SpaceCreate
 						onSubmit={submit}
 						pending={pending}
 						error={error}
+						showNsfw={!!showNsfw}
+						nsfw={nsfw}
+						setNsfw={setNsfw}
 					/>
 				)}
 			</PopoverContent>
@@ -201,6 +214,7 @@ function DetailsStage({
 	visibility, name, setName, topic, setTopic,
 	avatarPreview, onAvatarPick, onAvatarClear, fileInputRef,
 	onBack, onSubmit, pending, error,
+	showNsfw, nsfw, setNsfw,
 }: {
 	visibility: "public" | "private";
 	name: string;
@@ -215,6 +229,9 @@ function DetailsStage({
 	onSubmit(e: React.FormEvent): void;
 	pending: boolean;
 	error: string | null;
+	showNsfw: boolean;
+	nsfw: boolean;
+	setNsfw(v: boolean): void;
 }) {
 	const heading = visibility === "public" ? "Public space" : "Private space";
 	return (
@@ -308,6 +325,28 @@ function DetailsStage({
 					maxLength={200}
 				/>
 			</div>
+
+			{showNsfw && (
+				// Permanent flag — same wording the room create form
+				// uses.  Hidden when the viewer doesn't have "Show
+				// NSFW rooms" on, so users can't mark a space NSFW
+				// without first opting into seeing such content
+				// themselves.
+				<div className="flex items-start justify-between gap-3 rounded-md border border-border bg-card/40 px-3 py-2">
+					<div className="flex-1 min-w-0">
+						<Label htmlFor="space-nsfw" className="text-xs cursor-pointer">Mark as NSFW</Label>
+						<p className="text-[10px] text-muted-foreground leading-snug mt-0.5">
+							Hides the space from Explore for users who haven&rsquo;t opted into NSFW content. <strong className="text-foreground">This can&rsquo;t be reversed.</strong>
+						</p>
+					</div>
+					<Switch
+						id="space-nsfw"
+						checked={nsfw}
+						onCheckedChange={setNsfw}
+						className="mt-0.5"
+					/>
+				</div>
+			)}
 
 			{error && (
 				<div className="text-xs text-destructive border border-destructive/40 bg-destructive/10 rounded px-2 py-1.5">
