@@ -53,12 +53,46 @@ const FUN_EMOJI_BG_PALETTE = [
 	"ffb3ba", // coral
 ];
 
+// Allowlists for fun-emoji's facial features.  By default DiceBear
+// picks from the full set, which includes sad / crying / pissed
+// expressions — those landing on a real person's avatar reads as
+// the app calling them sad, which is a bummer.  Restrict to the
+// expressive-but-positive subset so every generated face feels
+// neutral-to-friendly.  The remaining variation across mouth ×
+// eye combos is enough to keep avatars distinct.
+const FUN_EMOJI_MOUTHS = [
+	"cute",
+	"kissHeart",
+	"lilSmile",
+	"plain",
+	"shock",          // surprised, not sad
+	"smileLol",
+	"smileTeeth",
+	"tongueOut",
+	"wideSmile",
+];
+const FUN_EMOJI_EYES = [
+	"closed",
+	"closed2",
+	"cute",
+	"glasses",
+	"love",
+	"plain",
+	"shades",
+	"sleepClose",
+	"stars",
+	"wink",
+	"wink2",
+];
+
 export function autoAvatarUrl(seed: string, kind: AvatarKind = "user"): string {
 	const style = STYLE_BY_KIND[kind];
 	const params = new URLSearchParams();
 	params.set("seed", seed);
 	if (kind === "user") {
 		params.set("backgroundColor", FUN_EMOJI_BG_PALETTE.join(","));
+		params.set("mouth", FUN_EMOJI_MOUTHS.join(","));
+		params.set("eyes", FUN_EMOJI_EYES.join(","));
 	}
 	return `https://api.dicebear.com/9.x/${style}/svg?${params.toString()}`;
 }
