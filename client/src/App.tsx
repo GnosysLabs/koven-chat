@@ -103,6 +103,16 @@ export default function App() {
 		creds?.access_token ?? null,
 		state.activeRoomId,
 	);
+	// Stable handle on `notifications.refresh` so the transport's
+	// onMessage callback can pull a fresh unread count the instant a
+	// notification-worthy event lands, without re-binding the entire
+	// MatrixHandlers object every render.  Otherwise the bell's red
+	// dot only appeared on the next 30-second poll tick — the engine
+	// had already written the row, but the SPA hadn't asked yet.
+	const notificationsRefreshRef = useRef(notifications.refresh);
+	useEffect(() => {
+		notificationsRefreshRef.current = notifications.refresh;
+	}, [notifications.refresh]);
 
 	// Click handler shared by both bell instances (mobile topbar
 	// icon + desktop FAB).  Two responsibilities:
@@ -539,6 +549,11 @@ export default function App() {
 						dispatch({ type: "set_active_room", roomId: message.roomId });
 					},
 				});
+				// Bell red dot was lagging up to 30s (the poll cadence)
+				// behind the OS notification — engine wrote the row,
+				// but the SPA hadn't asked.  Pull a fresh unread count
+				// now so the badge lights as soon as the event lands.
+				void notificationsRefreshRef.current?.();
 			},
 			onReaction: (reaction) => dispatch({
 				type: "reaction_arrived",
