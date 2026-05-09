@@ -114,6 +114,7 @@ import {
 	kickOrBanAs,
 	loginAsUser,
 	registerAppserviceUser,
+	repairRoomInvitePL,
 	redactEventAs,
 	setProfileAvatar,
 	setRoomDirectoryVisibility,
@@ -2121,6 +2122,44 @@ export function startServer(): void {
 					}),
 				);
 				return json({ marked });
+			}
+
+			// POST /api/rooms/:roomId/repair-permissions
+			//
+			// Self-heal for the "M_FORBIDDEN: You don't have permission
+			// to invite users" 403 a member can hit on rooms whose
+			// m.room.power_levels was left with `invite > 0` — typically
+			// rooms created before the atomic-PL fix in the client's
+			// createRoom path, where the follow-up sendStateEvent could
+			// drop silently and leave the room with Synapse's default
+			// (`invite: 50` on older room versions).
+			//
+			// The client calls this after an invite returns 403; the
+			// engine elevates its appservice user via make_room_admin
+			// and rewrites the PL with `invite: 0`.  The user retries
+			// the invite transparently — no UI button.  Caller must be
+			// a joined member of the room (otherwise anyone could nudge
+			// PLs of any room they know the id of).
+			{
+				const m = path.match(/^\/api\/rooms\/([^/]+)\/repair-permissions$/);
+				if (req.method === "POST" && m) {
+					const userId = await whoami(extractToken(req));
+					if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+					const roomId = decodeURIComponent(m[1]!);
+					try {
+						const members = await getJoinedMembers(roomId);
+						if (!members.includes(userId)) {
+							return json({ errcode: "M_FORBIDDEN", error: "not a member" }, { status: 403 });
+						}
+					} catch (err) {
+						return json({ error: "membership_check_failed", detail: err instanceof Error ? err.message : String(err) }, { status: 502 });
+					}
+					const result = await repairRoomInvitePL(roomId);
+					if ("error" in result) {
+						return json({ error: result.error, detail: result.detail }, { status: 502 });
+					}
+					return json({ ok: true, repaired: result.repaired });
+				}
 			}
 
 			if (req.method === "POST" && path === "/api/rooms/icons") {

@@ -29,6 +29,7 @@ import type {
 	EventId,
 	FlagCategory,
 } from "@koven/shared";
+import { ENGINE_URL } from "@/lib/urls";
 
 // Synapse OG-preview response, normalised into a flat shape the UI
 // can render without poking through `og:*` keys.  `imageMxc` is a
@@ -2479,31 +2480,92 @@ export class MatrixTransport {
 		const burst = userIds.slice(0, burstCount);
 		const rest = userIds.slice(burstCount);
 
-		await Promise.all(burst.map(async u => {
+		// Tracks whether we've already asked the engine to repair this
+		// room's PL during this call.  We trigger at most one repair
+		// per inviteUsers() — if the first failure was something other
+		// than a PL issue (e.g. the user is banned, the target is on a
+		// blocked server), repeated repair attempts wouldn't help and
+		// would just slow things down.
+		let repairAttempted = false;
+
+		const tryInvite = async (u: UserId) => {
 			try {
 				await c.invite(roomId, u, reason);
 				invited.push(u);
+				return;
 			} catch (err) {
-				failed.push({
-					userId: u,
-					error: err instanceof Error ? err.message : String(err),
-				});
+				const msg = err instanceof Error ? err.message : String(err);
+				// Only the PL-rejection path is self-healable.  Other
+				// 403s (banned user, server ACL, etc.) bubble up.
+				const isPermissionDenial =
+					/permission to invite/i.test(msg)
+					|| /M_FORBIDDEN/.test(msg);
+				if (!isPermissionDenial) {
+					failed.push({ userId: u, error: msg });
+					return;
+				}
+				// Try to repair on first hit; subsequent invites in
+				// this same call benefit from the repair without
+				// re-attempting it.
+				if (!repairAttempted) {
+					repairAttempted = true;
+					const repaired = await this.repairRoomInvitePermissions(roomId);
+					if (repaired) {
+						try {
+							await c.invite(roomId, u, reason);
+							invited.push(u);
+							return;
+						} catch (retryErr) {
+							failed.push({
+								userId: u,
+								error: retryErr instanceof Error ? retryErr.message : String(retryErr),
+							});
+							return;
+						}
+					}
+				}
+				failed.push({ userId: u, error: msg });
 			}
-		}));
+		};
+
+		await Promise.all(burst.map(tryInvite));
 		for (const u of rest) {
 			await new Promise(resolve => setTimeout(resolve, gapMs));
-			try {
-				await c.invite(roomId, u, reason);
-				invited.push(u);
-			} catch (err) {
-				failed.push({
-					userId: u,
-					error: err instanceof Error ? err.message : String(err),
-				});
-			}
+			await tryInvite(u);
 		}
 
 		return { invited, failed };
+	}
+
+	/** Ask the engine to fix a room's m.room.power_levels so any
+	 * member can issue invites.  Used as a transparent retry inside
+	 * inviteUsers when Synapse rejects with M_FORBIDDEN — see the
+	 * engine's POST /api/rooms/:id/repair-permissions for the
+	 * implementation.  Returns true on a successful repair (or "no
+	 * repair needed"), false otherwise. */
+	private async repairRoomInvitePermissions(roomId: RoomId): Promise<boolean> {
+		const token = this.creds?.access_token;
+		if (!token) return false;
+		try {
+			const r = await fetch(
+				`${ENGINE_URL}/api/rooms/${encodeURIComponent(roomId)}/repair-permissions`,
+				{
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						Authorization: `Bearer ${token}`,
+					},
+				},
+			);
+			if (!r.ok) {
+				console.warn(`repairRoomInvitePermissions ${roomId} → ${r.status}`);
+				return false;
+			}
+			return true;
+		} catch (err) {
+			console.warn(`repairRoomInvitePermissions ${roomId} threw`, err);
+			return false;
+		}
 	}
 
 	/**

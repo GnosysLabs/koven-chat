@@ -348,6 +348,114 @@ export async function adminJoinUserToRoom(
 }
 
 /**
+ * Promote a user to PL `max(existing_admins) + 1` in a room via
+ * Synapse's admin endpoint `POST /_synapse/admin/v1/rooms/{roomId}
+ * /make_room_admin`.  Used by the invite-permission self-heal: the
+ * engine elevates its own appservice user to enough PL to fix a
+ * busted m.room.power_levels (typically a stranded `invite > 0` on
+ * a public room) without anyone in the UI having to click a repair
+ * button.
+ *
+ * Caveats:
+ *   - Requires at least one existing admin in the room (Synapse
+ *     masquerades as them to issue the elevation).
+ *   - Permanent: there's no admin endpoint to demote afterwards.
+ *     We accept that: the engine's user is a system identity, and
+ *     it being a room admin is effectively a Koven-platform invariant.
+ *   - Idempotent in practice — calling twice on the same user just
+ *     re-emits the elevation event.
+ */
+export async function makeUserRoomAdmin(
+	userId: string,
+	roomId: string,
+): Promise<{ ok: true } | { error: string; detail?: string }> {
+	const path = `/_synapse/admin/v1/rooms/${encodeURIComponent(roomId)}/make_room_admin`;
+	const r = await adminFetch(path, {
+		method: "POST",
+		body: JSON.stringify({ user_id: userId }),
+	});
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		console.warn(`engine: makeUserRoomAdmin ${userId} in ${roomId} → ${r.status} ${txt.slice(0, 200)}`);
+		return { error: `synapse_${r.status}`, detail: txt.slice(0, 300) };
+	}
+	return { ok: true };
+}
+
+/**
+ * Repair a room's m.room.power_levels so any member can issue
+ * invites — the invariant Koven's createRoom has always meant to
+ * apply but historically wrote as a follow-up sendStateEvent that
+ * could fail silently and leave the room with Synapse's default
+ * (`invite: 50` on older room versions).
+ *
+ * Strategy:
+ *   1. Read current PL state.  If `invite` is already ≤ 0, no-op.
+ *   2. Elevate the engine's appservice user via make_room_admin so
+ *      it has enough PL to write the PL state event.
+ *   3. PUT a fresh m.room.power_levels with the same content but
+ *      `invite: 0`.  Other fields are preserved verbatim — the goal
+ *      is the minimum-invasive fix that unblocks the picker, not a
+ *      wholesale PL re-write that might trample manual tweaks.
+ *
+ * Returns:
+ *   - { ok: true, repaired: true }  on a successful fix
+ *   - { ok: true, repaired: false } when no fix was needed
+ *   - { error }                     on any step failure
+ */
+export async function repairRoomInvitePL(
+	roomId: string,
+): Promise<
+	| { ok: true; repaired: boolean }
+	| { error: string; detail?: string }
+> {
+	const state = await readRoomState(roomId);
+	if (!state) {
+		return { error: "state_unreadable", detail: "couldn't read room state via admin API" };
+	}
+	const pl = pickStateContent(state, "m.room.power_levels", "");
+	const currentInvite = pl && typeof (pl as Record<string, unknown>).invite === "number"
+		? ((pl as { invite: number }).invite)
+		: 0;
+	if (currentInvite <= 0) {
+		// Already open.  This will be the common case after the
+		// atomic createRoom fix lands; the self-heal still gets
+		// called on every M_FORBIDDEN as a defensive sweep.
+		return { ok: true, repaired: false };
+	}
+
+	// Step 1: give the engine's appservice user enough PL to write
+	// m.room.power_levels.  make_room_admin sets PL to max+1 so we
+	// land above the existing creator (typically PL 100) and clear
+	// the room's events["m.room.power_levels"] threshold.
+	const elevate = await makeUserRoomAdmin(config.engineUserId, roomId);
+	if ("error" in elevate) {
+		return { error: "elevate_failed", detail: elevate.detail ?? elevate.error };
+	}
+
+	// Step 2: PUT the new PL.  Preserve every existing field; only
+	// flip `invite`.  Content not present in the original is
+	// untouched (so e.g. a custom `events` table survives).
+	const newContent: Record<string, unknown> = {
+		...(pl as Record<string, unknown> | null ?? {}),
+		invite: 0,
+	};
+	const putPath =
+		`/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.power_levels/`;
+	const r = await asFetch(putPath, {
+		method: "PUT",
+		body: JSON.stringify(newContent),
+	});
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		console.warn(`engine: repairRoomInvitePL PUT ${roomId} → ${r.status} ${txt.slice(0, 200)}`);
+		return { error: `synapse_${r.status}`, detail: txt.slice(0, 300) };
+	}
+	console.log(`engine: repaired invite PL on ${roomId} (was ${currentInvite}, now 0)`);
+	return { ok: true, repaired: true };
+}
+
+/**
  * Read the active child room ids of a Matrix space.  Pulls the full
  * state and filters m.space.child events to those that still have a
  * non-empty `via` array — Matrix represents removed children with
