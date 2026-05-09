@@ -2234,6 +2234,40 @@ export function startServer(): void {
 				return handleAdminImageUpload(req, "logo_url");
 			}
 
+			// Admin-only debug: test the stored Giphy key by hitting
+			// trending and returning the upstream status + body + the
+			// URL it sent (with the api_key masked).  Lets the admin
+			// see exactly what Giphy says without grepping engine logs.
+			if (req.method === "GET" && path === "/api/instance/giphy-test") {
+				const auth = await requireAdmin(req);
+				if (auth instanceof Response) return auth;
+				const apiKey = readInstanceConfig()["giphy_api_key"]?.trim();
+				if (!apiKey) {
+					return json({ ok: false, error: "no_key_configured" });
+				}
+				const upstream = new URL("https://api.giphy.com/v1/gifs/trending");
+				upstream.searchParams.set("api_key", apiKey);
+				upstream.searchParams.set("limit", "1");
+				const masked = `${apiKey.slice(0, 4)}…${apiKey.slice(-4)} (length=${apiKey.length})`;
+				try {
+					const r = await fetch(upstream);
+					const body = await r.text();
+					return json({
+						ok: r.ok,
+						status: r.status,
+						key_preview: masked,
+						url: upstream.toString().replace(apiKey, "***"),
+						upstream_body: body.slice(0, 1000),
+					});
+				} catch (err) {
+					return json({
+						ok: false,
+						key_preview: masked,
+						error: err instanceof Error ? err.message : String(err),
+					});
+				}
+			}
+
 			// Admin-only: report which integrations are configured (by
 			// presence of their credential, not its value).  The value
 			// itself is never returned over the wire; the admin form
