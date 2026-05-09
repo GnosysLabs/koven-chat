@@ -58,6 +58,7 @@ import {
 	type SmitheryServerSummary,
 	type SmitheryServerDetail,
 } from "@/lib/bot-mcp";
+import { McpConfigDialog } from "@/components/McpConfigDialog";
 import { claimBellOffset, releaseBellOffset } from "@/state/bell-offset";
 import { cn } from "@/lib/utils";
 
@@ -126,6 +127,15 @@ function formStateFromBot(bot: BotSummary): FormState {
 }
 
 const NAME_PATTERN = /^[a-z0-9-]{1,21}$/;
+
+/** Catalog pick queued during create mode.  Carries the summary so
+ * the Tools tab can render the queued row with display name +
+ * description, plus the per-server config the user supplied via
+ * McpConfigDialog (empty object for servers that didn't need any). */
+interface PendingMcpAttachment {
+	server: SmitheryServerSummary;
+	config: Record<string, unknown>;
+}
 
 /** Tabs are ordered by the typical create flow.  "tools" is gated
  * behind edit mode in create flows (the bot needs to exist before we
@@ -197,8 +207,10 @@ export function BotEditForm({
 	// flush after createBot succeeds (same pattern as knowledge).
 	// We store the catalog summary (not just the qualified name) so
 	// the Tools tab can render the queued items with their display
-	// name + description without re-fetching.
-	const [pendingMcpAttachments, setPendingMcpAttachments] = useState<SmitheryServerSummary[]>([]);
+	// name + description without re-fetching.  `config` carries the
+	// per-server config the user entered through the McpConfigDialog
+	// — empty for servers that don't need any.
+	const [pendingMcpAttachments, setPendingMcpAttachments] = useState<PendingMcpAttachment[]>([]);
 
 	// Push the floating notification bell up by the footer height
 	// while this form is mounted — without this, the FAB sits on top
@@ -441,8 +453,8 @@ export function BotEditForm({
 			// constraint and confuse error reporting.
 			if (pendingMcpAttachments.length > 0) {
 				try {
-					for (const s of pendingMcpAttachments) {
-						await attachBotMcpServer(accessToken, saved.id, s.qualifiedName);
+					for (const p of pendingMcpAttachments) {
+						await attachBotMcpServer(accessToken, saved.id, p.server.qualifiedName, p.config);
 					}
 					setPendingMcpAttachments([]);
 				} catch (err) {
@@ -1162,8 +1174,8 @@ function ToolsTab({
 	/** Catalog picks queued during create mode.  Ignored in edit
 	 * mode (where we mutate the engine directly).  The parent flushes
 	 * this queue after createBot succeeds. */
-	pendingAttachments: SmitheryServerSummary[];
-	onPendingChange(next: SmitheryServerSummary[]): void;
+	pendingAttachments: PendingMcpAttachment[];
+	onPendingChange(next: PendingMcpAttachment[]): void;
 }) {
 	const isCreateMode = bot === null;
 
@@ -1179,6 +1191,16 @@ function ToolsTab({
 
 	const [busyQualifiedName, setBusyQualifiedName] = useState<string | null>(null);
 	const [actionError, setActionError] = useState<string | null>(null);
+
+	// Config-dialog state.  When the user clicks Attach on a server
+	// whose schema declares required fields, we open this dialog
+	// with the server's detail and complete the attach only after
+	// the user fills it out.  Servers with no required config skip
+	// the dialog and attach directly.
+	const [configTarget, setConfigTarget] = useState<{
+		summary: SmitheryServerSummary;
+		detail: SmitheryServerDetail;
+	} | null>(null);
 
 	// Initial fetch of the bot's existing attachments.  Re-runs when
 	// the bot id changes (parent flips between bots).  Skipped
@@ -1230,38 +1252,57 @@ function ToolsTab({
 	async function attach(server: SmitheryServerSummary) {
 		if (!accessToken) return;
 		setActionError(null);
+		setBusyQualifiedName(server.qualifiedName);
 
-		// Detail fetch is the same in both modes — useful for the
-		// required-config heads-up.  Failing to fetch is non-fatal;
-		// the attach proceeds with empty config either way.
+		// Fetch the server detail before deciding what to do.  When
+		// the schema declares required fields we route through the
+		// config dialog; when it doesn't, we attach immediately with
+		// an empty config object.  Detail-fetch failure is non-fatal
+		// — fall through to direct-attach so the user isn't blocked
+		// on a transient registry hiccup.
 		let detail: SmitheryServerDetail | null = null;
 		try { detail = await getSmitheryServerDetail(accessToken, server.qualifiedName); } catch { /* fall through */ }
-		if (detail && hasRequiredConfig(detail.configSchema)) {
-			setActionError(`${server.displayName} requires configuration we don't collect from the UI yet — attached with empty config; tools that need credentials will fail at runtime.`);
-		}
+		setBusyQualifiedName(null);
 
-		// Create mode: just queue locally.  No network round-trip
-		// until the parent flushes after createBot succeeds.
-		if (isCreateMode) {
-			const filtered = pendingAttachments.filter(p => p.qualifiedName !== server.qualifiedName);
-			onPendingChange([...filtered, server]);
+		if (detail && hasRequiredConfig(detail.configSchema)) {
+			// Open the dialog and stop here — completion fires
+			// from finishAttach() once the user submits the form.
+			setConfigTarget({ summary: server, detail });
 			return;
 		}
 
-		// Edit mode: hit the engine.
+		await finishAttach(server, {});
+	}
+
+	/** Complete the attach, with whatever config the dialog (or empty
+	 * defaulting) produced.  Two routing branches:
+	 *   - Create mode: enqueue with config; the parent flushes after
+	 *     createBot succeeds.
+	 *   - Edit mode: POST /api/bots/:id/mcp now with the config and
+	 *     update local list state on success.
+	 * Throws on edit-mode network failure so the dialog can surface
+	 * the error inline rather than closing optimistically. */
+	async function finishAttach(server: SmitheryServerSummary, config: Record<string, unknown>) {
+		if (!accessToken) return;
+		if (isCreateMode) {
+			const filtered = pendingAttachments.filter(p => p.server.qualifiedName !== server.qualifiedName);
+			onPendingChange([...filtered, { server, config }]);
+			return;
+		}
 		if (!bot) return;
 		setBusyQualifiedName(server.qualifiedName);
 		try {
-			const row = await attachBotMcpServer(accessToken, bot.id, server.qualifiedName);
+			const row = await attachBotMcpServer(accessToken, bot.id, server.qualifiedName, config);
 			setAttached(prev => {
-				// Replace any existing row for the same server (the
-				// engine treats this as upsert) so the list doesn't
+				// Engine treats duplicate attach as upsert — match
+				// that semantics client-side so the list doesn't
 				// duplicate after a re-attach.
 				const filtered = prev.filter(p => p.smithery_qualified_name !== row.smithery_qualified_name);
 				return [...filtered, row];
 			});
 		} catch (err) {
 			setActionError(err instanceof Error ? err.message : String(err));
+			throw err;
 		} finally {
 			setBusyQualifiedName(null);
 		}
@@ -1283,7 +1324,7 @@ function ToolsTab({
 
 	function detachPending(qualifiedName: string) {
 		setActionError(null);
-		onPendingChange(pendingAttachments.filter(p => p.qualifiedName !== qualifiedName));
+		onPendingChange(pendingAttachments.filter(p => p.server.qualifiedName !== qualifiedName));
 	}
 
 	// Names already attached (or queued).  Drives the "Attached" /
@@ -1291,7 +1332,7 @@ function ToolsTab({
 	// same server twice.
 	const attachedQualifiedNames = new Set(
 		isCreateMode
-			? pendingAttachments.map(a => a.qualifiedName)
+			? pendingAttachments.map(a => a.server.qualifiedName)
 			: attached.map(a => a.smithery_qualified_name),
 	);
 
@@ -1322,26 +1363,29 @@ function ToolsTab({
 						</div>
 					) : (
 						<ul className="rounded-md border border-border divide-y divide-border bg-primary/5">
-							{pendingAttachments.map(row => (
-								<li key={row.qualifiedName} className="px-3 py-2.5 flex items-center gap-3">
-									<Plug className="h-4 w-4 shrink-0 text-primary" />
-									<div className="flex-1 min-w-0">
-										<div className="text-sm font-medium truncate">{row.displayName}</div>
-										<div className="text-[11px] text-muted-foreground truncate">
-											{row.qualifiedName} · queued — attaches after create
+							{pendingAttachments.map(row => {
+								const hasConfig = Object.keys(row.config).length > 0;
+								return (
+									<li key={row.server.qualifiedName} className="px-3 py-2.5 flex items-center gap-3">
+										<Plug className="h-4 w-4 shrink-0 text-primary" />
+										<div className="flex-1 min-w-0">
+											<div className="text-sm font-medium truncate">{row.server.displayName}</div>
+											<div className="text-[11px] text-muted-foreground truncate">
+												{row.server.qualifiedName} · queued{hasConfig ? " · configured" : ""} — attaches after create
+											</div>
 										</div>
-									</div>
-									<button
-										type="button"
-										onClick={() => detachPending(row.qualifiedName)}
-										title="Remove from queue"
-										aria-label="Remove from queue"
-										className="text-muted-foreground hover:text-destructive"
-									>
-										<X className="h-4 w-4" />
-									</button>
-								</li>
-							))}
+										<button
+											type="button"
+											onClick={() => detachPending(row.server.qualifiedName)}
+											title="Remove from queue"
+											aria-label="Remove from queue"
+											className="text-muted-foreground hover:text-destructive"
+										>
+											<X className="h-4 w-4" />
+										</button>
+									</li>
+								);
+							})}
 						</ul>
 					)
 				) : attached.length === 0 ? (
@@ -1458,6 +1502,20 @@ function ToolsTab({
 					</div>
 				)}
 			</div>
+
+			{configTarget && (
+				<McpConfigDialog
+					open={!!configTarget}
+					onOpenChange={(o) => { if (!o) setConfigTarget(null); }}
+					displayName={configTarget.summary.displayName}
+					qualifiedName={configTarget.summary.qualifiedName}
+					homepage={configTarget.summary.homepage}
+					configSchema={configTarget.detail.configSchema}
+					onSubmit={async (config) => {
+						await finishAttach(configTarget.summary, config);
+					}}
+				/>
+			)}
 		</section>
 	);
 }
