@@ -14,6 +14,7 @@ import type { Settings, Theme } from "@/state/settings";
 import { THEMES } from "@/state/settings";
 import { Check, Monitor, Palette, User, Wrench, type LucideIcon } from "lucide-react";
 import { InstanceAdminSection } from "@/components/InstanceAdminSection";
+import { AdminManagementSection } from "@/components/AdminManagementSection";
 import { AccountSection } from "@/components/AccountSection";
 import { SessionsSection } from "@/components/SessionsSection";
 import { fetchAdminStatus } from "@/lib/instance";
@@ -30,6 +31,9 @@ export interface AppSettingsSheetProps {
 	// Transport is needed by the Instance admin section to enumerate
 	// public spaces for the default-space picker.
 	transport?: MatrixTransport | null;
+	// Current viewer's mxid — propagated into AdminManagementSection
+	// so the roster can flag the "this is you" row + gate self-revoke.
+	currentUserId?: UserId | null;
 	// Live ignore-list state for the Account tab's blocked-users list.
 	ignoredUsers?: Set<UserId>;
 	// Self-deactivation success → drop credentials in the parent.
@@ -42,7 +46,7 @@ interface TabDef {
 	icon: LucideIcon;
 }
 
-export function AppSettingsSheet({ open, onOpenChange, settings, onSettingsChange, accessToken, transport, ignoredUsers, onSignedOut }: AppSettingsSheetProps) {
+export function AppSettingsSheet({ open, onOpenChange, settings, onSettingsChange, accessToken, transport, currentUserId, ignoredUsers, onSignedOut }: AppSettingsSheetProps) {
 	const [activeTab, setActiveTab] = useState("appearance");
 	const [isAdmin, setIsAdmin] = useState(false);
 
@@ -187,7 +191,16 @@ export function AppSettingsSheet({ open, onOpenChange, settings, onSettingsChang
 							)}
 
 							{activeTab === "instance" && accessToken && (
-								<InstanceAdminSection accessToken={accessToken} transport={transport ?? null} />
+								<div className="space-y-8">
+									<InstanceAdminSection accessToken={accessToken} transport={transport ?? null} />
+									{currentUserId && (
+										<AdminManagementSection
+											accessToken={accessToken}
+											transport={transport ?? null}
+											currentUserId={currentUserId}
+										/>
+									)}
+								</div>
 							)}
 						</div>
 					</div>

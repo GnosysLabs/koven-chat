@@ -58,6 +58,7 @@ import {
 	insertFlag,
 	isAdmin,
 	issueAuthCode,
+	listAdmins,
 	listAllBotMxids,
 	listAllBotsPublic,
 	listBotsByOwner,
@@ -78,6 +79,7 @@ import {
 	readWeight,
 	recordBotMembershipAction,
 	recordSelfDeletion,
+	revokeAdmin,
 	selfDeletionsForRoom,
 	setBotAvatarMxc,
 	suspensionsForRoom,
@@ -2045,6 +2047,81 @@ export function startServer(): void {
 						return json({ ok: true });
 					}
 				}
+			}
+
+			// ─── Admin management ───────────────────────────────────
+			// Admins can promote and demote other users.  Bootstraps
+			// to a single admin (admins.ts auto-grants the first user
+			// the engine sees), so without this surface a single-admin
+			// server stays single-admin forever — fine for solo
+			// installs, painful for any team.  These three endpoints
+			// are admin-gated; non-admins get a flat 403.
+
+			// GET /api/admins → list of every current admin row.
+			// Response shape: { admins: [{ user_id, granted_at,
+			// granted_by }] }, oldest grant first (matches the table's
+			// natural order).  Used by Settings → Instance to show the
+			// roster; the UI also runs Synapse user-search to display
+			// nice names and avatars next to each mxid.
+			if (req.method === "GET" && path === "/api/admins") {
+				const auth = await requireAdmin(req);
+				if (auth instanceof Response) return auth;
+				return json({ admins: listAdmins() });
+			}
+
+			// POST /api/admins/grant { user_id }
+			// Promote `user_id` to admin.  No-op when they already
+			// have it — INSERT OR IGNORE means the request still
+			// returns 200 but doesn't double-write the row.  Doesn't
+			// validate that the user actually exists on Synapse — an
+			// admin granting on a typo'd mxid wastes a row, not a
+			// security event, since isAdmin() resolves only when the
+			// mxid+grant both exist.  The Settings UI funnels through
+			// user search so typos in practice are rare.
+			if (req.method === "POST" && path === "/api/admins/grant") {
+				const auth = await requireAdmin(req);
+				if (auth instanceof Response) return auth;
+				const body = (await req.json().catch(() => null)) as { user_id?: unknown } | null;
+				const targetUserId = typeof body?.user_id === "string" ? body.user_id.trim() : "";
+				if (!targetUserId.startsWith("@") || !targetUserId.includes(":")) {
+					return json({ errcode: "M_INVALID_PARAM", error: "user_id must be a Matrix mxid" }, { status: 400 });
+				}
+				grantAdmin(targetUserId, auth.userId);
+				console.log(`engine: admin grant ${targetUserId} by ${auth.userId}`);
+				return json({ ok: true, user_id: targetUserId, admin_count: adminCount() });
+			}
+
+			// POST /api/admins/revoke { user_id }
+			// Demote `user_id`.  Two safety guards:
+			//   1. Refuse to drop the last admin — the server would
+			//      become un-administrable until someone re-runs
+			//      bin/koven setup or pokes the SQLite directly.
+			//   2. Self-revoke is allowed only when at least one OTHER
+			//      admin exists (combines with #1 for the same effect,
+			//      but #2 lets us return a clearer error).
+			// Idempotent: revoking a user who isn't currently an admin
+			// returns 200 with admin_count unchanged.
+			if (req.method === "POST" && path === "/api/admins/revoke") {
+				const auth = await requireAdmin(req);
+				if (auth instanceof Response) return auth;
+				const body = (await req.json().catch(() => null)) as { user_id?: unknown } | null;
+				const targetUserId = typeof body?.user_id === "string" ? body.user_id.trim() : "";
+				if (!targetUserId) {
+					return json({ errcode: "M_INVALID_PARAM", error: "user_id required" }, { status: 400 });
+				}
+				if (!isAdmin(targetUserId)) {
+					// Idempotent — return 200 with the unchanged count.
+					return json({ ok: true, user_id: targetUserId, admin_count: adminCount() });
+				}
+				if (adminCount() === 1) {
+					return json({
+						errcode: "M_FORBIDDEN",
+						error: "cannot revoke the last admin — promote someone else first",
+					}, { status: 409 });
+				}
+				revokeAdmin(targetUserId);
+				console.log(`engine: admin revoke ${targetUserId} by ${auth.userId}`);
+				return json({ ok: true, user_id: targetUserId, admin_count: adminCount() });
 			}
 
 			// ─── Bulk room-icon lookup ──────────────────────────────

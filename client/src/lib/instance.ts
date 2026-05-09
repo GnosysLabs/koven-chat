@@ -56,6 +56,75 @@ export async function fetchAdminStatus(accessToken: string): Promise<MeResponse>
 	return (await r.json()) as MeResponse;
 }
 
+// ─── Admin management ────────────────────────────────────────────────
+//
+// The engine maintains its own admins table (separate from Synapse
+// server admins).  First user the engine sees is auto-promoted on
+// bootstrap; everyone else has to be granted explicitly by an
+// existing admin.  These helpers wrap the three /api/admins endpoints
+// the Settings → Instance UI uses.
+
+export interface AdminRow {
+	user_id: string;
+	granted_at: number;
+	// User who granted the admin row.  Null when the row was set by
+	// the bootstrap path (first-user-becomes-admin) — there was no
+	// previous admin to attribute the grant to.
+	granted_by: string | null;
+}
+
+/** Fetch every current admin row, oldest grant first.  Returns null
+ * on auth/network failure so the UI can render an empty state rather
+ * than crash. */
+export async function listAdmins(accessToken: string): Promise<AdminRow[] | null> {
+	const r = await fetch(`${ENGINE_URL}/api/admins`, {
+		headers: { Authorization: `Bearer ${accessToken}` },
+	});
+	if (!r.ok) return null;
+	const body = (await r.json()) as { admins: AdminRow[] };
+	return body.admins;
+}
+
+/** Promote the given user to admin.  Idempotent — granting an
+ * already-admin user returns ok with the unchanged count.  `userId`
+ * must be a Matrix mxid (`@user:server`); the engine validates the
+ * shape and rejects malformed values with M_INVALID_PARAM. */
+export async function grantAdminUser(accessToken: string, userId: string): Promise<{ ok: boolean; error?: string }> {
+	const r = await fetch(`${ENGINE_URL}/api/admins/grant`, {
+		method: "POST",
+		headers: {
+			Authorization: `Bearer ${accessToken}`,
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify({ user_id: userId }),
+	});
+	if (!r.ok) {
+		const body = (await r.json().catch(() => ({}))) as { error?: string };
+		return { ok: false, error: body.error ?? `HTTP ${r.status}` };
+	}
+	return { ok: true };
+}
+
+/** Revoke admin from the given user.  Refused with HTTP 409 by the
+ * engine when the target is the only remaining admin — caller should
+ * surface the error message rather than swallow it.  Idempotent for
+ * non-admin targets. */
+export async function revokeAdminUser(accessToken: string, userId: string): Promise<{ ok: boolean; error?: string }> {
+	const r = await fetch(`${ENGINE_URL}/api/admins/revoke`, {
+		method: "POST",
+		headers: {
+			Authorization: `Bearer ${accessToken}`,
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify({ user_id: userId }),
+	});
+	if (!r.ok) {
+		const body = (await r.json().catch(() => ({}))) as { error?: string };
+		return { ok: false, error: body.error ?? `HTTP ${r.status}` };
+	}
+	return { ok: true };
+}
+
 /**
  * Self-cleanup hook called immediately before the client asks Synapse
  * to deactivate the account.  Drops the user's reputation row + any

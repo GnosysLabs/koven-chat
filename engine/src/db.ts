@@ -1083,7 +1083,13 @@ const isAdminStmt = db.prepare(`SELECT 1 FROM admins WHERE user_id = ?`);
 const insertAdminStmt = db.prepare(`
 	INSERT OR IGNORE INTO admins (user_id, granted_at, granted_by) VALUES (?, ?, ?)
 `);
+const deleteAdminStmt = db.prepare(`DELETE FROM admins WHERE user_id = ?`);
 const countAdminsStmt = db.prepare(`SELECT COUNT(*) as n FROM admins`);
+const listAdminsStmt = db.prepare(`
+	SELECT user_id, granted_at, granted_by
+	FROM admins
+	ORDER BY granted_at ASC
+`);
 const firstUserStmt = db.prepare(`
 	SELECT user_id FROM users ORDER BY first_seen_ts ASC LIMIT 1
 `);
@@ -1096,8 +1102,31 @@ export function grantAdmin(userId: string, grantedBy: string | null): void {
 	insertAdminStmt.run(userId, Date.now(), grantedBy);
 }
 
+/** Remove a user from the admins table.  Idempotent: deleting a row
+ * that doesn't exist is a no-op.  Caller is responsible for the
+ * "don't drop the last admin" + "self-demote-as-only-admin" guards
+ * — see /api/admins/revoke in server.ts for the policy. */
+export function revokeAdmin(userId: string): void {
+	deleteAdminStmt.run(userId);
+}
+
 export function adminCount(): number {
 	return (countAdminsStmt.get() as { n: number }).n;
+}
+
+/** Return every admin row, oldest grant first.  Drives the Settings
+ * → Instance admin-management UI so existing admins can see who else
+ * has the keys + when each was promoted. */
+export function listAdmins(): Array<{
+	user_id: string;
+	granted_at: number;
+	granted_by: string | null;
+}> {
+	return listAdminsStmt.all() as Array<{
+		user_id: string;
+		granted_at: number;
+		granted_by: string | null;
+	}>;
 }
 
 export function firstSeenUser(): string | null {

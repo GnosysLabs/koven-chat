@@ -2185,6 +2185,7 @@ export default function App() {
 				}}
 				accessToken={creds.access_token}
 				transport={transport}
+				currentUserId={creds.user_id}
 				ignoredUsers={ignoredUsers}
 				onSignedOut={handleSignOut}
 			/>
