@@ -1414,7 +1414,7 @@ function MessageRow({
 	return (
 		<div
 			data-message-id={message.id}
-			className={cn("flex gap-3 items-start", topMargin)}
+			className={cn("flex gap-3 items-start", topMargin, mentionHighlight)}
 		>
 			<AvatarSlot mxc={avatarMxc} seed={message.sender} hidden={continuesGroup} isBot={isBot} />
 			<div className="flex-1 min-w-0">
