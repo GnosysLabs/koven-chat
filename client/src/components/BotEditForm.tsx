@@ -1767,8 +1767,13 @@ function ToolsTab({
 								Paste an <code className="font-mono">mcpServers</code> block from any MCP client config (Claude Desktop, Cursor, Cline, Windsurf). Multiple servers in one paste are all attached. Both <code className="font-mono">command</code>-based stdio servers and <code className="font-mono">url</code>-based HTTP servers are supported.
 							</p>
 						</div>
-						<div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-400 leading-snug">
-							<strong className="font-semibold">Stdio MCP servers run on the engine host.</strong> The package you attach gets a sandboxed filesystem (no view of engine secrets), only the env vars you specify, and per-spawn memory + CPU limits. Treat the env vars you paste here as exposed to anyone in any room your bot is in — bot tools are invocable by mention.
+						<div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-400 leading-snug space-y-1.5">
+							<div>
+								<strong className="font-semibold">Stdio MCP servers run on the engine host.</strong> The package you attach gets a sandboxed filesystem (no view of engine secrets), only the env vars you specify, and per-spawn memory + CPU limits.
+							</div>
+							<div>
+								<strong className="font-semibold">Anyone who can mention your bot can invoke its tools.</strong> The credentials you paste here authorize those calls — costs (API billing, rate limits) and side effects (writes via the API) accrue to whoever owns the keys. Use a dedicated bot account or scoped key, not your personal one.
+							</div>
 						</div>
 						<div className="flex items-center gap-2">
 							<Button
