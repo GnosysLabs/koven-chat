@@ -121,13 +121,37 @@ export interface NotifyOptions {
  * notificationclick event and posts an `open-room` message back to
  * the page (see public/sw.js + the postMessage listener in App.tsx).
  */
-async function showViaServiceWorker(_opts: NotifyOptions): Promise<boolean> {
-	// SW path TEMPORARILY DISABLED — see main.tsx for context.  We
-	// short-circuit here so notify() falls straight through to the
-	// page-side `new Notification(...)` path (which is what worked
-	// before this branch).  Will be re-enabled once we've isolated
-	// whether the SW deploy was the cause of the fleet-wide regression.
-	return false;
+async function showViaServiceWorker(opts: NotifyOptions): Promise<boolean> {
+	if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) {
+		return false;
+	}
+	try {
+		// `serviceWorker.ready` resolves with the *active* SW
+		// registration; if registration is still in progress (first
+		// page load before /sw.js install completes) this awaits it.
+		// Bounded with a 2s race so a stuck registration can't
+		// silently swallow the notification — fall back to the page
+		// path instead.
+		const reg = await Promise.race([
+			navigator.serviceWorker.ready,
+			new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000)),
+		]);
+		if (!reg) return false;
+		await reg.showNotification(opts.title, {
+			body: opts.body,
+			tag: opts.tag,
+			icon: "/favicon.png",
+			// Carries the room id back to the SW's notificationclick
+			// handler, which posts {type: "open-room", roomId} to all
+			// SPA tabs.  App.tsx's listener picks that up and
+			// dispatches `set_active_room`.
+			data: opts.roomId ? { roomId: opts.roomId } : undefined,
+		});
+		return true;
+	} catch (err) {
+		console.warn("notifications: SW showNotification failed", err);
+		return false;
+	}
 }
 
 /**

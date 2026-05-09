@@ -109,20 +109,31 @@ void setupMacChrome()
 	.then(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
 	.then(revealApp);
 
-// SW registration DISABLED — investigating a fleet-wide regression
-// where /sync, message send, read receipts, and profile fetch broke
-// across all platforms after the bell/SW deploy.  Until we isolate
-// whether the SW was the cause, we don't register it — AND we
-// actively unregister any SW that a previous page load installed,
-// so a stale SW can't keep controlling the tab.
+// Register the service worker that backs notifications + (later)
+// offline caching.  Done after the React tree mounts so the
+// installation cost (network request for /sw.js, parse, install
+// event) doesn't compete with first paint.  iOS Safari requires the
+// SW to fire notifications on installed PWAs (the page-side
+// `new Notification(...)` is a silent no-op there); modern Chromium /
+// Firefox / Safari desktop also work fine via the SW path, so we use
+// it universally.  Skipped silently if `serviceWorker` isn't on
+// `navigator` (older browsers, sandbox modes that disable workers).
 //
-// Notifications fall back to page-side `new Notification(...)` on
-// browsers that support it.  iOS PWA notifications regress until
-// the SW can be re-introduced safely.
+// Note: the SW itself only handles install / activate /
+// notificationclick — no fetch handler, so it doesn't intercept
+// network traffic.  An earlier suspicion that SW was the cause of
+// a fleet-wide regression turned out to be wrong; the actual bug
+// was a render loop in useNotifications hammering the engine, fixed
+// in 3cb48d0.  SW is back to its intended job: notification
+// surfacing on iOS PWA.
 if (typeof window !== "undefined" && "serviceWorker" in navigator) {
 	window.addEventListener("load", () => {
-		navigator.serviceWorker.getRegistrations()
-			.then((regs) => Promise.all(regs.map((r) => r.unregister())))
-			.catch(() => { /* silent — no-op on browsers without SW */ });
+		navigator.serviceWorker
+			.register("/sw.js", { scope: "/" })
+			.catch((err) => {
+				// Don't escalate — a missing SW falls back to page-
+				// side `new Notification(...)` (see lib/notifications.ts).
+				console.warn("sw: registration failed", err);
+			});
 	});
 }
