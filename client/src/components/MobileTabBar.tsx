@@ -56,19 +56,17 @@ export function MobileTabBar({ active, onChange, unreadByTab }: MobileTabBarProp
 			className={cn(
 				"shrink-0 w-full",
 				// Bg-background = the same colour the safe-area /
-				// home-indicator strip paints with (body's resolved
-				// background).  Painting the bar with the same colour
-				// means the bar + the strip read as one continuous
-				// surface; no visible seam between the two.
+				// home-indicator strip paints with.  We do NOT pad
+				// for the safe area inside the bar — that just adds a
+				// big visible gap below the labels.  Instead the
+				// bar ends right under its content, and the OS-
+				// reserved strip below paints with the body's
+				// bg-background (= bar's bg) and reads as a seamless
+				// continuation of the bar.
 				"bg-background",
-				// Top corners rounded on the container itself — the
-				// bar reads as a single shape that swoops down from
-				// the chat content into the home-indicator zone.
-				// Buttons inside stay flat / unstyled.
+				// Top corners rounded on the container itself.
+				// Buttons inside stay flat.
 				"rounded-t-3xl",
-				// Safe-area-bottom padding keeps the home-indicator
-				// strip painted in the bar's colour.
-				"pb-[env(safe-area-inset-bottom)]",
 				// Top hairline separates the bar from chat content
 				// scrolling above it.
 				"border-t border-border",
@@ -87,14 +85,10 @@ export function MobileTabBar({ active, onChange, unreadByTab }: MobileTabBarProp
 							aria-label={t.label}
 							className={cn(
 								"flex-1 flex flex-col items-center justify-center gap-0.5",
-								// Zero bottom padding — labels sit
-								// flush with the safe-area strip
-								// below, as low as the layout allows
-								// without the home-indicator gesture
-								// zone eating taps.  Small top padding
-								// gives breathing room from the bar's
-								// rounded top edge.
-								"pt-1.5 pb-0 px-1",
+								// Tight padding all around — bar
+								// height is just icon + label + small
+								// breathing room.
+								"py-1.5 px-1",
 								"transition-colors duration-150",
 								"select-none",
 								// No per-button bg fill — only the
