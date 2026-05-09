@@ -1503,6 +1503,9 @@ export default function App() {
 					onCreatePoll={async (opts) => {
 						if (!transport || !state.activeRoomId) return;
 						try {
+							// `opts` already carries `endsAt` when the user
+							// picked a finite duration in the dialog; sendPoll
+							// reads it directly into the start event.
 							await transport.sendPoll(state.activeRoomId, opts);
 						} catch (e) {
 							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });

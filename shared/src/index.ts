@@ -156,6 +156,13 @@ export interface PollDescriptor {
 	kind: "disclosed" | "undisclosed";
 	/** Default 1.  Multiple-choice polls allow up to this many picks. */
 	maxSelections: number;
+	/** Server time (ms since epoch) when the poll auto-closes.  Set
+	 * for undisclosed polls so results actually surface; absent on
+	 * disclosed polls where the running counts are visible the whole
+	 * time and "no expiry" is the saner default.  When set, clients
+	 * disable voting after this time and the creator's client emits
+	 * m.poll.end automatically. */
+	endsAt?: number;
 }
 
 export interface Message {

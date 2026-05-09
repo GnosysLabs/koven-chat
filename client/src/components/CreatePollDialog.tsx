@@ -1,18 +1,30 @@
 // Modal for composing a new poll.  Triggered from the chat composer's
-// poll button; on submit hands the question + answers off to the
-// caller, which sends the m.poll.start event via the transport.
+// poll button; on submit hands the question + answers + duration off
+// to the caller, which sends the m.poll.start event via the
+// transport.
 //
 // Defaults:
 //   - 2 answer slots (the minimum for a poll to make sense)
 //   - "disclosed" (running counts visible to all)
-//   - single-select (max_selections = 1)
+//   - single-select (max_selections = 1, hardcoded)
+//   - duration = "no limit" when disclosed, "24h" when undisclosed
 //
 // Limits:
 //   - up to 8 answers (plenty for any plausible poll, keeps the
 //     start-event payload small)
 //   - 240 chars per question, 120 per answer (matches Element)
+//
+// "Show running results" + duration interaction:
+//   - Disclosed: counts are always visible, so a "no limit" poll
+//     still surfaces useful information at any time.  Users can pick
+//     any preset OR no-limit.
+//   - Undisclosed: counts are hidden until the poll ends.  No-limit
+//     would mean results never surface — so we force a real
+//     duration; the "no limit" option is hidden when undisclosed,
+//     and selecting "no limit" then unchecking disclosed snaps the
+//     selection back to 24h.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import {
 	Dialog,
@@ -25,6 +37,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { cn } from "@/lib/utils";
 
 interface CreatePollDialogProps {
 	open: boolean;
@@ -34,6 +47,7 @@ interface CreatePollDialogProps {
 		answers: string[];
 		kind: "disclosed" | "undisclosed";
 		maxSelections: number;
+		endsAt?: number;
 	}): Promise<void> | void;
 }
 
@@ -41,19 +55,36 @@ const MAX_ANSWERS = 8;
 const MAX_QUESTION_LEN = 240;
 const MAX_ANSWER_LEN = 120;
 
+type DurationKey = "1h" | "24h" | "3d" | "7d" | "none";
+
+const DURATION_OPTIONS: Array<{ key: DurationKey; label: string; ms: number | null }> = [
+	{ key: "1h",  label: "1 hour",  ms: 60 * 60 * 1000 },
+	{ key: "24h", label: "24 hours", ms: 24 * 60 * 60 * 1000 },
+	{ key: "3d",  label: "3 days",  ms: 3 * 24 * 60 * 60 * 1000 },
+	{ key: "7d",  label: "7 days",  ms: 7 * 24 * 60 * 60 * 1000 },
+	{ key: "none", label: "No limit", ms: null },
+];
+
 export function CreatePollDialog({ open, onOpenChange, onSubmit }: CreatePollDialogProps) {
 	const [question, setQuestion] = useState("");
 	const [answers, setAnswers] = useState<string[]>(["", ""]);
 	const [disclosed, setDisclosed] = useState(true);
-	const [multipleChoice, setMultipleChoice] = useState(false);
+	const [duration, setDuration] = useState<DurationKey>("none");
 	const [submitting, setSubmitting] = useState(false);
 	const [error, setError] = useState<string | null>(null);
+
+	// Snap "no limit" → 24h whenever the poll becomes undisclosed —
+	// undisclosed polls never reveal results without a finite end,
+	// so "no limit" + undisclosed is a no-result-ever footgun.
+	useEffect(() => {
+		if (!disclosed && duration === "none") setDuration("24h");
+	}, [disclosed, duration]);
 
 	function reset() {
 		setQuestion("");
 		setAnswers(["", ""]);
 		setDisclosed(true);
-		setMultipleChoice(false);
+		setDuration("none");
 		setError(null);
 	}
 
@@ -91,13 +122,13 @@ export function CreatePollDialog({ open, onOpenChange, onSubmit }: CreatePollDia
 		setSubmitting(true);
 		setError(null);
 		try {
+			const durationMs = DURATION_OPTIONS.find(d => d.key === duration)?.ms ?? null;
 			await onSubmit({
 				question: trimmedQuestion,
 				answers: filledAnswers,
 				kind: disclosed ? "disclosed" : "undisclosed",
-				// Multiple-choice caps at the answer count; spec needs
-				// max_selections >= 1 and <= len(answers).
-				maxSelections: multipleChoice ? filledAnswers.length : 1,
+				maxSelections: 1,
+				endsAt: durationMs !== null ? Date.now() + durationMs : undefined,
 			});
 			close();
 		} catch (err) {
@@ -170,38 +201,54 @@ export function CreatePollDialog({ open, onOpenChange, onSubmit }: CreatePollDia
 						</div>
 					</div>
 
-					<div className="space-y-2">
-						<label className="flex items-center justify-between gap-3 cursor-pointer">
-							<div>
-								<div className="text-sm">Show running results</div>
-								<div className="text-[10px] text-muted-foreground leading-snug">
-									{disclosed
-										? "Voters see counts as soon as they're cast."
-										: "Counts stay hidden until you end the poll."}
-								</div>
+					<label className="flex items-center justify-between gap-3 cursor-pointer">
+						<div>
+							<div className="text-sm">Show running results</div>
+							<div className="text-[10px] text-muted-foreground leading-snug">
+								{disclosed
+									? "Voters see counts as soon as they're cast."
+									: "Counts stay hidden until the poll ends."}
 							</div>
-							<input
-								type="checkbox"
-								checked={disclosed}
-								onChange={(e) => setDisclosed(e.target.checked)}
-								className="h-4 w-4 accent-primary"
-							/>
-						</label>
+						</div>
+						<input
+							type="checkbox"
+							checked={disclosed}
+							onChange={(e) => setDisclosed(e.target.checked)}
+							className="h-4 w-4 accent-primary"
+						/>
+					</label>
 
-						<label className="flex items-center justify-between gap-3 cursor-pointer">
-							<div>
-								<div className="text-sm">Allow multiple choices</div>
-								<div className="text-[10px] text-muted-foreground leading-snug">
-									Voters can pick more than one option.
-								</div>
-							</div>
-							<input
-								type="checkbox"
-								checked={multipleChoice}
-								onChange={(e) => setMultipleChoice(e.target.checked)}
-								className="h-4 w-4 accent-primary"
-							/>
-						</label>
+					<div className="space-y-1.5">
+						<Label>Duration</Label>
+						<div className="flex flex-wrap gap-1.5">
+							{DURATION_OPTIONS
+								// Hide "No limit" when undisclosed — without a
+								// finite end, the results never surface, which
+								// defeats the point of the poll.
+								.filter(d => disclosed || d.key !== "none")
+								.map(d => (
+									<button
+										key={d.key}
+										type="button"
+										onClick={() => setDuration(d.key)}
+										className={cn(
+											"px-2.5 py-1 rounded-md text-xs border transition-colors",
+											duration === d.key
+												? "border-primary bg-primary/10 text-foreground"
+												: "border-border text-muted-foreground hover:text-foreground hover:bg-accent",
+										)}
+									>
+										{d.label}
+									</button>
+								))}
+						</div>
+						<p className="text-[10px] text-muted-foreground leading-snug">
+							{duration === "none"
+								? "Poll stays open until you end it manually."
+								: `Poll closes automatically in ${
+									DURATION_OPTIONS.find(d => d.key === duration)?.label.toLowerCase()
+								}. You can also end it early.`}
+						</p>
 					</div>
 
 					{error && (

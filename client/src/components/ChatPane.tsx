@@ -215,6 +215,9 @@ export interface ChatPaneProps {
 		answers: string[];
 		kind: "disclosed" | "undisclosed";
 		maxSelections: number;
+		/** Optional auto-close time (ms since epoch).  Set when the
+		 * creator picked a finite duration in the create dialog. */
+		endsAt?: number;
 	}): Promise<void> | void;
 	// Cast / change a vote on a poll.  Empty `answerIds` withdraws
 	// the vote.  Receives the poll start event id (== the message id).

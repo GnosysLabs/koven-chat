@@ -11,8 +11,20 @@
 //   - voting in progress: pending click is disabled until response
 //     event echoes back through sync (or 1.5s, whichever first —
 //     gives the click instant feedback without waiting on federation)
+//
+// Auto-close (poll.endsAt):
+//   - When set and the wall clock has passed it, voting locks for
+//     everyone and the card renders the same way an explicit
+//     m.poll.end would render — except `endedAt` only flips after
+//     the canonical end-event arrives on the timeline.
+//   - The creator's client schedules a setTimeout to auto-fire
+//     m.poll.end at expiry so the canonical event lands for every
+//     other client (and federation backfills correctly).
+//   - Other clients just hide voting after expiry; they wait for
+//     the m.poll.end propagation to flip `endedAt` and reveal final
+//     results in undisclosed polls.
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { BarChart3, CheckCircle2 } from "lucide-react";
 import type { Message, PollAggregate, UserId } from "@koven/shared";
 import { cn } from "@/lib/utils";
@@ -27,41 +39,79 @@ interface PollCardProps {
 
 export function PollCard({ message, aggregate, viewerUserId, onVote, onEnd }: PollCardProps) {
 	const [submitting, setSubmitting] = useState(false);
+	// Re-render once a minute so countdown text stays accurate without
+	// per-card timers leaking memory.  Module-shared interval would be
+	// nicer; the cardinality of polls in a room is small enough that
+	// per-card is fine for v1.
+	const [tick, setTick] = useState(0);
+	useEffect(() => {
+		const id = window.setInterval(() => setTick(t => t + 1), 30_000);
+		return () => window.clearInterval(id);
+	}, []);
+	void tick;
+
 	const poll = message.poll;
 	if (!poll) return null;
-	// Local capture: TS narrowing doesn't propagate into the inner
-	// async closures (`pickAnswer` references `poll.maxSelections`)
-	// so we hoist a `definitely-defined` reference for the closures
-	// to use.
 	const pollDef = poll;
-
 	const isCreator = !!viewerUserId && message.sender === viewerUserId;
+
+	// "Ended" combines two signals:
+	//   1. canonical: m.poll.end has arrived (aggregate.endedAt set)
+	//   2. local: pollDef.endsAt has passed wall-clock time
+	// Either suffices for "voting locked" UX; only (1) reveals
+	// undisclosed counts (we don't know the final tallies otherwise).
+	const now = Date.now();
+	const expired = !!pollDef.endsAt && now >= pollDef.endsAt;
 	const ended = !!aggregate?.endedAt;
+	const votingLocked = ended || expired;
+
+	// Creator auto-end: when wall-clock passes endsAt and we haven't
+	// already seen an m.poll.end, the creator's client fires it so
+	// the canonical event lands for every other participant.  Guarded
+	// by a ref so a re-render mid-call doesn't double-send.
+	const autoEndedRef = useRef(false);
+	useEffect(() => {
+		if (!isCreator) return;
+		if (ended) return;
+		if (!pollDef.endsAt) return;
+		if (autoEndedRef.current) return;
+		const remaining = pollDef.endsAt - Date.now();
+		if (remaining <= 0) {
+			autoEndedRef.current = true;
+			void onEnd();
+			return;
+		}
+		const id = window.setTimeout(() => {
+			autoEndedRef.current = true;
+			void onEnd();
+		}, remaining);
+		return () => window.clearTimeout(id);
+	}, [isCreator, ended, pollDef.endsAt, onEnd]);
+
 	const counts = ended
 		? (aggregate?.finalCounts ?? aggregate?.counts ?? {})
 		: (aggregate?.counts ?? {});
 	const totalVotes = Object.values(counts).reduce((s, n) => s + n, 0);
 	const myAnswers = aggregate?.myAnswers ?? [];
-	const showCounts = ended || poll.kind === "disclosed";
-	const multi = poll.maxSelections > 1;
+	// Disclosed counts are always visible.  Undisclosed counts only
+	// reveal once the canonical end-event has landed — local expiry
+	// alone isn't enough because we don't have the sender's final
+	// tallies until then.
+	const showCounts = ended || pollDef.kind === "disclosed";
+	const multi = pollDef.maxSelections > 1;
 
 	async function pickAnswer(answerId: string) {
-		if (ended || submitting) return;
+		if (votingLocked || submitting) return;
 		let next: string[];
 		if (multi) {
-			// Toggle: remove if present, otherwise add up to the cap.
 			if (myAnswers.includes(answerId)) {
 				next = myAnswers.filter(a => a !== answerId);
 			} else if (myAnswers.length < pollDef.maxSelections) {
 				next = [...myAnswers, answerId];
 			} else {
-				// At cap: replace the oldest pick with this one so the
-				// click does something visible instead of silently no-op.
 				next = [...myAnswers.slice(1), answerId];
 			}
 		} else {
-			// Single-choice: clicking the current pick clears the vote
-			// (matches Element); clicking another switches to it.
 			next = myAnswers[0] === answerId ? [] : [answerId];
 		}
 		setSubmitting(true);
@@ -73,7 +123,7 @@ export function PollCard({ message, aggregate, viewerUserId, onVote, onEnd }: Po
 	}
 
 	async function endPoll() {
-		if (ended || submitting) return;
+		if (votingLocked || submitting) return;
 		setSubmitting(true);
 		try {
 			await onEnd();
@@ -82,16 +132,25 @@ export function PollCard({ message, aggregate, viewerUserId, onVote, onEnd }: Po
 		}
 	}
 
+	// Header label — distinguishes the four states the card can be in.
+	const headerLabel = ended
+		? "Final results"
+		: expired
+			? "Closing…"
+			: pollDef.kind === "undisclosed"
+				? "Hidden until ended"
+				: "Poll";
+
 	return (
 		<div className="inline-block max-w-[60ch] w-full px-4 py-3 rounded-xl bg-muted/60 border border-border">
 			<div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-muted-foreground mb-2">
 				<BarChart3 className="h-3 w-3" />
-				<span>{ended ? "Final results" : poll.kind === "undisclosed" ? "Hidden until ended" : "Poll"}</span>
-				{multi && !ended && <span>· choose up to {poll.maxSelections}</span>}
+				<span>{headerLabel}</span>
+				{multi && !ended && <span>· choose up to {pollDef.maxSelections}</span>}
 			</div>
-			<div className="text-sm font-semibold mb-3 break-words">{poll.question}</div>
+			<div className="text-sm font-semibold mb-3 break-words">{pollDef.question}</div>
 			<div className="space-y-1.5">
-				{poll.answers.map(a => {
+				{pollDef.answers.map(a => {
 					const count = counts[a.id] ?? 0;
 					const pct = totalVotes > 0 ? Math.round((count / totalVotes) * 100) : 0;
 					const picked = myAnswers.includes(a.id);
@@ -100,7 +159,7 @@ export function PollCard({ message, aggregate, viewerUserId, onVote, onEnd }: Po
 						<button
 							key={a.id}
 							type="button"
-							disabled={ended || submitting}
+							disabled={votingLocked || submitting}
 							onClick={() => void pickAnswer(a.id)}
 							className={cn(
 								"relative w-full text-left px-3 py-2 rounded-md border transition-colors overflow-hidden",
@@ -108,15 +167,11 @@ export function PollCard({ message, aggregate, viewerUserId, onVote, onEnd }: Po
 								picked
 									? "border-primary/60 bg-primary/10"
 									: "border-border bg-background/40 hover:bg-accent/40",
-								ended && "cursor-default",
+								votingLocked && "cursor-default",
 								submitting && "opacity-70",
 							)}
 						>
 							{showCounts && (
-								// Bar fill underneath the label — width
-								// matches the answer's vote share.  Sits
-								// behind the text via `absolute` + a low-
-								// alpha bg so the label stays readable.
 								<div
 									className={cn(
 										"absolute inset-y-0 left-0 transition-[width] duration-300",
@@ -146,25 +201,50 @@ export function PollCard({ message, aggregate, viewerUserId, onVote, onEnd }: Po
 					);
 				})}
 			</div>
-			<div className="flex items-center justify-between mt-3 pt-2 border-t border-border/60 text-[10px] text-muted-foreground">
-				<span>
+			<div className="flex items-center justify-between mt-3 pt-2 border-t border-border/60 text-[10px] text-muted-foreground gap-2">
+				<span className="truncate">
 					{showCounts
 						? `${totalVotes} ${totalVotes === 1 ? "vote" : "votes"} total`
 						: ended
 							? ""
 							: "Vote to see results when the poll ends"}
 				</span>
-				{!ended && isCreator && (
-					<button
-						type="button"
-						onClick={() => void endPoll()}
-						disabled={submitting}
-						className="text-destructive/80 hover:text-destructive disabled:opacity-50"
-					>
-						End poll
-					</button>
-				)}
+				<span className="flex items-center gap-3 shrink-0">
+					{!ended && pollDef.endsAt && (
+						<span className={cn(expired && "text-amber-500/90")}>
+							{formatTimeRemaining(pollDef.endsAt - now)}
+						</span>
+					)}
+					{!votingLocked && isCreator && (
+						<button
+							type="button"
+							onClick={() => void endPoll()}
+							disabled={submitting}
+							className="text-destructive/80 hover:text-destructive disabled:opacity-50"
+						>
+							End poll
+						</button>
+					)}
+				</span>
 			</div>
 		</div>
 	);
+}
+
+/** "Closes in 3h", "Closes in 12m", "Closing…", etc.  Coarse-grained
+ * (no seconds) so the per-minute re-render tick is sufficient. */
+function formatTimeRemaining(ms: number): string {
+	if (ms <= 0) return "Closing…";
+	const totalMinutes = Math.floor(ms / 60_000);
+	if (totalMinutes < 60) return `Closes in ${Math.max(1, totalMinutes)}m`;
+	const hours = Math.floor(totalMinutes / 60);
+	if (hours < 24) {
+		const minutes = totalMinutes % 60;
+		return minutes === 0 ? `Closes in ${hours}h` : `Closes in ${hours}h ${minutes}m`;
+	}
+	const days = Math.floor(hours / 24);
+	const remainingHours = hours % 24;
+	return remainingHours === 0
+		? `Closes in ${days}d`
+		: `Closes in ${days}d ${remainingHours}h`;
 }

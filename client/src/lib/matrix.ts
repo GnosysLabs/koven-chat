@@ -1338,6 +1338,11 @@ export class MatrixTransport {
 			answers: string[];
 			kind: "disclosed" | "undisclosed";
 			maxSelections: number;
+			/** Optional auto-close time (server-time ms).  Stored on the
+			 * start event under our own namespace; clients treat the
+			 * poll as ended after this timestamp even if no m.poll.end
+			 * has landed yet. */
+			endsAt?: number;
 		},
 	): Promise<EventId> {
 		const c = this.requireClient();
@@ -1361,6 +1366,15 @@ export class MatrixTransport {
 			max_selections: Math.max(1, Math.min(answers.length, opts.maxSelections)),
 			answers,
 		};
+		// Auto-close timestamp lives under our own namespace — MSC3381
+		// doesn't define an expiry field, so spec-pure clients (Element)
+		// just ignore it and treat the poll as no-limit.  Our clients
+		// honour it: voting disables after `ends_at`, and the creator's
+		// client auto-fires m.poll.end so the canonical end-event lands
+		// for everyone.
+		if (typeof opts.endsAt === "number" && Number.isFinite(opts.endsAt)) {
+			pollContent["chat.koven.poll.ends_at"] = opts.endsAt;
+		}
 		// Body fallback for clients that don't render polls — they see
 		// the question as a plain text message.  Element does this too.
 		const fallbackBody = `${opts.question}\n${opts.answers.map((a, i) => `${i + 1}. ${a}`).join("\n")}`;
@@ -3722,6 +3736,13 @@ export class MatrixTransport {
 				: "disclosed";
 		const maxSelections = Math.max(1, Math.min(answers.length,
 			parseInt(String(pollBody?.max_selections ?? "1"), 10) || 1));
+		// Auto-close timestamp — our extension; absent on polls created
+		// by spec-only clients (Element) and on Koven polls explicitly
+		// set to "no limit."
+		const endsAtRaw = pollBody?.["chat.koven.poll.ends_at"];
+		const endsAt = typeof endsAtRaw === "number" && Number.isFinite(endsAtRaw)
+			? endsAtRaw
+			: undefined;
 		return {
 			id: eventId as EventId,
 			roomId: room.roomId as RoomId,
@@ -3736,6 +3757,7 @@ export class MatrixTransport {
 				answers,
 				kind: pollKind,
 				maxSelections,
+				endsAt,
 			},
 		};
 	}
