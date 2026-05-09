@@ -52,7 +52,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import { AlertTriangle, CornerDownRight, Download, EyeOff, File as FileIcon, Film, Flag, Globe, Lock, Network, Paperclip, Phone, Scale, Settings, UserPlus, Video, X } from "lucide-react";
+import { AlertTriangle, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Lock, Network, Paperclip, Phone, Scale, Settings, UserPlus, Video, X } from "lucide-react";
 
 export interface ChatPaneProps {
 	room: Room | null;
@@ -923,13 +923,11 @@ export function ChatPane({
 						</>
 					)}
 					{onSendAttachment && giphyEnabled && accessToken && (
-						// GIF picker — only renders when the instance admin
-						// has set a Giphy API key (giphyEnabled).  Click
-						// drops the popover, pick auto-sends through the
-						// attachment pipeline.  Uses Lucide's Film icon
-						// (universal "moving image" glyph — same one
-						// Slack and Telegram use for their GIF buttons)
-						// to match the paperclip's visual weight.
+						// GIF picker — Discord-style "GIF" text pill.  Sized
+						// to h-8 so it shares a baseline with the paperclip
+						// button (which is h-4 icon + p-2 = 32px); items-end
+						// on the surrounding form keeps both anchored to
+						// the bottom of the multi-line composer.
 						<GifPicker
 							accessToken={accessToken}
 							disabled={isSuspended || uploading || !!pendingAttachment}
@@ -938,11 +936,17 @@ export function ChatPane({
 							<button
 								type="button"
 								disabled={isSuspended || uploading || !!pendingAttachment}
-								className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+								className={cn(
+									"h-8 px-2 rounded-md inline-flex items-center justify-center",
+									"text-[10px] font-bold tracking-wide",
+									"text-muted-foreground hover:text-foreground hover:bg-accent",
+									"border border-foreground/20 hover:border-foreground/40",
+									"transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
+								)}
 								title="Send a GIF"
 								aria-label="Send a GIF"
 							>
-								<Film className="h-4 w-4" />
+								GIF
 							</button>
 						</GifPicker>
 					)}
