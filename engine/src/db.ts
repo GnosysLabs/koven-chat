@@ -1778,6 +1778,9 @@ const listBotsByOwnerStmt = db.prepare(
 const listAllBotMxidsStmt = db.prepare(
 	`SELECT mxid FROM bots WHERE enabled = 1`,
 );
+const listAllBotsPublicStmt = db.prepare(
+	`SELECT mxid, display_name, avatar_mxc FROM bots WHERE enabled = 1 ORDER BY display_name COLLATE NOCASE ASC`,
+);
 const listAllEnabledBotsStmt = db.prepare(
 	`SELECT * FROM bots WHERE enabled = 1`,
 );
@@ -1853,6 +1856,29 @@ export function listBotsByOwner(ownerId: string): BotRow[] {
 
 export function listAllBotMxids(): string[] {
 	return (listAllBotMxidsStmt.all() as { mxid: string }[]).map(r => r.mxid);
+}
+
+export interface PublicBotEntry {
+	mxid: string;
+	display_name: string;
+	avatar_mxc: string | null;
+}
+
+/** Public roster entry — one row per enabled bot with just the
+ * fields safe to expose unauthenticated.  Powers the invite picker's
+ * "show local bots even before they're in any room" behaviour, which
+ * Synapse's user-directory can't do for fresh bots that haven't
+ * joined anything yet. */
+export function listAllBotsPublic(): PublicBotEntry[] {
+	return (listAllBotsPublicStmt.all() as Array<{
+		mxid: string;
+		display_name: string;
+		avatar_mxc: string | null;
+	}>).map(r => ({
+		mxid: r.mxid,
+		display_name: r.display_name,
+		avatar_mxc: r.avatar_mxc,
+	}));
 }
 
 export function listAllEnabledBots(): BotRow[] {

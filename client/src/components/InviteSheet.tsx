@@ -21,11 +21,14 @@ import { cn } from "@/lib/utils";
 import { Check, X } from "lucide-react";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { RoomId, UserId } from "@koven/shared";
+import { fetchBotDirectory, type PublicBotEntry } from "@/lib/bots-cache";
+import { BotBadge } from "@/components/BotBadge";
 
 interface DirectoryResult {
 	userId: UserId;
 	displayName?: string;
 	avatarUrl?: string;
+	isBot?: boolean;
 }
 
 export interface InviteSheetProps {
@@ -46,6 +49,11 @@ export function InviteSheet({ open, onOpenChange, transport, roomId, roomName, i
 	const [error, setError] = useState<string | null>(null);
 	const [info, setInfo] = useState<string | null>(null);
 	const queryDebounceRef = useRef<number | null>(null);
+	// Snapshot of the local bot roster, fetched on open.  We merge
+	// matching bots into the directory results so freshly-created
+	// bots are pickable before they've joined any rooms (Synapse's
+	// user_directory only indexes users with shared room membership).
+	const [botRoster, setBotRoster] = useState<PublicBotEntry[]>([]);
 
 	// Reset everything whenever the dialog opens for a new target.
 	useEffect(() => {
@@ -56,6 +64,11 @@ export function InviteSheet({ open, onOpenChange, transport, roomId, roomName, i
 		setError(null);
 		setInfo(null);
 		setPending(false);
+		// Refresh the bot roster on every open so bots created after
+		// the page loaded still show up.  Cheap unauthenticated
+		// fetch; failure leaves the roster empty (search falls back
+		// to directory only).
+		void fetchBotDirectory().then(setBotRoster);
 	}, [open, roomId]);
 
 	// Debounced search on the homeserver's user directory.  Filters
@@ -75,7 +88,29 @@ export function InviteSheet({ open, onOpenChange, transport, roomId, roomName, i
 				const matches = await transport.searchUsers(trimmed, 8);
 				const me = transport.currentUserId;
 				const selectedIds = new Set(selected.map(s => s.userId));
-				setResults(matches.filter(m => m.userId !== me && !selectedIds.has(m.userId)));
+				const lower = trimmed.toLowerCase();
+				// Bots first: substring match against display name AND
+				// localpart so "jeev" finds "Jeeves" / "@bot-jeeves".
+				// Synapse's directory often misses bots that haven't
+				// shared a room yet, so this is the canonical source
+				// for them.
+				const directoryIds = new Set(matches.map(m => m.userId));
+				const botMatches: DirectoryResult[] = botRoster
+					.filter(b => {
+						if (b.mxid === me || selectedIds.has(b.mxid) || directoryIds.has(b.mxid)) return false;
+						return b.displayName.toLowerCase().includes(lower)
+							|| b.mxid.toLowerCase().includes(lower);
+					})
+					.slice(0, 8)
+					.map(b => ({
+						userId: b.mxid,
+						displayName: b.displayName,
+						avatarUrl: b.avatarMxc ?? undefined,
+						isBot: true,
+					}));
+				const directoryMatches = matches
+					.filter(m => m.userId !== me && !selectedIds.has(m.userId));
+				setResults([...botMatches, ...directoryMatches]);
 			} catch (err) {
 				console.warn("searchUsers failed", err);
 				setResults([]);
@@ -86,7 +121,7 @@ export function InviteSheet({ open, onOpenChange, transport, roomId, roomName, i
 		return () => {
 			if (queryDebounceRef.current) window.clearTimeout(queryDebounceRef.current);
 		};
-	}, [query, open, transport, selected]);
+	}, [query, open, transport, selected, botRoster]);
 
 	function addUser(u: DirectoryResult) {
 		setSelected(s => s.some(x => x.userId === u.userId) ? s : [...s, u]);
@@ -216,9 +251,17 @@ export function InviteSheet({ open, onOpenChange, transport, roomId, roomName, i
 												"w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-accent transition-colors",
 											)}
 										>
-											<MatrixAvatar mxc={r.avatarUrl} seed={r.userId} className="h-6 w-6" />
+											<MatrixAvatar
+												mxc={r.avatarUrl}
+												seed={r.userId}
+												kind={r.isBot ? "bot" : "user"}
+												className="h-6 w-6"
+											/>
 											<div className="min-w-0 flex-1">
-												<div className="text-sm truncate">{r.displayName ?? r.userId}</div>
+												<div className="text-sm truncate flex items-center gap-1.5">
+													<span className="truncate">{r.displayName ?? r.userId}</span>
+													{r.isBot && <BotBadge />}
+												</div>
 												{r.displayName && (
 													<div className="text-[10px] text-muted-foreground font-mono truncate">{r.userId}</div>
 												)}

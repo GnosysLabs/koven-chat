@@ -19,11 +19,14 @@ import { cn } from "@/lib/utils";
 import { serverOf } from "@/lib/mxid";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
+import { fetchBotDirectory, type PublicBotEntry } from "@/lib/bots-cache";
+import { BotBadge } from "@/components/BotBadge";
 
 interface DirectoryResult {
 	userId: UserId;
 	displayName?: string;
 	avatarUrl?: string;
+	isBot?: boolean;
 }
 
 export interface StartDmSheetProps {
@@ -41,6 +44,15 @@ export function StartDmSheet({ open, onOpenChange, transport, onStarted }: Start
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const queryDebounceRef = useRef<number | null>(null);
+	// Local bot roster — same gap-fill story as InviteSheet.  Without
+	// this, freshly-created bots can't be DM'd until they've shared
+	// at least one room with someone (Synapse user_directory limit).
+	const [botRoster, setBotRoster] = useState<PublicBotEntry[]>([]);
+
+	useEffect(() => {
+		if (!open) return;
+		void fetchBotDirectory().then(setBotRoster);
+	}, [open]);
 
 	// Use the viewer's own server in placeholder + error copy so the
 	// example matches the actual instance — `@alice:koven.chat` on
@@ -74,7 +86,24 @@ export function StartDmSheet({ open, onOpenChange, transport, onStarted }: Start
 			try {
 				const matches = await transport.searchUsers(trimmed, 8);
 				const me = transport.currentUserId;
-				setResults(matches.filter(m => m.userId !== me));
+				const lower = trimmed.toLowerCase();
+				const directoryIds = new Set(matches.map(m => m.userId));
+				// Bots first — see InviteSheet for the same merge.
+				const botMatches: DirectoryResult[] = botRoster
+					.filter(b => {
+						if (b.mxid === me || directoryIds.has(b.mxid)) return false;
+						return b.displayName.toLowerCase().includes(lower)
+							|| b.mxid.toLowerCase().includes(lower);
+					})
+					.slice(0, 8)
+					.map(b => ({
+						userId: b.mxid,
+						displayName: b.displayName,
+						avatarUrl: b.avatarMxc ?? undefined,
+						isBot: true,
+					}));
+				const directoryMatches = matches.filter(m => m.userId !== me);
+				setResults([...botMatches, ...directoryMatches]);
 			} catch (err) {
 				console.warn("searchUsers failed", err);
 				setResults([]);
@@ -85,7 +114,7 @@ export function StartDmSheet({ open, onOpenChange, transport, onStarted }: Start
 		return () => {
 			if (queryDebounceRef.current) window.clearTimeout(queryDebounceRef.current);
 		};
-	}, [query, open, transport]);
+	}, [query, open, transport, botRoster]);
 
 	async function start() {
 		if (!transport) return;
@@ -155,9 +184,17 @@ export function StartDmSheet({ open, onOpenChange, transport, onStarted }: Start
 												picked?.userId === r.userId && "bg-accent",
 											)}
 										>
-											<MatrixAvatar mxc={r.avatarUrl} seed={r.userId} className="h-6 w-6" />
+											<MatrixAvatar
+												mxc={r.avatarUrl}
+												seed={r.userId}
+												kind={r.isBot ? "bot" : "user"}
+												className="h-6 w-6"
+											/>
 											<div className="min-w-0 flex-1">
-												<div className="text-sm truncate">{r.displayName ?? r.userId}</div>
+												<div className="text-sm truncate flex items-center gap-1.5">
+													<span className="truncate">{r.displayName ?? r.userId}</span>
+													{r.isBot && <BotBadge />}
+												</div>
 												{r.displayName && (
 													<div className="text-[10px] text-muted-foreground font-mono truncate">{r.userId}</div>
 												)}

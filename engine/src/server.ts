@@ -59,6 +59,7 @@ import {
 	isAdmin,
 	issueAuthCode,
 	listAllBotMxids,
+	listAllBotsPublic,
 	listBotsByOwner,
 	listPendingSuspensions,
 	listRoomCollapses,
@@ -1277,6 +1278,17 @@ export function startServer(): void {
 			// can render the BOT badge without needing per-bot lookups.
 			if (req.method === "GET" && path === "/api/bots/all-mxids") {
 				return json({ bots: listAllBotMxids() });
+			}
+
+			// GET /api/bots/directory
+			// Public read.  Richer roster (mxid + display_name + avatar)
+			// for the invite picker, which needs to surface bots BEFORE
+			// they've joined a room — Synapse's user_directory only
+			// indexes users that share a public room, so a freshly-
+			// created bot is invisible to the directory search.  We
+			// fill the gap from our own bot table.
+			if (req.method === "GET" && path === "/api/bots/directory") {
+				return json({ bots: listAllBotsPublic() });
 			}
 
 			// GET /api/bots/me

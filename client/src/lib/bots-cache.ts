@@ -28,3 +28,33 @@ export async function fetchAllBotMxids(): Promise<Set<UserId>> {
 		return new Set();
 	}
 }
+
+export interface PublicBotEntry {
+	mxid: UserId;
+	displayName: string;
+	avatarMxc: string | null;
+}
+
+interface DirectoryResponse {
+	bots?: Array<{ mxid: string; display_name: string; avatar_mxc: string | null }>;
+}
+
+/** Richer roster — display name + avatar — used by the invite
+ * picker so freshly-created bots show up before they've joined any
+ * rooms (Synapse's user directory only indexes users with shared
+ * room membership).  Empty on error so the caller can treat the
+ * directory search as the canonical source and add bots on top. */
+export async function fetchBotDirectory(): Promise<PublicBotEntry[]> {
+	try {
+		const r = await fetch(`${ENGINE_URL}/api/bots/directory`, { credentials: "omit" });
+		if (!r.ok) return [];
+		const body = (await r.json()) as DirectoryResponse;
+		return (body.bots ?? []).map(b => ({
+			mxid: b.mxid as UserId,
+			displayName: b.display_name,
+			avatarMxc: b.avatar_mxc,
+		}));
+	} catch {
+		return [];
+	}
+}
