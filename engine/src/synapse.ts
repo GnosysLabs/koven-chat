@@ -298,12 +298,23 @@ export async function adminJoinUserToRoom(
  * "couldn't read state" against "no children."
  */
 export async function getSpaceChildRoomIds(spaceId: string): Promise<string[]> {
-	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(spaceId)}/state`;
+	// Use Synapse's admin /state endpoint so this works whether the
+	// engine's admin user is a member of the space or not.  The
+	// equivalent client API (/_matrix/client/v3/rooms/{id}/state)
+	// 403s for non-members and silently returns []; that exact path
+	// caused autoJoinDefaultSpace to skip ALL child rooms after the
+	// prod migration moved the admin token from @koven-admin (in the
+	// Koven space) to @koven-svc (NOT in the Koven space).  Net
+	// effect: every new signup since the migration joined the space
+	// itself but missed every public child room.  Fixed by using
+	// the same admin /state endpoint we already use elsewhere.
+	const path = `/_synapse/admin/v1/rooms/${encodeURIComponent(spaceId)}/state`;
 	const r = await adminFetch(path);
 	if (!r.ok) return [];
-	const events = (await r.json().catch(() => null)) as
-		| Array<{ type?: string; state_key?: string; content?: { via?: unknown } }>
+	const body = (await r.json().catch(() => null)) as
+		| { state?: Array<{ type?: string; state_key?: string; content?: { via?: unknown } }> }
 		| null;
+	const events = body?.state;
 	if (!Array.isArray(events)) return [];
 	const ids: string[] = [];
 	for (const ev of events) {
