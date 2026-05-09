@@ -4064,6 +4064,18 @@ export class MatrixTransport {
 		if (type !== "m.room.message") return null;
 		if (event.isRedacted()) return null;
 
+		// Drop m.replace edit events — they're the *edit*, not the
+		// edited message.  The original event's getContent() returns
+		// the latest m.new_content (matrix-js-sdk merges edits server-
+		// side, see makeReplaced in event.js), so the original row
+		// already shows the post-edit body; rendering the edit event
+		// itself would surface a duplicate "* new body" line in the
+		// timeline.  Bots use this for progressive status updates
+		// ("Thinking…" → "calling search_web…" → answer); without
+		// the filter every status change posts as its own bubble.
+		const rawContent = event.getContent() as { "m.relates_to"?: { rel_type?: unknown } };
+		if (rawContent["m.relates_to"]?.rel_type === "m.replace") return null;
+
 		const content = event.getContent() as any;
 		const sender = event.getSender();
 		if (!sender) return null;

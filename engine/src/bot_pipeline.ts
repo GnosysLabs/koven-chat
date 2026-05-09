@@ -144,7 +144,7 @@ async function dispatch(deps: PipelineDeps): Promise<void> {
 	// reply just lands as a fresh message (see BotProgress.finalise).
 	const stopTyping = startTypingHeartbeat(client, room.roomId);
 	const progress = new BotProgress(client, room.roomId);
-	await progress.start("🤔 Thinking…");
+	await progress.start("Thinking…");
 
 	// Open MCP sessions up-front for every server attached to this
 	// bot.  Empty bundle (no key, no attachments, all opens failed)
@@ -290,7 +290,7 @@ async function runToolLoop(
 		}
 		// Tools just finished; flip the placeholder back to a
 		// generic "thinking" while we wait on the next LLM round.
-		await progress.update("🤔 Thinking…");
+		await progress.update("Thinking…");
 	}
 
 	// Loop fell through without returning — should be unreachable
@@ -593,22 +593,41 @@ class BotProgress {
 	}
 
 	/** Edit the placeholder to a new body.  Used while tools fire
-	 * to surface "🔧 calling <tool>…" breadcrumbs.  No-op when the
-	 * initial send dropped (eventId never landed). */
+	 * to surface "🔧 calling <tool>…" breadcrumbs — the placeholder
+	 * mutates in place via m.replace rather than spawning a fresh
+	 * message per status change.  No-op when the initial send
+	 * dropped (eventId never landed). */
 	async update(body: string): Promise<void> {
 		if (!this.eventId) return;
 		await this.sendEdit(body);
 	}
 
-	/** Edit the placeholder to the final reply text.  When the
-	 * placeholder never landed, send the body as a fresh message
-	 * instead so the user still sees the answer. */
+	/** Drop the placeholder (redact) and post the bot's final reply
+	 * as a fresh, clean message.  We deliberately don't edit-into-
+	 * answer here — leaving the placeholder around as the answer's
+	 * row would mean the timeline carries a "Thinking… → answer"
+	 * edit history forever, and any client that doesn't show the
+	 * latest edited body would see "Thinking…" indefinitely.  A
+	 * redacted placeholder + fresh reply leaves a clean answer row
+	 * with no progress detritus.
+	 *
+	 * If the placeholder never landed, just post the reply as the
+	 * one-and-only message. */
 	async finalise(body: string): Promise<void> {
-		if (!this.eventId) {
-			await postPlain(this.client, this.roomId, body);
-			return;
+		if (this.eventId) {
+			// Redact first so the redaction lands before the new
+			// message — clients that re-order on receipt time still
+			// show the right thing.  Best-effort: a failed redaction
+			// just leaves the placeholder visible, which is annoying
+			// but harmless.
+			try {
+				await this.client.redactEvent(this.roomId, this.eventId);
+			} catch (err) {
+				console.warn(`bot progress.finalise redact failed in ${this.roomId}`, err);
+			}
+			this.eventId = null;
 		}
-		await this.sendEdit(body);
+		await postPlain(this.client, this.roomId, body);
 	}
 
 	/** Internal: emit an m.replace edit pointing at our placeholder.
