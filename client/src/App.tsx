@@ -1337,6 +1337,7 @@ export default function App() {
 					messagesLoaded={!!state.activeRoomId && state.loadedTimelines.has(state.activeRoomId)}
 					viewerServer={creds.user_id ? creds.user_id.split(":")[1] ?? null : null}
 					receiptsVersion={state.activeRoomId ? state.receiptsVersionByRoom.get(state.activeRoomId) ?? 0 : 0}
+					viewerUserId={creds.user_id}
 					onLoadMoreHistory={async (roomId) => {
 						if (!transport) return false;
 						const got = await transport.loadMoreHistory(roomId, 50);

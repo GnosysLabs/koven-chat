@@ -44,6 +44,7 @@ import { useMatrixAttachment } from "@/lib/useMatrixAttachment";
 import { useMatrixMedia } from "@/lib/useMatrixMedia";
 import { useUrlPreview } from "@/lib/useUrlPreview";
 import { useTransport } from "@/lib/transportContext";
+import { messageMentionsUser } from "@/lib/mention";
 import {
 	Dialog,
 	DialogContent,
@@ -143,6 +144,11 @@ export interface ChatPaneProps {
 	// defaults to 0 — without it the indicators just won't update
 	// live, but the initial render is still correct.
 	receiptsVersion?: number;
+	// Viewer's MXID — drives the @-mention highlight on incoming
+	// messages (Discord-style left-border + tinted bg when the row
+	// pings the viewer, including reply-to-me).  Optional; falls
+	// back to no highlighting when omitted.
+	viewerUserId?: UserId;
 }
 
 // Threshold for "this message is part of the same group as the
@@ -163,6 +169,7 @@ export function ChatPane({
 	viewerServer,
 	onLoadMoreHistory,
 	receiptsVersion,
+	viewerUserId,
 }: ChatPaneProps) {
 	// Consensus flagging only works where the local engine can act:
 	//   - DMs are 1-on-1 — no quorum to gather, no consensus to reach.
@@ -713,6 +720,9 @@ export function ChatPane({
 								receiptsVersion={receiptsVersion ?? 0}
 								memberAvatars={memberAvatars}
 								memberNames={memberNamesByUserId}
+								mentionsViewer={
+									!m.isSelf && !!viewerUserId && messageMentionsUser(m, viewerUserId)
+								}
 								onReact={(emoji) => toggleReaction(m, emoji)}
 								onReply={() => setReplyTarget(m)}
 								onFlag={(category, rationale) => onFlag(m.id, category, rationale)}
@@ -962,7 +972,7 @@ function MessageRow({
 	message, avatarMxc, continuesGroup, isFirst, flaggable, roomEncrypted,
 	reactions, flags, collapse, onReact, onReply, onFlag, onTogglePillFlag, onToggleReactionPill, isBot,
 	isOwnedBot, isHovered, onDelete,
-	isDm, receiptsVersion, memberAvatars, memberNames,
+	isDm, receiptsVersion, memberAvatars, memberNames, mentionsViewer,
 }: {
 	message: Message;
 	avatarMxc: string | undefined;
@@ -1022,6 +1032,10 @@ function MessageRow({
 	receiptsVersion: number;
 	memberAvatars: Map<string, string | undefined>;
 	memberNames: Map<string, string>;
+	// True when the row pings the viewer — direct @-mention or
+	// reply to a message the viewer authored.  Drives the Discord-
+	// style left-border accent + faint background tint on the row.
+	mentionsViewer: boolean;
 }) {
 	const [flagDialogOpen, setFlagDialogOpen] = useState(false);
 	const [expanded, setExpanded] = useState(false);
@@ -1077,6 +1091,17 @@ function MessageRow({
 	//   - New sender / new group: generous (16px) for visual separation.
 	const topMargin = isFirst ? "" : continuesGroup ? "mt-1" : "mt-4";
 
+	// Discord-style mention highlight: left accent border + faint
+	// background wash spanning the full row.  Subtle but unmissable
+	// when scrolling — the eye catches the colored bar in peripheral
+	// vision even when the row's text is below the fold.  Negative
+	// horizontal margin + matching padding stretches the wash to the
+	// scroll-container edges so it doesn't read as a "card" stuck
+	// inside the timeline.
+	const mentionHighlight = mentionsViewer
+		? "-mx-4 px-4 border-l-2 border-primary bg-primary/5"
+		: "";
+
 	// Emotes (`/me`) render as a single italic line with no bubble — same
 	// shape as Matrix m.emote.  Avatar still gutters them so the layout
 	// doesn't shift.
@@ -1084,7 +1109,7 @@ function MessageRow({
 		return (
 			<div
 				data-message-id={message.id}
-				className={cn("flex gap-3 items-start", topMargin)}
+				className={cn("flex gap-3 items-start py-1", topMargin, mentionHighlight)}
 			>
 				<AvatarSlot mxc={avatarMxc} seed={message.sender} hidden={continuesGroup} isBot={isBot} />
 				<div className="flex-1 min-w-0 pt-1 text-sm italic text-muted-foreground flex items-center gap-2">
