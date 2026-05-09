@@ -359,21 +359,31 @@ export async function isSpaceRoom(roomId: string): Promise<boolean> {
  * Returns [] on any error so callers don't have to special-case.
  */
 export async function getJoinedMembers(roomId: string): Promise<string[]> {
-	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state`;
+	// Use the Synapse admin endpoint, NOT the client `/state` API:
+	// the latter requires the admin user to BE A MEMBER of the room
+	// (Matrix's client API enforces "you can only read state for
+	// rooms you're in").  The engine's admin user is a Synapse
+	// admin but not a member of every room.  `/admin/v1/rooms/<id>/
+	// members` works regardless of membership — it's exactly the
+	// "list everyone here" query Synapse exposes for moderation
+	// dashboards, which is what we need for notification fan-out's
+	// lazy member backfill.  The previous client-API version
+	// silently returned [] on 403, leaving room_members empty for
+	// rooms the admin user wasn't in — which was every room with
+	// real users — and the bell never lit up.
+	const path = `/_synapse/admin/v1/rooms/${encodeURIComponent(roomId)}/members`;
 	const r = await adminFetch(path);
 	if (!r.ok) return [];
-	const events = (await r.json().catch(() => null)) as
-		| Array<{ type?: string; state_key?: string; content?: { membership?: unknown } }>
+	const body = (await r.json().catch(() => null)) as
+		| { members?: unknown }
 		| null;
-	if (!Array.isArray(events)) return [];
+	if (!body || !Array.isArray(body.members)) return [];
 	const ids: string[] = [];
-	for (const ev of events) {
-		if (ev.type !== "m.room.member") continue;
-		if (typeof ev.state_key !== "string" || !ev.state_key) continue;
-		if (ev.content?.membership !== "join") continue;
-		if (/^@bot-/.test(ev.state_key)) continue;
-		if (/^@koven-engine[:_]/.test(ev.state_key)) continue;
-		ids.push(ev.state_key);
+	for (const m of body.members) {
+		if (typeof m !== "string") continue;
+		if (/^@bot-/.test(m)) continue;
+		if (/^@koven-engine[:_]/.test(m)) continue;
+		ids.push(m);
 	}
 	return ids;
 }
