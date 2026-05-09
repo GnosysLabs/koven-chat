@@ -1462,19 +1462,39 @@ function MessageRow({
 				    stacking is steadier visually than branching by
 				    message kind. */}
 				<div className="flex items-start gap-2">
-					{isCollapsed ? (
-						<CollapsedBubble collapse={collapse!} onExpand={() => setExpanded(true)} />
-					) : (
-						<MessageBubble
-							message={message}
-							memberNames={memberNames}
-							onMentionClick={onMentionClick}
-							pollAggregate={pollAggregate}
-							viewerUserId={viewerUserId}
-							onPollVote={onPollVote}
-							onPollEnd={onPollEnd}
-						/>
-					)}
+					{/* Bubble + the things that visually belong under the
+					    bubble (link preview, reaction pills) live in the
+					    same min-w-0 column so the sidecar's reserved
+					    toolbar slot can't push them away from the bubble.
+					    Putting the pills AFTER this whole row would let
+					    the sidecar's h-8 reservation create an empty band
+					    between bubble and pills on short messages — which
+					    is what the user complained about. */}
+					<div className="flex flex-col min-w-0">
+						{isCollapsed ? (
+							<CollapsedBubble collapse={collapse!} onExpand={() => setExpanded(true)} />
+						) : (
+							<MessageBubble
+								message={message}
+								memberNames={memberNames}
+								onMentionClick={onMentionClick}
+								pollAggregate={pollAggregate}
+								viewerUserId={viewerUserId}
+								onPollVote={onPollVote}
+								onPollEnd={onPollEnd}
+							/>
+						)}
+						{!isCollapsed && message.kind === "text" && !roomEncrypted && (
+							// Link preview rides under the bubble for plain text
+							// messages only.  Skipped on attachments / collapses /
+							// emotes to keep those layouts clean.  Also skipped
+							// in encrypted rooms — see roomEncrypted prop above.
+							<UrlPreviewSlot text={message.text} />
+						)}
+						{!isCollapsed && (
+							<ReactionPills reactions={reactions} onToggle={onToggleReactionPill} />
+						)}
+					</div>
 					<div className="flex flex-col items-start gap-1 shrink-0">
 						{/* Seen-by indicator on YOUR sent messages.
 						    DM rooms get a "Read · time" line; group
@@ -1535,16 +1555,6 @@ function MessageRow({
 						</div>
 					</div>
 				</div>
-				{!isCollapsed && message.kind === "text" && !roomEncrypted && (
-					// Link preview rides under the bubble for plain text
-					// messages only.  Skipped on attachments / collapses /
-					// emotes to keep those layouts clean.  Also skipped
-					// in encrypted rooms — see roomEncrypted prop above.
-					<UrlPreviewSlot text={message.text} />
-				)}
-				{!isCollapsed && (
-					<ReactionPills reactions={reactions} onToggle={onToggleReactionPill} />
-				)}
 			</div>
 			{canFlag && (
 				<FlagDialog
