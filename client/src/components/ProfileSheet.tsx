@@ -525,7 +525,18 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 				)}
 
 				<DialogFooter>
-					{!isSelf && viewedUserId && (
+					{/* Block is a personal-noise filter for human users:
+					    drop their messages from your timeline, refuse
+					    their DMs.  Bots aren't blockable in that sense
+					    — they're system identities tied to a specific
+					    room.  If you want a bot gone, kick or ban it
+					    from the room (founder-only, in the Room
+					    moderation section above the footer).  Hiding
+					    the Block button on bots avoids implying
+					    it's the right gesture and accidentally
+					    silencing notifications across rooms when the
+					    user actually wanted "remove from this room." */}
+					{!isSelf && viewedUserId && !isBot && (
 						<Button
 							type="button"
 							variant="ghost"
