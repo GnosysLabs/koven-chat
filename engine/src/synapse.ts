@@ -214,6 +214,65 @@ async function adminFetch(path: string, init: RequestInit = {}): Promise<Respons
 	return r;
 }
 
+/// One Matrix state-event row, as returned by Synapse's /state APIs.
+export interface StateEvent {
+	type?: string;
+	state_key?: string;
+	sender?: string;
+	content?: Record<string, unknown>;
+}
+
+/**
+ * Read a room's full state via Synapse's ADMIN endpoint.  This is
+ * the ONLY supported way to read room state from the engine — the
+ * client API equivalent (`/_matrix/client/v3/rooms/{id}/state`) is
+ * gated by Matrix's "you can only read state for rooms you're in"
+ * rule, which silently 403s for any room the engine's admin user
+ * isn't a member of.  Across an entire afternoon's worth of
+ * features (notification fan-out, auto-join cascade, Explore
+ * icons + NSFW flag, default-space child enumeration), every state
+ * read silently returned [] / null / false on rooms the admin user
+ * wasn't in — until the bugs were noticed individually and fixed.
+ *
+ * This helper is the permanent fix.  It centralises the choice of
+ * endpoint so new state-reading code can't accidentally pick the
+ * client API and reintroduce the regression.  If you find yourself
+ * about to call `adminFetch("/_matrix/client/v3/rooms/...state")`,
+ * use this instead.
+ *
+ * Returns the parsed state-event array on success.  Returns null
+ * (NOT empty array) on any error so callers can distinguish "no
+ * matching events" from "couldn't read the room".
+ */
+export async function readRoomState(roomId: string): Promise<StateEvent[] | null> {
+	const path = `/_synapse/admin/v1/rooms/${encodeURIComponent(roomId)}/state`;
+	const r = await adminFetch(path);
+	if (!r.ok) return null;
+	const body = (await r.json().catch(() => null)) as
+		| { state?: StateEvent[] }
+		| null;
+	if (!body || !Array.isArray(body.state)) return null;
+	return body.state;
+}
+
+/** Lookup a single state event by (type, state_key) from a state
+ * array.  Returns the event's `content` (or null when not present).
+ * Convenience over `readRoomState(...)?.find(...)` for the common
+ * "I just want this one event" case. */
+export function pickStateContent(
+	state: StateEvent[] | null,
+	type: string,
+	stateKey: string = "",
+): Record<string, unknown> | null {
+	if (!state) return null;
+	for (const ev of state) {
+		if (ev.type === type && ev.state_key === stateKey) {
+			return ev.content ?? null;
+		}
+	}
+	return null;
+}
+
 /**
  * Admin-create a Synapse user with a random password (the engine
  * doesn't keep it; on every login we rotate it again).  Idempotent in
@@ -298,29 +357,13 @@ export async function adminJoinUserToRoom(
  * "couldn't read state" against "no children."
  */
 export async function getSpaceChildRoomIds(spaceId: string): Promise<string[]> {
-	// Use Synapse's admin /state endpoint so this works whether the
-	// engine's admin user is a member of the space or not.  The
-	// equivalent client API (/_matrix/client/v3/rooms/{id}/state)
-	// 403s for non-members and silently returns []; that exact path
-	// caused autoJoinDefaultSpace to skip ALL child rooms after the
-	// prod migration moved the admin token from @koven-admin (in the
-	// Koven space) to @koven-svc (NOT in the Koven space).  Net
-	// effect: every new signup since the migration joined the space
-	// itself but missed every public child room.  Fixed by using
-	// the same admin /state endpoint we already use elsewhere.
-	const path = `/_synapse/admin/v1/rooms/${encodeURIComponent(spaceId)}/state`;
-	const r = await adminFetch(path);
-	if (!r.ok) return [];
-	const body = (await r.json().catch(() => null)) as
-		| { state?: Array<{ type?: string; state_key?: string; content?: { via?: unknown } }> }
-		| null;
-	const events = body?.state;
-	if (!Array.isArray(events)) return [];
+	const state = await readRoomState(spaceId);
+	if (!state) return [];
 	const ids: string[] = [];
-	for (const ev of events) {
+	for (const ev of state) {
 		if (ev.type !== "m.space.child") continue;
 		if (typeof ev.state_key !== "string" || !ev.state_key) continue;
-		const via = ev.content?.via;
+		const via = (ev.content as { via?: unknown } | undefined)?.via;
 		if (!Array.isArray(via) || via.length === 0) continue;
 		ids.push(ev.state_key);
 	}
@@ -340,48 +383,23 @@ export async function getSpaceChildRoomIds(spaceId: string): Promise<string[]> {
  * joining everyone to a sub-space they didn't ask for.
  */
 export async function isSpaceRoom(roomId: string): Promise<boolean> {
-	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state`;
-	const r = await adminFetch(path);
-	if (!r.ok) return false;
-	const events = (await r.json().catch(() => null)) as
-		| Array<{ type?: string; state_key?: string; content?: { type?: unknown } }>
-		| null;
-	if (!Array.isArray(events)) return false;
-	for (const ev of events) {
-		if (ev.type === "m.room.create" && ev.state_key === "") {
-			return ev.content?.type === "m.space";
-		}
-	}
-	return false;
+	const create = pickStateContent(await readRoomState(roomId), "m.room.create");
+	return create?.type === "m.space";
 }
 
 /**
- * Read the user ids of the room's currently-joined members.  Uses
- * the appservice as_token via /state because Synapse's
- * /joined_members endpoint requires a real session (and we don't
- * want to mint one just for this).  We're already a member of
- * every room (regex `.*` namespace), so /state is authorized.
+ * Read the user ids of the room's currently-joined members via
+ * Synapse's admin /members endpoint (NOT the client API — see
+ * `readRoomState` for the rationale that applies here too: the
+ * client API requires room membership we don't always have).
  *
  * Filters to `membership: "join"` and skips @bot-* service users
- * (they're managed via the engine's bot runtime, not the
- * "everyone in this server gets every channel" auto-join path)
- * plus the appservice's own user.
+ * (they're managed via the engine's bot runtime) plus the
+ * appservice's own user.
  *
  * Returns [] on any error so callers don't have to special-case.
  */
 export async function getJoinedMembers(roomId: string): Promise<string[]> {
-	// Use the Synapse admin endpoint, NOT the client `/state` API:
-	// the latter requires the admin user to BE A MEMBER of the room
-	// (Matrix's client API enforces "you can only read state for
-	// rooms you're in").  The engine's admin user is a Synapse
-	// admin but not a member of every room.  `/admin/v1/rooms/<id>/
-	// members` works regardless of membership — it's exactly the
-	// "list everyone here" query Synapse exposes for moderation
-	// dashboards, which is what we need for notification fan-out's
-	// lazy member backfill.  The previous client-API version
-	// silently returned [] on 403, leaving room_members empty for
-	// rooms the admin user wasn't in — which was every room with
-	// real users — and the bell never lit up.
 	const path = `/_synapse/admin/v1/rooms/${encodeURIComponent(roomId)}/members`;
 	const r = await adminFetch(path);
 	if (!r.ok) return [];
@@ -417,19 +435,11 @@ export async function getRoomNameAndCreator(roomId: string): Promise<{
 	name?: string;
 	creator?: string;
 } | null> {
-	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state`;
-	const r = await adminFetch(path);
-	if (!r.ok) return null;
-	const events = (await r.json().catch(() => null)) as Array<{
-		type?: string;
-		state_key?: string;
-		sender?: string;
-		content?: { name?: unknown };
-	}> | null;
-	if (!Array.isArray(events)) return null;
+	const state = await readRoomState(roomId);
+	if (!state) return null;
 	let name: string | undefined;
 	let creator: string | undefined;
-	for (const ev of events) {
+	for (const ev of state) {
 		if (ev.type === "m.room.name" && ev.state_key === "" && typeof ev.content?.name === "string") {
 			name = ev.content.name;
 		} else if (ev.type === "m.room.create" && ev.state_key === "" && typeof ev.sender === "string") {
@@ -489,11 +499,9 @@ export async function setRoomDirectoryVisibility(
  * admin-join that Synapse will reject with M_FORBIDDEN.
  */
 export async function getRoomJoinRule(roomId: string): Promise<string | null> {
-	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.join_rules/`;
-	const r = await adminFetch(path);
-	if (!r.ok) return null;
-	const body = (await r.json().catch(() => null)) as { join_rule?: string } | null;
-	return typeof body?.join_rule === "string" ? body.join_rule : null;
+	const content = pickStateContent(await readRoomState(roomId), "m.room.join_rules");
+	const r = content?.join_rule;
+	return typeof r === "string" ? r : null;
 }
 
 /**
@@ -868,28 +876,15 @@ export async function getRoomKovenMeta(roomId: string): Promise<{
 	iconEmoji: string | null;
 	nsfw: boolean;
 }> {
-	const path = `/_synapse/admin/v1/rooms/${encodeURIComponent(roomId)}/state`;
-	const r = await adminFetch(path);
-	if (!r.ok) return { iconEmoji: null, nsfw: false };
-	const body = (await r.json().catch(() => null)) as
-		| { state?: Array<{ type?: string; state_key?: string; content?: Record<string, unknown> }> }
-		| null;
-	const events = body?.state;
-	if (!Array.isArray(events)) return { iconEmoji: null, nsfw: false };
+	const state = await readRoomState(roomId);
+	const icon = pickStateContent(state, "chat.koven.room_icon");
+	const nsfw = pickStateContent(state, "chat.koven.nsfw");
 	let iconEmoji: string | null = null;
-	let nsfw = false;
-	for (const ev of events) {
-		if (ev.type === "chat.koven.room_icon" && ev.state_key === "") {
-			const e = ev.content?.emoji;
-			if (typeof e === "string") {
-				const trimmed = e.trim();
-				if (trimmed && trimmed.length <= 16) iconEmoji = trimmed;
-			}
-		} else if (ev.type === "chat.koven.nsfw" && ev.state_key === "") {
-			if (ev.content?.enabled === true) nsfw = true;
-		}
+	if (typeof icon?.emoji === "string") {
+		const trimmed = icon.emoji.trim();
+		if (trimmed && trimmed.length <= 16) iconEmoji = trimmed;
 	}
-	return { iconEmoji, nsfw };
+	return { iconEmoji, nsfw: nsfw?.enabled === true };
 }
 
 export async function getRoomNsfw(roomId: string): Promise<boolean> {

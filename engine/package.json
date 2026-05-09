@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint:no-client-state-api": "bun run scripts/no-client-state-api.ts"
   },
   "dependencies": {
     "@koven/shared": "workspace:*",
