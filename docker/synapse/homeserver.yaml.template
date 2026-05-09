@@ -115,6 +115,26 @@ turn_allow_guests: false
 app_service_config_files:
   - /data/koven-engine.appservice.yaml
 
+# --- Invite state forwarding -----------------------------------------
+# Synapse only forwards a small whitelist of room state events to
+# users in the invite preview (i.e. before they accept).  Default
+# whitelist covers m.room.{name,avatar,join_rules,canonical_alias,
+# encryption,topic,member,create}.  We extend it with `chat.koven.nsfw`
+# so the koven-web client can surface an NSFW badge on invite rows
+# AND prompt the user with the "this is adult content" confirmation
+# gate BEFORE they accept.  Without this entry, the NSFW flag isn't
+# visible until after join, which defeats the purpose of the gate.
+room_invite_state_types:
+  - "m.room.create"
+  - "m.room.name"
+  - "m.room.avatar"
+  - "m.room.topic"
+  - "m.room.join_rules"
+  - "m.room.canonical_alias"
+  - "m.room.encryption"
+  - "m.room.member"
+  - "chat.koven.nsfw"
+
 # --- Misc -----------------------------------------------------------
 report_stats: false              # Don't phone home to matrix.org
 url_preview_enabled: true

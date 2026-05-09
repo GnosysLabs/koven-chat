@@ -636,7 +636,32 @@ export class MatrixTransport {
 			// Sub-spaces are explicit opt-in — symmetric with
 			// joinSpaceWithChildren which doesn't auto-join sub-spaces.
 			if (existing?.isSpaceRoom?.()) return;
+			// NSFW gate — when the viewer hasn't opted into NSFW
+			// content, skip auto-join for children whose m.space.child
+			// content is flagged nsfw=true.  Without this, a SFW space
+			// admin adding an NSFW room would silently auto-join every
+			// member regardless of their preference.  Symmetric with
+			// the same skip in joinSpaceWithChildren.  Backwards-compat
+			// for older m.space.child events (no nsfw field): we'd
+			// auto-join, but the post-join sweep below catches NSFW-
+			// flagged rooms and leaves them.
+			const nsfwHint = (content as { nsfw?: unknown }).nsfw === true;
+			if (nsfwHint && !this.getNsfwPreference()) {
+				return;
+			}
 			void c.joinRoom(childRoomId).then(() => {
+				// Post-join NSFW sweep: if the room turned out to be
+				// flagged NSFW (state we couldn't see pre-join) and
+				// the viewer hasn't opted into NSFW, leave the room.
+				if (!this.getNsfwPreference()) {
+					const joinedRoom = c.getRoom(childRoomId);
+					if (joinedRoom && readKovenNsfw(joinedRoom)) {
+						c.leave(childRoomId).catch(err => {
+							console.warn(`auto-leave NSFW child ${childRoomId} failed`, err);
+						});
+						return;
+					}
+				}
 				this.emitRoomList();
 			}).catch(err => {
 				// Banned, room doesn't exist, etc. — log and move on.
@@ -1668,7 +1693,7 @@ export class MatrixTransport {
 		}
 
 		if (opts.parentSpaceId) {
-			await this.linkRoomToSpace(opts.parentSpaceId, newRoomId).catch(err => {
+			await this.linkRoomToSpace(opts.parentSpaceId, newRoomId, { nsfw: !!opts.nsfw }).catch(err => {
 				console.warn("createRoom: failed to link to parent space", err);
 			});
 		}
@@ -2064,10 +2089,35 @@ export class MatrixTransport {
 		spaceId: SpaceId;
 		joinedChildren: number;
 		skippedChildren: number;
+		// True iff there were one-or-more NSFW children we declined
+		// to auto-join because the viewer hasn't opted into NSFW.  The
+		// caller (App.tsx) uses this to surface a follow-up "this
+		// space contains NSFW rooms — enable to see them?" prompt.
+		skippedNsfwChildren: number;
 	}> {
 		const c = this.requireClient();
 		const root = await c.joinRoom(spaceIdOrAlias);
 		const spaceId = root.roomId as SpaceId;
+		const nsfwPref = this.getNsfwPreference();
+
+		// Read the parent's m.space.child events directly — Koven
+		// linkRoomToSpace mirrors the child's NSFW flag onto the
+		// content there, so we can decide pre-join whether to skip
+		// each child without having to peek/join it first.  Falls
+		// back to "assume not NSFW" for events written by older
+		// clients that didn't include the field.
+		const childNsfwById = new Map<string, boolean>();
+		try {
+			const events = root.currentState.getStateEvents("m.space.child") ?? [];
+			for (const ev of events) {
+				const stateKey = ev.getStateKey();
+				if (!stateKey) continue;
+				const content = ev.getContent() as { nsfw?: unknown };
+				childNsfwById.set(stateKey, content.nsfw === true);
+			}
+		} catch (err) {
+			console.warn("joinSpaceWithChildren: failed to read m.space.child state", err);
+		}
 
 		let hierarchy;
 		try {
@@ -2076,7 +2126,7 @@ export class MatrixTransport {
 			console.warn("joinSpaceWithChildren: hierarchy fetch failed", err);
 			this.emitRoomList();
 			this.emitSpaceList();
-			return { spaceId, joinedChildren: 0, skippedChildren: 0 };
+			return { spaceId, joinedChildren: 0, skippedChildren: 0, skippedNsfwChildren: 0 };
 		}
 
 		const rooms = (hierarchy.rooms ?? []) as Array<{
@@ -2087,15 +2137,22 @@ export class MatrixTransport {
 
 		// Best-effort parallel join of every joinable child.  Skip the
 		// space itself, sub-spaces (let the user opt-in by clicking
-		// them in Explore), and anything not public/knock — invite-only
-		// children would just bounce back with M_FORBIDDEN.
+		// them in Explore), anything not public/knock (invite-only
+		// children bounce back with M_FORBIDDEN), and — when the
+		// viewer hasn't opted into NSFW — anything flagged NSFW on
+		// the parent's m.space.child content.
 		let joined = 0;
 		let skipped = 0;
+		let skippedNsfw = 0;
 		await Promise.all(rooms.map(async r => {
 			if (r.room_id === spaceId) return;
 			if (r.room_type === "m.space") { skipped++; return; }
 			const rule = r.join_rule ?? "public";
 			if (rule !== "public" && rule !== "knock") { skipped++; return; }
+			if (!nsfwPref && childNsfwById.get(r.room_id) === true) {
+				skippedNsfw++;
+				return;
+			}
 			try {
 				await c.joinRoom(r.room_id);
 				joined++;
@@ -2104,9 +2161,33 @@ export class MatrixTransport {
 			}
 		}));
 
+		// Post-join NSFW sweep — covers rooms whose m.space.child was
+		// written by an older client (no nsfw field) but whose own
+		// chat.koven.nsfw state is set.  Only runs when the viewer
+		// hasn't opted into NSFW.  Auto-leave is jarring but the
+		// alternative is silently joining users to adult content; we
+		// surface a count so App.tsx can mention the leave in the
+		// follow-up prompt.
+		if (!nsfwPref) {
+			for (const r of rooms) {
+				if (r.room_id === spaceId) continue;
+				const joinedRoom = c.getRoom(r.room_id);
+				if (!joinedRoom) continue;
+				if (joinedRoom.getMyMembership() !== "join") continue;
+				if (!readKovenNsfw(joinedRoom)) continue;
+				try {
+					await c.leave(r.room_id);
+					skippedNsfw++;
+					joined = Math.max(0, joined - 1);
+				} catch (err) {
+					console.warn(`joinSpaceWithChildren: post-join NSFW leave for ${r.room_id} failed`, err);
+				}
+			}
+		}
+
 		this.emitRoomList();
 		this.emitSpaceList();
-		return { spaceId, joinedChildren: joined, skippedChildren: skipped };
+		return { spaceId, joinedChildren: joined, skippedChildren: skipped, skippedNsfwChildren: skippedNsfw };
 	}
 
 	/**
@@ -2316,12 +2397,23 @@ export class MatrixTransport {
 	 * way there (state events written but invites refused due to PL)
 	 * is better than rolling back the link entirely.
 	 */
-	async linkRoomToSpace(spaceId: SpaceId, roomId: RoomId): Promise<void> {
+	async linkRoomToSpace(spaceId: SpaceId, roomId: RoomId, opts?: { nsfw?: boolean }): Promise<void> {
 		const c = this.requireClient();
 		const via = [this.serverName()];
 
-		// 1. Canonical hierarchy state events.
-		await c.sendStateEvent(spaceId, "m.space.child" as any, { via, suggested: false }, roomId);
+		// 1. Canonical hierarchy state events.  Mirror the child's NSFW
+		//    flag onto the m.space.child content so anyone reading the
+		//    parent's state can decide whether to auto-join the child
+		//    without having to peek/join it first.  Koven-custom field;
+		//    extra fields on m.space.child are spec-allowed and ignored
+		//    by stock clients.  See joinSpaceWithChildren + the live
+		//    m.space.child auto-join listener for the read paths.
+		const childContent: { via: string[]; suggested: boolean; nsfw?: boolean } = {
+			via,
+			suggested: false,
+		};
+		if (opts?.nsfw) childContent.nsfw = true;
+		await c.sendStateEvent(spaceId, "m.space.child" as any, childContent, roomId);
 		try {
 			await c.sendStateEvent(roomId, "m.space.parent" as any, { via, canonical: true }, spaceId);
 		} catch {
@@ -2504,14 +2596,25 @@ export class MatrixTransport {
 	 *     parent that requires manual room-by-room joining.
 	 *   - Regular room invite: just join.
 	 */
-	async acceptInvite(roomId: RoomId): Promise<void> {
+	async acceptInvite(roomId: RoomId): Promise<{
+		// True when the invite was for a space (vs. a regular room or DM).
+		isSpace: boolean;
+		// For space invites: the count of NSFW child rooms skipped
+		// during joinSpaceWithChildren because the viewer hasn't opted
+		// into NSFW.  Always 0 for non-space invites.  App.tsx uses
+		// this to decide whether to surface a follow-up "this space
+		// contains NSFW rooms — enable to see them?" dialog.
+		skippedNsfwChildren: number;
+	}> {
 		const c = this.requireClient();
 		const room = c.getRoom(roomId);
 		const dmInviter = room?.getDMInviter();
 		const isSpaceRoom = room ? this.isSpace(room) : false;
 
+		let skippedNsfwChildren = 0;
 		if (isSpaceRoom) {
-			await this.joinSpaceWithChildren(roomId);
+			const result = await this.joinSpaceWithChildren(roomId);
+			skippedNsfwChildren = result.skippedNsfwChildren;
 		} else {
 			await c.joinRoom(roomId);
 		}
@@ -2533,6 +2636,31 @@ export class MatrixTransport {
 			this.pendingDmMappings.set(roomId, dmInviter);
 		}
 		this.emitRoomList();
+		return { isSpace: isSpaceRoom, skippedNsfwChildren };
+	}
+
+	/**
+	 * Pre-accept peek at an invite.  Returns whether the invite is for
+	 * a space (vs. a regular room or DM) and whether the room is
+	 * flagged NSFW — used by the App.tsx accept handler to decide
+	 * whether to show the NSFW confirmation gate before joining.
+	 *
+	 * Notes on NSFW visibility pre-accept:
+	 *   • Synapse only forwards a small whitelist of state events in
+	 *     invite_state by default.  For the `chat.koven.nsfw` flag to
+	 *     be visible here, the homeserver must include it in
+	 *     `room_invite_state_types` (see homeserver.yaml).  When it
+	 *     isn't included, this returns nsfw=false even for NSFW rooms,
+	 *     and the post-accept dialog kicks in instead.
+	 */
+	getInviteInfo(roomId: RoomId): { isSpace: boolean; isNsfw: boolean } | null {
+		const c = this.client;
+		if (!c) return null;
+		const room = c.getRoom(roomId);
+		if (!room) return null;
+		const isSpace = this.isSpace(room);
+		const isNsfw = readKovenNsfw(room);
+		return { isSpace, isNsfw };
 	}
 
 	/**

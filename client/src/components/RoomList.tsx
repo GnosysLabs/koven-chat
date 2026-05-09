@@ -7,7 +7,7 @@
 
 import { cn } from "@/lib/utils";
 import { COLLAPSED_NAME } from "@/lib/collapsedRooms";
-import type { Room, RoomId, Space } from "@koven/shared";
+import type { Room, RoomId, Space, UserId } from "@koven/shared";
 import { Check, EyeOff, Globe, Lock, Pin, Plus, X } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import type { ActiveSpace } from "@/state/store";
@@ -17,6 +17,15 @@ export interface RoomListProps {
 	spaces: Space[];
 	activeSpace: ActiveSpace;
 	activeRoomId: RoomId | null;
+	// Current user's mxid.  Used to gate the "+ create room" button
+	// inside a space — only the space creator should be able to
+	// surface that affordance.  See the create-room-in-space gate
+	// below for why: non-creators can technically create a new room,
+	// but the m.space.child link state event requires PL 100, so the
+	// link silently fails and they end up with an orphan room they
+	// thought they put in the space.  Hide the button to stop the
+	// footgun before it produces orphans.
+	currentUserId: UserId;
 	onSelectRoom(roomId: RoomId): void;
 	onCreateRoom(): void;
 	onAcceptInvite(roomId: RoomId): void | Promise<void>;
@@ -49,7 +58,7 @@ export interface RoomListProps {
 const PIN_PL_THRESHOLD = 50;
 
 export function RoomList({
-	rooms, spaces, activeSpace, activeRoomId,
+	rooms, spaces, activeSpace, activeRoomId, currentUserId,
 	onSelectRoom, onCreateRoom, onAcceptInvite, onDeclineInvite,
 	onPinRoom, onUnpinRoom, collapsedRoomIds,
 	roomsLoaded,
@@ -94,6 +103,19 @@ export function RoomList({
 		&& !activeSpaceObj.iconEmoji
 	);
 
+	// Gate the "+ create room" button inside a space to the space
+	// creator only.  Non-creators don't have PL 100 in the parent
+	// space, so `m.space.child` linking would 403 and produce an
+	// orphan room — better to hide the button entirely than to let
+	// people create rooms that silently fail to land in the space.
+	// `dms` and `rooms` (orphans pseudo-space) keep the + because
+	// they aren't bound to a parent space at all.
+	const canCreateRoomHere =
+		activeSpace?.kind === "dms"
+		|| activeSpace?.kind === "rooms"
+		|| (activeSpace?.kind === "space"
+			&& activeSpaceObj?.creatorId === currentUserId);
+
 	return (
 		<aside className="w-60 shrink-0 border-r border-border bg-card flex flex-col">
 			{showSpaceBanner && activeSpaceObj && (
@@ -108,7 +130,7 @@ export function RoomList({
 			)}
 			<div className="px-4 h-12 flex items-center justify-between border-b border-border">
 				<span className="font-semibold text-sm truncate" title={header}>{header}</span>
-				{activeSpace?.kind !== "explore" && (
+				{canCreateRoomHere && (
 					<button
 						type="button"
 						onClick={onCreateRoom}
@@ -419,6 +441,14 @@ function InviteRow({
 	onAccept(): void | Promise<void>;
 	onDecline(): void | Promise<void>;
 }) {
+	// NSFW pill — surfaces the room's adult-content flag pre-accept
+	// so the viewer can decide before joining.  Note: visibility of
+	// `room.nsfw` on an *invite* depends on Synapse forwarding the
+	// `chat.koven.nsfw` state event in invite_state (see homeserver.yaml
+	// `room_invite_state_types`).  When the homeserver doesn't forward
+	// it, the badge stays hidden pre-accept and the confirmation gate
+	// in App.tsx kicks in post-accept instead.
+	const isNsfw = !!room.nsfw;
 	// Prefer the inviter's display name; fall back to the localpart of
 	// their mxid if we couldn't resolve a profile (which happens for
 	// federated invites where we haven't synced the inviter's profile
@@ -438,11 +468,24 @@ function InviteRow({
 	// (line-clamp-2) instead of getting chopped at the first colon.
 	const isDm = room.kind === "dm";
 	return (
-		<div className="rounded-md border border-border bg-card/60 p-2 space-y-1.5">
+		<div className={cn(
+			"rounded-md border p-2 space-y-1.5",
+			isNsfw ? "border-rose-500/40 bg-rose-500/5" : "border-border bg-card/60",
+		)}>
 			<div className="flex items-start gap-2 min-w-0">
 				<RoomAvatar room={room} />
 				<div className="min-w-0 flex-1">
-					<div className="text-sm font-medium truncate">{room.name}</div>
+					<div className="text-sm font-medium truncate flex items-center gap-1.5">
+						<span className="truncate">{room.name}</span>
+						{isNsfw && (
+							<span
+								className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wide bg-rose-500/15 text-rose-500 border border-rose-500/30"
+								title="This room is flagged as NSFW"
+							>
+								NSFW
+							</span>
+						)}
+					</div>
 					{isDm ? (
 						<div className="text-[11px] text-muted-foreground truncate">
 							Wants to chat

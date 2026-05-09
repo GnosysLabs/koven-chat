@@ -48,6 +48,7 @@ import { fetchIntegrationsStatus } from "@/lib/giphy";
 import { ENGINE_URL } from "@/lib/urls";
 import { setAppBadge } from "@/lib/appBadge";
 import { PublishLimitDialog } from "@/components/PublishLimitDialog";
+import { NsfwAcceptDialog } from "@/components/NsfwAcceptDialog";
 import { AddExistingRoomDialog } from "@/components/AddExistingRoomDialog";
 import { useCollapsedRooms } from "@/lib/collapsedRooms";
 import { fetchAllBotMxids } from "@/lib/bots-cache";
@@ -196,6 +197,25 @@ export default function App() {
 	// linking an already-existing room, not creating a new one.
 	const [addExistingRoomTo, setAddExistingRoomTo] = useState<SpaceId | null>(null);
 	const [startDmOpen, setStartDmOpen] = useState(false);
+	// NSFW invite-confirmation gate.  Two-mode dialog: "invite"
+	// (pre-accept, the room/space itself is flagged NSFW) and
+	// "space-children" (post-accept, joinSpaceWithChildren skipped
+	// some NSFW child rooms because the viewer hasn't opted in).
+	// Confirming flips `chat.koven.nsfw_preference` to true and runs
+	// the deferred accept (or, for space-children mode, lets the live
+	// auto-join listener pick the children up on the next sync).
+	const [nsfwGate, setNsfwGate] = useState<{
+		mode: "invite" | "space-children";
+		roomId: RoomId;
+		subjectName: string;
+		isSpace: boolean;
+		skippedNsfwCount?: number;
+		// Deferred accept handler — only set in "invite" mode.  Runs
+		// after the user confirms (and after we flip the NSFW pref);
+		// in "space-children" mode the join already happened, so this
+		// is undefined and confirmation just flips the pref.
+		onConfirm?: () => Promise<void>;
+	} | null>(null);
 	// Mobile-only "Me" tab — when true, the bottom-tab "Me" view
 	// covers the panels with the profile + settings list.  Kept
 	// as a separate flag (rather than another `ActiveSpace` kind)
@@ -918,6 +938,72 @@ export default function App() {
 		setCreateRoomOpen(true);
 	}, [creds?.access_token]);
 
+	// Centralised invite-accept with NSFW gate.  Three paths:
+	//   1. Room/space is flagged NSFW + user hasn't opted in →
+	//      surface NsfwAcceptDialog ("invite" mode), defer the join
+	//      until the user confirms.  Confirming flips the pref and
+	//      runs the join.
+	//   2. Subject isn't NSFW or user already opted in → run
+	//      acceptInvite immediately.  If it was a space invite and
+	//      joinSpaceWithChildren skipped any NSFW children, surface
+	//      the dialog in "space-children" mode so the user can
+	//      decide to enable + auto-join the rest.
+	//   3. Anything else → just join.
+	//
+	// All RoomList / ChatPane invite buttons funnel through here so
+	// the gate is unbypassable from the UI.
+	const acceptInviteWithGate = useCallback(async (roomId: RoomId): Promise<RoomId | null> => {
+		if (!transport) return null;
+		const info = transport.getInviteInfo(roomId);
+		const room = state.rooms.find(r => r.id === roomId);
+		const subjectName = room?.name ?? "this room";
+		const nsfwPref = !!settings.showNsfw;
+		// Path 1: pre-accept gate.
+		if (info?.isNsfw && !nsfwPref) {
+			setNsfwGate({
+				mode: "invite",
+				roomId,
+				subjectName,
+				isSpace: !!info.isSpace,
+				onConfirm: async () => {
+					try {
+						await transport.setNsfwPreference(true);
+						const result = await transport.acceptInvite(roomId);
+						dispatch({ type: "set_active_room", roomId });
+						// If the invite was for a space whose children
+						// include MORE NSFW rooms, joinSpaceWithChildren
+						// would have skipped them — but since we just
+						// flipped the pref, they should auto-join via the
+						// live m.space.child listener as state propagates.
+						// No follow-up dialog needed here.
+						void result;
+					} catch (e) {
+						dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+					}
+				},
+			});
+			return null;
+		}
+		// Path 2: normal accept, but watch for skipped NSFW children
+		// when it was a space invite.
+		try {
+			const result = await transport.acceptInvite(roomId);
+			if (result.isSpace && result.skippedNsfwChildren > 0 && !nsfwPref) {
+				setNsfwGate({
+					mode: "space-children",
+					roomId,
+					subjectName,
+					isSpace: true,
+					skippedNsfwCount: result.skippedNsfwChildren,
+				});
+			}
+			return roomId;
+		} catch (e) {
+			dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+			return null;
+		}
+	}, [transport, state.rooms, settings.showNsfw]);
+
 	function handleSignOut() {
 		// PROPER LOGOUT — invalidate the access token AND deactivate
 		// the device on Synapse before we drop creds locally.
@@ -1344,6 +1430,7 @@ export default function App() {
 					spaces={state.spaces}
 					activeSpace={state.activeSpace}
 					activeRoomId={state.activeRoomId}
+					currentUserId={creds.user_id}
 					collapsedRoomIds={collapsedRoomIds}
 					// True once initial sync has reached the "syncing"
 					// or "ready" state — at that point matrix-js-sdk
@@ -1366,13 +1453,8 @@ export default function App() {
 						await openCreateRoomGated();
 					}}
 					onAcceptInvite={async (roomId) => {
-						if (!transport) return;
-						try {
-							await transport.acceptInvite(roomId);
-							dispatch({ type: "set_active_room", roomId });
-						} catch (e) {
-							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
-						}
+						const accepted = await acceptInviteWithGate(roomId);
+						if (accepted) dispatch({ type: "set_active_room", roomId: accepted });
 					}}
 					onDeclineInvite={async (roomId) => {
 						if (!transport) return;
@@ -1596,12 +1678,7 @@ export default function App() {
 					}}
 					collapsedRoomIds={collapsedRoomIds}
 					onAcceptInvite={async (roomId) => {
-						if (!transport) return;
-						try {
-							await transport.acceptInvite(roomId as RoomId);
-						} catch (e) {
-							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
-						}
+						await acceptInviteWithGate(roomId as RoomId);
 					}}
 					onDeclineInvite={async (roomId) => {
 						if (!transport) return;
@@ -2116,6 +2193,40 @@ export default function App() {
 				onOpenChange={(o) => { if (!o) setPublishLimitInfo(null); }}
 				quota={publishLimitInfo}
 			/>
+			<NsfwAcceptDialog
+				open={!!nsfwGate}
+				onOpenChange={(o) => { if (!o) setNsfwGate(null); }}
+				mode={nsfwGate?.mode ?? "invite"}
+				subjectName={nsfwGate?.subjectName ?? ""}
+				isSpace={nsfwGate?.isSpace}
+				skippedNsfwCount={nsfwGate?.skippedNsfwCount}
+				onConfirm={async () => {
+					if (!nsfwGate) return;
+					if (nsfwGate.mode === "invite" && nsfwGate.onConfirm) {
+						// "invite" mode: the join was deferred — flip
+						// the pref + run the deferred join.  The
+						// onConfirm closure captured by the gate already
+						// sequences setNsfwPreference + acceptInvite +
+						// dispatch in the right order.
+						await nsfwGate.onConfirm();
+					} else {
+						// "space-children" mode: already joined the
+						// parent space.  Flip the pref and re-run
+						// joinSpaceWithChildren — it's idempotent for
+						// already-joined children, and the second pass
+						// (with the pref now on) picks up the NSFW
+						// children that the first pass skipped.
+						if (transport) {
+							try {
+								await transport.setNsfwPreference(true);
+								await transport.joinSpaceWithChildren(nsfwGate.roomId);
+							} catch (e) {
+								dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+							}
+						}
+					}
+				}}
+			/>
 			<AddExistingRoomDialog
 				open={!!addExistingRoomTo}
 				onOpenChange={(o) => { if (!o) setAddExistingRoomTo(null); }}
@@ -2129,7 +2240,13 @@ export default function App() {
 				currentUserId={creds.user_id}
 				onAdd={async (roomId) => {
 					if (!transport || !addExistingRoomTo) return;
-					await transport.linkRoomToSpace(addExistingRoomTo, roomId);
+					// Pass through the room's NSFW flag so the parent's
+					// m.space.child content carries it — that's the bit
+					// joinSpaceWithChildren / the live cascade listener
+					// reads to decide whether to auto-join the child for
+					// users who haven't opted into NSFW.
+					const room = state.rooms.find(r => r.id === roomId);
+					await transport.linkRoomToSpace(addExistingRoomTo, roomId, { nsfw: !!room?.nsfw });
 				}}
 			/>
 			{/* Call overlays — top-level so they survive room navigation.
