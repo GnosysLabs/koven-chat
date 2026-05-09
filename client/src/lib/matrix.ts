@@ -3970,6 +3970,44 @@ export class MatrixTransport {
 	private routeDecryptedEvent(event: MatrixEvent, room: SdkRoom, live: boolean): void {
 		const type = event.getType();
 
+		// m.replace edit on a message: matrix-js-sdk's relations engine
+		// has (by the time we get here) already merged the edit into
+		// the original event's content, so calling getContent() on the
+		// ORIGINAL now returns m.new_content.  But our App-side
+		// message list still holds the pre-edit Message snapshot —
+		// nothing re-renders unless we explicitly push the original
+		// back through onMessage.  Find the target id, look it up in
+		// the live timeline, and re-route it (skipping the edit event
+		// itself, which would otherwise spawn a duplicate "*body" row).
+		// Bots use this for progressive status updates, so without
+		// this path the placeholder freezes on its initial body and
+		// nothing updates until the final reply lands.
+		if (type === "m.room.message") {
+			const c = event.getContent() as { "m.relates_to"?: { rel_type?: unknown; event_id?: unknown } };
+			const rel = c["m.relates_to"];
+			if (rel?.rel_type === "m.replace" && typeof rel.event_id === "string") {
+				const target = room.findEventById(rel.event_id);
+				if (target) {
+					// Re-emit immediately if the relations engine has
+					// already merged the edit into the target (the
+					// common case — relations.js runs before the
+					// Timeline event reaches us).
+					const refreshed = this.eventToMessage(target, room);
+					if (refreshed) this.handlers.onMessage(refreshed, { live });
+					// Belt-and-suspenders: also subscribe to the
+					// target's Replaced event in case the merge runs
+					// LATER on this tick or later (rare, but observed
+					// during initial sync when many edits land at
+					// once).  `once` makes this self-cleaning.
+					target.once(MatrixEventEvent.Replaced, () => {
+						const r2 = this.eventToMessage(target, room);
+						if (r2) this.handlers.onMessage(r2, { live });
+					});
+				}
+				return;
+			}
+		}
+
 		// Reactions flow on a separate channel — we don't render them
 		// as chat messages, the App reducer aggregates them per
 		// target message and the UI shows them as pills.
