@@ -1096,11 +1096,23 @@ function MessageRow({
 			<div className="flex-1 min-w-0">
 				{!continuesGroup && (
 					<div className={cn(
-						"text-xs font-medium mb-1.5 flex items-center gap-1.5",
+						"text-xs font-medium mb-1.5 flex items-baseline gap-1.5",
 						message.isSelf ? "text-primary" : "text-foreground"
 					)}>
 						<span>{message.senderDisplayName}</span>
 						{isBot && <BotBadge />}
+						{/* Subtle timestamp to the right of the
+						    username — same row line as Discord /
+						    Slack / iMessage's group headers.  Only
+						    shown on the FIRST message of a sender's
+						    consecutive run; collapsed-group
+						    successors inherit it from the header
+						    above and don't re-render to keep the
+						    timeline clean.  Muted at 60% so it
+						    reads as metadata, not content. */}
+						<span className="text-[10px] font-normal text-muted-foreground/60 tabular-nums">
+							{formatChatTimestamp(message.timestamp)}
+						</span>
 					</div>
 				)}
 				{message.replyTo && <ReplyQuote replyTo={message.replyTo} />}
@@ -1646,4 +1658,26 @@ function formatBytes(bytes: number): string {
 	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
 	if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 	return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+/** Compact timestamp for the username line.  Same shape Discord /
+ * Slack / iMessage use: time-of-day for messages today, "Yesterday
+ * HH:MM" for yesterday, "MMM D" for older within the year, "MMM D,
+ * YYYY" for older still.  Locale-aware via toLocaleTimeString /
+ * toLocaleDateString — respects 12h/24h preferences set at the OS
+ * level. */
+function formatChatTimestamp(ts: number): string {
+	const d = new Date(ts);
+	const now = new Date();
+	const sameDay = d.toDateString() === now.toDateString();
+	const yesterday = new Date(now);
+	yesterday.setDate(yesterday.getDate() - 1);
+	const isYesterday = d.toDateString() === yesterday.toDateString();
+	const time = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+	if (sameDay) return time;
+	if (isYesterday) return `Yesterday ${time}`;
+	if (d.getFullYear() === now.getFullYear()) {
+		return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + ` ${time}`;
+	}
+	return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
