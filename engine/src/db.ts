@@ -159,22 +159,21 @@ db.exec(`
 		updated_at INTEGER NOT NULL
 	);
 
-	-- MCP servers attached to each bot.  Owners pick servers from
-	-- Smithery catalog (Layer 6 UI) and the engine exposes their
-	-- tools to the bot LLM at runtime.  qualified_name is
-	-- Smithery package id (e.g. "@modelcontextprotocol/server-
-	-- github" or "exa").  config_json is an opaque per-server
-	-- config blob — JSONSchema is server-defined, validation
-	-- happens at MCP-connect time, we just round-trip the JSON.
-	-- Cascade-delete on bot deletion so a removed bot does not
-	-- leave orphan rows behind.
+	-- MCP servers attached to each bot.  We're protocol-pure: owners
+	-- paste a Streamable-HTTP MCP URL plus optional auth headers
+	-- (typical: Authorization: Bearer <pat>).  No catalog, no proxy,
+	-- no platform-specific glue — if the user can find an MCP URL
+	-- they're qualified to wire up the auth that goes with it.
+	-- 'label' is a freeform display name shown in the bot edit UI.
+	-- Cascade-delete on bot deletion so a removed bot doesn't leave
+	-- orphan rows behind.
 	CREATE TABLE IF NOT EXISTS bot_mcp_servers (
-		id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-		bot_id                  INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
-		smithery_qualified_name TEXT NOT NULL,
-		config_json             TEXT NOT NULL DEFAULT '{}',
-		created_at              INTEGER NOT NULL,
-		UNIQUE(bot_id, smithery_qualified_name)
+		id           INTEGER PRIMARY KEY AUTOINCREMENT,
+		bot_id       INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+		label        TEXT NOT NULL DEFAULT '',
+		url          TEXT NOT NULL DEFAULT '',
+		headers_json TEXT NOT NULL DEFAULT '{}',
+		created_at   INTEGER NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_bot_mcp_servers_bot ON bot_mcp_servers(bot_id);
 
@@ -510,6 +509,36 @@ ensureColumns("bots", [
 	{ name: "daily_token_limit",   ddl: "daily_token_limit INTEGER NOT NULL DEFAULT 0" },
 	{ name: "daily_call_limit",    ddl: "daily_call_limit INTEGER NOT NULL DEFAULT 0" },
 ]);
+
+// Schema rewrite: bot_mcp_servers used to be Smithery-specific
+// `(smithery_qualified_name, config_json)`; we've since dropped
+// the catalog and proxy in favour of users pasting raw MCP URLs +
+// auth headers.  When we detect the old shape, drop the table —
+// the grand total of attachments worth migrating is "however many
+// the user had on the day they upgraded," and the new flow takes
+// ten seconds to re-add each one.  Idempotent: no-op on installs
+// that already have the new columns.
+{
+	const cols = new Set(
+		(db.prepare("PRAGMA table_info(bot_mcp_servers)").all() as Array<{ name: string }>)
+			.map(c => c.name),
+	);
+	if (cols.size > 0 && !cols.has("url")) {
+		console.log("engine: rewriting bot_mcp_servers for URL-based attachments (existing rows dropped)");
+		db.exec("DROP TABLE bot_mcp_servers");
+		db.exec(`
+			CREATE TABLE bot_mcp_servers (
+				id           INTEGER PRIMARY KEY AUTOINCREMENT,
+				bot_id       INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+				label        TEXT NOT NULL DEFAULT '',
+				url          TEXT NOT NULL DEFAULT '',
+				headers_json TEXT NOT NULL DEFAULT '{}',
+				created_at   INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_bot_mcp_servers_bot ON bot_mcp_servers(bot_id);
+		`);
+	}
+}
 
 // Per-bot per-UTC-day rolling usage counters.  Reads on the hot
 // path (every mention checks today's usage against the bot's
@@ -1192,43 +1221,53 @@ export function hasUserIntegration(userId: string, integration: string): boolean
 
 // ─── Per-bot MCP servers ────────────────────────────────────────────
 //
-// Each bot has zero or more MCP servers attached (from Smithery's
-// catalog).  Stored as (bot_id, qualified_name, config) triples;
-// the config blob is opaque JSON whose shape is dictated by the
-// individual server's published JSONSchema (Layer 6 surfaces the
-// form in the bot edit UI).
+// Each bot has zero or more MCP servers attached.  We're protocol-
+// pure: a row is just a Streamable-HTTP URL plus optional auth
+// headers.  No catalog, no proxy, no platform-specific glue.  The
+// runtime opens each server with `new StreamableHTTPClientTransport(
+// url, { requestInit: { headers } })` — see engine/src/mcp/bot_tools.ts.
 
 export interface BotMcpServer {
 	id: number;
 	bot_id: number;
-	smithery_qualified_name: string;
-	config: Record<string, unknown>;
+	label: string;
+	url: string;
+	/** HTTP headers added to every MCP request.  Typical use:
+	 * `{ "Authorization": "Bearer <pat>" }`.  Empty when the server
+	 * is anonymously accessible. */
+	headers: Record<string, string>;
 	created_at: number;
 }
 
 interface RawBotMcpServerRow {
 	id: number;
 	bot_id: number;
-	smithery_qualified_name: string;
-	config_json: string;
+	label: string;
+	url: string;
+	headers_json: string;
 	created_at: number;
 }
 
 const insertBotMcpServerStmt = db.prepare(`
-	INSERT INTO bot_mcp_servers (bot_id, smithery_qualified_name, config_json, created_at)
-	VALUES (?, ?, ?, ?)
-	ON CONFLICT(bot_id, smithery_qualified_name) DO UPDATE SET
-		config_json = excluded.config_json
+	INSERT INTO bot_mcp_servers (bot_id, label, url, headers_json, created_at)
+	VALUES (?, ?, ?, ?, ?)
 	RETURNING id
 `);
+const updateBotMcpServerStmt = db.prepare(`
+	UPDATE bot_mcp_servers SET
+		label        = COALESCE(?, label),
+		url          = COALESCE(?, url),
+		headers_json = COALESCE(?, headers_json)
+	WHERE id = ?
+`);
 const listBotMcpServersStmt = db.prepare(`
-	SELECT id, bot_id, smithery_qualified_name, config_json, created_at
+	SELECT id, bot_id, label, url, headers_json, created_at
 	FROM bot_mcp_servers
 	WHERE bot_id = ?
 	ORDER BY created_at ASC
 `);
 const getBotMcpServerStmt = db.prepare(`
-	SELECT id, bot_id, smithery_qualified_name, config_json, created_at
+	SELECT id, bot_id, label, url, headers_json, created_at
 	FROM bot_mcp_servers
 	WHERE id = ?
 `);
@@ -1238,41 +1277,63 @@ const deleteBotMcpServerStmt = db.prepare(
 
 function mapMcpRow(raw: RawBotMcpServerRow | undefined): BotMcpServer | null {
 	if (!raw) return null;
-	let config: Record<string, unknown> = {};
+	let headers: Record<string, string> = {};
 	try {
-		const parsed = JSON.parse(raw.config_json ?? "{}");
+		const parsed = JSON.parse(raw.headers_json ?? "{}");
 		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-			config = parsed as Record<string, unknown>;
+			// Coerce non-string values to strings; anything stored
+			// here came from the API and should already be a
+			// string-map, but be defensive.
+			for (const [k, v] of Object.entries(parsed)) {
+				if (typeof v === "string") headers[k] = v;
+			}
 		}
 	} catch {
-		// Malformed JSON → treat as empty.  The API caller stored it
-		// originally so this shouldn't happen, but defensive.
-		console.warn(`db: bot_mcp_servers ${raw.id} has malformed config_json`);
+		console.warn(`db: bot_mcp_servers ${raw.id} has malformed headers_json`);
 	}
 	return {
 		id: raw.id,
 		bot_id: raw.bot_id,
-		smithery_qualified_name: raw.smithery_qualified_name,
-		config,
+		label: raw.label,
+		url: raw.url,
+		headers,
 		created_at: raw.created_at,
 	};
 }
 
-/** Attach an MCP server to a bot.  Idempotent on (bot_id,
- * qualified_name) — a second add for the same server replaces the
- * stored config.  Returns the row's id. */
+/** Attach an MCP server to a bot.  Returns the row's id. */
 export function addBotMcpServer(opts: {
 	bot_id: number;
-	qualified_name: string;
-	config?: Record<string, unknown>;
+	label: string;
+	url: string;
+	headers?: Record<string, string>;
 }): number {
 	const r = insertBotMcpServerStmt.get(
 		opts.bot_id,
-		opts.qualified_name,
-		JSON.stringify(opts.config ?? {}),
+		opts.label,
+		opts.url,
+		JSON.stringify(opts.headers ?? {}),
 		Date.now(),
 	) as { id: number };
 	return r.id;
+}
+
+/** Edit an attached server in place.  Pass undefined for any field
+ * that should be left alone; the SQL COALESCE preserves it.  Used
+ * by PATCH /api/bots/:id/mcp/:mcpId to let users rotate auth tokens
+ * or rename the label without re-attaching. */
+export function updateBotMcpServer(id: number, patch: {
+	label?: string;
+	url?: string;
+	headers?: Record<string, string>;
+}): BotMcpServer | null {
+	updateBotMcpServerStmt.run(
+		patch.label ?? null,
+		patch.url ?? null,
+		patch.headers === undefined ? null : JSON.stringify(patch.headers),
+		id,
+	);
+	return getBotMcpServerById(id);
 }
 
 export function listBotMcpServers(botId: number): BotMcpServer[] {

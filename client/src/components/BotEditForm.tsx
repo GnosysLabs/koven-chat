@@ -50,15 +50,10 @@ import {
 import {
 	listBotMcpServers as fetchBotMcpServers,
 	attachBotMcpServer,
+	patchBotMcpServer,
 	detachBotMcpServer,
-	searchSmitheryCatalog,
-	getSmitheryServerDetail,
-	SmitheryKeyMissingError,
 	type BotMcpAttachment,
-	type SmitheryServerSummary,
-	type SmitheryServerDetail,
 } from "@/lib/bot-mcp";
-import { McpConfigDialog } from "@/components/McpConfigDialog";
 import { claimBellOffset, releaseBellOffset } from "@/state/bell-offset";
 import { cn } from "@/lib/utils";
 
@@ -151,13 +146,14 @@ function parseLimit(s: string): number {
 
 const NAME_PATTERN = /^[a-z0-9-]{1,21}$/;
 
-/** Catalog pick queued during create mode.  Carries the summary so
- * the Tools tab can render the queued row with display name +
- * description, plus the per-server config the user supplied via
- * McpConfigDialog (empty object for servers that didn't need any). */
+/** MCP attachment queued during create mode.  Same shape as the
+ * AttachMcpRequest the engine accepts after bot creation; the
+ * parent's handleSubmit flushes the queue against /api/bots/:id/mcp
+ * once the new bot id exists. */
 interface PendingMcpAttachment {
-	server: SmitheryServerSummary;
-	config: Record<string, unknown>;
+	label: string;
+	url: string;
+	headers: Record<string, string>;
 }
 
 /** Tabs are ordered by the typical create flow.  "tools" is gated
@@ -500,7 +496,11 @@ export function BotEditForm({
 			if (pendingMcpAttachments.length > 0) {
 				try {
 					for (const p of pendingMcpAttachments) {
-						await attachBotMcpServer(accessToken, saved.id, p.server.qualifiedName, p.config);
+						await attachBotMcpServer(accessToken, saved.id, {
+							label: p.label,
+							url: p.url,
+							headers: p.headers,
+						});
 					}
 					setPendingMcpAttachments([]);
 				} catch (err) {
@@ -1309,15 +1309,19 @@ function formatBytes(n: number): string {
 // ─── Tools (MCP) tab ───────────────────────────────────────────────
 //
 // Two sections:
-//   - Attached servers: GET /api/bots/:id/mcp + per-row detach
-//   - Catalog browse: search field hits /api/smithery/search,
-//     click a result to attach.  Shows a "configure your Smithery
-//     key first" nudge when the engine reports the key is missing.
+//   - Attached servers: list of URL-based MCP attachments with edit
+//     and detach affordances.
+//   - Add server form: URL + label + optional Authorization header
+//     (with show/hide) + advanced raw-headers textarea.  No catalog
+//     browse, no OAuth dance, no Smithery proxy — protocol-pure.
 //
-// Servers with required config (the registry's JSONSchema marks
-// fields as `required`) are surfaced with a hint — for now the
-// attach flow uses an empty config object.  A first-class config
-// form generator is future work.
+// SECURITY NOTE: any caller who can mention the bot can invoke its
+// tools, which means anyone in any room with the bot can act with
+// whatever permissions the URL + headers grant.  Surface that
+// explicitly under the form so the owner makes an informed choice
+// (especially for static-token-auth servers like the user's own
+// API key for some service — leaking that to "anyone in the room"
+// is a real risk worth flagging).
 
 function ToolsTab({
 	bot,
@@ -1327,9 +1331,9 @@ function ToolsTab({
 }: {
 	bot: BotSummary | null;
 	accessToken: string | null;
-	/** Catalog picks queued during create mode.  Ignored in edit
-	 * mode (where we mutate the engine directly).  The parent flushes
-	 * this queue after createBot succeeds. */
+	/** Picks queued during create mode.  Ignored in edit mode (where
+	 * we mutate the engine directly).  The parent flushes this
+	 * queue after createBot succeeds. */
 	pendingAttachments: PendingMcpAttachment[];
 	onPendingChange(next: PendingMcpAttachment[]): void;
 }) {
@@ -1339,29 +1343,21 @@ function ToolsTab({
 	const [loading, setLoading] = useState(!isCreateMode);
 	const [listError, setListError] = useState<string | null>(null);
 
-	const [query, setQuery] = useState("");
-	const [searchResults, setSearchResults] = useState<SmitheryServerSummary[]>([]);
-	const [searching, setSearching] = useState(false);
-	const [searchError, setSearchError] = useState<string | null>(null);
-	const [keyMissing, setKeyMissing] = useState(false);
-
-	const [busyQualifiedName, setBusyQualifiedName] = useState<string | null>(null);
+	// Form state for adding a new server.  Kept inline (vs. a
+	// dialog) because it's a small enough form to live alongside
+	// the attached list — and the user told us not to overcomplicate.
+	const [formLabel, setFormLabel] = useState("");
+	const [formUrl, setFormUrl] = useState("");
+	const [formAuthToken, setFormAuthToken] = useState("");
+	const [formAuthScheme, setFormAuthScheme] = useState<"bearer" | "raw">("bearer");
+	const [formExtraHeaders, setFormExtraHeaders] = useState("");
+	const [showToken, setShowToken] = useState(false);
+	const [showAdvanced, setShowAdvanced] = useState(false);
 	const [actionError, setActionError] = useState<string | null>(null);
+	const [submitting, setSubmitting] = useState(false);
+	const [editingId, setEditingId] = useState<number | null>(null);
 
-	// Config-dialog state.  When the user clicks Attach on a server
-	// whose schema declares required fields, we open this dialog
-	// with the server's detail and complete the attach only after
-	// the user fills it out.  Servers with no required config skip
-	// the dialog and attach directly.
-	const [configTarget, setConfigTarget] = useState<{
-		summary: SmitheryServerSummary;
-		detail: SmitheryServerDetail;
-	} | null>(null);
-
-	// Initial fetch of the bot's existing attachments.  Re-runs when
-	// the bot id changes (parent flips between bots).  Skipped
-	// entirely in create mode — there's no bot id yet, the source of
-	// truth is the parent's pendingAttachments queue.
+	// Initial fetch of the bot's attached servers (edit mode only).
 	useEffect(() => {
 		if (!accessToken || !bot) {
 			setLoading(false);
@@ -1377,131 +1373,145 @@ function ToolsTab({
 		return () => { cancelled = true; };
 	}, [accessToken, bot?.id]);
 
-	// Debounced catalog search.  Empty query returns top servers; the
-	// 250ms wait is enough to avoid hammering the proxy on every
-	// keystroke without making the UI feel sluggish.
-	useEffect(() => {
-		if (!accessToken) return;
-		let cancelled = false;
-		setSearchError(null);
-		setKeyMissing(false);
-		const handle = window.setTimeout(async () => {
-			setSearching(true);
-			try {
-				const r = await searchSmitheryCatalog(accessToken, query);
-				if (!cancelled) setSearchResults(r.servers);
-			} catch (err) {
-				if (cancelled) return;
-				if (err instanceof SmitheryKeyMissingError) {
-					setKeyMissing(true);
-					setSearchResults([]);
-				} else {
-					setSearchError(err instanceof Error ? err.message : String(err));
-				}
-			} finally {
-				if (!cancelled) setSearching(false);
-			}
-		}, 250);
-		return () => { cancelled = true; window.clearTimeout(handle); };
-	}, [accessToken, query]);
-
-	async function attach(server: SmitheryServerSummary) {
-		if (!accessToken) return;
+	function resetForm() {
+		setFormLabel("");
+		setFormUrl("");
+		setFormAuthToken("");
+		setFormAuthScheme("bearer");
+		setFormExtraHeaders("");
+		setShowAdvanced(false);
 		setActionError(null);
-		setBusyQualifiedName(server.qualifiedName);
-
-		// Fetch the server detail before deciding what to do.  When
-		// the schema declares required fields we route through the
-		// config dialog; when it doesn't, we attach immediately with
-		// an empty config object.  Detail-fetch failure is non-fatal
-		// — fall through to direct-attach so the user isn't blocked
-		// on a transient registry hiccup.
-		let detail: SmitheryServerDetail | null = null;
-		try { detail = await getSmitheryServerDetail(accessToken, server.qualifiedName); } catch { /* fall through */ }
-		setBusyQualifiedName(null);
-
-		if (detail && needsConfigDialog(detail)) {
-			// Open the dialog and stop here — completion fires
-			// from finishAttach() once the user submits the form.
-			setConfigTarget({ summary: server, detail });
-			return;
-		}
-
-		await finishAttach(server, {});
+		setEditingId(null);
 	}
 
-	/** Complete the attach, with whatever config the dialog (or empty
-	 * defaulting) produced.  Two routing branches:
-	 *   - Create mode: enqueue with config; the parent flushes after
-	 *     createBot succeeds.
-	 *   - Edit mode: POST /api/bots/:id/mcp now with the config and
-	 *     update local list state on success.
-	 * Throws on edit-mode network failure so the dialog can surface
-	 * the error inline rather than closing optimistically. */
-	async function finishAttach(server: SmitheryServerSummary, config: Record<string, unknown>) {
-		if (!accessToken) return;
-		if (isCreateMode) {
-			const filtered = pendingAttachments.filter(p => p.server.qualifiedName !== server.qualifiedName);
-			onPendingChange([...filtered, { server, config }]);
-			return;
+	function startEdit(row: BotMcpAttachment) {
+		setEditingId(row.id);
+		setFormLabel(row.label);
+		setFormUrl(row.url);
+		// Try to recover an "Authorization: Bearer …" entry into
+		// the dedicated auth field; everything else lands in the
+		// advanced raw-headers textarea.
+		const restHeaders: Record<string, string> = { ...row.headers };
+		const auth = restHeaders["Authorization"] ?? restHeaders["authorization"];
+		if (auth && /^Bearer\s+/i.test(auth)) {
+			setFormAuthScheme("bearer");
+			setFormAuthToken(auth.replace(/^Bearer\s+/i, ""));
+			delete restHeaders["Authorization"];
+			delete restHeaders["authorization"];
+		} else {
+			setFormAuthScheme("bearer");
+			setFormAuthToken("");
 		}
-		if (!bot) return;
-		setBusyQualifiedName(server.qualifiedName);
+		const extras = Object.entries(restHeaders);
+		setFormExtraHeaders(
+			extras.length === 0
+				? ""
+				: JSON.stringify(Object.fromEntries(extras), null, 2),
+		);
+		setShowAdvanced(extras.length > 0);
+		setActionError(null);
+	}
+
+	/** Build the final headers map from the form fields.  The auth
+	 * field is the common case (Bearer token); advanced JSON is
+	 * merged on top so power users can set arbitrary headers
+	 * (X-Api-Key, custom tenant ids, etc.). */
+	function buildHeaders(): Record<string, string> | { error: string } {
+		const headers: Record<string, string> = {};
+		const tok = formAuthToken.trim();
+		if (tok.length > 0) {
+			headers["Authorization"] = formAuthScheme === "bearer" ? `Bearer ${tok}` : tok;
+		}
+		const raw = formExtraHeaders.trim();
+		if (raw.length > 0) {
+			let parsed: unknown;
+			try { parsed = JSON.parse(raw); } catch (err) {
+				return { error: `Advanced headers: invalid JSON (${err instanceof Error ? err.message : String(err)})` };
+			}
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+				return { error: "Advanced headers must be a JSON object." };
+			}
+			for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+				if (typeof v !== "string") {
+					return { error: `Advanced headers: ${k} must be a string.` };
+				}
+				headers[k] = v;
+			}
+		}
+		return headers;
+	}
+
+	async function submit() {
+		setActionError(null);
+		const url = formUrl.trim();
+		if (!url) { setActionError("URL is required."); return; }
+		try { new URL(url); } catch { setActionError("URL doesn't parse."); return; }
+		const label = formLabel.trim() || hostnameFromUrl(url);
+		const headersOrError = buildHeaders();
+		if ("error" in headersOrError) { setActionError(headersOrError.error); return; }
+		const headers = headersOrError;
+
+		setSubmitting(true);
 		try {
-			const row = await attachBotMcpServer(accessToken, bot.id, server.qualifiedName, config);
-			setAttached(prev => {
-				// Engine treats duplicate attach as upsert — match
-				// that semantics client-side so the list doesn't
-				// duplicate after a re-attach.
-				const filtered = prev.filter(p => p.smithery_qualified_name !== row.smithery_qualified_name);
-				return [...filtered, row];
-			});
+			if (isCreateMode) {
+				// Queue locally; parent flushes after createBot succeeds.
+				const filtered = pendingAttachments.filter(p => p.url !== url || (editingId === null));
+				if (editingId !== null) {
+					// In create mode, "edit" replaces the queued entry
+					// at that synthetic id — we use index-as-id since
+					// there's no real DB row yet.
+					onPendingChange(
+						pendingAttachments.map((p, i) =>
+							i === editingId ? { label, url, headers } : p,
+						),
+					);
+				} else {
+					onPendingChange([...filtered, { label, url, headers }]);
+				}
+			} else if (bot && accessToken) {
+				if (editingId !== null) {
+					const updated = await patchBotMcpServer(accessToken, bot.id, editingId, { label, url, headers });
+					setAttached(prev => prev.map(r => r.id === editingId ? updated : r));
+				} else {
+					const row = await attachBotMcpServer(accessToken, bot.id, { label, url, headers });
+					setAttached(prev => [...prev, row]);
+				}
+			}
+			resetForm();
 		} catch (err) {
 			setActionError(err instanceof Error ? err.message : String(err));
-			throw err;
 		} finally {
-			setBusyQualifiedName(null);
+			setSubmitting(false);
 		}
 	}
 
 	async function detach(row: BotMcpAttachment) {
 		if (!accessToken || !bot) return;
 		setActionError(null);
-		setBusyQualifiedName(row.smithery_qualified_name);
 		try {
 			await detachBotMcpServer(accessToken, bot.id, row.id);
 			setAttached(prev => prev.filter(p => p.id !== row.id));
+			if (editingId === row.id) resetForm();
 		} catch (err) {
 			setActionError(err instanceof Error ? err.message : String(err));
-		} finally {
-			setBusyQualifiedName(null);
 		}
 	}
 
-	function detachPending(qualifiedName: string) {
-		setActionError(null);
-		onPendingChange(pendingAttachments.filter(p => p.server.qualifiedName !== qualifiedName));
+	function detachPending(idx: number) {
+		onPendingChange(pendingAttachments.filter((_, i) => i !== idx));
+		if (editingId === idx) resetForm();
 	}
 
-	// Names already attached (or queued).  Drives the "Attached" /
-	// disabled state on catalog results so the user can't queue the
-	// same server twice.
-	const attachedQualifiedNames = new Set(
-		isCreateMode
-			? pendingAttachments.map(a => a.server.qualifiedName)
-			: attached.map(a => a.smithery_qualified_name),
-	);
+	const editing = editingId !== null;
 
 	return (
 		<section className="space-y-6">
 			<SectionHeader
 				title="Tools"
-				subtitle="Smithery-hosted MCP servers this bot can call.  Tools listed by each server become available to the model on every reply."
+				subtitle="Attach MCP servers your bot can call. Paste any Streamable-HTTP MCP endpoint and (optional) auth — no catalog, no platform-specific glue."
 			/>
 
-			{/* Attached list — in create mode this renders the queued
-			    catalog picks (flushed by the parent after Create bot);
-			    in edit mode it's the live engine list. */}
+			{/* Attached / Queued list */}
 			<div className="space-y-2">
 				<div className="text-xs font-medium uppercase text-muted-foreground tracking-wide">
 					{isCreateMode ? "Queued" : "Attached"}
@@ -1514,142 +1524,161 @@ function ToolsTab({
 					</div>
 				) : isCreateMode ? (
 					pendingAttachments.length === 0 ? (
-						<div className="rounded-md border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
-							No tools queued. Search the catalog below — picks will attach when you create the bot.
-						</div>
+						<EmptyServersState createMode />
 					) : (
 						<ul className="rounded-md border border-border divide-y divide-border bg-primary/5">
-							{pendingAttachments.map(row => {
-								const hasConfig = Object.keys(row.config).length > 0;
-								return (
-									<li key={row.server.qualifiedName} className="px-3 py-2.5 flex items-center gap-3">
-										<Plug className="h-4 w-4 shrink-0 text-primary" />
-										<div className="flex-1 min-w-0">
-											<div className="text-sm font-medium truncate">{row.server.displayName}</div>
-											<div className="text-[11px] text-muted-foreground truncate">
-												{row.server.qualifiedName} · queued{hasConfig ? " · configured" : ""} — attaches after create
-											</div>
-										</div>
-										<button
-											type="button"
-											onClick={() => detachPending(row.server.qualifiedName)}
-											title="Remove from queue"
-											aria-label="Remove from queue"
-											className="text-muted-foreground hover:text-destructive"
-										>
-											<X className="h-4 w-4" />
-										</button>
-									</li>
-								);
-							})}
+							{pendingAttachments.map((p, idx) => (
+								<AttachmentRow
+									key={`pending-${idx}`}
+									label={p.label || hostnameFromUrl(p.url)}
+									url={p.url}
+									hasAuth={!!p.headers["Authorization"]}
+									suffix=" · queued — attaches after create"
+									onEdit={() => {
+										setEditingId(idx);
+										setFormLabel(p.label);
+										setFormUrl(p.url);
+										const auth = p.headers["Authorization"];
+										if (auth && /^Bearer\s+/i.test(auth)) {
+											setFormAuthScheme("bearer");
+											setFormAuthToken(auth.replace(/^Bearer\s+/i, ""));
+										} else {
+											setFormAuthToken("");
+										}
+										const others = Object.fromEntries(
+											Object.entries(p.headers).filter(([k]) => k !== "Authorization"),
+										);
+										setFormExtraHeaders(
+											Object.keys(others).length > 0 ? JSON.stringify(others, null, 2) : "",
+										);
+										setShowAdvanced(Object.keys(others).length > 0);
+									}}
+									onRemove={() => detachPending(idx)}
+								/>
+							))}
 						</ul>
 					)
 				) : attached.length === 0 ? (
-					<div className="rounded-md border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
-						No tools attached. Search the catalog below to add one.
-					</div>
+					<EmptyServersState createMode={false} />
 				) : (
 					<ul className="rounded-md border border-border divide-y divide-border bg-card/30">
 						{attached.map(row => (
-							<li key={row.id} className="px-3 py-2.5 flex items-center gap-3">
-								<Plug className="h-4 w-4 shrink-0 text-muted-foreground" />
-								<div className="flex-1 min-w-0">
-									<div className="text-sm font-medium truncate">{row.smithery_qualified_name}</div>
-									{Object.keys(row.config).length > 0 && (
-										<div className="text-[11px] text-muted-foreground">configured</div>
-									)}
-								</div>
-								<button
-									type="button"
-									onClick={() => detach(row)}
-									disabled={busyQualifiedName === row.smithery_qualified_name}
-									title="Remove tool"
-									aria-label="Remove tool"
-									className="text-muted-foreground hover:text-destructive disabled:opacity-40"
-								>
-									<X className="h-4 w-4" />
-								</button>
-							</li>
+							<AttachmentRow
+								key={row.id}
+								label={row.label || hostnameFromUrl(row.url)}
+								url={row.url}
+								hasAuth={!!row.headers["Authorization"]}
+								onEdit={() => startEdit(row)}
+								onRemove={() => detach(row)}
+							/>
 						))}
 					</ul>
 				)}
 			</div>
 
-			{/* Catalog search */}
-			<div className="space-y-2">
-				<div className="text-xs font-medium uppercase text-muted-foreground tracking-wide">Browse Smithery catalog</div>
+			{/* Add / Edit form */}
+			<div className="space-y-3 rounded-md border border-border bg-card/20 px-4 py-4">
+				<div className="text-xs font-medium uppercase text-muted-foreground tracking-wide">
+					{editing ? "Edit server" : "Add server"}
+				</div>
 
-				{keyMissing ? (
-					<div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-3 text-sm">
-						<p className="font-medium">Connect your Smithery account first</p>
-						<p className="text-muted-foreground mt-0.5">
-							Add your Smithery API key in Account → Integrations to browse and attach tools.
+				<div className="space-y-1.5">
+					<Label htmlFor="mcp-url">MCP server URL</Label>
+					<Input
+						id="mcp-url"
+						value={formUrl}
+						onChange={e => setFormUrl(e.target.value)}
+						placeholder="https://example.com/mcp"
+						autoComplete="off"
+					/>
+					<p className="text-[11px] text-muted-foreground">
+						Streamable-HTTP MCP endpoint. Many MCP servers publish their endpoint URL in their docs.
+					</p>
+				</div>
+
+				<div className="space-y-1.5">
+					<Label htmlFor="mcp-label">
+						Label <span className="text-muted-foreground font-normal">(optional)</span>
+					</Label>
+					<Input
+						id="mcp-label"
+						value={formLabel}
+						onChange={e => setFormLabel(e.target.value)}
+						placeholder="Defaults to the URL's hostname"
+						autoComplete="off"
+					/>
+				</div>
+
+				<div className="space-y-1.5">
+					<Label htmlFor="mcp-auth">
+						Auth token <span className="text-muted-foreground font-normal">(optional)</span>
+					</Label>
+					<div className="flex items-center gap-2">
+						<select
+							value={formAuthScheme}
+							onChange={e => setFormAuthScheme(e.target.value as "bearer" | "raw")}
+							className="h-9 rounded-md border border-foreground/15 bg-background px-2 text-sm shrink-0"
+						>
+							<option value="bearer">Bearer</option>
+							<option value="raw">Raw</option>
+						</select>
+						<div className="relative flex-1">
+							<Input
+								id="mcp-auth"
+								type={showToken ? "text" : "password"}
+								value={formAuthToken}
+								onChange={e => setFormAuthToken(e.target.value)}
+								placeholder={formAuthScheme === "bearer" ? "your-token" : "Custom Authorization header value"}
+								autoComplete="off"
+								className="pr-9 font-mono"
+							/>
+							<button
+								type="button"
+								onClick={() => setShowToken(s => !s)}
+								className="absolute inset-y-0 right-0 px-2 flex items-center text-muted-foreground hover:text-foreground"
+								aria-label={showToken ? "Hide token" : "Show token"}
+							>
+								{showToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+							</button>
+						</div>
+					</div>
+					<p className="text-[11px] text-muted-foreground">
+						Sent as <code className="font-mono text-[10px]">Authorization: {formAuthScheme === "bearer" ? "Bearer …" : "…"}</code> with every request.
+					</p>
+				</div>
+
+				{showAdvanced ? (
+					<div className="space-y-1.5">
+						<div className="flex items-center justify-between">
+							<Label htmlFor="mcp-extra">Extra headers (JSON)</Label>
+							<button
+								type="button"
+								onClick={() => { setShowAdvanced(false); setFormExtraHeaders(""); }}
+								className="text-[10px] text-muted-foreground hover:text-foreground"
+							>
+								hide
+							</button>
+						</div>
+						<textarea
+							id="mcp-extra"
+							value={formExtraHeaders}
+							onChange={e => setFormExtraHeaders(e.target.value)}
+							placeholder='{"X-Api-Key": "…"}'
+							rows={3}
+							className="w-full font-mono text-xs rounded-md border border-foreground/15 bg-background px-3 py-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-none"
+						/>
+						<p className="text-[10px] text-muted-foreground">
+							Object of header name → value. Merged with the Authorization header above.
 						</p>
 					</div>
 				) : (
-					<>
-						<div className="relative max-w-md">
-							<Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
-							<Input
-								value={query}
-								onChange={e => setQuery(e.target.value)}
-								placeholder="Search for a tool/capability"
-								className="pl-9"
-								autoComplete="off"
-							/>
-						</div>
-
-						{searchError && (
-							<div className="text-sm text-destructive border border-destructive/40 bg-destructive/5 rounded-md px-3 py-2">
-								{searchError}
-							</div>
-						)}
-
-						{searching && searchResults.length === 0 ? (
-							<div className="text-sm text-muted-foreground">Searching…</div>
-						) : searchResults.length === 0 ? (
-							<div className="rounded-md border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
-								No matches.
-							</div>
-						) : (
-							<ul className="rounded-md border border-border divide-y divide-border">
-								{searchResults.map(s => {
-									const isAttached = attachedQualifiedNames.has(s.qualifiedName);
-									const isBusy = busyQualifiedName === s.qualifiedName;
-									return (
-										<li key={s.qualifiedName} className="px-3 py-2.5 flex items-start gap-3">
-											<div className="flex-1 min-w-0">
-												<div className="flex items-center gap-2">
-													<span className="text-sm font-medium truncate">{s.displayName}</span>
-													{s.isDeployed === false && (
-														<span className="text-[10px] px-1.5 py-0.5 rounded-full border border-border text-muted-foreground">
-															not deployed
-														</span>
-													)}
-												</div>
-												<div className="text-[11px] text-muted-foreground truncate">{s.qualifiedName}</div>
-												{s.description && (
-													<p className="text-xs text-muted-foreground mt-1 line-clamp-2">{s.description}</p>
-												)}
-											</div>
-											<Button
-												type="button"
-												size="sm"
-												variant={isAttached ? "ghost" : "outline"}
-												disabled={isAttached || isBusy || s.isDeployed === false}
-												onClick={() => attach(s)}
-											>
-												{isAttached
-													? (isCreateMode ? "Queued" : "Attached")
-													: isBusy ? "Attaching…"
-													: (isCreateMode ? "Queue" : "Attach")}
-											</Button>
-										</li>
-									);
-								})}
-							</ul>
-						)}
-					</>
+					<button
+						type="button"
+						onClick={() => setShowAdvanced(true)}
+						className="text-xs text-muted-foreground hover:text-foreground underline"
+					>
+						Add custom headers…
+					</button>
 				)}
 
 				{actionError && (
@@ -1657,55 +1686,78 @@ function ToolsTab({
 						{actionError}
 					</div>
 				)}
-			</div>
 
-			{configTarget && (
-				<McpConfigDialog
-					open={!!configTarget}
-					onOpenChange={(o) => { if (!o) setConfigTarget(null); }}
-					displayName={configTarget.summary.displayName}
-					qualifiedName={configTarget.summary.qualifiedName}
-					homepage={configTarget.summary.homepage}
-					configSchema={configTarget.detail.configSchema}
-					remote={configTarget.detail.remote}
-					smitheryUrl={configTarget.detail.smitheryUrl}
-					onSubmit={async (config) => {
-						await finishAttach(configTarget.summary, config);
-					}}
-				/>
-			)}
+				<div className="flex items-center gap-2 pt-1">
+					<Button type="button" size="sm" onClick={submit} disabled={submitting || !formUrl.trim()}>
+						{submitting ? "Saving…" : editing ? "Save changes" : "Attach server"}
+					</Button>
+					{editing && (
+						<Button type="button" size="sm" variant="ghost" onClick={resetForm} disabled={submitting}>
+							Cancel edit
+						</Button>
+					)}
+				</div>
+
+				<p className="text-[11px] text-muted-foreground leading-snug border-t border-border/50 pt-3">
+					⚠️ Anyone who can mention the bot — i.e. anyone in any room the bot's joined to — can invoke its tools. The token you paste here grants that audience whatever access it authorises. Don't attach personal-account tokens to bots in shared rooms.
+				</p>
+			</div>
 		</section>
 	);
 }
 
-/** True if the registry's config schema declares any required
- * fields.  Kept around for callers that want the strict-required
- * heuristic; today only the broader `needsConfigDialog` is used. */
-function hasRequiredConfig(schema: Record<string, unknown> | undefined): boolean {
-	if (!schema) return false;
-	const required = (schema as { required?: unknown }).required;
-	return Array.isArray(required) && required.length > 0;
+function AttachmentRow({
+	label, url, hasAuth, suffix, onEdit, onRemove,
+}: {
+	label: string;
+	url: string;
+	hasAuth: boolean;
+	suffix?: string;
+	onEdit(): void;
+	onRemove(): void;
+}) {
+	return (
+		<li className="px-3 py-2.5 flex items-center gap-3">
+			<Plug className="h-4 w-4 shrink-0 text-muted-foreground" />
+			<div className="flex-1 min-w-0">
+				<div className="text-sm font-medium truncate">{label}</div>
+				<div className="text-[11px] text-muted-foreground truncate">
+					{url}{hasAuth ? " · authed" : ""}{suffix ?? ""}
+				</div>
+			</div>
+			<button
+				type="button"
+				onClick={onEdit}
+				className="text-xs text-muted-foreground hover:text-foreground"
+			>
+				Edit
+			</button>
+			<button
+				type="button"
+				onClick={onRemove}
+				title="Remove"
+				aria-label="Remove"
+				className="text-muted-foreground hover:text-destructive"
+			>
+				<X className="h-4 w-4" />
+			</button>
+		</li>
+	);
 }
 
-/** Should we open the config dialog before attaching this server?
- *
- * Three triggers:
- *   1. Schema has required fields → user must fill them.
- *   2. Schema has any properties at all (even all optional) → give
- *      the user a chance to configure non-default values.
- *   3. Remote (Smithery-hosted) server with empty schema → most
- *      likely OAuth-based (Reddit, Notion, GitHub-via-Composio).
- *      Dialog surfaces a "Configure on Smithery" link instead of
- *      a form so the user can authorize the integration there.
- *
- * Servers that fall through (local-stdio with no schema) attach
- * directly with empty config, no friction. */
-function needsConfigDialog(detail: SmitheryServerDetail): boolean {
-	const schema = detail.configSchema;
-	if (schema) {
-		const props = (schema as { properties?: unknown }).properties;
-		if (props && typeof props === "object" && Object.keys(props).length > 0) return true;
-	}
-	if (detail.remote && detail.smitheryUrl) return true;
-	return false;
+function EmptyServersState({ createMode }: { createMode: boolean }) {
+	return (
+		<div className="rounded-md border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+			{createMode
+				? "No tools queued. Add a server below — picks attach when you create the bot."
+				: "No tools attached. Use the form below to add one."}
+		</div>
+	);
+}
+
+/** Best-effort hostname extraction for the "Defaults to" label
+ * placeholder.  Returns the URL string itself when parsing fails so
+ * the form still degrades gracefully. */
+function hostnameFromUrl(url: string): string {
+	try { return new URL(url).hostname; } catch { return url; }
 }

@@ -1,12 +1,12 @@
 // Per-bot MCP tool gathering / routing.
 //
-// This is the bridge between Layer 4's stored bot↔server attachments
-// and the LLM tool-use loop in bot_pipeline.ts.  Responsibilities:
+// Bridges the stored bot↔server attachments and the LLM tool-use
+// loop in bot_pipeline.ts.  Responsibilities:
 //
 //   1. Open one MCP session per attached server for the bot.
 //   2. Concatenate all servers' tool listings into a single OpenAI
-//      `tools[]` array, with names namespaced so two servers can both
-//      expose e.g. `search` without colliding.
+//      `tools[]` array, with names namespaced so two servers can
+//      both expose e.g. `search` without colliding.
 //   3. Route an `AssistantToolCall` from the LLM back to the right
 //      session by parsing the namespace prefix.
 //   4. Tear all sessions down on demand.
@@ -14,13 +14,13 @@
 // Naming scheme: `srv<id>__<originalToolName>` — the prefix is the
 // `bot_mcp_servers.id` row id (a number) so it's compact, unique
 // per-bot, and trivially OpenAI-tool-name compliant (the regex is
-// `^[a-zA-Z0-9_-]+$`, no `/` or `@` allowed which rules out raw
-// qualified names like `@modelcontextprotocol/server-github`).
+// `^[a-zA-Z0-9_-]+$`, no `/` or `@` allowed).
 //
-// When the bot owner has no Smithery key configured, this module
-// returns an empty result — the pipeline continues as the no-tools
-// path.  When a single server fails to open we log + skip it; one
-// broken server shouldn't blank-tool the whole bot.
+// We're protocol-pure: no catalog, no proxy, no platform-specific
+// glue.  An attached server is a Streamable-HTTP URL plus optional
+// headers; we hand both to the MCP SDK's transport.  When a single
+// server fails to open we log + skip it so one broken server
+// doesn't blank-tool the whole bot.
 
 import {
 	openMcpSession,
@@ -30,14 +30,10 @@ import {
 	type McpSession,
 	type McpToolResult,
 } from "./client";
-import { buildSmitheryServerUrl } from "./smithery";
 import {
 	listBotMcpServers,
-	getUserIntegrationSecretEnc,
 	type BotRow,
-	type BotMcpServer,
 } from "../db";
-import { openSecret } from "../secret_box";
 import type { ToolDefinition } from "../llm_client";
 
 const TOOL_PREFIX = "srv";
@@ -47,16 +43,17 @@ const TOOL_SEPARATOR = "__";
  * so the router can look it up by the namespace prefix. */
 export interface BotMcpRoute {
 	rowId: number;
-	qualifiedName: string;
+	label: string;
+	url: string;
 	session: McpSession;
 }
 
 export interface BotMcpBundle {
-	/** Tools to hand to chatCompletion().  Empty when no servers were
-	 * usable (no key, no attachments, or all opens failed). */
+	/** Tools to hand to chatCompletion().  Empty when no servers
+	 * were usable (no attachments, or all opens failed). */
 	tools: ToolDefinition[];
-	/** Routing table for tool-call dispatch.  Keyed by row id (number)
-	 * so `parseToolName` can index directly. */
+	/** Routing table for tool-call dispatch.  Keyed by row id so
+	 * `parseToolName` can index directly. */
 	routes: Map<number, BotMcpRoute>;
 }
 
@@ -71,25 +68,6 @@ export async function openBotMcpBundle(bot: BotRow): Promise<BotMcpBundle> {
 	const attachments = listBotMcpServers(bot.id);
 	if (attachments.length === 0) return empty;
 
-	// Decrypt the bot owner's Smithery key.  All of this bot's MCP
-	// servers share the same key — that's the locked design decision
-	// (per-user, not per-bot, so adding another bot doesn't mean
-	// re-pasting the same secret).
-	const apiKeyEnc = getUserIntegrationSecretEnc(bot.owner_id, "smithery");
-	if (!apiKeyEnc) {
-		console.warn(
-			`bot ${bot.mxid}: ${attachments.length} MCP server(s) attached but owner has no Smithery key — skipping MCP`,
-		);
-		return empty;
-	}
-	let smitheryKey: string;
-	try {
-		smitheryKey = openSecret(apiKeyEnc);
-	} catch (err) {
-		console.error(`bot ${bot.mxid}: Smithery key decrypt failed`, err);
-		return empty;
-	}
-
 	const tools: ToolDefinition[] = [];
 	const routes = new Map<number, BotMcpRoute>();
 
@@ -98,17 +76,14 @@ export async function openBotMcpBundle(bot: BotRow): Promise<BotMcpBundle> {
 	// also keeps log output sane.  In practice bots will have ≤3
 	// servers attached so the latency cost is fine.
 	for (const att of attachments) {
+		const labelOrUrl = att.label || att.url;
 		try {
-			const url = buildSmitheryServerUrl({
-				qualifiedName: att.smithery_qualified_name,
-				apiKey: smitheryKey,
-				config: att.config,
-			});
-			const session = await openMcpSession(url);
+			const session = await openMcpSession(att.url, att.headers);
 			const serverTools = await listMcpTools(session);
 			routes.set(att.id, {
 				rowId: att.id,
-				qualifiedName: att.smithery_qualified_name,
+				label: att.label,
+				url: att.url,
 				session,
 			});
 			for (const t of serverTools) {
@@ -116,17 +91,17 @@ export async function openBotMcpBundle(bot: BotRow): Promise<BotMcpBundle> {
 					type: "function",
 					function: {
 						name: namespaceToolName(att.id, t.function.name),
-						description: prefixDescription(att, t.function.description),
+						description: prefixDescription(att.label || att.url, t.function.description),
 						parameters: t.function.parameters,
 					},
 				});
 			}
 			console.log(
-				`bot ${bot.mxid}: MCP ${att.smithery_qualified_name} ready (${serverTools.length} tools)`,
+				`bot ${bot.mxid}: MCP ${labelOrUrl} ready (${serverTools.length} tools)`,
 			);
 		} catch (err) {
 			console.warn(
-				`bot ${bot.mxid}: MCP ${att.smithery_qualified_name} failed to open — skipping`,
+				`bot ${bot.mxid}: MCP ${labelOrUrl} failed to open — skipping`,
 				err,
 			);
 		}
@@ -146,9 +121,8 @@ export async function closeBotMcpBundle(bundle: BotMcpBundle): Promise<void> {
 
 /** Dispatch one tool invocation back to the originating server.
  * Returns a stringified result suitable for handing to the LLM as a
- * `tool` role message.  When the namespaced name doesn't resolve to a
- * known route we return an error string so the model can see what
- * went wrong (vs. throwing, which would abort the loop). */
+ * `tool` role message.  Errors come back as result strings so the
+ * model can see them and decide whether to retry / give up. */
 export async function dispatchToolCall(
 	bundle: BotMcpBundle,
 	namespacedName: string,
@@ -171,11 +145,9 @@ export async function dispatchToolCall(
 	try {
 		return await callMcpTool(route.session, parsed.toolName, args);
 	} catch (err) {
-		// Transport / protocol failure — don't kill the loop; let the
-		// model see the error and decide whether to retry / give up.
 		const detail = err instanceof Error ? err.message : String(err);
 		return {
-			text: `Error invoking ${route.qualifiedName}/${parsed.toolName}: ${detail}`,
+			text: `Error invoking ${route.label || route.url}/${parsed.toolName}: ${detail}`,
 			isError: true,
 		};
 	}
@@ -186,13 +158,9 @@ function namespaceToolName(rowId: number, toolName: string): string {
 }
 
 /** Pretty-print a namespaced tool name for the bot's progress
- * placeholder: returns the tool's bare name plus the originating
- * MCP server's qualified name so users can see "calling search_web
- * (exa)…" rather than "calling srv5__search_web…".  Returns null
- * when the name doesn't parse, when the route id isn't in the
- * bundle, or when the prefix is missing entirely (e.g. the LLM
- * hallucinated a tool that doesn't belong to any server) — caller
- * falls back to the raw name in that case. */
+ * placeholder: returns the tool's bare name plus a friendly server
+ * label.  Returns null when the name doesn't parse / no route
+ * matches; caller falls back to the raw name. */
 export function describeToolCall(
 	bundle: BotMcpBundle,
 	namespacedName: string,
@@ -201,7 +169,7 @@ export function describeToolCall(
 	if (!parsed) return null;
 	const route = bundle.routes.get(parsed.rowId);
 	if (!route) return null;
-	return { tool: parsed.toolName, server: route.qualifiedName };
+	return { tool: parsed.toolName, server: route.label || route.url };
 }
 
 interface ParsedToolName {
@@ -221,11 +189,10 @@ function parseToolName(namespaced: string): ParsedToolName | null {
 	return { rowId, toolName };
 }
 
-/** Keep the original tool description but tag it with the source
- * server's qualified name so the model can reason about provenance
- * ("ask GitHub vs. ask Notion"). */
-function prefixDescription(att: BotMcpServer, original: string | undefined): string {
-	const tag = `[${att.smithery_qualified_name}]`;
+/** Tag the tool description with its server label so the model can
+ * reason about provenance ("ask grokipedia vs. ask exa"). */
+function prefixDescription(serverLabel: string, original: string | undefined): string {
+	const tag = `[${serverLabel}]`;
 	if (!original) return tag;
 	return `${tag} ${original}`;
 }

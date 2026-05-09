@@ -49,10 +49,23 @@ export interface OpenAITool {
 /** Open a streaming MCP session against a hosted server.  Throws
  * when the URL is malformed, the network is unreachable, or the
  * server's initialize handshake fails.  Caller is responsible for
- * closing the session when done. */
-export async function openMcpSession(url: string | URL): Promise<McpSession> {
+ * closing the session when done.
+ *
+ * `headers` (optional) are merged into every request the SDK fires
+ * — typical use is passing `{ Authorization: "Bearer <pat>" }` for
+ * token-protected servers. */
+export async function openMcpSession(
+	url: string | URL,
+	headers?: Record<string, string>,
+): Promise<McpSession> {
 	const urlStr = typeof url === "string" ? url : url.toString();
-	const transport = new StreamableHTTPClientTransport(new URL(urlStr));
+	const transport = new StreamableHTTPClientTransport(new URL(urlStr), {
+		// requestInit is forwarded to every fetch the transport
+		// makes (initialize, list_tools, call_tool, etc.).
+		requestInit: headers && Object.keys(headers).length > 0
+			? { headers }
+			: undefined,
+	});
 	const client = new Client(KOVEN_CLIENT_INFO, { capabilities: {} });
 	await client.connect(transport);
 	return { client, transport, url: urlStr };

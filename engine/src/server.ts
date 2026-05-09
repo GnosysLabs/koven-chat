@@ -68,11 +68,8 @@ import {
 	markFlagRetracted,
 	markRoomAsDm,
 	purgeUserState,
-	hasUserIntegration,
-	setUserIntegrationSecret,
-	clearUserIntegrationSecret,
-	getUserIntegrationSecretEnc,
 	addBotMcpServer,
+	updateBotMcpServer,
 	listBotMcpServers,
 	getBotMcpServerById,
 	deleteBotMcpServer,
@@ -126,7 +123,6 @@ import { sendLoginCodeEmail } from "./email";
 import { extractToken, whoami } from "./auth";
 import { extractKnowledgeText } from "./knowledge_extract";
 import { reconcileOne, startOne, stopOne } from "./bot_manager";
-import { searchSmitheryServers, getSmitheryServer } from "./mcp/registry";
 import { WEIGHT_FLOOR } from "./weight";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -365,21 +361,6 @@ function json(body: unknown, init: ResponseInit = {}): Response {
 	});
 }
 
-/** Decrypt a user's stored Smithery API key, or return null when no
- * key is configured / decryption fails.  Centralised here so every
- * caller (catalog search, bot tool runtime — well, the runtime gets
- * its own copy via openSecret) handles "no key" the same way. */
-function decryptUserSmitheryKey(userId: string): string | null {
-	const enc = getUserIntegrationSecretEnc(userId, "smithery");
-	if (!enc) return null;
-	try {
-		return openSecret(enc);
-	} catch (err) {
-		console.error(`smithery: failed to decrypt key for ${userId}`, err);
-		return null;
-	}
-}
-
 // Loose email validation: well-formed enough to be worth sending.
 // Resend will tell us if it's actually deliverable.  We mostly want to
 // catch obvious typos (missing @, missing TLD) before paying the email
@@ -413,6 +394,55 @@ function clampNonNegInt(v: unknown, max: number): number {
 	const n = Math.floor(v);
 	if (n <= 0) return 0;
 	return Math.min(n, max);
+}
+
+interface ParsedMcpServerBody {
+	label?: string;
+	url?: string;
+	headers?: Record<string, string>;
+}
+
+/** Validate the body shape of POST/PATCH /api/bots/:id/mcp.  Either
+ * yields the cleaned-up fields (only properties the caller actually
+ * sent) or an error string for the M_INVALID_PARAM response.  We
+ * deliberately don't fetch the URL here to validate it — connect-
+ * time errors surface in the bot's logs, which is the right place
+ * for "your URL is wrong" feedback. */
+function parseMcpServerBody(
+	body: { label?: unknown; url?: unknown; headers?: unknown },
+	opts: { requireUrl: boolean },
+): ParsedMcpServerBody | { error: string } {
+	const out: ParsedMcpServerBody = {};
+	if (body.label !== undefined) {
+		if (typeof body.label !== "string") return { error: "label must be a string" };
+		const v = body.label.trim();
+		if (v.length > 100) return { error: "label too long (max 100 chars)" };
+		out.label = v;
+	}
+	if (body.url !== undefined) {
+		if (typeof body.url !== "string") return { error: "url must be a string" };
+		const v = body.url.trim();
+		if (v.length === 0) return { error: "url required" };
+		if (v.length > 2_000) return { error: "url too long" };
+		try { new URL(v); } catch { return { error: "url is not a valid URL" }; }
+		out.url = v;
+	} else if (opts.requireUrl) {
+		return { error: "url required" };
+	}
+	if (body.headers !== undefined) {
+		if (typeof body.headers !== "object" || body.headers === null || Array.isArray(body.headers)) {
+			return { error: "headers must be a JSON object" };
+		}
+		const headers: Record<string, string> = {};
+		for (const [k, v] of Object.entries(body.headers as Record<string, unknown>)) {
+			if (typeof v !== "string") return { error: `header ${k} must be a string` };
+			if (k.length === 0 || k.length > 200) return { error: "header name length out of range" };
+			if (v.length > 4_000) return { error: `header ${k} value too long` };
+			headers[k] = v;
+		}
+		out.headers = headers;
+	}
+	return out;
 }
 
 function isValidBotName(s: string): boolean {
@@ -978,98 +1008,6 @@ export function startServer(): void {
 				}
 				purgeUserState(userId);
 				return json({ ok: true });
-			}
-
-			// ─── Per-user integrations ──────────────────────────────
-			// Encrypted credentials a user has opted into (currently
-			// just the Smithery API key, used to discover + invoke
-			// MCP servers attached to their bots).  Read returns
-			// presence only; the value never leaves the engine.
-			if (req.method === "GET" && path === "/api/me/integrations") {
-				const userId = await whoami(extractToken(req));
-				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
-				return json({
-					integrations: {
-						smithery: { configured: hasUserIntegration(userId, "smithery") },
-					},
-				});
-			}
-
-			if (req.method === "PUT" && path === "/api/me/integrations/smithery") {
-				const userId = await whoami(extractToken(req));
-				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
-				const body = (await req.json().catch(() => null)) as { api_key?: unknown } | null;
-				const apiKey = typeof body?.api_key === "string" ? body.api_key.trim() : "";
-				if (!apiKey) {
-					return json({ errcode: "M_INVALID_PARAM", error: "api_key required" }, { status: 400 });
-				}
-				try {
-					const sealed = sealSecret(apiKey);
-					setUserIntegrationSecret(userId, "smithery", sealed);
-				} catch {
-					return json({ error: "encryption_unavailable" }, { status: 503 });
-				}
-				return json({ ok: true });
-			}
-
-			if (req.method === "DELETE" && path === "/api/me/integrations/smithery") {
-				const userId = await whoami(extractToken(req));
-				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
-				clearUserIntegrationSecret(userId, "smithery");
-				return json({ ok: true });
-			}
-
-			// ─── Smithery catalog proxy ─────────────────────────────
-			// The bot edit UI's "Tools" tab needs to browse Smithery's
-			// registry to attach MCP servers.  We proxy the call (vs.
-			// hitting registry.smithery.ai from the browser) for two
-			// reasons: the registry needs a Bearer token (the user's
-			// personal Smithery key), which we hold encrypted server-
-			// side and never expose to the client; and it dodges any
-			// CORS issues with the third-party registry.
-			//
-			//   GET /api/smithery/search?q=...           → list
-			//   GET /api/smithery/servers/<qualifiedName> → detail + schema
-			//
-			// 503 when the user hasn't configured a Smithery key yet —
-			// the UI nudges them to Account settings in that case.
-			if (req.method === "GET" && path === "/api/smithery/search") {
-				const userId = await whoami(extractToken(req));
-				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
-				const apiKey = decryptUserSmitheryKey(userId);
-				if (!apiKey) {
-					return json({ error: "smithery_key_missing", detail: "Configure your Smithery API key in Account settings before browsing the catalog." }, { status: 503 });
-				}
-				const q = url.searchParams.get("q") ?? "";
-				try {
-					const result = await searchSmitheryServers(apiKey, q);
-					return json(result);
-				} catch (err) {
-					return json({ error: "smithery_search_failed", detail: err instanceof Error ? err.message : String(err) }, { status: 502 });
-				}
-			}
-
-			{
-				// Detail endpoint — qualified names contain "@" and "/"
-				// (e.g. "@modelcontextprotocol/server-github") which we
-				// pull out of the path with a tail-capture regex rather
-				// than splitting on "/" naively.
-				const m = path.match(/^\/api\/smithery\/servers\/(.+)$/);
-				if (req.method === "GET" && m) {
-					const userId = await whoami(extractToken(req));
-					if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
-					const apiKey = decryptUserSmitheryKey(userId);
-					if (!apiKey) {
-						return json({ error: "smithery_key_missing" }, { status: 503 });
-					}
-					const qualifiedName = decodeURIComponent(m[1]!);
-					try {
-						const detail = await getSmitheryServer(apiKey, qualifiedName);
-						return json(detail);
-					} catch (err) {
-						return json({ error: "smithery_detail_failed", detail: err instanceof Error ? err.message : String(err) }, { status: 502 });
-					}
-				}
 			}
 
 			// ─── Suspension state ────────────────────────────────────
@@ -1752,16 +1690,23 @@ export function startServer(): void {
 			}
 
 			// GET    /api/bots/:id/mcp           — list attached MCP servers
-			// POST   /api/bots/:id/mcp           — attach a Smithery server
+			// POST   /api/bots/:id/mcp           — attach an MCP server (URL + headers)
+			// PATCH  /api/bots/:id/mcp/:mcpId    — edit label / url / headers
 			// DELETE /api/bots/:id/mcp/:mcpId    — detach
 			//
-			// MCP servers (from Smithery's catalog) the bot's owner has
-			// attached.  At runtime, the bot's tool-use loop fetches
-			// `tools/list` from each enabled server and exposes them to
-			// the LLM.  See engine/src/mcp/* for the runtime client.
-			// `config` is server-specific JSON; we round-trip it
-			// opaquely (validation happens when the bot actually
-			// connects to the server).
+			// We're protocol-pure: the body is `{ label, url, headers? }`
+			// where `url` points at any Streamable-HTTP MCP endpoint
+			// and `headers` carries optional auth (typical:
+			// `Authorization: Bearer <pat>`).  No catalog, no proxy.
+			// At runtime the tool-use loop fetches `tools/list` from
+			// each attached server and exposes them to the LLM —
+			// see engine/src/mcp/* for the client wiring.
+			//
+			// SECURITY NOTE: any caller who can mention the bot can
+			// invoke its tools, which means anyone in any room with
+			// the bot can act with whatever permissions the URL +
+			// headers grant.  The UI surfaces this when attaching;
+			// the engine just stores what the owner sent.
 			{
 				const m = path.match(/^\/api\/bots\/(\d+)\/mcp(?:\/(\d+))?$/);
 				if (m) {
@@ -1781,38 +1726,44 @@ export function startServer(): void {
 
 					if (req.method === "POST" && mcpId === null) {
 						const body = (await req.json().catch(() => ({}))) as {
-							qualified_name?: unknown;
-							config?: unknown;
+							label?: unknown;
+							url?: unknown;
+							headers?: unknown;
 						};
-						const qualifiedName = typeof body.qualified_name === "string"
-							? body.qualified_name.trim()
-							: "";
-						if (!qualifiedName) {
-							return json({ errcode: "M_INVALID_PARAM", error: "qualified_name required" }, { status: 400 });
-						}
-						// Sanity-cap on the qualified name.  Smithery's
-						// longest published names are well under 100 chars;
-						// a much longer string is almost certainly malformed
-						// or a probing attempt.
-						if (qualifiedName.length > 200) {
-							return json({ errcode: "M_INVALID_PARAM", error: "qualified_name too long" }, { status: 400 });
-						}
-						// Per-server config: opaque JSON object.  Reject
-						// non-object shapes (arrays, strings, numbers) so
-						// we don't store something the runtime can't pass
-						// through to MCP later.
-						const config = body.config;
-						if (config !== undefined
-							&& (typeof config !== "object" || config === null || Array.isArray(config))) {
-							return json({ errcode: "M_INVALID_PARAM", error: "config must be a JSON object" }, { status: 400 });
+						const parsed = parseMcpServerBody(body, { requireUrl: true });
+						if ("error" in parsed) {
+							return json({ errcode: "M_INVALID_PARAM", error: parsed.error }, { status: 400 });
 						}
 						const newId = addBotMcpServer({
 							bot_id: id,
-							qualified_name: qualifiedName,
-							config: (config as Record<string, unknown> | undefined) ?? {},
+							label: parsed.label ?? "",
+							url: parsed.url ?? "",
+							headers: parsed.headers,
 						});
 						const row = getBotMcpServerById(newId);
 						return json({ server: row });
+					}
+
+					if (req.method === "PATCH" && mcpId !== null) {
+						const row = getBotMcpServerById(mcpId);
+						if (!row || row.bot_id !== id) {
+							return json({ errcode: "M_NOT_FOUND" }, { status: 404 });
+						}
+						const body = (await req.json().catch(() => ({}))) as {
+							label?: unknown;
+							url?: unknown;
+							headers?: unknown;
+						};
+						const parsed = parseMcpServerBody(body, { requireUrl: false });
+						if ("error" in parsed) {
+							return json({ errcode: "M_INVALID_PARAM", error: parsed.error }, { status: 400 });
+						}
+						const updated = updateBotMcpServer(mcpId, {
+							label: parsed.label,
+							url: parsed.url,
+							headers: parsed.headers,
+						});
+						return json({ server: updated });
 					}
 
 					if (req.method === "DELETE" && mcpId !== null) {
