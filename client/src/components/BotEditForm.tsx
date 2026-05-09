@@ -1383,7 +1383,7 @@ function ToolsTab({
 							<Input
 								value={query}
 								onChange={e => setQuery(e.target.value)}
-								placeholder="Search GitHub, search the web, fetch URLs…"
+								placeholder="Search for a tool/capability"
 								className="pl-9"
 								autoComplete="off"
 							/>
