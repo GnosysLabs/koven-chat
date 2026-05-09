@@ -1618,16 +1618,7 @@ function MessageRow({
 				    the visual gutter where reactions land; even with
 				    one row of pills, reactions render INSIDE that
 				    gutter rather than pushing the next message down. */}
-				{/* `relative` here so the right column (toolbar, seen-by,
-				    flag pill) can sit absolutely positioned next to the
-				    bubble WITHOUT contributing to row height.  Critical
-				    for "DM spacing matches group-room spacing" — the
-				    SeenIndicator's "Read · time" line under self-DM
-				    messages used to push the right column ~14px taller
-				    than the bubble, dragging the whole row taller.
-				    Now the bubble alone defines row height; right
-				    column overlays into the row's reserved gutter. */}
-				<div className="relative flex items-start gap-2">
+				<div className="flex items-start gap-2">
 					{/* Bubble column.  `relative` so the absolutely-
 					    positioned reaction pills below anchor to the
 					    BUBBLE'S bottom, not the row's bottom.  Anchoring
@@ -1680,14 +1671,7 @@ function MessageRow({
 							</div>
 						)}
 					</div>
-					{/* Right column.  Absolutely positioned so its height
-					    doesn't influence the row — bubble height alone
-					    determines row height.  See parent `relative`
-					    block above for the rationale.  `top-0 left-full
-					    ml-2` puts it flush against the bubble's right
-					    edge; `whitespace-nowrap` keeps SeenIndicator's
-					    "Read · time" from wrapping if it's narrow. */}
-					<div className="absolute top-0 left-full ml-2 flex flex-col items-start gap-1 shrink-0 whitespace-nowrap">
+					<div className="flex flex-col items-start gap-1 shrink-0">
 						{/* Seen-by indicator on YOUR sent messages.
 						    DM rooms get a "Read · time" line; group
 						    rooms get an avatar stack + count that
