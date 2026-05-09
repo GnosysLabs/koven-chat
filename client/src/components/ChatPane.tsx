@@ -708,7 +708,17 @@ export function ChatPane({
 	}
 
 	return (
-		<div className="flex-1 flex flex-col min-w-0">
+		// `min-h-0` is load-bearing: without it, this flex column's
+		// implicit min-height is the sum of its children's content
+		// heights, which OVERRIDES the `flex-1 overflow-y-auto` on
+		// the scroll container below.  Result: the scroll container
+		// expands to fit ALL messages, leaving nothing to scroll.
+		// The bug only shows on first paint — any window resize
+		// triggers a layout recalc that gets it right, which is the
+		// telltale "resize fixes it" symptom.  min-h-0 lets the flex
+		// child shrink below content, so flex-1 + overflow-y-auto
+		// constrain to the available height as intended.
+		<div className="flex-1 flex flex-col min-w-0 min-h-0">
 			<header className="h-12 px-4 flex items-center justify-between gap-3 border-b border-border bg-muted/30">
 				<div className="flex items-center gap-2 min-w-0">
 					<MatrixAvatar
@@ -1476,31 +1486,26 @@ function MessageRow({
 	// timeline reads as steady rhythm and the gutter doubles as the
 	// landing zone for absolutely-positioned reaction pills.
 	//
-	// Row padding.  pb is CONSTANT regardless of whether this row has
-	// reactions — adding a pill must NOT shift layout.  The previous
-	// approach toggled pb-7 vs pb-0.5 based on reaction state, which
-	// made adding a single reaction grow the row by 26px and bump
-	// every message below it down by the same amount.  That was
-	// indistinguishable from "spacing is broken" because reaction
-	// activity and message arrival both produce vertical motion.
+	// Row padding tuned for Discord-style "tight stack on same sender,
+	// breathing space between groups."
 	//
-	// Now: every row reserves the pill landing zone (pb-6 = 24px),
-	// whether or not reactions are present.  Pills paint into that
-	// reserved gutter, so adding/removing one is purely a paint, not
-	// a layout shift.  pt still varies for sender grouping so the
-	// Discord-style "tighter when same sender" rhythm is preserved.
-	//
-	// Pill stack height = ReactionPills' internal mt-1 (4px) + pill
-	// block height (~24px) = ~28px below the bubble.  pb-6 + pt-1
-	// (continuation) = 28px, exactly fits the pill.  pb-6 + pt-4
-	// (new group) = 40px, comfortable.
-	//
-	//   - Continuation row pt: pt-1 (4px) — tight stack
-	//   - New-group row pt:    pt-4 (16px) — clear group separator
-	//   - All rows pb:         pb-6 (24px) — pill landing zone
+	//   - Continuation row pt: pt-0 (0px) — bubbles touch directly,
+	//     same-sender stack reads as one continuous thread.
+	//   - New-group row pt:    pt-4 (16px) — clear group separator.
+	//   - pb when reactions present: pb-7 (28px) — landing zone for
+	//     the absolutely-positioned reaction pills (pill height ~24px
+	//     + 4px breathing room).  Without this the pills overlay the
+	//     next row's bubble.
+	//   - pb when no reactions:    pb-0.5 (2px) — minimal gap, lets
+	//     same-sender stacks pack as tightly as possible.  Adding a
+	//     reaction grows the row by ~26px which IS a real layout
+	//     shift, but it matches what every other chat client (Slack,
+	//     Discord, iMessage) does on reaction toggle and is what
+	//     makes "no reactions" stacks feel natural.
+	const hasReactions = !isCollapsed && reactions.length > 0;
 	const rowPadding = cn(
-		continuesGroup ? "pt-1" : "pt-4",
-		"pb-6",
+		continuesGroup ? "pt-0" : "pt-4",
+		hasReactions ? "pb-7" : "pb-0.5",
 	);
 
 	// Discord-style mention highlight: left accent border + faint
@@ -1613,7 +1618,16 @@ function MessageRow({
 				    the visual gutter where reactions land; even with
 				    one row of pills, reactions render INSIDE that
 				    gutter rather than pushing the next message down. */}
-				<div className="flex items-start gap-2">
+				{/* `relative` here so the right column (toolbar, seen-by,
+				    flag pill) can sit absolutely positioned next to the
+				    bubble WITHOUT contributing to row height.  Critical
+				    for "DM spacing matches group-room spacing" — the
+				    SeenIndicator's "Read · time" line under self-DM
+				    messages used to push the right column ~14px taller
+				    than the bubble, dragging the whole row taller.
+				    Now the bubble alone defines row height; right
+				    column overlays into the row's reserved gutter. */}
+				<div className="relative flex items-start gap-2">
 					{/* Bubble column.  `relative` so the absolutely-
 					    positioned reaction pills below anchor to the
 					    BUBBLE'S bottom, not the row's bottom.  Anchoring
@@ -1666,7 +1680,14 @@ function MessageRow({
 							</div>
 						)}
 					</div>
-					<div className="flex flex-col items-start gap-1 shrink-0">
+					{/* Right column.  Absolutely positioned so its height
+					    doesn't influence the row — bubble height alone
+					    determines row height.  See parent `relative`
+					    block above for the rationale.  `top-0 left-full
+					    ml-2` puts it flush against the bubble's right
+					    edge; `whitespace-nowrap` keeps SeenIndicator's
+					    "Read · time" from wrapping if it's narrow. */}
+					<div className="absolute top-0 left-full ml-2 flex flex-col items-start gap-1 shrink-0 whitespace-nowrap">
 						{/* Seen-by indicator on YOUR sent messages.
 						    DM rooms get a "Read · time" line; group
 						    rooms get an avatar stack + count that
