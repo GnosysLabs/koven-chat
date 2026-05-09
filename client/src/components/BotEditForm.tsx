@@ -239,11 +239,36 @@ const NAME_PATTERN = /^[a-z0-9-]{1,21}$/;
  * AttachMcpRequest the engine accepts after bot creation; the
  * parent's handleSubmit flushes the queue against /api/bots/:id/mcp
  * once the new bot id exists. */
-interface PendingMcpAttachment {
-	label: string;
-	url: string;
-	headers: Record<string, string>;
-}
+/** A queued MCP attachment from create mode.  Two flavours
+ * matching the live-attach paths:
+ *   kind='http'  → label + URL + headers, flushed via
+ *                  attachBotMcpServer once the bot exists.
+ *   kind='paste' → raw JSON the user pasted, flushed via
+ *                  importBotMcpServers (which parses + version-pins).
+ *                  Always treated as a single queue entry even if
+ *                  the JSON contains multiple servers — the import
+ *                  endpoint expands them server-side.
+ *
+ * The discriminated union keeps the create-mode tools tab honest:
+ * users can attach hosted URLs AND paste stdio configs in the same
+ * create flow, and both flush after the first save. */
+type PendingMcpAttachment =
+	| {
+		kind?: "http"; // optional for backwards compat; default 'http'
+		label: string;
+		url: string;
+		headers: Record<string, string>;
+	}
+	| {
+		kind: "paste";
+		/** Display label derived from the JSON for the queued list.
+		 * Best-effort: counts the servers in the paste, e.g. "Paste
+		 * config (3 servers)". */
+		label: string;
+		/** Raw JSON the user pasted.  Forwarded as-is to
+		 * importBotMcpServers on flush. */
+		pasteJson: string;
+	};
 
 /** Tabs are ordered by the typical create flow.  "tools" is gated
  * behind edit mode in create flows (the bot needs to exist before we
@@ -573,11 +598,21 @@ export function BotEditForm({
 			if (pendingMcpAttachments.length > 0) {
 				try {
 					for (const p of pendingMcpAttachments) {
-						await attachBotMcpServer(accessToken, saved.id, {
-							label: p.label,
-							url: p.url,
-							headers: p.headers,
-						});
+						if (p.kind === "paste") {
+							// Pasted JSON config — bulk-import,
+							// engine parses + version-pins each
+							// server inside.  Warnings / skipped
+							// rows are dropped here in the create
+							// flow; user can re-paste in edit mode
+							// to see them surfaced.
+							await importBotMcpServers(accessToken, saved.id, p.pasteJson);
+						} else {
+							await attachBotMcpServer(accessToken, saved.id, {
+								label: p.label,
+								url: p.url,
+								headers: p.headers,
+							});
+						}
 					}
 					setPendingMcpAttachments([]);
 				} catch (err) {
@@ -1523,18 +1558,23 @@ function ToolsTab({
 		try {
 			if (isCreateMode) {
 				// Queue locally; parent flushes after createBot succeeds.
-				const filtered = pendingAttachments.filter(p => p.url !== url || (editingId === null));
+				// Filter dedupes on URL — only HTTP-kind entries have a
+				// URL, paste-kind entries are kept regardless.
+				const filtered = pendingAttachments.filter(p => {
+					if (p.kind === "paste") return true;
+					return p.url !== url || editingId === null;
+				});
 				if (editingId !== null) {
 					// In create mode, "edit" replaces the queued entry
 					// at that synthetic id — we use index-as-id since
 					// there's no real DB row yet.
 					onPendingChange(
 						pendingAttachments.map((p, i) =>
-							i === editingId ? { label, url, headers } : p,
+							i === editingId ? { kind: "http", label, url, headers } : p,
 						),
 					);
 				} else {
-					onPendingChange([...filtered, { label, url, headers }]);
+					onPendingChange([...filtered, { kind: "http", label, url, headers }]);
 				}
 			} else if (bot && accessToken) {
 				if (editingId !== null) {
@@ -1570,16 +1610,18 @@ function ToolsTab({
 		if (editingId === idx) resetForm();
 	}
 
-	/** Bulk-import the pasted JSON config.  Edit-mode only — paste
-	 * mode is hidden during create because the bulk-import endpoint
-	 * is per-bot-id and the bot doesn't exist yet.  Users on create
-	 * get the URL form (or paste later in edit mode after the bot's
-	 * created — chosen this UX because adding stdio attachments
-	 * during create would mean queuing the JSON until create
-	 * resolves, then bulk-importing, with no atomicity guarantees
-	 * for the user's mental model). */
+	/** Bulk-import the pasted JSON config.
+	 *
+	 * Edit mode: posts to the bulk-import engine endpoint
+	 * immediately, surfaces per-server warnings inline.
+	 *
+	 * Create mode: queues the raw JSON onto pendingMcpAttachments
+	 * (kind="paste").  The form's main submit flushes the queue via
+	 * importBotMcpServers once the new bot id exists.  Single-entry
+	 * queue per paste — even if the JSON contained multiple servers
+	 * the queued list shows it as one row, matching how the import
+	 * endpoint treats it (atomic per paste). */
 	async function submitPaste() {
-		if (!accessToken || !bot) return;
 		setActionError(null);
 		setPasteWarnings([]);
 		const trimmed = pasteJson.trim();
@@ -1587,6 +1629,38 @@ function ToolsTab({
 			setActionError("paste a config first");
 			return;
 		}
+		// Validate the JSON parses + has at least one server-shaped
+		// entry BEFORE we queue it — otherwise the user would only
+		// find out at create-time, by which point the form's gone
+		// and they can't recover the paste.  Cheap parse-side check;
+		// the engine still re-validates at flush.
+		let serverCount = 0;
+		try {
+			const parsed = JSON.parse(trimmed);
+			serverCount = countServersInPaste(parsed);
+			if (serverCount === 0) {
+				setActionError("no MCP servers found in the paste — expected an `mcpServers` block, a bare server map, or a single server object");
+				return;
+			}
+		} catch (err) {
+			setActionError(`not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+			return;
+		}
+
+		if (isCreateMode) {
+			// Queue for post-create flush.
+			const labelGuess = serverCount === 1
+				? "Paste config (1 server)"
+				: `Paste config (${serverCount} servers)`;
+			onPendingChange([
+				...pendingAttachments,
+				{ kind: "paste", label: labelGuess, pasteJson: trimmed },
+			]);
+			setPasteJson("");
+			return;
+		}
+
+		if (!accessToken || !bot) return;
 		setSubmitting(true);
 		try {
 			const result = await importBotMcpServers(accessToken, bot.id, trimmed);
@@ -1637,35 +1711,54 @@ function ToolsTab({
 						<EmptyServersState createMode />
 					) : (
 						<ul className="rounded-md border border-border divide-y divide-border bg-primary/5">
-							{pendingAttachments.map((p, idx) => (
-								<AttachmentRow
-									key={`pending-${idx}`}
-									label={p.label || hostnameFromUrl(p.url)}
-									url={p.url}
-									hasAuth={!!p.headers["Authorization"]}
-									suffix=" · queued — attaches after create"
-									onEdit={() => {
-										setEditingId(idx);
-										setFormLabel(p.label);
-										setFormUrl(p.url);
-										const auth = p.headers["Authorization"];
-										if (auth && /^Bearer\s+/i.test(auth)) {
-											setFormAuthScheme("bearer");
-											setFormAuthToken(auth.replace(/^Bearer\s+/i, ""));
-										} else {
-											setFormAuthToken("");
-										}
-										const others = Object.fromEntries(
-											Object.entries(p.headers).filter(([k]) => k !== "Authorization"),
-										);
-										setFormExtraHeaders(
-											Object.keys(others).length > 0 ? JSON.stringify(others, null, 2) : "",
-										);
-										setShowAdvanced(Object.keys(others).length > 0);
-									}}
-									onRemove={() => detachPending(idx)}
-								/>
-							))}
+							{pendingAttachments.map((p, idx) => {
+								// Paste-config queue entry: render with the
+								// stdio-style badge + a generic subtitle.
+								// No Edit affordance — re-pasting is the
+								// edit gesture (remove + paste again).
+								if (p.kind === "paste") {
+									return (
+										<AttachmentRow
+											key={`pending-${idx}`}
+											label={p.label}
+											url="JSON config"
+											hasAuth={false}
+											kind="stdio"
+											suffix=" · queued — imports after create"
+											onRemove={() => detachPending(idx)}
+										/>
+									);
+								}
+								return (
+									<AttachmentRow
+										key={`pending-${idx}`}
+										label={p.label || hostnameFromUrl(p.url)}
+										url={p.url}
+										hasAuth={!!p.headers["Authorization"]}
+										suffix=" · queued — attaches after create"
+										onEdit={() => {
+											setEditingId(idx);
+											setFormLabel(p.label);
+											setFormUrl(p.url);
+											const auth = p.headers["Authorization"];
+											if (auth && /^Bearer\s+/i.test(auth)) {
+												setFormAuthScheme("bearer");
+												setFormAuthToken(auth.replace(/^Bearer\s+/i, ""));
+											} else {
+												setFormAuthToken("");
+											}
+											const others = Object.fromEntries(
+												Object.entries(p.headers).filter(([k]) => k !== "Authorization"),
+											);
+											setFormExtraHeaders(
+												Object.keys(others).length > 0 ? JSON.stringify(others, null, 2) : "",
+											);
+											setShowAdvanced(Object.keys(others).length > 0);
+										}}
+										onRemove={() => detachPending(idx)}
+									/>
+								);
+							})}
 						</ul>
 					)
 				) : attached.length === 0 ? (
@@ -1708,11 +1801,12 @@ function ToolsTab({
 					<div className="text-xs font-medium uppercase text-muted-foreground tracking-wide">
 						{editing ? "Edit server" : "Add server"}
 					</div>
-					{!editing && !isCreateMode && (
-						/* Mode toggle — hidden in edit mode (you can't
-						   re-paste an existing row) and in create mode
-						   (paste-import requires a real bot id; users
-						   add stdio after the bot's created). */
+					{!editing && (
+						/* Mode toggle — hidden only in edit mode (you
+						   can't re-paste an existing row).  Available
+						   in both create + edit otherwise: in create
+						   mode pasted configs are queued and bulk-
+						   imported after the first save. */
 						<div className="inline-flex rounded-md border border-border overflow-hidden text-[11px]">
 							<button
 								type="button"
@@ -1738,7 +1832,7 @@ function ToolsTab({
 					)}
 				</div>
 
-				{addMode === "paste" && !editing && !isCreateMode ? (
+				{addMode === "paste" && !editing ? (
 					/* JSON-paste mode: tolerant import.  Shows warnings
 					   from the engine after submit so the user knows
 					   what was attached, what was skipped, and any
@@ -2022,4 +2116,33 @@ function EmptyServersState({ createMode }: { createMode: boolean }) {
  * the form still degrades gracefully. */
 function hostnameFromUrl(url: string): string {
 	try { return new URL(url).hostname; } catch { return url; }
+}
+
+/** Count the number of server-shaped entries in a parsed MCP config
+ * paste.  Used by the create-mode queue to label the queued entry
+ * "Paste config (N servers)" — same accept-anything heuristic as the
+ * engine-side parser, just count-only.  Returns 0 when nothing
+ * recognisable. */
+function countServersInPaste(obj: unknown): number {
+	if (!obj || typeof obj !== "object") return 0;
+	const o = obj as Record<string, unknown>;
+	const map =
+		(o.mcpServers && typeof o.mcpServers === "object" && o.mcpServers as Record<string, unknown>)
+		|| (o.servers && typeof o.servers === "object" && o.servers as Record<string, unknown>)
+		|| (o.mcp && typeof o.mcp === "object" && (o.mcp as Record<string, unknown>).servers as Record<string, unknown> | undefined)
+		|| null;
+	if (map) return Object.keys(map).length;
+	// Bare server (single object with command or url).
+	if (typeof o.command === "string" || typeof o.url === "string") return 1;
+	// Bare map of servers (every value looks like a server).
+	const entries = Object.entries(o);
+	if (entries.length > 0 && entries.every(([, v]) =>
+		v && typeof v === "object" && (
+			typeof (v as Record<string, unknown>).command === "string"
+			|| typeof (v as Record<string, unknown>).url === "string"
+		)
+	)) {
+		return entries.length;
+	}
+	return 0;
 }
