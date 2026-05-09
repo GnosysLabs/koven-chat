@@ -74,7 +74,7 @@ export function MatrixAvatar({ mxc, emoji, seed, kind = "user", className }: Mat
 				<img
 					src={blobUrl}
 					alt=""
-					className={cn("rounded-full bg-muted shrink-0 object-cover", className)}
+					className={cn("rounded-full shrink-0 object-cover", className)}
 				/>
 			);
 		}
@@ -90,7 +90,7 @@ export function MatrixAvatar({ mxc, emoji, seed, kind = "user", className }: Mat
 		<img
 			src={autoAvatarUrl(seed, kind)}
 			alt=""
-			className={cn("rounded-full bg-muted shrink-0 object-cover", className)}
+			className={cn("rounded-full shrink-0 object-cover", className)}
 		/>
 	);
 }
