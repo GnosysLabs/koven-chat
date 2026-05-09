@@ -83,8 +83,29 @@ export function RoomList({
 		return () => onUnpinRoom(spaceId, roomId);
 	};
 
+	// Showcase the active space's uploaded avatar at the top of the
+	// room list, parallel to MemberList's room-banner.  Skipped for
+	// emoji-iconed spaces (the emoji already shows in the SpaceBar
+	// tile + the existing h-12 header below) and for spaces without
+	// a custom avatar (DiceBear fallback isn't worth a banner).
+	const showSpaceBanner = !!(
+		activeSpaceObj
+		&& activeSpaceObj.avatarUrl
+		&& !activeSpaceObj.iconEmoji
+	);
+
 	return (
 		<aside className="w-60 shrink-0 border-r border-border bg-card flex flex-col">
+			{showSpaceBanner && activeSpaceObj && (
+				<div className="px-4 pt-4 pb-3 border-b border-border flex justify-center">
+					<MatrixAvatar
+						mxc={activeSpaceObj.avatarUrl}
+						seed={activeSpaceObj.id}
+						kind="space"
+						className="h-40 w-40 rounded-lg"
+					/>
+				</div>
+			)}
 			<div className="px-4 h-12 flex items-center justify-between border-b border-border">
 				<span className="font-semibold text-sm truncate" title={header}>{header}</span>
 				{activeSpace?.kind !== "explore" && (
