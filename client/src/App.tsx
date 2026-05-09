@@ -6,11 +6,19 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
 	MatrixTransport,
-	loadStoredCredentials,
-	saveCredentials,
 	type MatrixCredentials,
 	type SyncState,
 } from "@/lib/matrix";
+import {
+	loadAccounts,
+	saveAccounts,
+	loadActiveUserId,
+	saveActiveUserId,
+	upsertAccount,
+	removeAccount,
+	pickNextActive,
+	type StoredAccount,
+} from "@/lib/accounts";
 import { Login } from "@/components/Login";
 import { SpaceBar } from "@/components/SpaceBar";
 import { RoomList } from "@/components/RoomList";
@@ -89,7 +97,42 @@ function escapeRegex(s: string): string {
 }
 
 export default function App() {
-	const [creds, setCreds] = useState<MatrixCredentials | null>(loadStoredCredentials);
+	// Multi-account model.
+	//
+	// `accounts` holds every account the user has logged into on this
+	// origin; `activeUserId` is a pointer to the one currently driving
+	// the live MatrixTransport.  Switching is "set the pointer, let
+	// the cred-watching effect tear the old transport down and bring
+	// the new one up."  Sign-out-of-current splices the active row out
+	// and falls forward to the next account when one exists, else null
+	// (which routes to the Login screen).  Adding an account leaves
+	// every existing entry untouched and just appends.
+	//
+	// `creds` is derived from those two — the rest of the app keeps
+	// reading `creds` exactly the way it did in the single-account era,
+	// which kept this refactor surgical.
+	const [accounts, setAccounts] = useState<StoredAccount[]>(loadAccounts);
+	const [activeUserId, setActiveUserIdState] = useState<string | null>(loadActiveUserId);
+	// Whenever no `activeUserId` is set but accounts exist, default to
+	// the first one — covers fresh-load with the legacy single-cred
+	// migration where the active key wasn't yet written.
+	useEffect(() => {
+		if (!activeUserId && accounts.length > 0) {
+			const fallback = accounts[0]!.user_id;
+			setActiveUserIdState(fallback);
+			saveActiveUserId(fallback);
+		}
+	}, [accounts, activeUserId]);
+	const creds: MatrixCredentials | null = useMemo(() => {
+		if (!activeUserId) return null;
+		const a = accounts.find(x => x.user_id === activeUserId);
+		return a ? {
+			homeserver: a.homeserver,
+			user_id: a.user_id,
+			access_token: a.access_token,
+			device_id: a.device_id,
+		} : null;
+	}, [accounts, activeUserId]);
 	const [state, dispatch] = useReducer(reduce, initialState);
 	// Engine-driven collapsed-room set: drives the room-name display
 	// override + the Explore directory filter for the offensive-room-
@@ -720,7 +763,36 @@ export default function App() {
 			// `undefined` initial state — the SpaceBar tile renders a
 			// muted placeholder until this fires.
 			t.getMyProfile()
-				.then(p => { if (!cancelled) setMyAvatarMxc(p.avatarUrl ?? null); })
+				.then(p => {
+					if (cancelled) return;
+					setMyAvatarMxc(p.avatarUrl ?? null);
+					// Cache display name + avatar onto the active stored
+					// account so the AccountSwitcher popover can render
+					// inactive rows without a network round-trip on cold
+					// boot.  Only write when a value actually changed
+					// (cheap deep equality on the two cached fields)
+					// so we don't churn localStorage on every sync echo.
+					setAccounts(prev => {
+						const idx = prev.findIndex(a => a.user_id === p.userId);
+						if (idx < 0) return prev;
+						const existing = prev[idx]!;
+						if (
+							existing.display_name === p.displayName
+							&& existing.avatar_url === (p.avatarUrl ?? undefined)
+						) {
+							return prev;
+						}
+						const updated: StoredAccount = {
+							...existing,
+							display_name: p.displayName,
+							avatar_url: p.avatarUrl ?? undefined,
+						};
+						const copy = prev.slice();
+						copy[idx] = updated;
+						saveAccounts(copy);
+						return copy;
+					});
+				})
 				.catch(() => { if (!cancelled) setMyAvatarMxc(null); });
 			// Encryption probe — gates app rendering.  See encState above.
 			try {
@@ -793,7 +865,16 @@ export default function App() {
 			cancelled = true;
 			unsubscribe();
 			unsubscribeNsfw();
-			t.stop();
+			// `transport.stop()` is async (it awaits the IDB drain so the
+			// next start() on this origin can't race a stale OlmMachine
+			// handle), but useEffect cleanups can't be async — fire-and-
+			// forget here.  React's StrictMode + concurrent rendering
+			// means the next `creds`-driven mount may run before this
+			// stop() has resolved; that's fine because start() is
+			// idempotent on `stopped` mid-init AND each transport
+			// instance owns its own client, so the in-flight teardown
+			// can't disturb the new instance's state.
+			void t.stop();
 			setTransport(null);
 			setIgnoredUsers(new Set());
 		};
@@ -906,7 +987,18 @@ export default function App() {
 	}, [state.activeRoomId, transport, creds]);
 
 	function handleLogin(newCreds: MatrixCredentials, uiaPassword: string) {
-		saveCredentials(newCreds);
+		// Insert (or refresh) the account in the array.  Existing rows
+		// for the same user_id are replaced — covers the "log in again
+		// to refresh the access token / device_id for an account I've
+		// already added" case — without duplicating the slot.
+		const next = upsertAccount(accounts, newCreds as StoredAccount);
+		setAccounts(next);
+		saveAccounts(next);
+		// Make the just-logged-in account active.  The cred-watching
+		// effect below tears down the previous transport (if any) and
+		// brings up a fresh one for this user.
+		setActiveUserIdState(newCreds.user_id);
+		saveActiveUserId(newCreds.user_id);
 		// Stash the engine-issued UIA password in a ref so we can hand
 		// it to the transport once it's instantiated by the cred-driven
 		// effect below.  Memory-only by design: never written to
@@ -915,8 +1007,35 @@ export default function App() {
 		// that fires later this session calls fetchUiaPassword() to
 		// rotate fresh.
 		pendingUiaPasswordRef.current = uiaPassword;
-		setCreds(newCreds);
+		// Surface the login screen as DONE — required when we're in
+		// "add account" mode where the LoginScreen was rendered on top
+		// of the existing transport.
+		setAddAccountMode(false);
 	}
+
+	/** Switch the live transport to a different already-stored account.
+	 * No-op when the requested user is already active.  Drops back to
+	 * the login screen if asked to switch to an account that isn't in
+	 * the array (shouldn't happen in normal flows, but defensive). */
+	function switchAccount(userId: string) {
+		if (userId === activeUserId) return;
+		const account = accounts.find(a => a.user_id === userId);
+		if (!account) {
+			console.warn(`switchAccount: ${userId} not in accounts`);
+			return;
+		}
+		setActiveUserIdState(userId);
+		saveActiveUserId(userId);
+		// The effect below sees the derived `creds` change and runs
+		// teardown → start.  No further work here — letting the
+		// effect own the lifecycle keeps a single source of truth for
+		// transport state.
+	}
+
+	// Add-account mode flag: when true, render the Login screen even
+	// though the user is already authenticated as someone else.  Login
+	// success flips this back to false (handled in handleLogin).
+	const [addAccountMode, setAddAccountMode] = useState(false);
 
 	// Pre-flight rate-limit check before opening CreateRoomSheet.  If
 	// the user's over their daily cap, surface the explanatory dialog
@@ -1004,54 +1123,95 @@ export default function App() {
 		}
 	}, [transport, state.rooms, settings.showNsfw]);
 
+	/** Sign out of the currently-active account.
+	 *
+	 * Three-step:
+	 *   1. Fire-and-forget the Synapse-side logout (drop the device
+	 *      so the next sign-in doesn't accumulate a stale device row;
+	 *      see the long comment below for why that matters for E2EE).
+	 *   2. Splice the active row out of the local accounts array.
+	 *   3. Fall forward to the next account when one exists, else
+	 *      drop activeUserId to null which routes back to the login
+	 *      screen.
+	 *
+	 * The cred-watching effect below sees `creds` change and tears
+	 * the live transport down — including the IDB drain in
+	 * transport.stop() — before bringing up the next account's
+	 * transport.  Whichever account we land on, the user gets a
+	 * clean sync from there.
+	 */
+	/** Sign out of any single account by user_id.
+	 *
+	 * When `userId` is the current active account, this delegates to
+	 * the full handleSignOut path (which falls forward to the next
+	 * account or to the login screen).
+	 *
+	 * When `userId` is an inactive stored account, we splice it out
+	 * of the array WITHOUT touching the live transport — the user
+	 * stays signed in as whoever they were.  We do still attempt a
+	 * server-side logout for the dropped account using its stored
+	 * access token, fire-and-forget, so the device row on Synapse
+	 * gets cleaned up.
+	 */
+	function handleSignOutOfAccount(userId: string) {
+		if (userId === activeUserId) {
+			handleSignOut();
+			return;
+		}
+		const dropped = accounts.find(a => a.user_id === userId);
+		if (!dropped) return;
+		// Best-effort server-side logout for the stored token.  Direct
+		// fetch (bypassing matrix-js-sdk) so we don't have to spin up a
+		// second client just to call /logout — this account isn't live.
+		void (async () => {
+			try {
+				await fetch(`${dropped.homeserver}/_matrix/client/v3/logout`, {
+					method: "POST",
+					headers: { Authorization: `Bearer ${dropped.access_token}` },
+				});
+			} catch (err) {
+				console.warn(`signOutOfAccount: server-side logout for ${userId} failed`, err);
+			}
+		})();
+		const nextAccounts = removeAccount(accounts, userId);
+		setAccounts(nextAccounts);
+		saveAccounts(nextAccounts);
+	}
+
 	function handleSignOut() {
-		// PROPER LOGOUT — invalidate the access token AND deactivate
-		// the device on Synapse before we drop creds locally.
-		// Without this, every sign-out + sign-in cycle creates a new
-		// Matrix device on the server while leaving the old one
-		// alive, so a single user accumulates 8+ active devices over
-		// a few sessions.  Encrypted messages get re-encrypted to
-		// every active device the sender's client can see — when one
-		// of those devices is a stale ghost without local megolm
-		// session keys, decryption fails server-side ("key backup is
-		// not working") because the message was encrypted to a key
-		// the live device never had.  Calling client.logout() before
-		// the local wipe removes the device from the server-side
-		// list, so the user's device count stays bounded.
-		//
-		// Fire-and-forget — we don't want signing out to block on a
-		// network round-trip if Synapse is slow.  The local wipe +
-		// state reset happen synchronously below so the UI flips to
-		// the login screen immediately.
+		// Server-side logout for the leaving account.  Invalidates the
+		// access token AND deactivates the device on Synapse — without
+		// it, every sign-out + sign-in cycle creates a new Matrix
+		// device while leaving the old one alive, so a single user
+		// accumulates 8+ active devices over a few sessions.
+		// Encrypted messages get re-encrypted to every active device
+		// the sender's client can see — when one of those devices is
+		// a stale ghost without local megolm session keys, decryption
+		// fails server-side ("key backup is not working") because the
+		// message was encrypted to a key the live device never had.
+		// Fire-and-forget; the rest of the teardown runs synchronously
+		// so the UI flips immediately.
 		const t = transport;
 		if (t) {
 			void t.logout().catch(err => {
 				console.warn("handleSignOut: server-side logout failed", err);
 			});
 		}
-		saveCredentials(null);
-		setCreds(null);
+		const leaving = activeUserId;
+		const nextAccounts = leaving ? removeAccount(accounts, leaving) : accounts;
+		const nextActive = leaving ? pickNextActive(accounts, leaving) : null;
+		setAccounts(nextAccounts);
+		saveAccounts(nextAccounts);
+		setActiveUserIdState(nextActive);
+		saveActiveUserId(nextActive);
 		setEncState(null);
 		dispatch({ type: "set_active_room", roomId: null });
-		// Wipe matrix-js-sdk's IndexedDB state — both the rust-crypto
-		// stores AND the regular sync store — so the NEXT login (which
-		// might be as a different user) doesn't trip the "rust-crypto
-		// store mismatch" recovery path on the way in.  That path
-		// catches the mismatch error, wipes, and retries init from
-		// scratch, which on slow devices takes 30-90s and strands the
-		// user on the "Connecting…" screen.  Doing the wipe at
-		// sign-out time means we pay the cost during "signing out…"
-		// (a UX moment where users already expect to wait) instead of
-		// at the next login.
-		//
-		// Fire-and-forget: the wipe is async (IndexedDB) but signing
-		// out is otherwise instantaneous — we don't want to make the
-		// user stare at the login screen waiting for IndexedDB to
-		// drain.  Errors are tolerated by the recovery path on the
-		// next login.
-		void import("@/lib/matrix").then(({ wipeAllMatrixIndexedDB }) => {
-			void wipeAllMatrixIndexedDB();
-		});
+		// IDB wipe is now handled inside transport.stop() (which the
+		// cred-watching effect awaits before starting the next
+		// transport), so we don't need a separate fire-and-forget
+		// wipe here.  When `nextActive` is null the transport tears
+		// down to nothing and the wipe still happens — start() of
+		// the next user (whenever it arrives) sees clean state.
 	}
 
 	const activeRoom = useMemo(
@@ -1166,6 +1326,21 @@ export default function App() {
 
 	if (!creds) {
 		return <Login onLoggedIn={handleLogin} />;
+	}
+	// Add-account mode: an existing user clicked "Add account" in the
+	// switcher.  We render the same Login form on top of the live app
+	// without tearing down the existing transport — handleLogin
+	// appends + flips the active id, which triggers the cred-watching
+	// effect to swap transports cleanly.  An "← cancel" button lets
+	// the user back out without a new login.
+	if (addAccountMode) {
+		return (
+			<Login
+				onLoggedIn={handleLogin}
+				addingAccount
+				onCancelAddAccount={() => setAddAccountMode(false)}
+			/>
+		);
 	}
 
 	// If transport boot failed (most commonly: rust-crypto WASM
@@ -1365,7 +1540,10 @@ export default function App() {
 					}}
 					onOpenProfile={() => setViewedUserId(creds.user_id as UserId)}
 					onOpenSettings={() => setSettingsOpen(true)}
-					onSignOut={handleSignOut}
+					accounts={accounts}
+					onSwitchAccount={switchAccount}
+					onAddAccount={() => setAddAccountMode(true)}
+					onSignOutAccount={handleSignOutOfAccount}
 					onOpenReview={isAdmin ? () => setReviewSheetOpen(true) : undefined}
 					pendingReviewCount={pendingReviewCount}
 				/>

@@ -28,11 +28,19 @@ import { useTurnstile } from "@/lib/turnstile";
 
 export interface LoginProps {
 	onLoggedIn(creds: MatrixCredentials, uiaPassword: string): void;
+	// "Add account" mode flips the heading to make it clear the user
+	// is signing INTO an additional account rather than the only one,
+	// and surfaces a "Back" button so they can cancel without
+	// trapping themselves on the login screen with another account
+	// already signed in.  Default false → original single-account
+	// flow.
+	addingAccount?: boolean;
+	onCancelAddAccount?(): void;
 }
 
 type Step = "email" | "code";
 
-export function Login({ onLoggedIn }: LoginProps) {
+export function Login({ onLoggedIn, addingAccount, onCancelAddAccount }: LoginProps) {
 	const [step, setStep] = useState<Step>("email");
 	const [email, setEmail] = useState("");
 	const [code, setCode] = useState("");
@@ -227,6 +235,17 @@ export function Login({ onLoggedIn }: LoginProps) {
 				</>
 			)}
 			<div className="relative w-full max-w-sm space-y-4">
+				{addingAccount && onCancelAddAccount && (
+					<div className="-mt-2">
+						<button
+							type="button"
+							onClick={onCancelAddAccount}
+							className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+						>
+							← Back to your other account
+						</button>
+					</div>
+				)}
 				<div className="text-center space-y-1 flex flex-col items-center">
 					{logoUrl ? (
 						<img
@@ -236,6 +255,11 @@ export function Login({ onLoggedIn }: LoginProps) {
 						/>
 					) : (
 						<h1 className="text-2xl font-semibold tracking-tight">{brandName}</h1>
+					)}
+					{addingAccount && (
+						<p className="text-xs text-muted-foreground italic">
+							Sign in to add another account
+						</p>
 					)}
 					{tagline ? (
 						<p className={cn(

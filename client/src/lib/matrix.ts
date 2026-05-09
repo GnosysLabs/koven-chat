@@ -146,15 +146,60 @@ export type SyncState = "preparing" | "syncing" | "ready" | "error" | "offline";
 async function wipeRustCryptoIndexedDB(): Promise<void> {
 	if (typeof indexedDB === "undefined") return;
 	const names = ["matrix-js-sdk::matrix-sdk-crypto", "matrix-js-sdk::matrix-sdk-crypto-meta"];
-	await Promise.all(names.map(name => new Promise<void>((resolve) => {
+	await Promise.all(names.map(name => deleteDatabaseAwait(name)));
+}
+
+/**
+ * Wrap `indexedDB.deleteDatabase` in a promise that ACTUALLY resolves
+ * after the DB is closed — including the `blocked` retry path where
+ * a previous OlmMachine handle hasn't released yet.
+ *
+ * Why this is load-bearing for account switching:
+ *   1. matrix-js-sdk's RustCrypto.stop() calls olmMachine.close(),
+ *      which schedules the WASM side to drop the IDB connection.
+ *   2. The close is "synchronous" from JS's POV but the underlying
+ *      IDBDatabase teardown is async — Chrome/Safari batch close
+ *      callbacks across a microtask boundary.
+ *   3. If we deleteDatabase(name) right after close(), the request
+ *      fires `blocked` instead of `success` because the connection
+ *      is still in the process of closing.
+ *   4. Default behaviour: silently leak.  The connection eventually
+ *      closes, but our `then` already resolved on the `blocked`
+ *      event, so the next initRustCrypto opens the OLD database —
+ *      which still has the previous user's olm account — and hangs
+ *      indefinitely on the account-mismatch error.
+ *
+ * Fix: when we get `blocked`, wait up to 5 seconds for either a
+ * `success` (the connection eventually drained and the delete went
+ * through) or a hard timeout (browser is stuck — let the next init
+ * try its luck on the existing DB; the in-init mismatch-recovery
+ * path will fire if needed).
+ */
+function deleteDatabaseAwait(name: string): Promise<void> {
+	return new Promise<void>((resolve) => {
 		const req = indexedDB.deleteDatabase(name);
-		req.onsuccess = () => resolve();
-		// Best-effort: in private-browsing modes deleteDatabase can
-		// error or block; either way we let the retry through and
-		// surface any real failure on the second initRustCrypto call.
-		req.onerror = () => resolve();
-		req.onblocked = () => resolve();
-	})));
+		let done = false;
+		const finish = () => {
+			if (done) return;
+			done = true;
+			resolve();
+		};
+		req.onsuccess = finish;
+		req.onerror = finish;
+		// `onblocked` fires once when another connection is preventing
+		// the delete.  We DON'T resolve on this event — instead we wait
+		// for the eventual `success`/`error` (which fires after the
+		// blocking connection actually closes) or a 5s safety timeout.
+		req.onblocked = () => {
+			console.warn(`indexedDB.deleteDatabase(${name}): blocked, waiting up to 5s for it to drain…`);
+		};
+		setTimeout(() => {
+			if (!done) {
+				console.warn(`indexedDB.deleteDatabase(${name}): timed out after 5s, proceeding anyway`);
+				finish();
+			}
+		}, 5000);
+	});
 }
 
 /**
@@ -205,12 +250,7 @@ export async function wipeAllMatrixIndexedDB(): Promise<void> {
 			"matrix-js-sdk:default",
 		];
 	}
-	await Promise.all(names.map(name => new Promise<void>((resolve) => {
-		const req = indexedDB.deleteDatabase(name);
-		req.onsuccess = () => resolve();
-		req.onerror = () => resolve();
-		req.onblocked = () => resolve();
-	})));
+	await Promise.all(names.map(name => deleteDatabaseAwait(name)));
 }
 
 export interface MatrixHandlers {
@@ -866,7 +906,25 @@ export class MatrixTransport {
 		}
 	}
 
-	stop(): void {
+	/**
+	 * Tear down the transport and release every resource it holds.
+	 *
+	 * Async because the IDB-drain step has to actually wait for the
+	 * OlmMachine's IndexedDB connection to close — without that wait,
+	 * a subsequent start() on this origin opens a stale DB and hangs
+	 * on the rust-crypto account-mismatch error.  See {@link
+	 * deleteDatabaseAwait} for the gory details.
+	 *
+	 * Callers that want fire-and-forget can `void transport.stop()`
+	 * and not await; the in-memory state cleanup is synchronous so
+	 * the React side flips immediately, and only the IDB drain is
+	 * waited on by callers that want to start a new transport on the
+	 * same origin without a race.
+	 *
+	 * Idempotent: calling stop() twice is safe — the second call
+	 * sees client === null and short-circuits.
+	 */
+	async stop(): Promise<void> {
 		this.stopped = true;
 		// Tear down rust-crypto FIRST so the OlmMachine releases its
 		// IndexedDB handle.  matrix-js-sdk's MatrixClient.stopClient
@@ -899,6 +957,7 @@ export class MatrixTransport {
 		this.client?.stopClient();
 		this.client?.removeAllListeners();
 		this.client = null;
+		const teardownUserId = this.creds?.user_id;
 		this.creds = null;
 		// Drop the in-memory SSSS key so a stop()→start() cycle
 		// re-prompts for unlock.  Not strictly required by the SDK
@@ -917,6 +976,16 @@ export class MatrixTransport {
 		this.ignoreListeners.clear();
 		this.nsfwPrefListeners.clear();
 		this.uiaPassword = null;
+		// Don't delete the rust-crypto IDB on stop().  Same-user
+		// stop→start cycles (page refresh, transient errors) need
+		// the megolm sessions + cross-signing state preserved; only
+		// a real account switch should wipe.  start() handles that
+		// via the LAST_USER_KEY mismatch check: when start() sees
+		// the user changed, it calls wipeRustCryptoIndexedDB(),
+		// which now properly awaits the IDB connection drain (see
+		// deleteDatabaseAwait) instead of resolving on `blocked`
+		// and racing the next initRustCrypto.
+		void teardownUserId;
 	}
 
 	// ─── UIA password stash ────────────────────────────────────────────

@@ -6,8 +6,10 @@
 import { forwardRef, useMemo } from "react";
 import { cn } from "@/lib/utils";
 import type { Room, Space } from "@koven/shared";
-import { Bot, Compass, Hash, LogOut, Plus, Settings, ShieldAlert, User } from "lucide-react";
+import { Bot, Compass, Hash, Plus, Settings, ShieldAlert, User } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
+import { AccountSwitcher } from "@/components/AccountSwitcher";
+import type { StoredAccount } from "@/lib/accounts";
 import type { ActiveSpace } from "@/state/store";
 
 export interface SpaceBarProps {
@@ -19,6 +21,15 @@ export interface SpaceBarProps {
 	// `undefined`, then flips to one of the other two once
 	// `transport.getMyProfile()` resolves.
 	currentUserAvatarMxc?: string | null;
+	// Multi-account state.  When >1 account is present the avatar
+	// opens the AccountSwitcher popover (switch / add / sign-out
+	// each); single-account collapses the popover to its primary
+	// affordance (open profile) so the UX doesn't grow steps for
+	// users who only have one login.
+	accounts?: StoredAccount[];
+	onSwitchAccount?(userId: string): void;
+	onAddAccount?(): void;
+	onSignOutAccount?(userId: string): void;
 	spaces: Space[];
 	// All joined rooms — used to compute the per-tile unread indicators.
 	// We don't filter here; each tile picks the slice it cares about.
@@ -35,7 +46,6 @@ export interface SpaceBarProps {
 	onOpenCreateSpace(): void;
 	onOpenProfile(): void;
 	onOpenSettings(): void;
-	onSignOut(): void;
 	// Admin-only surfaces.  When `onOpenReview` is omitted the shield
 	// button is hidden entirely; non-admins shouldn't see it at all,
 	// even with a zero-count badge.  Pending count drives the red dot.
@@ -46,6 +56,10 @@ export interface SpaceBarProps {
 export function SpaceBar({
 	currentUserId,
 	currentUserAvatarMxc,
+	accounts,
+	onSwitchAccount,
+	onAddAccount,
+	onSignOutAccount,
 	spaces,
 	rooms,
 	activeSpace,
@@ -57,10 +71,10 @@ export function SpaceBar({
 	onOpenCreateSpace,
 	onOpenProfile,
 	onOpenSettings,
-	onSignOut,
 	onOpenReview,
 	pendingReviewCount = 0,
 }: SpaceBarProps) {
+	const showSwitcher = !!(accounts && onSwitchAccount && onAddAccount && onSignOutAccount);
 	const exploreActive = activeSpace?.kind === "explore";
 	const dmsActive = activeSpace?.kind === "dms";
 	const botsActive = activeSpace?.kind === "bots";
@@ -84,31 +98,38 @@ export function SpaceBar({
 	}, [rooms, roomsActive]);
 	return (
 		<aside className="w-[68px] shrink-0 bg-card border-r border-border flex flex-col items-center py-2 gap-2">
-			<button
-				type="button"
-				onClick={onOpenProfile}
-				className="rounded-full focus:outline-none focus:ring-2 focus:ring-primary"
-				title={currentUserId ?? "Profile"}
-				aria-label="Profile"
-			>
-				{currentUserAvatarMxc === undefined ? (
-					// Profile probe still in flight — render a neutral
-					// muted disc instead of the DiceBear fallback that
-					// MatrixAvatar would otherwise produce for a
-					// no-mxc seed.  Same dimensions as the real
-					// avatar so layout doesn't shift on resolve.
-					<span
-						className="block h-10 w-10 rounded-full bg-muted"
-						aria-hidden
-					/>
-				) : (
-					<MatrixAvatar
-						mxc={currentUserAvatarMxc ?? undefined}
-						seed={currentUserId ?? "self"}
-						className="h-10 w-10"
-					/>
-				)}
-			</button>
+			{showSwitcher ? (
+				<AccountSwitcher
+					accounts={accounts!}
+					activeUserId={currentUserId}
+					currentUserAvatarMxc={currentUserAvatarMxc}
+					onSwitch={onSwitchAccount!}
+					onAddAccount={onAddAccount!}
+					onSignOutAccount={onSignOutAccount!}
+					onOpenProfile={onOpenProfile}
+				/>
+			) : (
+				<button
+					type="button"
+					onClick={onOpenProfile}
+					className="rounded-full focus:outline-none focus:ring-2 focus:ring-primary"
+					title={currentUserId ?? "Profile"}
+					aria-label="Profile"
+				>
+					{currentUserAvatarMxc === undefined ? (
+						<span
+							className="block h-10 w-10 rounded-full bg-muted"
+							aria-hidden
+						/>
+					) : (
+						<MatrixAvatar
+							mxc={currentUserAvatarMxc ?? undefined}
+							seed={currentUserId ?? "self"}
+							className="h-10 w-10"
+						/>
+					)}
+				</button>
+			)}
 
 			<TileButton
 				active={exploreActive}
@@ -199,9 +220,11 @@ export function SpaceBar({
 				<IconButton onClick={onOpenSettings} title="Settings" ariaLabel="Settings">
 					<Settings className="h-4 w-4" />
 				</IconButton>
-				<IconButton onClick={onSignOut} title="Sign out" ariaLabel="Sign out">
-					<LogOut className="h-4 w-4" />
-				</IconButton>
+				{/* Sign-out moved into the AccountSwitcher popover at the
+				    top of the rail — covers per-account sign-out (when
+				    multiple are stored) plus the single-account
+				    "sign out" affordance.  Removing it here avoids two
+				    sign-out buttons on the same screen. */}
 			</div>
 		</aside>
 	);
