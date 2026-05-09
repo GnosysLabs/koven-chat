@@ -260,14 +260,18 @@ export async function fanOutMessage(ev: MatrixEvent): Promise<void> {
 		// Don't notify bot or engine users.
 		if (isBotOrEngineUser(recipient)) continue;
 
-		// Pick the kind: priority order dm > mention > reply >
-		// (fall-through, no notification).  Invite is handled in
-		// fanOutMember; system events are emitted by other
-		// pathways (suspensions etc.) — not here.
+		// Pick the kind: priority order mention > reply > dm >
+		// (fall-through, no notification).  Explicit signals win —
+		// a 2-person private room is `memberCount === 2` so the DM
+		// fallback catches it, but if the message also @-mentions
+		// or replies-to the recipient, that's the more accurate
+		// label and shouldn't get masked by the implicit DM heuristic.
+		// Invite is handled in fanOutMember; system events come from
+		// other pathways.
 		let kind: "dm" | "mention" | "reply" | null = null;
-		if (isDm) kind = "dm";
-		else if (mentioned.has(recipient)) kind = "mention";
+		if (mentioned.has(recipient)) kind = "mention";
 		else if (replyTargetId === recipient) kind = "reply";
+		else if (isDm) kind = "dm";
 
 		if (kind === null) {
 			console.log(`[fanout] skip ${recipient}: not DM, not mentioned, not reply target`);

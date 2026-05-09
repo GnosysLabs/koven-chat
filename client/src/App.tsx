@@ -136,8 +136,16 @@ export default function App() {
 						type: "set_active_space",
 						space: { kind: "space", id: room.parentSpaceIds[0] as SpaceId },
 					});
+				} else {
+					// Orphan non-DM room — lives in the "Rooms" bucket.
+					// Without this branch, clicking a notification while
+					// on Explore (or any other virtual space) would
+					// silently leave the active space alone, the
+					// timeline would never render, and the user would
+					// just stare at Explore wondering where their room
+					// went.
+					dispatch({ type: "set_active_space", space: { kind: "rooms" } });
 				}
-				// Else: orphan room — leave activeSpace as-is.
 			}
 			setMobileMeOpen(false);
 
