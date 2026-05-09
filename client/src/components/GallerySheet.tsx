@@ -21,7 +21,9 @@
 //     dedicated request loop; deferred until anyone asks.
 
 import { useMemo, useState, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { ChevronLeft, ChevronRight, Download, Images, Play, X } from "lucide-react";
+import { downloadMediaUrl } from "@/lib/downloadMedia";
 import {
 	Dialog,
 	DialogContent,
@@ -197,13 +199,24 @@ function MediaLightbox({
 }) {
 	const url = useMatrixAttachment(message);
 	const isVideo = message.kind === "video";
-	return (
+	if (typeof document === "undefined") return null;
+	// Portal to document.body so the fixed overlay actually fills the
+	// viewport.  Without this the lightbox renders INSIDE the
+	// containing DialogContent, which uses `translate-x-[-50%]
+	// translate-y-[-50%]` for centering — that establishes a
+	// containing block for `position: fixed`, so `inset-0` ends up
+	// pinned to the dialog's 768×85vh footprint instead of the full
+	// viewport.  Net effect was the image getting squeezed into the
+	// dialog's aspect ratio rather than its own.  Portalling out
+	// escapes the transformed ancestor and restores fixed-to-
+	// viewport semantics.
+	return createPortal(
 		// Stacked over the dialog content via a fixed overlay so the
 		// underlying grid stays mounted (preserves scroll position +
 		// thumbnail decode work).  Backdrop blocks pointer events to
 		// the grid so clicks fall through to the close button only.
 		<div
-			className="fixed inset-0 z-50 flex items-center justify-center bg-black/85"
+			className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85"
 			onClick={onClose}
 		>
 			<button
@@ -215,17 +228,27 @@ function MediaLightbox({
 				<X className="h-5 w-5" />
 			</button>
 			{url && (
-				<a
-					href={url}
-					download={message.mediaName ?? undefined}
-					target="_blank"
-					rel="noreferrer"
-					onClick={(e) => e.stopPropagation()}
+				<button
+					type="button"
+					onClick={async (e) => {
+						// Same blob:-URL-anchor problem as the chat-pane
+						// download path: Tauri's WKWebView / WebKitGTK
+						// silently drop anchor downloads pointed at a
+						// blob: URL, so the previous <a download> here
+						// did nothing in the desktop apps.  Route
+						// through downloadMediaUrl, which fetches the
+						// bytes and serves them as a data: URL the
+						// Rust on_download handler intercepts and
+						// writes to OS Downloads/.
+						e.stopPropagation();
+						await downloadMediaUrl(url, message.mediaName ?? "download");
+					}}
 					aria-label="Download"
+					title="Download"
 					className="absolute top-4 right-16 p-2 rounded-full bg-background/20 hover:bg-background/40 text-white"
 				>
 					<Download className="h-5 w-5" />
-				</a>
+				</button>
 			)}
 			{hasPrev && (
 				<button
@@ -257,13 +280,24 @@ function MediaLightbox({
 							src={url}
 							controls
 							autoPlay
-							className="max-w-full max-h-[80vh] rounded-md"
+							// Both axes capped — the natural aspect
+							// ratio is preserved because <video> with
+							// explicit max-w + max-h shrinks
+							// proportionally rather than stretching.
+							className="max-w-[92vw] max-h-[80vh] rounded-md"
 						/>
 					) : (
 						<img
 							src={url}
 							alt={message.mediaName ?? "image"}
-							className="max-w-full max-h-[80vh] rounded-md object-contain"
+							// `object-contain` is belt-and-braces here
+							// — max-w + max-h on an <img> already
+							// preserves aspect ratio, but if either
+							// the surrounding flex layout or a future
+							// CSS change ever forced the element to a
+							// fixed shape, contain stops it from
+							// stretching.
+							className="max-w-[92vw] max-h-[80vh] rounded-md object-contain"
 						/>
 					)
 				) : (
@@ -275,6 +309,7 @@ function MediaLightbox({
 					<span>{new Date(message.timestamp).toLocaleString()}</span>
 				</div>
 			</div>
-		</div>
+		</div>,
+		document.body,
 	);
 }
