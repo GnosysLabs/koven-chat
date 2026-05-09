@@ -112,6 +112,7 @@ import {
 	isSpaceRoom,
 	kickOrBanAs,
 	loginAsUser,
+	registerAppserviceUser,
 	redactEventAs,
 	setProfileAvatar,
 	setRoomDirectoryVisibility,
@@ -1337,26 +1338,22 @@ export function startServer(): void {
 					return json({ error: "name_taken" }, { status: 409 });
 				}
 
-				// Provision the Matrix user, then log in as it to get an
-				// access token + device id.  We discard the random
-				// password after this step — the engine acts as the bot
-				// via the access token from now on.
-				const initialPw = randomPassword();
-				const created = await adminCreateUser({
-					userId: mxid,
-					password: initialPw,
+				// Provision the Matrix user via the appservice register
+				// endpoint.  The admin /_synapse/admin/v2/users path
+				// can't be used here — Synapse refuses creates inside an
+				// appservice's exclusive namespace with M_EXCLUSIVE
+				// (which is what the @bot-* range is, see
+				// koven-engine.appservice.yaml).  The AS-register call
+				// returns access_token + device_id directly, so we
+				// don't need a separate password-login round-trip.
+				const localpart = mxid.slice(1, mxid.indexOf(":")); // "bot-jeeves"
+				const token = await registerAppserviceUser({
+					username: localpart,
 					displayname: displayName,
 				});
-				if ("error" in created) {
-					return json({
-						error: "synapse_create_failed",
-						detail: created.detail ?? created.error,
-					}, { status: 502 });
-				}
-				const token = await loginAsUser(mxid, initialPw);
 				if ("error" in token) {
 					return json({
-						error: "synapse_token_failed",
+						error: "synapse_create_failed",
 						detail: token.detail ?? token.error,
 					}, { status: 502 });
 				}

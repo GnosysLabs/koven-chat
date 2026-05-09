@@ -770,6 +770,99 @@ export async function loginAsUser(userId: string, password: string): Promise<
 	};
 }
 
+/**
+ * Register a user inside the engine appservice's exclusive `@bot-*`
+ * namespace, authenticated with the as_token.
+ *
+ * Why we can't use the admin API: when a namespace is declared
+ * `exclusive: true` in the appservice yaml, Synapse refuses creates
+ * for matching localparts via /_synapse/admin/v2/users with
+ * M_EXCLUSIVE — only the appservice itself is allowed to mint
+ * accounts there.  This is the supported way to do it: a /register
+ * call with `type: "m.login.application_service"` and the as_token
+ * in Authorization, which Synapse short-circuits past UIA and just
+ * provisions the user.
+ *
+ * Returns the new account's access token + device id (Synapse mints
+ * both as part of the register response, which is convenient — no
+ * second password-login round-trip).  `displayname` is set in a
+ * follow-up profile call because the register endpoint doesn't
+ * accept it.
+ */
+export async function registerAppserviceUser(opts: {
+	username: string;             // localpart only (e.g. "bot-jeeves")
+	displayname?: string;
+}): Promise<
+	| { access_token: string; device_id: string; user_id: string }
+	| { error: string; detail?: string }
+> {
+	const url = `${config.homeserverUrl}/_matrix/client/v3/register`;
+	const r = await fetch(url, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${config.asToken}`,
+		},
+		body: JSON.stringify({
+			type: "m.login.application_service",
+			username: opts.username,
+		}),
+	});
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		console.warn(
+			`engine: registerAppserviceUser ${opts.username} → ${r.status} ${txt.slice(0, 200)}`,
+		);
+		return { error: `synapse_${r.status}`, detail: txt.slice(0, 300) };
+	}
+	const body = (await r.json()) as {
+		access_token?: string;
+		device_id?: string;
+		user_id?: string;
+	};
+	if (!body.access_token || !body.user_id) {
+		return { error: "incomplete_register_response" };
+	}
+	const userId = body.user_id;
+	const accessToken = body.access_token;
+	// Synapse may omit device_id on AS-register.  Fall back to a
+	// stable label so callers always have something to persist.
+	const deviceId = body.device_id ?? "koven-bot";
+
+	// Set displayname if requested.  We use the new account's own
+	// access token (rather than the as_token) so the profile event
+	// is signed by the bot itself.  Failure here is non-fatal — the
+	// user can rename the bot via display-name patch later.
+	if (opts.displayname) {
+		try {
+			const dnUrl =
+				`${config.homeserverUrl}/_matrix/client/v3/profile/${encodeURIComponent(userId)}/displayname`;
+			const dnRes = await fetch(dnUrl, {
+				method: "PUT",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${accessToken}`,
+				},
+				body: JSON.stringify({ displayname: opts.displayname }),
+			});
+			if (!dnRes.ok) {
+				const txt = await dnRes.text().catch(() => "");
+				console.warn(
+					`engine: registerAppserviceUser ${opts.username} displayname set → ${dnRes.status} ${txt.slice(0, 200)}`,
+				);
+			}
+		} catch (err) {
+			console.warn(`engine: registerAppserviceUser ${opts.username} displayname set threw`, err);
+		}
+	}
+
+	return {
+		access_token: accessToken,
+		device_id: deviceId,
+		user_id: userId,
+	};
+}
+
 // ─── Helpers acting under a user's bearer token ─────────────────────
 //
 // These mirror the appservice helpers above but authenticate as a
