@@ -24,7 +24,14 @@
 
 import type { MatrixClient, MatrixEvent, Room as SdkRoom } from "matrix-js-sdk";
 import { MsgType } from "matrix-js-sdk";
-import { type BotRow, bumpBotUsage, getBotKnowledgeContent } from "./db";
+import {
+	type BotRow,
+	bumpBotUsage,
+	bumpBotDailyUsage,
+	getBotDailyUsage,
+	getBotKnowledgeContent,
+	utcDayKey,
+} from "./db";
 import { openSecret } from "./secret_box";
 import {
 	chatCompletion,
@@ -165,6 +172,33 @@ export async function maybeHandleMention(deps: PipelineDeps): Promise<void> {
 async function dispatch(deps: PipelineDeps): Promise<void> {
 	const { bot, client, room, event } = deps;
 
+	// Daily-spend guardrails.  Both fields default to 0 = unlimited;
+	// when set, the pre-flight check refuses the LLM call without
+	// burning tokens, and we surface a short note in the room so
+	// the user knows why the bot went quiet.  Token budget is the
+	// total of prompt+completion accumulated for THIS UTC day.
+	if (bot.daily_call_limit > 0 || bot.daily_token_limit > 0) {
+		const day = utcDayKey();
+		const used = getBotDailyUsage(bot.id, day);
+		if (bot.daily_call_limit > 0 && used.calls >= bot.daily_call_limit) {
+			console.log(`bot ${bot.mxid}: daily call limit reached (${used.calls}/${bot.daily_call_limit}), refusing`);
+			await postPlain(
+				client, room.roomId,
+				`(daily call limit reached — ${used.calls}/${bot.daily_call_limit}; resets at 00:00 UTC)`,
+			);
+			return;
+		}
+		const totalTokens = used.prompt_tokens + used.completion_tokens;
+		if (bot.daily_token_limit > 0 && totalTokens >= bot.daily_token_limit) {
+			console.log(`bot ${bot.mxid}: daily token limit reached (${totalTokens}/${bot.daily_token_limit}), refusing`);
+			await postPlain(
+				client, room.roomId,
+				`(daily token limit reached — ${totalTokens}/${bot.daily_token_limit}; resets at 00:00 UTC)`,
+			);
+			return;
+		}
+	}
+
 	const messages = buildContext(bot, room, event);
 	if (messages.length === 0) {
 		console.warn(`bot ${bot.mxid}: empty context, skipping LLM call`);
@@ -241,6 +275,10 @@ async function runToolLoop(
 			referer: `https://${config.homeserverName}`,
 			title: `Koven (${bot.display_name})`,
 			tools: toolsForCall,
+			// Per-reply token cap.  bot.max_tokens_per_reply = 0
+			// means "let the provider decide" (same as not passing
+			// the field); a positive value clamps each LLM call.
+			maxTokens: bot.max_tokens_per_reply > 0 ? bot.max_tokens_per_reply : undefined,
 		});
 
 		if (!result.ok) {

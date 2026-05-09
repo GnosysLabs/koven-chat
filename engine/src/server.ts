@@ -404,6 +404,17 @@ function isValidLocalpart(s: string): boolean {
 // dots / underscores / etc).  The mxid Becomes `@bot-<name>:server`,
 // so the full visible localpart is `bot-<name>` with `bot-` always
 // the first 4 chars (the appservice namespace claim is `@bot-.*`).
+/** Coerce an unknown body field into a non-negative integer in
+ * [0, max].  Anything else (negative, NaN, undefined, non-number)
+ * collapses to 0, which our schema treats as "unlimited" for the
+ * spending guardrails. */
+function clampNonNegInt(v: unknown, max: number): number {
+	if (typeof v !== "number" || !Number.isFinite(v)) return 0;
+	const n = Math.floor(v);
+	if (n <= 0) return 0;
+	return Math.min(n, max);
+}
+
 function isValidBotName(s: string): boolean {
 	return s.length >= 1 && s.length <= 21 && /^[a-z0-9-]+$/.test(s) && !s.startsWith("-") && !s.endsWith("-");
 }
@@ -426,6 +437,10 @@ function toBotSummary(row: import("./db").BotRow) {
 		context_window: row.context_window,
 		enabled: row.enabled === 1,
 		created_at: row.created_at,
+		// Spending guardrails — 0 means unlimited for all three.
+		max_tokens_per_reply: row.max_tokens_per_reply,
+		daily_token_limit: row.daily_token_limit,
+		daily_call_limit: row.daily_call_limit,
 		// Usage stats are operator-/owner-readable.
 		total_prompt_tokens: row.total_prompt_tokens,
 		total_completion_tokens: row.total_completion_tokens,
@@ -1324,6 +1339,13 @@ export function startServer(): void {
 				const contextWindow = Number.isFinite(body.context_window)
 					? Math.max(1, Math.min(100, Math.floor(body.context_window as number)))
 					: 20;
+				// Spending guardrails.  All three default to 0 = unlimited.
+				// Negative or non-finite values fall back to 0; we cap at
+				// generous-but-finite ceilings so a misclick can't set a
+				// "100 trillion tokens" budget.
+				const maxTokensPerReply = clampNonNegInt(body.max_tokens_per_reply, 1_000_000);
+				const dailyTokenLimit   = clampNonNegInt(body.daily_token_limit, 1_000_000_000);
+				const dailyCallLimit    = clampNonNegInt(body.daily_call_limit, 1_000_000);
 				// Optional bio — stored in user_profiles keyed by mxid,
 				// same table that backs human bios.  Capped at 300 chars
 				// to match the human ceiling enforced on PUT /api/profile/me.
@@ -1394,6 +1416,9 @@ export function startServer(): void {
 					context_window: contextWindow,
 					access_token_enc: accessTokenEnc,
 					device_id: token.device_id,
+					max_tokens_per_reply: maxTokensPerReply,
+					daily_token_limit: dailyTokenLimit,
+					daily_call_limit: dailyCallLimit,
 				});
 				// Persist the bio against the bot's mxid so other members
 				// see it in the profile sheet.  Empty string skips the
@@ -1460,6 +1485,18 @@ export function startServer(): void {
 					}
 					if (typeof body.enabled === "boolean") {
 						patch.enabled = body.enabled ? 1 : 0;
+					}
+					// Spending guardrails — explicitly coerce 0 = unlimited.
+					// Only applied when the client actually sent the field
+					// (Number.isFinite covers undefined / non-number).
+					if (Number.isFinite(body.max_tokens_per_reply)) {
+						patch.max_tokens_per_reply = clampNonNegInt(body.max_tokens_per_reply, 1_000_000);
+					}
+					if (Number.isFinite(body.daily_token_limit)) {
+						patch.daily_token_limit = clampNonNegInt(body.daily_token_limit, 1_000_000_000);
+					}
+					if (Number.isFinite(body.daily_call_limit)) {
+						patch.daily_call_limit = clampNonNegInt(body.daily_call_limit, 1_000_000);
 					}
 					// Bio update writes through to user_profiles, parallel
 					// path to PUT /api/profile/me.  Empty string clears.

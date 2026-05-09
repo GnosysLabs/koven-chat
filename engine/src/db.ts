@@ -491,7 +491,44 @@ ensureColumns("collapses", [
 ensureColumns("bots", [
 	// JSON array of trigger phrases — see CREATE TABLE comment above.
 	{ name: "triggers", ddl: "triggers TEXT NOT NULL DEFAULT '[]'" },
+	// Spending guardrails.  All three default to 0 = unlimited so
+	// existing rows behave unchanged after the migration; the bot
+	// owner opts in by setting positive values.
+	//
+	//   - max_tokens_per_reply: cap on output tokens for ONE LLM
+	//     call.  Maps directly to the OpenAI `max_tokens` param.
+	//     Bounds individual blowups (a chatty model spinning out
+	//     30k-token essays).
+	//   - daily_token_limit: cap on total prompt + completion
+	//     tokens across all LLM calls in a UTC day.  Bot stops
+	//     responding when exceeded until the day rolls over.
+	//   - daily_call_limit: cap on total LLM calls in a UTC day.
+	//     Bot stops responding when exceeded.  Useful when the
+	//     model is cheap-per-call but a single conversation could
+	//     run an unbounded number of tool-use iterations.
+	{ name: "max_tokens_per_reply", ddl: "max_tokens_per_reply INTEGER NOT NULL DEFAULT 0" },
+	{ name: "daily_token_limit",   ddl: "daily_token_limit INTEGER NOT NULL DEFAULT 0" },
+	{ name: "daily_call_limit",    ddl: "daily_call_limit INTEGER NOT NULL DEFAULT 0" },
 ]);
+
+// Per-bot per-UTC-day rolling usage counters.  Reads on the hot
+// path (every mention checks today's usage against the bot's
+// limits before firing the LLM call); writes after every LLM
+// completion bump the day's row.  Old rows aren't pruned —
+// historical accounting is useful for "how much did this bot
+// cost last month?" reporting later.  At ~50 bytes per row per
+// bot per day, a year of data on 100 bots is ~1.8 MB; not worth
+// a janitor.
+db.exec(`
+	CREATE TABLE IF NOT EXISTS bot_usage_daily (
+		bot_id            INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+		day               TEXT NOT NULL,
+		calls             INTEGER NOT NULL DEFAULT 0,
+		prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+		completion_tokens INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (bot_id, day)
+	);
+`);
 ensureColumns("room_creations", [
 	// Discriminate between regular chat rooms and Matrix spaces so the
 	// publish-rate gate can apply parallel ladders — same per-
@@ -1732,6 +1769,11 @@ export interface BotRow {
 	 * mentions / replies / DMs," which is the platform's original
 	 * behaviour and the default for newly-created bots. */
 	triggers: string[];
+	/** Spending guardrails — see migration in the schema block.
+	 * 0 means "no limit" for all three. */
+	max_tokens_per_reply: number;
+	daily_token_limit: number;
+	daily_call_limit: number;
 	access_token_enc: string;
 	device_id: string;
 	enabled: number;
@@ -1769,8 +1811,9 @@ const insertBotStmt = db.prepare(`
 	INSERT INTO bots
 		(mxid, owner_id, display_name, avatar_mxc, provider, api_base,
 		 api_key_enc, model, system_prompt, context_window,
-		 access_token_enc, device_id, enabled, created_at, triggers)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+		 access_token_enc, device_id, enabled, created_at, triggers,
+		 max_tokens_per_reply, daily_token_limit, daily_call_limit)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
 `);
 const listBotsByOwnerStmt = db.prepare(
 	`SELECT * FROM bots WHERE owner_id = ? ORDER BY created_at ASC`,
@@ -1791,16 +1834,19 @@ const countBotsByOwnerStmt = db.prepare(
 );
 const updateBotStmt = db.prepare(`
 	UPDATE bots SET
-		display_name   = COALESCE(?, display_name),
-		avatar_mxc     = COALESCE(?, avatar_mxc),
-		provider       = COALESCE(?, provider),
-		api_base       = COALESCE(?, api_base),
-		api_key_enc    = COALESCE(?, api_key_enc),
-		model          = COALESCE(?, model),
-		system_prompt  = COALESCE(?, system_prompt),
-		context_window = COALESCE(?, context_window),
-		enabled        = COALESCE(?, enabled),
-		triggers       = COALESCE(?, triggers)
+		display_name         = COALESCE(?, display_name),
+		avatar_mxc           = COALESCE(?, avatar_mxc),
+		provider             = COALESCE(?, provider),
+		api_base             = COALESCE(?, api_base),
+		api_key_enc          = COALESCE(?, api_key_enc),
+		model                = COALESCE(?, model),
+		system_prompt        = COALESCE(?, system_prompt),
+		context_window       = COALESCE(?, context_window),
+		enabled              = COALESCE(?, enabled),
+		triggers             = COALESCE(?, triggers),
+		max_tokens_per_reply = COALESCE(?, max_tokens_per_reply),
+		daily_token_limit    = COALESCE(?, daily_token_limit),
+		daily_call_limit     = COALESCE(?, daily_call_limit)
 	WHERE id = ?
 `);
 const deleteBotStmt = db.prepare(`DELETE FROM bots WHERE id = ?`);
@@ -1826,6 +1872,9 @@ export function createBot(opts: {
 	access_token_enc: string;
 	device_id: string;
 	triggers?: string[];
+	max_tokens_per_reply?: number;
+	daily_token_limit?: number;
+	daily_call_limit?: number;
 }): BotRow {
 	const r = insertBotStmt.run(
 		opts.mxid,
@@ -1842,6 +1891,9 @@ export function createBot(opts: {
 		opts.device_id,
 		Date.now(),
 		JSON.stringify(opts.triggers ?? []),
+		opts.max_tokens_per_reply ?? 0,
+		opts.daily_token_limit ?? 0,
+		opts.daily_call_limit ?? 0,
 	);
 	const row = mapBotRow(getBotByIdStmt.get(Number(r.lastInsertRowid)) as RawBotRow);
 	if (!row) throw new Error(`createBot: failed to read back inserted row ${r.lastInsertRowid}`);
@@ -1918,6 +1970,9 @@ export function updateBot(id: number, patch: {
 	 * "add one" / "remove one" granularity at this layer; the
 	 * client always sends the full set). */
 	triggers?: string[];
+	max_tokens_per_reply?: number;
+	daily_token_limit?: number;
+	daily_call_limit?: number;
 }): BotRow | null {
 	updateBotStmt.run(
 		patch.display_name ?? null,
@@ -1930,6 +1985,9 @@ export function updateBot(id: number, patch: {
 		patch.context_window ?? null,
 		patch.enabled ?? null,
 		patch.triggers === undefined ? null : JSON.stringify(patch.triggers),
+		patch.max_tokens_per_reply ?? null,
+		patch.daily_token_limit ?? null,
+		patch.daily_call_limit ?? null,
 		id,
 	);
 	return getBotById(id);
@@ -1955,6 +2013,69 @@ export function deleteBot(id: number): void {
 
 export function bumpBotUsage(id: number, promptTokens: number, completionTokens: number): void {
 	bumpBotUsageStmt.run(promptTokens, completionTokens, Date.now(), id);
+	// Mirror into today's rolling-usage row so the daily-limit
+	// guardrails see this call.  Cheap upsert on (bot_id, day);
+	// we deliberately keep it inside the same helper so callers
+	// can't update lifetime stats and forget today's.
+	bumpBotDailyUsage(id, promptTokens, completionTokens);
+}
+
+// ─── Per-bot daily usage (rolling) ─────────────────────────────────
+//
+// Used to enforce the bot's `daily_token_limit` / `daily_call_limit`
+// guardrails.  Day key is `YYYY-MM-DD` in UTC so a single global day
+// boundary applies regardless of where the bot's owner happens to
+// be — we'd rather have predictable ledger boundaries than a
+// timezone-aware accounting that drifts with DST.
+
+/** Today's UTC date as `YYYY-MM-DD`.  Stable across the engine
+ * process for any callers that need to reuse the same key in a hot
+ * loop. */
+export function utcDayKey(now: number = Date.now()): string {
+	return new Date(now).toISOString().slice(0, 10);
+}
+
+const getBotDailyUsageStmt = db.prepare(
+	`SELECT calls, prompt_tokens, completion_tokens
+	   FROM bot_usage_daily
+	  WHERE bot_id = ? AND day = ?`,
+);
+const upsertBotDailyUsageStmt = db.prepare(`
+	INSERT INTO bot_usage_daily (bot_id, day, calls, prompt_tokens, completion_tokens)
+	VALUES (?, ?, ?, ?, ?)
+	ON CONFLICT(bot_id, day) DO UPDATE SET
+		calls             = bot_usage_daily.calls             + excluded.calls,
+		prompt_tokens     = bot_usage_daily.prompt_tokens     + excluded.prompt_tokens,
+		completion_tokens = bot_usage_daily.completion_tokens + excluded.completion_tokens
+`);
+
+export interface BotDailyUsage {
+	calls: number;
+	prompt_tokens: number;
+	completion_tokens: number;
+}
+
+/** Return today's accumulated usage for a bot.  Defaults to zeros
+ * when the row doesn't exist yet (the first call of the day) — keeps
+ * the limit-check call site branch-free. */
+export function getBotDailyUsage(id: number, day: string = utcDayKey()): BotDailyUsage {
+	const row = getBotDailyUsageStmt.get(id, day) as
+		| { calls: number; prompt_tokens: number; completion_tokens: number }
+		| undefined;
+	return row ?? { calls: 0, prompt_tokens: 0, completion_tokens: 0 };
+}
+
+/** Bump today's usage row.  All four counters are added (calls
+ * always +1 on a successful LLM call; tokens come from the response
+ * usage block).  Atomic upsert so concurrent mentions can't lose
+ * each other's increments. */
+export function bumpBotDailyUsage(
+	id: number,
+	promptTokens: number,
+	completionTokens: number,
+	day: string = utcDayKey(),
+): void {
+	upsertBotDailyUsageStmt.run(id, day, 1, promptTokens, completionTokens);
 }
 
 // ─── Bot knowledge files ────────────────────────────────────────────

@@ -94,6 +94,12 @@ interface FormState {
 	model: string;
 	systemPrompt: string;
 	contextWindow: number;
+	// Spending guardrails.  Stored as strings in form state so the
+	// inputs can show empty (= unlimited) cleanly without displaying
+	// a literal 0; coerced to numbers at submit time.
+	maxTokensPerReply: string;
+	dailyTokenLimit: string;
+	dailyCallLimit: string;
 }
 
 function freshFormState(): FormState {
@@ -108,6 +114,9 @@ function freshFormState(): FormState {
 		model: PROVIDER_DEFAULTS.openrouter.model,
 		systemPrompt: "",
 		contextWindow: 20,
+		maxTokensPerReply: "",
+		dailyTokenLimit: "",
+		dailyCallLimit: "",
 	};
 }
 
@@ -123,7 +132,21 @@ function formStateFromBot(bot: BotSummary): FormState {
 		model: bot.model,
 		systemPrompt: bot.system_prompt,
 		contextWindow: bot.context_window,
+		// Engine returns 0 for "unlimited"; show that as empty in the
+		// inputs so the user sees blank rather than a literal 0.
+		maxTokensPerReply: bot.max_tokens_per_reply > 0 ? String(bot.max_tokens_per_reply) : "",
+		dailyTokenLimit: bot.daily_token_limit > 0 ? String(bot.daily_token_limit) : "",
+		dailyCallLimit: bot.daily_call_limit > 0 ? String(bot.daily_call_limit) : "",
 	};
+}
+
+/** Coerce a limit input value (string from the form) into the wire
+ * number — 0 means unlimited.  Empty / non-numeric falls through to
+ * 0 so the user can clear a limit by emptying the field. */
+function parseLimit(s: string): number {
+	const n = Number(s);
+	if (!Number.isFinite(n) || n <= 0) return 0;
+	return Math.floor(n);
 }
 
 const NAME_PATTERN = /^[a-z0-9-]{1,21}$/;
@@ -140,7 +163,7 @@ interface PendingMcpAttachment {
 /** Tabs are ordered by the typical create flow.  "tools" is gated
  * behind edit mode in create flows (the bot needs to exist before we
  * can attach a server to it) — see the `availableTabs` memo below. */
-type TabKey = "identity" | "connection" | "behavior" | "knowledge" | "tools";
+type TabKey = "identity" | "connection" | "behavior" | "knowledge" | "tools" | "limits";
 
 interface TabDef {
 	key: TabKey;
@@ -153,6 +176,7 @@ const ALL_TABS: TabDef[] = [
 	{ key: "behavior",   label: "Behavior"   },
 	{ key: "knowledge",  label: "Knowledge"  },
 	{ key: "tools",      label: "Tools"      },
+	{ key: "limits",     label: "Limits"     },
 ];
 
 export function BotEditForm({
@@ -394,6 +418,9 @@ export function BotEditForm({
 					system_prompt: form.systemPrompt,
 					context_window: form.contextWindow,
 					bio: form.bio.trim(),
+					max_tokens_per_reply: parseLimit(form.maxTokensPerReply),
+					daily_token_limit: parseLimit(form.dailyTokenLimit),
+					daily_call_limit: parseLimit(form.dailyCallLimit),
 				});
 			} else if (bot) {
 				const patch: Record<string, unknown> = {
@@ -404,6 +431,9 @@ export function BotEditForm({
 					system_prompt: form.systemPrompt,
 					context_window: form.contextWindow,
 					bio: form.bio.trim(),
+					max_tokens_per_reply: parseLimit(form.maxTokensPerReply),
+					daily_token_limit: parseLimit(form.dailyTokenLimit),
+					daily_call_limit: parseLimit(form.dailyCallLimit),
 				};
 				// Only send api_key if the user replaced it (mask was
 				// off and a non-empty value entered).
@@ -718,6 +748,7 @@ export function BotEditForm({
 							onPendingChange={setPendingMcpAttachments}
 						/>
 					)}
+					{currentTabKey === "limits"     && renderLimitsTab()}
 
 					{error && (
 						<div className="mt-6 text-sm text-destructive border border-destructive/40 bg-destructive/5 rounded-md px-3 py-2">
@@ -1098,6 +1129,90 @@ export function BotEditForm({
 				{knowledgeError && (
 					<div className="text-sm text-destructive border border-destructive/40 bg-destructive/5 rounded-md px-3 py-2">
 						{knowledgeError}
+					</div>
+				)}
+			</section>
+		);
+	}
+
+	function renderLimitsTab() {
+		// Show today's UTC usage (edit mode only) so the owner can
+		// gauge headroom relative to their daily caps without leaving
+		// the form.  Lifetime totals come from BotSummary; daily
+		// rolling counters aren't on the summary, so we derive a
+		// rough sense from "since last_used_at" hints below the
+		// inputs.  A future enhancement could add a /api/bots/:id/usage
+		// endpoint for true today-only numbers.
+		const lifetimeTokens = mode === "edit" && bot
+			? bot.total_prompt_tokens + bot.total_completion_tokens
+			: 0;
+		const lifetimeCalls = mode === "edit" && bot ? bot.total_calls : 0;
+		return (
+			<section className="space-y-4">
+				<SectionHeader
+					title="Limits"
+					subtitle="Spending guardrails. Leave any field blank for unlimited. The bot stops responding once a daily cap is reached and resumes at 00:00 UTC."
+				/>
+
+				<div className="space-y-1.5 max-w-xs">
+					<Label htmlFor="bot-max-tokens">
+						Max tokens per reply <span className="text-muted-foreground font-normal">(optional)</span>
+					</Label>
+					<Input
+						id="bot-max-tokens"
+						type="number"
+						min={0}
+						value={form.maxTokensPerReply}
+						onChange={e => update("maxTokensPerReply", e.target.value)}
+						placeholder="Unlimited"
+					/>
+					<p className="text-xs text-muted-foreground">
+						Caps the output length of a single LLM call. Useful when the model gets chatty — passes through to OpenAI's <code className="font-mono text-[11px]">max_tokens</code>.
+					</p>
+				</div>
+
+				<div className="space-y-1.5 max-w-xs">
+					<Label htmlFor="bot-daily-tokens">
+						Daily token limit <span className="text-muted-foreground font-normal">(optional)</span>
+					</Label>
+					<Input
+						id="bot-daily-tokens"
+						type="number"
+						min={0}
+						value={form.dailyTokenLimit}
+						onChange={e => update("dailyTokenLimit", e.target.value)}
+						placeholder="Unlimited"
+					/>
+					<p className="text-xs text-muted-foreground">
+						Total prompt + completion tokens across all replies in a UTC day. The bot will quietly refuse new mentions once exceeded.
+					</p>
+				</div>
+
+				<div className="space-y-1.5 max-w-xs">
+					<Label htmlFor="bot-daily-calls">
+						Daily call limit <span className="text-muted-foreground font-normal">(optional)</span>
+					</Label>
+					<Input
+						id="bot-daily-calls"
+						type="number"
+						min={0}
+						value={form.dailyCallLimit}
+						onChange={e => update("dailyCallLimit", e.target.value)}
+						placeholder="Unlimited"
+					/>
+					<p className="text-xs text-muted-foreground">
+						Number of times the bot can be triggered in a UTC day, regardless of token count. Useful when the model is cheap-per-call but a single conversation could fan out to many tool-use iterations.
+					</p>
+				</div>
+
+				{mode === "edit" && bot && (
+					<div className="rounded-md border border-border bg-card/30 px-3 py-2.5 max-w-md">
+						<div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground mb-1">
+							Lifetime usage
+						</div>
+						<div className="text-xs text-muted-foreground">
+							{lifetimeCalls.toLocaleString()} call{lifetimeCalls === 1 ? "" : "s"} · {lifetimeTokens.toLocaleString()} tokens
+						</div>
 					</div>
 				)}
 			</section>

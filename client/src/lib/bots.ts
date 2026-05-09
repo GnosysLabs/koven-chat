@@ -31,6 +31,10 @@ export interface BotSummary {
 	model: string;
 	system_prompt: string;
 	context_window: number;
+	/** Spending guardrails.  All three default to 0 = unlimited. */
+	max_tokens_per_reply: number;
+	daily_token_limit: number;
+	daily_call_limit: number;
 	enabled: boolean;
 	created_at: number;
 	total_prompt_tokens: number;
@@ -56,6 +60,10 @@ export interface BotCreateRequest {
 	/** Optional public bio.  Capped at 300 chars server-side; empty
 	 * string skips the write. */
 	bio?: string;
+	/** Spending guardrails.  Omit (or 0) for unlimited. */
+	max_tokens_per_reply?: number;
+	daily_token_limit?: number;
+	daily_call_limit?: number;
 }
 
 export interface BotPatchRequest {
@@ -72,6 +80,10 @@ export interface BotPatchRequest {
 	/** Replace the public bio.  Empty string clears.  `undefined` (or
 	 * field omitted) leaves the existing bio alone. */
 	bio?: string;
+	/** Spending guardrails — same shape as create.  0 means unlimited. */
+	max_tokens_per_reply?: number;
+	daily_token_limit?: number;
+	daily_call_limit?: number;
 }
 
 export interface BotsListResponse {
