@@ -41,6 +41,41 @@ function looksLikeMarkdown(s: string): boolean {
 	if (/\*\*[^\n*]+\*\*|__[^\n_]+__|\*[^\n*]+\*|_[^\n_]+_|`[^`\n]+`|\[[^\]]+\]\([^)]+\)/.test(s)) return true;
 	return false;
 }
+
+/** iMessage / Telegram-style emoji-only sizing.
+ *
+ * Returns 1, 2, or 3 when the message is purely emoji (modulo
+ * whitespace) and short enough to qualify for the "blow it up" treat-
+ * ment; null otherwise.  Returns null for 4+ emojis (treat as a normal
+ * bubble) so a long sticker-spam message doesn't dominate the column.
+ *
+ * Uses Intl.Segmenter to count graphemes properly — a single emoji
+ * like 👨‍👩‍👧 is a ZWJ sequence of multiple codepoints, but counts as
+ * one visual character.  Anything with letters or digits is rejected
+ * up-front so "ok 👍" stays bubbled. */
+function emojiOnlyCount(text: string): 1 | 2 | 3 | null {
+	const t = text.trim();
+	if (!t) return null;
+	// Fast disqualifier: any letter or digit anywhere → not emoji-only.
+	if (/[\p{L}\p{N}]/u.test(t)) return null;
+	// Need a Segmenter to count user-perceived characters; fall back
+	// to length-bound bail-out on the rare engine without it.
+	const Segmenter = (Intl as { Segmenter?: typeof Intl.Segmenter }).Segmenter;
+	if (!Segmenter) return null;
+	const seg = new Segmenter(undefined, { granularity: "grapheme" });
+	let count = 0;
+	for (const { segment } of seg.segment(t)) {
+		if (/^\s+$/.test(segment)) continue;
+		// Each non-whitespace grapheme must contain at least one
+		// pictographic codepoint to qualify.  Filters out punctuation-
+		// only "messages" like "!!!", which would otherwise pass the
+		// no-letters-no-digits check.
+		if (!/\p{Extended_Pictographic}/u.test(segment)) return null;
+		count++;
+		if (count > 3) return null;
+	}
+	return count === 1 || count === 2 || count === 3 ? count : null;
+}
 import { useMatrixAttachment } from "@/lib/useMatrixAttachment";
 import { useMatrixMedia } from "@/lib/useMatrixMedia";
 import { useUrlPreview } from "@/lib/useUrlPreview";
@@ -1567,6 +1602,35 @@ function MessageBubble({
 		// Files render as a thumbnail card (no surrounding bubble) so a
 		// wall of mixed attachments has consistent footprint with images.
 		return <AttachmentFileCard message={message} />;
+	}
+
+	// iMessage-style "jumbo emoji": 1-3 emoji-only messages shed the
+	// bubble and render at a much larger size.  Skipped once we hit 4+
+	// because at that point it's stickerspam and dominating the column
+	// becomes obnoxious.  Edited badge is preserved at normal size so
+	// the (edited) hint still reads as text.
+	const jumboCount = emojiOnlyCount(message.text);
+	if (jumboCount !== null) {
+		const sizeClass =
+			jumboCount === 1 ? "text-7xl" :
+			jumboCount === 2 ? "text-6xl" :
+			"text-5xl";
+		return (
+			<div className={cn(
+				"inline-flex flex-col gap-0.5",
+				// Match the bubble's max-width semantics so the line
+				// can wrap into 2 if 3 large glyphs don't fit on the
+				// row, but otherwise paint with no chrome.
+				"max-w-[60ch]",
+			)}>
+				<div className={cn(sizeClass, "leading-none break-words")}>
+					{message.text}
+				</div>
+				{message.edited && (
+					<span className="text-[10px] text-muted-foreground">(edited)</span>
+				)}
+			</div>
+		);
 	}
 
 	const isMarkdown = looksLikeMarkdown(message.text);
