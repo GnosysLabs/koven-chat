@@ -65,7 +65,6 @@ const FUN_EMOJI_MOUTHS = [
 	"kissHeart",
 	"lilSmile",
 	"plain",
-	"shock",          // surprised, not sad
 	"smileLol",
 	"smileTeeth",
 	"tongueOut",
