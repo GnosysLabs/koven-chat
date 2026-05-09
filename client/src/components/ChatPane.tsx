@@ -4,11 +4,10 @@
 // renders in its own rounded bubble.  Self messages use the primary
 // bubble color; everyone else uses the muted card color.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CollapseAggregate, EventId, FlagAggregate, FlagCategory, Member, Message, ReactionAggregate, Room, RoomId, UserId } from "@koven/shared";
 import { cn } from "@/lib/utils";
 import { COLLAPSED_NAME } from "@/lib/collapsedRooms";
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { ReactionPills } from "@/components/ReactionPills";
@@ -201,7 +200,21 @@ export function ChatPane({
 	const [pendingAttachment, setPendingAttachment] = useState<File | null>(null);
 	const [uploading, setUploading] = useState(false);
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
-	const composeInputRef = useRef<HTMLInputElement | null>(null);
+	const composeInputRef = useRef<HTMLTextAreaElement | null>(null);
+	// Auto-grow the composer to fit its content (Discord-style).  Runs
+	// on every draft change: clear the inline height so scrollHeight
+	// reflects the natural content height, then write that back as the
+	// new height.  CSS `max-h` clamps the upper bound — once we hit
+	// the cap, the textarea's own `overflow-y-auto` takes over and
+	// scrolls instead of growing.  useLayoutEffect (not useEffect) so
+	// the height update happens before paint and there's no flash of
+	// the wrong size.
+	useLayoutEffect(() => {
+		const el = composeInputRef.current;
+		if (!el) return;
+		el.style.height = "auto";
+		el.style.height = `${el.scrollHeight}px`;
+	}, [draft]);
 	const scrollRef = useRef<HTMLDivElement | null>(null);
 	const scrollContentRef = useRef<HTMLDivElement | null>(null);
 	// Cursor position in the compose box.  Tracked separately from
@@ -850,7 +863,7 @@ export function ChatPane({
 				)}
 				<form
 					onSubmit={e => { e.preventDefault(); if (!isSuspended) send(); }}
-					className="flex gap-2 items-center"
+					className="flex gap-2 items-end"
 				>
 					{onSendAttachment && (
 						<>
@@ -889,10 +902,10 @@ export function ChatPane({
 								onHover={i => setMentionIndex(i)}
 							/>
 						)}
-						<Input
+						<textarea
 							ref={composeInputRef}
-							type="text"
 							value={draft}
+							rows={1}
 							onChange={e => {
 								setDraft(e.target.value);
 								setCursor(e.target.selectionStart ?? e.target.value.length);
@@ -901,7 +914,7 @@ export function ChatPane({
 								// Track caret moves driven by mouse / arrow keys
 								// without text changes — keeps the autocomplete
 								// trigger in sync.
-								setCursor((e.target as HTMLInputElement).selectionStart ?? draft.length);
+								setCursor((e.target as HTMLTextAreaElement).selectionStart ?? draft.length);
 							}}
 							onKeyDown={e => {
 								if (mentionToken && matches.length > 0) {
@@ -929,6 +942,15 @@ export function ChatPane({
 										return;
 									}
 								}
+								// Discord-style multi-line composer: plain Enter
+								// submits, Shift+Enter inserts a newline.  IME
+								// composition (CJK, voice input) is gated by
+								// `isComposing` so picking a candidate with Enter
+								// doesn't accidentally fire a send.
+								if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+									e.preventDefault();
+									if (!isSuspended && !uploading) send();
+								}
 							}}
 							placeholder={
 								isSuspended
@@ -946,7 +968,32 @@ export function ChatPane({
 							// attachment is still being uploaded.
 							disabled={isSuspended || uploading}
 							autoFocus={!isSuspended}
-							className="w-full"
+							className={cn(
+								// Match the Input component's visual style so the
+								// composer slot looks identical at single-line
+								// (one row).  Auto-grow handled by the layout
+								// effect below — reset height to auto, then
+								// set to scrollHeight, capped at max-h.
+								"flex w-full rounded-md border border-foreground/15 bg-transparent px-3 py-1.5 text-base shadow-sm transition-colors",
+								"hover:border-foreground/25",
+								"placeholder:text-muted-foreground",
+								"focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:border-ring",
+								"disabled:cursor-not-allowed disabled:opacity-50",
+								"md:text-sm",
+								// Disable the manual resize handle — auto-grow
+								// drives height; a manual handle would fight it.
+								"resize-none",
+								// Prevent overflow scrollbar flash while resizing
+								// — overflow only kicks in once we hit max-h.
+								"overflow-y-auto",
+								// Cap the height so a 50-line paste doesn't eat
+								// the chat.  Tracks Discord — about 12 rows.
+								"max-h-[50vh]",
+								// Snug single-line baseline.  leading-normal +
+								// py-1.5 lands at ~36px to match the Input
+								// component's h-9.
+								"leading-normal min-h-9",
+							)}
 						/>
 					</div>
 					{/* Send button removed — Enter on the input submits the
