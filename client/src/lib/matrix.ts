@@ -1381,12 +1381,26 @@ export class MatrixTransport {
 				}
 			}
 		}
+		// IMPORTANT: don't pass the full inviteList as the `invite`
+		// param — Synapse caps it at `rc_invites_per_room.burst_count`
+		// (default 10), and exceeding that fails the entire createRoom
+		// call with "Cannot invite so many users at once".  In a 14+
+		// member space, that means a single oversized invite array
+		// blocks room creation entirely.
+		//
+		// Two-phase instead: createRoom with NO invites (the room is
+		// born minimal), then fan out invites serially via /invite
+		// after the fact (see post-create block below).  The room is
+		// still discoverable via the space's m.space.child link
+		// `linkRoomToSpace` writes a few lines down, so space members
+		// who haven't been individually invited yet can still find
+		// and join via the space's room list while the invites
+		// trickle in.
 		const res = await c.createRoom({
 			name: opts.name,
 			topic: opts.topic,
 			visibility: opts.visibility as any,
 			preset: (opts.visibility === "public" ? "public_chat" : "private_chat") as any,
-			invite: inviteList.length > 0 ? inviteList : undefined,
 			initial_state: initialState.length ? initialState : undefined,
 		});
 		const newRoomId = res.room_id as RoomId;
@@ -1446,7 +1460,53 @@ export class MatrixTransport {
 		}
 		this.emitRoomList();
 		this.emitSpaceList();
+
+		// Fire space-member invites in the background — see comment
+		// at the createRoom call above for why we can't pass the
+		// full list inline.  Don't await: the user has already been
+		// returned the new room id and can navigate into it; invites
+		// trickle out behind that.  Errors logged, never propagated.
+		if (inviteList.length > 0) {
+			void this.inviteUsersThrottled(newRoomId, inviteList);
+		}
+
 		return newRoomId;
+	}
+
+	/** Background fan-out of invites that respects Synapse's
+	 * `rc_invites_per_room` rate limit (defaults: burst=10, sustained
+	 * 0.3/sec).  Fires up to `burstCount` invites in parallel to use
+	 * the burst quota, then paces the rest at one every `gapMs`.  No
+	 * await on individual invites — failures (rate-limited, target
+	 * left the homeserver, etc.) are logged but don't block subsequent
+	 * targets.  Used for createRoom's space-member invite fan-out
+	 * where we expect more than 10 recipients. */
+	private async inviteUsersThrottled(
+		roomId: RoomId,
+		userIds: UserId[],
+		opts: { burstCount?: number; gapMs?: number } = {},
+	): Promise<void> {
+		const c = this.requireClient();
+		const burstCount = opts.burstCount ?? 8; // leave a couple under Synapse's default 10
+		const gapMs = opts.gapMs ?? 350;          // ~3/sec, comfortably under sustained limit
+		const tryInvite = async (u: UserId) => {
+			try {
+				await c.invite(roomId, u);
+			} catch (err) {
+				console.warn(`inviteUsersThrottled: failed for ${u}`, err);
+			}
+		};
+		// First burst: fire in parallel.  Synapse counts these all at
+		// once but won't reject the burst as long as it's ≤ burstCount.
+		const burst = userIds.slice(0, burstCount);
+		const rest = userIds.slice(burstCount);
+		await Promise.all(burst.map(tryInvite));
+		// Remaining: serial with a gap so the sustained rate stays
+		// under 0.3/sec.
+		for (const u of rest) {
+			await new Promise(resolve => setTimeout(resolve, gapMs));
+			await tryInvite(u);
+		}
 	}
 
 	/** Create a Matrix space (a room with type m.space). */
@@ -2243,7 +2303,19 @@ export class MatrixTransport {
 		const c = this.requireClient();
 		const invited: UserId[] = [];
 		const failed: { userId: UserId; error: string }[] = [];
-		await Promise.all(userIds.map(async u => {
+
+		// Synapse's `rc_invites_per_room` defaults to burst=10,
+		// sustained 0.3/sec.  Promise.all over all invitees blows
+		// straight past the burst when userIds.length > 10 —
+		// downstream invites fail with "Cannot invite so many users
+		// at once".  Mirror inviteUsersThrottled's strategy: parallel
+		// burst up to `burstCount`, then serial with a gap.
+		const burstCount = 8;
+		const gapMs = 350;
+		const burst = userIds.slice(0, burstCount);
+		const rest = userIds.slice(burstCount);
+
+		await Promise.all(burst.map(async u => {
 			try {
 				await c.invite(roomId, u, reason);
 				invited.push(u);
@@ -2254,6 +2326,19 @@ export class MatrixTransport {
 				});
 			}
 		}));
+		for (const u of rest) {
+			await new Promise(resolve => setTimeout(resolve, gapMs));
+			try {
+				await c.invite(roomId, u, reason);
+				invited.push(u);
+			} catch (err) {
+				failed.push({
+					userId: u,
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		}
+
 		return { invited, failed };
 	}
 
