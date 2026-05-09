@@ -35,6 +35,7 @@ import {
 	openBotMcpBundle,
 	closeBotMcpBundle,
 	dispatchToolCall,
+	describeToolCall,
 	type BotMcpBundle,
 } from "./mcp/bot_tools";
 import { config } from "./config";
@@ -270,13 +271,19 @@ async function runToolLoop(
 			console.log(
 				`bot ${bot.mxid}:   tool ${call.function.name}(${truncate(call.function.arguments, 120)})`,
 			);
-			// Show the tool name (with our srvN__ namespace prefix
-			// stripped so the user sees "search_web" not
-			// "srv5__search_web") in the placeholder message.  Args
-			// are intentionally omitted from the user-visible status
-			// — they often contain raw URLs or full search queries
-			// that aren't useful breadcrumbs and clutter the bubble.
-			await progress.update(`🔧 calling ${prettyToolName(call.function.name)}…`);
+			// Show the tool name (srvN__ prefix stripped) plus the
+			// originating MCP server's qualified name in parens, so
+			// users see "calling search_web (exa)…" — useful when a
+			// bot has overlapping tool names attached from multiple
+			// servers, and reassuring in general because it makes the
+			// data path visible.  Args are intentionally omitted —
+			// they often contain raw URLs or full search queries that
+			// clutter the bubble without helping.
+			const desc = describeToolCall(bundle, call.function.name);
+			const label = desc
+				? `${desc.tool} (${prettyServerName(desc.server)})`
+				: prettyToolName(call.function.name);
+			await progress.update(`🔧 calling ${label}…`);
 			const toolResult = await dispatchToolCall(bundle, call.function.name, args);
 			console.log(
 				`bot ${bot.mxid}:   ← ${call.function.name} ${toolResult.isError ? "ERROR" : "ok"}`
@@ -307,6 +314,18 @@ async function runToolLoop(
 function prettyToolName(namespaced: string): string {
 	const m = /^srv\d+__(.+)$/.exec(namespaced);
 	return m ? m[1]! : namespaced;
+}
+
+/** Compact display form for a Smithery qualified name.  Strips the
+ * leading "@" and the namespace prefix so e.g.
+ * "@modelcontextprotocol/server-github" becomes "server-github" and
+ * "exa" stays "exa".  Keeps the bubble readable when servers come
+ * from publishers with verbose namespaces. */
+function prettyServerName(qualifiedName: string): string {
+	// Tail after the first slash, if present; "@x/y" → "y", "exa" → "exa".
+	const slashIdx = qualifiedName.indexOf("/");
+	if (slashIdx >= 0) return qualifiedName.slice(slashIdx + 1);
+	return qualifiedName.startsWith("@") ? qualifiedName.slice(1) : qualifiedName;
 }
 
 /** Best-effort JSON parse of an LLM's tool-call arguments.  Providers

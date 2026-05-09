@@ -185,6 +185,25 @@ function namespaceToolName(rowId: number, toolName: string): string {
 	return `${TOOL_PREFIX}${rowId}${TOOL_SEPARATOR}${toolName}`;
 }
 
+/** Pretty-print a namespaced tool name for the bot's progress
+ * placeholder: returns the tool's bare name plus the originating
+ * MCP server's qualified name so users can see "calling search_web
+ * (exa)…" rather than "calling srv5__search_web…".  Returns null
+ * when the name doesn't parse, when the route id isn't in the
+ * bundle, or when the prefix is missing entirely (e.g. the LLM
+ * hallucinated a tool that doesn't belong to any server) — caller
+ * falls back to the raw name in that case. */
+export function describeToolCall(
+	bundle: BotMcpBundle,
+	namespacedName: string,
+): { tool: string; server: string } | null {
+	const parsed = parseToolName(namespacedName);
+	if (!parsed) return null;
+	const route = bundle.routes.get(parsed.rowId);
+	if (!route) return null;
+	return { tool: parsed.toolName, server: route.qualifiedName };
+}
+
 interface ParsedToolName {
 	rowId: number;
 	toolName: string;
