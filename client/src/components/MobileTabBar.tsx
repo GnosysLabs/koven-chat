@@ -87,15 +87,14 @@ export function MobileTabBar({ active, onChange, unreadByTab }: MobileTabBarProp
 							aria-label={t.label}
 							className={cn(
 								"flex-1 flex flex-col items-center justify-center gap-0.5",
-								// Tight padding so the icon + label
-								// stack sits as close to the safe-area
-								// strip as possible.  Total intrinsic
-								// height ~36 px; the parent's 56 px
-								// reservation still clears the bar
-								// because the unused space above just
-								// shows bg-background (same colour as
-								// the bar itself — invisible seam).
-								"py-1 px-1",
+								// Zero bottom padding — labels sit
+								// flush with the safe-area strip
+								// below, as low as the layout allows
+								// without the home-indicator gesture
+								// zone eating taps.  Small top padding
+								// gives breathing room from the bar's
+								// rounded top edge.
+								"pt-1.5 pb-0 px-1",
 								"transition-colors duration-150",
 								"select-none",
 								// No per-button bg fill — only the
