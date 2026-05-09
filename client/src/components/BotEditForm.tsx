@@ -185,6 +185,15 @@ export function BotEditForm({
 	const [knowledgeBusy, setKnowledgeBusy] = useState(false);
 	const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
 
+	// MCP server picks queued during create.  In edit mode the Tools
+	// tab attaches/detaches against the engine immediately; in
+	// create mode there's no bot id yet, so picks queue here and
+	// flush after createBot succeeds (same pattern as knowledge).
+	// We store the catalog summary (not just the qualified name) so
+	// the Tools tab can render the queued items with their display
+	// name + description without re-fetching.
+	const [pendingMcpAttachments, setPendingMcpAttachments] = useState<SmitheryServerSummary[]>([]);
+
 	// Push the floating notification bell up by the footer height
 	// while this form is mounted — without this, the FAB sits on top
 	// of the Cancel / Save buttons in the bottom-right corner.
@@ -216,6 +225,7 @@ export function BotEditForm({
 		setKnowledge([]);
 		setPendingKnowledge([]);
 		setKnowledgeError(null);
+		setPendingMcpAttachments([]);
 		if (mode === "edit" && bot) {
 			setForm(formStateFromBot(bot));
 		} else {
@@ -306,17 +316,12 @@ export function BotEditForm({
 		form.model.trim().length > 0 &&
 		(mode === "edit" || (form.name.length > 0 && !nameError && form.apiKey.length > 0));
 
-	// Tools tab needs a bot id to attach servers to, so it only
-	// appears in edit mode.  In create mode we tell the user to save
-	// the bot first (a small banner inside the tab if they somehow
-	// navigate there is friendlier than hiding it entirely — but
-	// we hide it for now to keep the strip clean).
-	const availableTabs = useMemo(() => {
-		if (mode === "create") {
-			return ALL_TABS.filter(t => t.key !== "tools");
-		}
-		return ALL_TABS;
-	}, [mode]);
+	// Tools tab is available in both modes.  In create mode picks
+	// queue locally in `pendingMcpAttachments` and flush after
+	// createBot succeeds (handleSubmit walks the queue, same as
+	// knowledge); in edit mode the tab talks to the engine API
+	// directly.
+	const availableTabs = ALL_TABS;
 
 	const tabIndex = availableTabs.findIndex(t => t.key === activeTab);
 	const safeTabIndex = tabIndex < 0 ? 0 : tabIndex;
@@ -417,6 +422,25 @@ export function BotEditForm({
 					setPendingKnowledge([]);
 				} catch (err) {
 					setError(`Saved, but knowledge upload failed: ${err instanceof Error ? err.message : String(err)}`);
+					await onSaved(saved);
+					return;
+				}
+			}
+
+			// MCP follow-up: same idea as knowledge.  Each pending
+			// pick from the catalog gets attached against the freshly
+			// created bot.  Sequential because each attach is a small
+			// DB write and the engine treats duplicate attaches as
+			// upsert — concurrent retries would race the unique
+			// constraint and confuse error reporting.
+			if (pendingMcpAttachments.length > 0) {
+				try {
+					for (const s of pendingMcpAttachments) {
+						await attachBotMcpServer(accessToken, saved.id, s.qualifiedName);
+					}
+					setPendingMcpAttachments([]);
+				} catch (err) {
+					setError(`Saved, but tool attach failed: ${err instanceof Error ? err.message : String(err)}`);
 					await onSaved(saved);
 					return;
 				}
@@ -641,8 +665,10 @@ export function BotEditForm({
 					{currentTabKey === "knowledge"  && renderKnowledgeTab()}
 					{currentTabKey === "tools"      && (
 						<ToolsTab
-							bot={bot}
+							bot={bot ?? null}
 							accessToken={accessToken}
+							pendingAttachments={pendingMcpAttachments}
+							onPendingChange={setPendingMcpAttachments}
 						/>
 					)}
 
@@ -1118,12 +1144,21 @@ function formatBytes(n: number): string {
 function ToolsTab({
 	bot,
 	accessToken,
+	pendingAttachments,
+	onPendingChange,
 }: {
-	bot: BotSummary | undefined | null;
+	bot: BotSummary | null;
 	accessToken: string | null;
+	/** Catalog picks queued during create mode.  Ignored in edit
+	 * mode (where we mutate the engine directly).  The parent flushes
+	 * this queue after createBot succeeds. */
+	pendingAttachments: SmitheryServerSummary[];
+	onPendingChange(next: SmitheryServerSummary[]): void;
 }) {
+	const isCreateMode = bot === null;
+
 	const [attached, setAttached] = useState<BotMcpAttachment[]>([]);
-	const [loading, setLoading] = useState(true);
+	const [loading, setLoading] = useState(!isCreateMode);
 	const [listError, setListError] = useState<string | null>(null);
 
 	const [query, setQuery] = useState("");
@@ -1136,7 +1171,9 @@ function ToolsTab({
 	const [actionError, setActionError] = useState<string | null>(null);
 
 	// Initial fetch of the bot's existing attachments.  Re-runs when
-	// the bot id changes (parent flips between bots).
+	// the bot id changes (parent flips between bots).  Skipped
+	// entirely in create mode — there's no bot id yet, the source of
+	// truth is the parent's pendingAttachments queue.
 	useEffect(() => {
 		if (!accessToken || !bot) {
 			setLoading(false);
@@ -1181,20 +1218,30 @@ function ToolsTab({
 	}, [accessToken, query]);
 
 	async function attach(server: SmitheryServerSummary) {
-		if (!accessToken || !bot) return;
+		if (!accessToken) return;
 		setActionError(null);
+
+		// Detail fetch is the same in both modes — useful for the
+		// required-config heads-up.  Failing to fetch is non-fatal;
+		// the attach proceeds with empty config either way.
+		let detail: SmitheryServerDetail | null = null;
+		try { detail = await getSmitheryServerDetail(accessToken, server.qualifiedName); } catch { /* fall through */ }
+		if (detail && hasRequiredConfig(detail.configSchema)) {
+			setActionError(`${server.displayName} requires configuration we don't collect from the UI yet — attached with empty config; tools that need credentials will fail at runtime.`);
+		}
+
+		// Create mode: just queue locally.  No network round-trip
+		// until the parent flushes after createBot succeeds.
+		if (isCreateMode) {
+			const filtered = pendingAttachments.filter(p => p.qualifiedName !== server.qualifiedName);
+			onPendingChange([...filtered, server]);
+			return;
+		}
+
+		// Edit mode: hit the engine.
+		if (!bot) return;
 		setBusyQualifiedName(server.qualifiedName);
 		try {
-			// Fetch the detail so we can warn early when the server
-			// requires config we're not collecting yet.  If detail
-			// fetch fails we still try to attach with empty config —
-			// the server will simply fail at runtime with a helpful
-			// error visible in the bot's logs.
-			let detail: SmitheryServerDetail | null = null;
-			try { detail = await getSmitheryServerDetail(accessToken, server.qualifiedName); } catch { /* fall through */ }
-			if (detail && hasRequiredConfig(detail.configSchema)) {
-				setActionError(`${server.displayName} requires configuration we don't collect from the UI yet — attached with empty config; tools that need credentials will fail at runtime.`);
-			}
 			const row = await attachBotMcpServer(accessToken, bot.id, server.qualifiedName);
 			setAttached(prev => {
 				// Replace any existing row for the same server (the
@@ -1224,24 +1271,19 @@ function ToolsTab({
 		}
 	}
 
-	// Defensive — the parent hides the Tools tab in create mode, but
-	// if someone navigates here without a saved bot the message is
-	// kinder than a crash on `bot.id` access.
-	if (!bot) {
-		return (
-			<section>
-				<SectionHeader
-					title="Tools"
-					subtitle="Connect Smithery-hosted MCP servers to give this bot extra capabilities."
-				/>
-				<div className="rounded-md border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
-					Save the bot first, then come back here to attach tools.
-				</div>
-			</section>
-		);
+	function detachPending(qualifiedName: string) {
+		setActionError(null);
+		onPendingChange(pendingAttachments.filter(p => p.qualifiedName !== qualifiedName));
 	}
 
-	const attachedQualifiedNames = new Set(attached.map(a => a.smithery_qualified_name));
+	// Names already attached (or queued).  Drives the "Attached" /
+	// disabled state on catalog results so the user can't queue the
+	// same server twice.
+	const attachedQualifiedNames = new Set(
+		isCreateMode
+			? pendingAttachments.map(a => a.qualifiedName)
+			: attached.map(a => a.smithery_qualified_name),
+	);
 
 	return (
 		<section className="space-y-6">
@@ -1250,15 +1292,48 @@ function ToolsTab({
 				subtitle="Smithery-hosted MCP servers this bot can call.  Tools listed by each server become available to the model on every reply."
 			/>
 
-			{/* Attached list */}
+			{/* Attached list — in create mode this renders the queued
+			    catalog picks (flushed by the parent after Create bot);
+			    in edit mode it's the live engine list. */}
 			<div className="space-y-2">
-				<div className="text-xs font-medium uppercase text-muted-foreground tracking-wide">Attached</div>
-				{loading ? (
+				<div className="text-xs font-medium uppercase text-muted-foreground tracking-wide">
+					{isCreateMode ? "Queued" : "Attached"}
+				</div>
+				{!isCreateMode && loading ? (
 					<div className="text-sm text-muted-foreground">Loading…</div>
 				) : listError ? (
 					<div className="text-sm text-destructive border border-destructive/40 bg-destructive/5 rounded-md px-3 py-2">
 						{listError}
 					</div>
+				) : isCreateMode ? (
+					pendingAttachments.length === 0 ? (
+						<div className="rounded-md border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+							No tools queued. Search the catalog below — picks will attach when you create the bot.
+						</div>
+					) : (
+						<ul className="rounded-md border border-border divide-y divide-border bg-primary/5">
+							{pendingAttachments.map(row => (
+								<li key={row.qualifiedName} className="px-3 py-2.5 flex items-center gap-3">
+									<Plug className="h-4 w-4 shrink-0 text-primary" />
+									<div className="flex-1 min-w-0">
+										<div className="text-sm font-medium truncate">{row.displayName}</div>
+										<div className="text-[11px] text-muted-foreground truncate">
+											{row.qualifiedName} · queued — attaches after create
+										</div>
+									</div>
+									<button
+										type="button"
+										onClick={() => detachPending(row.qualifiedName)}
+										title="Remove from queue"
+										aria-label="Remove from queue"
+										className="text-muted-foreground hover:text-destructive"
+									>
+										<X className="h-4 w-4" />
+									</button>
+								</li>
+							))}
+						</ul>
+					)
 				) : attached.length === 0 ? (
 					<div className="rounded-md border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
 						No tools attached. Search the catalog below to add one.
@@ -1354,7 +1429,10 @@ function ToolsTab({
 												disabled={isAttached || isBusy || s.isDeployed === false}
 												onClick={() => attach(s)}
 											>
-												{isAttached ? "Attached" : isBusy ? "Attaching…" : "Attach"}
+												{isAttached
+													? (isCreateMode ? "Queued" : "Attached")
+													: isBusy ? "Attaching…"
+													: (isCreateMode ? "Queue" : "Attach")}
 											</Button>
 										</li>
 									);
