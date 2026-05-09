@@ -863,6 +863,7 @@ export function ChatPane({
 									!m.isSelf && !!viewerUserId && messageMentionsUser(m, viewerUserId)
 								}
 								onMentionClick={(userId) => onOpenProfile?.(userId)}
+								botMxids={botMxids}
 								pollAggregate={pollsByMessage?.get(m.id)}
 								viewerUserId={viewerUserId}
 								onPollVote={onVoteOnPoll}
@@ -1220,7 +1221,7 @@ function MessageRow({
 	message, avatarMxc, continuesGroup, isFirst, flaggable, roomEncrypted,
 	reactions, flags, collapse, onReact, onReply, onFlag, onTogglePillFlag, onToggleReactionPill, isBot,
 	isOwnedBot, isHovered, onDelete,
-	isDm, receiptsVersion, memberAvatars, memberNames, mentionsViewer, onMentionClick,
+	isDm, receiptsVersion, memberAvatars, memberNames, mentionsViewer, onMentionClick, botMxids,
 	pollAggregate, viewerUserId, onPollVote, onPollEnd,
 }: {
 	message: Message;
@@ -1288,6 +1289,10 @@ function MessageRow({
 	// Click handler for inline mention pills in this row's bubble.
 	// Routes to App.tsx's profile sheet via ChatPane's onOpenProfile.
 	onMentionClick(userId: string): void;
+	// Bot mxids in the room.  Forwarded to SeenIndicator so bot read
+	// receipts don't show up in the "seen by" stack — that count is
+	// for real readers, not the engine's auto-syncing bot clients.
+	botMxids?: Set<string>;
 	// Live poll aggregate for this row, when message.kind === "poll".
 	// Drives the bars + per-answer counts + viewer's selected answers.
 	pollAggregate?: PollAggregate;
@@ -1490,6 +1495,7 @@ function MessageRow({
 								receiptsVersion={receiptsVersion}
 								memberAvatars={memberAvatars}
 								memberNames={memberNames}
+								botMxids={botMxids}
 							/>
 						)}
 						{flaggable && flags && flags.count > 0 && (
@@ -2204,6 +2210,7 @@ function SeenIndicator({
 	receiptsVersion,
 	memberAvatars,
 	memberNames,
+	botMxids,
 }: {
 	roomId: RoomId;
 	eventId: EventId;
@@ -2211,18 +2218,29 @@ function SeenIndicator({
 	receiptsVersion: number;
 	memberAvatars: Map<string, string | undefined>;
 	memberNames: Map<string, string>;
+	// Read receipts from bot mxids in this set are excluded from
+	// the seen-by stack.  The engine keeps every bot's matrix-js-sdk
+	// client live + syncing, so they emit read receipts for every
+	// message they receive.  The user cares about who actually
+	// READ the message — i.e. real humans — not which automated
+	// processes happen to also be in the room.
+	botMxids?: Set<string>;
 }) {
 	const transport = useTransport();
 	const [open, setOpen] = useState(false);
 
 	// receiptsVersion in deps via useMemo so we re-query when it
 	// bumps.  matrix-js-sdk owns the actual receipt cache; we just
-	// trigger a re-read.
+	// trigger a re-read.  Bot receipts are filtered post-query
+	// rather than inside getMessageSeenBy because the transport
+	// doesn't carry the bot roster — it lives one level up.
 	const seen = useMemo(() => {
 		if (!transport) return [];
-		return transport.getMessageSeenBy(roomId, eventId);
+		const all = transport.getMessageSeenBy(roomId, eventId);
+		if (!botMxids || botMxids.size === 0) return all;
+		return all.filter(s => !botMxids.has(s.userId));
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [transport, roomId, eventId, receiptsVersion]);
+	}, [transport, roomId, eventId, receiptsVersion, botMxids]);
 
 	if (seen.length === 0) return null;
 
