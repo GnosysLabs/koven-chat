@@ -138,13 +138,25 @@ function PickerState({
 		);
 	}
 
+	// Bots exist but the user hasn't picked one — mirror the
+	// "no bots yet" CTA layout (icon disc + heading + sub + button)
+	// so both empty-state surfaces read as the same family.  Only
+	// the copy + button label differ.
 	return (
-		<div className="flex-1 min-w-0 flex flex-col items-center justify-center text-center px-6 gap-3 text-muted-foreground">
-			<Bot className="h-8 w-8 opacity-50" />
-			<p className="text-sm max-w-md">
-				Pick a bot from the list to view or edit its configuration, or
-				click <span className="font-medium text-foreground">+</span> to create a new one.
-			</p>
+		<div className="flex-1 min-w-0 flex flex-col items-center justify-center text-center px-6 gap-4">
+			<div className="rounded-full bg-primary/10 p-4 text-primary">
+				<Bot className="h-8 w-8" />
+			</div>
+			<div className="max-w-md space-y-1">
+				<h3 className="font-medium">Pick a bot to edit</h3>
+				<p className="text-sm text-muted-foreground">
+					Choose one from the list on the left to view or edit its configuration, or create a new one.
+				</p>
+			</div>
+			<Button type="button" onClick={onNewBot} disabled={atLimit} className="gap-1.5">
+				<Plus className="h-4 w-4" />
+				Create a bot
+			</Button>
 		</div>
 	);
 }
