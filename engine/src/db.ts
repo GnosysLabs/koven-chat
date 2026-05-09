@@ -159,6 +159,21 @@ db.exec(`
 		updated_at INTEGER NOT NULL
 	);
 
+	-- Per-user third-party integration secrets — currently just the
+	-- Smithery API key (used to query Smithery's MCP server registry
+	-- + invoke hosted MCP servers on the user's behalf).  Composite
+	-- key on (user_id, integration) lets one user store multiple
+	-- integration credentials independently; the value is encrypted
+	-- via sealSecret (same crypto as bot api_key_enc) and never
+	-- echoed back to the client.
+	CREATE TABLE IF NOT EXISTS user_integrations (
+		user_id     TEXT NOT NULL,
+		integration TEXT NOT NULL,
+		secret_enc  TEXT NOT NULL,
+		updated_at  INTEGER NOT NULL,
+		PRIMARY KEY (user_id, integration)
+	);
+
 	-- Floor-violation suspensions.  Created automatically when the
 	-- engine observes a chat.koven.flag.v1 with category=floor_violation
 	-- (target's account is paused pending admin review), or directly
@@ -1057,6 +1072,66 @@ export function writeBio(userId: string, bio: string): void {
 
 export function deleteBio(userId: string): void {
 	deleteBioStmt.run(userId);
+}
+
+// ─── Per-user integration secrets ───────────────────────────────────
+//
+// Encrypted credentials for third-party integrations the user has
+// opted into.  Currently used for Smithery (MCP server registry +
+// hosted MCP server invocation).  The `secret_enc` column holds a
+// sealSecret-encrypted blob; sealSecret/unsealSecret are the same
+// pair used for bot api_key_enc.  Nothing in this table ever
+// returns to the client in its original form — endpoints that
+// "report" a configured integration return a presence boolean only.
+
+const upsertUserIntegrationStmt = db.prepare(`
+	INSERT INTO user_integrations (user_id, integration, secret_enc, updated_at)
+	VALUES (?, ?, ?, ?)
+	ON CONFLICT(user_id, integration) DO UPDATE SET
+		secret_enc = excluded.secret_enc,
+		updated_at = excluded.updated_at
+`);
+const readUserIntegrationStmt = db.prepare(
+	`SELECT secret_enc FROM user_integrations WHERE user_id = ? AND integration = ?`,
+);
+const deleteUserIntegrationStmt = db.prepare(
+	`DELETE FROM user_integrations WHERE user_id = ? AND integration = ?`,
+);
+const hasUserIntegrationStmt = db.prepare(
+	`SELECT 1 FROM user_integrations WHERE user_id = ? AND integration = ? LIMIT 1`,
+);
+
+/** Store an encrypted integration secret for `userId`.  Replaces any
+ * existing value for the same (user, integration) pair. */
+export function setUserIntegrationSecret(
+	userId: string,
+	integration: string,
+	secretEnc: string,
+): void {
+	upsertUserIntegrationStmt.run(userId, integration, secretEnc, Date.now());
+}
+
+/** Read the encrypted blob — caller is responsible for unsealSecret.
+ * Returns null when no row exists. */
+export function getUserIntegrationSecretEnc(
+	userId: string,
+	integration: string,
+): string | null {
+	const row = readUserIntegrationStmt.get(userId, integration) as
+		| { secret_enc: string }
+		| undefined;
+	return row?.secret_enc ?? null;
+}
+
+export function clearUserIntegrationSecret(userId: string, integration: string): void {
+	deleteUserIntegrationStmt.run(userId, integration);
+}
+
+/** Cheap presence check.  Used by the integrations-status endpoint
+ * to report `{ configured: true|false }` without ever decrypting
+ * the value. */
+export function hasUserIntegration(userId: string, integration: string): boolean {
+	return !!hasUserIntegrationStmt.get(userId, integration);
 }
 
 // ─── Suspensions ────────────────────────────────────────────────────

@@ -67,6 +67,9 @@ import {
 	markFlagRetracted,
 	markRoomAsDm,
 	purgeUserState,
+	hasUserIntegration,
+	setUserIntegrationSecret,
+	clearUserIntegrationSecret,
 	readBio,
 	readInstanceConfig,
 	readWeight,
@@ -934,6 +937,45 @@ export function startServer(): void {
 					}, { status: 409 });
 				}
 				purgeUserState(userId);
+				return json({ ok: true });
+			}
+
+			// ─── Per-user integrations ──────────────────────────────
+			// Encrypted credentials a user has opted into (currently
+			// just the Smithery API key, used to discover + invoke
+			// MCP servers attached to their bots).  Read returns
+			// presence only; the value never leaves the engine.
+			if (req.method === "GET" && path === "/api/me/integrations") {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				return json({
+					integrations: {
+						smithery: { configured: hasUserIntegration(userId, "smithery") },
+					},
+				});
+			}
+
+			if (req.method === "PUT" && path === "/api/me/integrations/smithery") {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				const body = (await req.json().catch(() => null)) as { api_key?: unknown } | null;
+				const apiKey = typeof body?.api_key === "string" ? body.api_key.trim() : "";
+				if (!apiKey) {
+					return json({ errcode: "M_INVALID_PARAM", error: "api_key required" }, { status: 400 });
+				}
+				try {
+					const sealed = sealSecret(apiKey);
+					setUserIntegrationSecret(userId, "smithery", sealed);
+				} catch {
+					return json({ error: "encryption_unavailable" }, { status: 503 });
+				}
+				return json({ ok: true });
+			}
+
+			if (req.method === "DELETE" && path === "/api/me/integrations/smithery") {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				clearUserIntegrationSecret(userId, "smithery");
 				return json({ ok: true });
 			}
 
