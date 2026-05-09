@@ -1507,18 +1507,32 @@ function MessageRow({
 								hide
 							</button>
 						)}
-						{showActions && (
-							<MessageActions
-								onReact={onReact}
-								onReply={onReply}
-								onFlagClick={() => setFlagDialogOpen(true)}
-								showFlag={canFlag}
-								onDelete={handleDelete}
-								reactOpen={reactOpen}
-								onReactOpenChange={setReactOpen}
-								className="shrink-0"
-							/>
-						)}
+						{/* Reserved slot for the action toolbar.  Always
+						    present (even when not hovered) so the row's
+						    height stays constant and hovering doesn't
+						    push the message below down — gives the
+						    timeline a steady gutter between bubbles
+						    that absorbs the toolbar's vertical space.
+						    h-8 matches MessageActions' button row height
+						    (h-7 + padding); when showActions is false
+						    the slot stays mounted but empty.  Width is
+						    deliberately fluid so popovers from the
+						    react-picker / delete-confirm don't get
+						    constrained on first paint. */}
+						<div className="min-h-8 flex items-start">
+							{showActions && (
+								<MessageActions
+									onReact={onReact}
+									onReply={onReply}
+									onFlagClick={() => setFlagDialogOpen(true)}
+									showFlag={canFlag}
+									onDelete={handleDelete}
+									reactOpen={reactOpen}
+									onReactOpenChange={setReactOpen}
+									className="shrink-0"
+								/>
+							)}
+						</div>
 					</div>
 				</div>
 				{!isCollapsed && message.kind === "text" && !roomEncrypted && (
