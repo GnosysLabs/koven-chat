@@ -24,7 +24,7 @@ import { FlagDialog } from "@/components/FlagDialog";
 import { DeleteMessageDialog } from "@/components/DeleteMessageDialog";
 import { firstLink, linkify } from "@/lib/linkify";
 import { renderWithMentions } from "@/lib/mentionRender";
-import { findYouTubeMatches, stripYouTubeUrls } from "@/lib/youtube";
+import { findYouTubeMatches, isYouTubeUrl, stripYouTubeUrls } from "@/lib/youtube";
 import { YouTubeEmbed } from "@/components/YouTubeEmbed";
 import { GifPicker } from "@/components/GifPicker";
 import { PollCard } from "@/components/PollCard";
@@ -1767,15 +1767,22 @@ function MessageBubble({
 		);
 	}
 
-	// YouTube embeds: pull every YouTube URL out of the body, render
-	// the surviving text through the normal pipeline (with the URLs
-	// stripped so they don't print alongside the embed), and append
-	// each video as its own player below the bubble.  Markdown
-	// messages skip this — markdown already has its own URL handling
-	// and the embed/markdown interaction isn't worth the complexity
-	// for v1.
+	// YouTube embeds.  Rule: only the FIRST URL in the body gets to
+	// be the message's embed slot, and YouTube competes for it
+	// against the OG preview card (UrlPreviewSlot) — only one embed
+	// per message, period.  If the first URL is a YouTube link we
+	// render its player and strip the URL from the body; if it's
+	// anything else we don't embed any YouTube even if a later URL
+	// is one (UrlPreviewSlot handles the first URL instead).
+	// Markdown messages skip this — markdown owns its own link
+	// rendering and the embed/markdown interaction isn't worth the
+	// complexity for v1.
 	const isMarkdown = looksLikeMarkdown(message.text);
-	const youtubeMatches = isMarkdown ? [] : findYouTubeMatches(message.text);
+	const firstUrl = isMarkdown ? null : firstLink(message.text);
+	const firstUrlIsYouTube = !!firstUrl && isYouTubeUrl(firstUrl);
+	const youtubeMatches = firstUrlIsYouTube
+		? findYouTubeMatches(message.text)  // capped at 1 by MAX_INLINE_EMBEDS
+		: [];
 	const strippedText = youtubeMatches.length > 0
 		? stripYouTubeUrls(message.text, youtubeMatches)
 		: message.text;
@@ -2057,17 +2064,19 @@ function PendingAttachmentChip({
 // rendering entirely when there's no URL or no preview was returned —
 // no flicker, no empty cards.
 //
-// Suppressed for YouTube URLs — those render as native iframe embeds
-// in MessageBubble; an OG card alongside the player would be redundant.
+// Embed-slot competition: only the FIRST URL in source order gets an
+// embed.  If that first URL is YouTube, MessageBubble already rendered
+// the iframe player; this slot suppresses to keep the rule "one embed
+// per message".  If the first URL is non-YouTube, we preview it here
+// (and any later YouTube URLs in the same message stay as plain links).
 function UrlPreviewSlot({ text }: { text: string }) {
-	const youtubeMatches = findYouTubeMatches(text);
-	const textWithoutYouTube = youtubeMatches.length > 0
-		? stripYouTubeUrls(text, youtubeMatches)
-		: text;
-	const url = firstLink(textWithoutYouTube);
-	const preview = useUrlPreview(url);
+	const url = firstLink(text);
+	const firstUrlIsYouTube = !!url && isYouTubeUrl(url);
+	// Pass null to useUrlPreview when YouTube wins the slot so we
+	// don't spend a Synapse OG-preview round-trip we'd just discard.
+	const preview = useUrlPreview(firstUrlIsYouTube ? null : url);
 	const imageUrl = useMatrixMedia(preview?.imageMxc);
-	if (!url || !preview) return null;
+	if (!url || firstUrlIsYouTube || !preview) return null;
 
 	const host = (() => {
 		try { return new URL(preview.url).hostname.replace(/^www\./, ""); }

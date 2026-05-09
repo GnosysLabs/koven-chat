@@ -38,12 +38,12 @@ export interface YouTubeMatch {
 const HOST_RE =
 	/(?:^|[\s(])(?:https?:\/\/)?((?:(?:www|m|music)\.)?(?:youtube\.com|youtu\.be))(\/[^\s)]*)?/gi;
 
-/** Hard cap on inline embeds.  Past this, surviving YouTube URLs
- * stay in the message text as regular linkified anchors — the user
- * still sees them, but the chat doesn't turn into a 12-iframe wall.
- * Four covers the realistic "I'm sharing a few things" case without
- * tipping into "I pasted a playlist." */
-export const MAX_INLINE_EMBEDS = 4;
+/** Only ever embed the FIRST URL of a message — and YouTube
+ * competes for that single slot against the OG preview card.
+ * Surviving URLs after the first stay in the body as regular
+ * linkified anchors.  Keeps the timeline compact and predictable
+ * regardless of how many links someone pastes. */
+export const MAX_INLINE_EMBEDS = 1;
 
 export function findYouTubeMatches(text: string): YouTubeMatch[] {
 	if (!text) return [];
@@ -139,6 +139,14 @@ export function buildEmbedUrl(videoId: string, startSeconds?: number): string {
 		return `${base}?start=${startSeconds}`;
 	}
 	return base;
+}
+
+/** True when `url` is recognised as a YouTube link.  Cheap test
+ * that wraps `findYouTubeMatches` — used by the renderer to decide
+ * whether the first URL in a body should be embedded as a player
+ * (true) or handed to the OG-preview pipeline (false). */
+export function isYouTubeUrl(url: string): boolean {
+	return findYouTubeMatches(url).length > 0;
 }
 
 /** Replace YouTube URLs in the body with empty strings so the
