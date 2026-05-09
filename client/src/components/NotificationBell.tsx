@@ -9,7 +9,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Bell, Check, Trash2, AtSign, Reply, MessageSquare, Mail, Bell as SystemIcon } from "lucide-react";
+import { Bell, Trash2, AtSign, Reply, MessageSquare, Mail, Bell as SystemIcon } from "lucide-react";
 import {
 	Dialog,
 	DialogContent,
@@ -58,12 +58,20 @@ export function NotificationBell({
 	const [open, setOpen] = useState(false);
 	const { unreadCount, entries, error, refresh, markRead, markAllRead, dismissAll } = notifications;
 
-	function handleOpenChange(next: boolean) {
+	async function handleOpenChange(next: boolean) {
 		setOpen(next);
-		// Refresh on open — the polled count tells us SOMETHING new
-		// is there but the cached `entries` array might predate that
-		// arrival.  Re-pull so the list is current.
-		if (next) void refresh();
+		if (next) {
+			// 1. Refresh the list so it's current (polled count
+			//    flagged "new stuff" but cached entries may predate it).
+			// 2. Then mark everything read on the server — opening the
+			//    panel IS reading them.  No separate "Mark all read"
+			//    button needed; if the user pulled the panel up, they
+			//    saw what's in it.  Only unread → read flips happen here;
+			//    rows aren't deleted, so the user can still scroll
+			//    history of past notifications.
+			await refresh();
+			void markAllRead();
+		}
 	}
 
 	async function handleEntryClick(entry: NotificationEntry) {
@@ -245,23 +253,12 @@ export function NotificationBell({
 				</div>
 			)}
 
-			{/* Footer actions — only render when there's something
-			    to act on.  Keeps the empty state clean. */}
+			{/* Footer — single destructive action (Clear all).  Mark-
+			    all-read is implicit on panel open, so a button for it
+			    is redundant noise.  Clear all stays because hard-
+			    delete is a different intent than "I've seen these." */}
 			{entries.length > 0 ? (
-				<div className="border-t border-border/50 p-2 flex items-center justify-between gap-2 shrink-0">
-					<button
-						type="button"
-						onClick={() => void markAllRead()}
-						disabled={unreadCount === 0}
-						className={cn(
-							"flex items-center gap-1.5 px-3 py-1.5 rounded-md",
-							"text-xs font-medium",
-							"hover:bg-accent disabled:opacity-40 disabled:cursor-not-allowed",
-						)}
-					>
-						<Check className="h-3.5 w-3.5" />
-						Mark all read
-					</button>
+				<div className="border-t border-border/50 p-2 flex items-center justify-end shrink-0">
 					<button
 						type="button"
 						onClick={() => void dismissAll()}

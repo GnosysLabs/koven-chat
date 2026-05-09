@@ -99,11 +99,34 @@ export function useNotifications(
 			return;
 		}
 
+		// Live focus / visibility check.  Inlined here so pollOnce
+		// can use it without re-binding the polling loop on every
+		// render.
+		const isLookingNow = () => {
+			if (typeof document === "undefined") return false;
+			if (document.visibilityState !== "visible") return false;
+			if (typeof document.hasFocus === "function" && !document.hasFocus()) return false;
+			return true;
+		};
+
 		let cancelled = false;
 		const pollOnce = async () => {
 			const t = tokenRef.current;
 			if (!t) return;
 			try {
+				// If the user is actively viewing a room with the
+				// tab focused, clear any unread for THAT room BEFORE
+				// fetching the count.  This is what stops the badge
+				// going up while you're sitting in the conversation
+				// — the engine already wrote the row, but we mark it
+				// read on the server before /unread-count returns,
+				// so the count comes back without it.  Server-side
+				// markRoomRead is a no-op SQL UPDATE when there's
+				// nothing to clear, so this is cheap.
+				const room = activeRoomIdRef.current;
+				if (room && isLookingNow()) {
+					await apiMarkRoomRead({ accessToken: t, roomId: room }).catch(() => {/* swallow */});
+				}
 				const count = await fetchUnreadCount(t);
 				if (!cancelled) setUnreadCount(count);
 			} catch {
