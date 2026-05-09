@@ -570,9 +570,53 @@ export class MatrixTransport {
 		// is non-fatal — most likely cause is "no backup exists yet"
 		// (pre-setup user) which is correctly handled as "no auto-
 		// restore until they enable it".
-		void this.client.getCrypto()?.checkKeyBackupAndEnable().catch(err => {
-			console.warn("matrix: checkKeyBackupAndEnable failed (auto-restore won't work this session)", err);
-		});
+		//
+		// We also chain a `restoreKeyBackup()` after enable.  This is
+		// the bulk pull from /room_keys → local store, which catches
+		// the multi-device case: if THIS device is missing a session
+		// that ANOTHER of this user's devices already uploaded to
+		// backup, the bulk pull is what gets it down here.  Without
+		// this, the auto-pull only fires on freshly-arriving UTDs,
+		// not on UTDs already sitting in the timeline from before
+		// backup was enabled — which is most of the visible breakage
+		// in practice.
+		//
+		// Both calls require the backup decryption key to be in the
+		// rust crypto store.  It IS there if the user has unlocked
+		// at least once on this device (loaded via SSSS into the
+		// persistent rust IndexedDB during unlockEncryption).  If
+		// they haven't, both calls no-op gracefully — no decryption
+		// possible until they enter their passphrase, which the
+		// EncryptionUnlockSheet flow will prompt for.
+		const cryptoApi = this.client.getCrypto();
+		if (cryptoApi) {
+			void (async () => {
+				try {
+					await cryptoApi.checkKeyBackupAndEnable();
+				} catch (err) {
+					console.warn("matrix: checkKeyBackupAndEnable failed (auto-restore won't work this session)", err);
+					return;
+				}
+				try {
+					// Bulk pull.  Pulls every backed-up megolm session
+					// into the local store; matrix-js-sdk re-fires
+					// Decrypted on stuck timeline events as their
+					// sessions arrive.  Slow on first run (one HTTP
+					// GET per backup chunk), idempotent thereafter.
+					const result = await cryptoApi.restoreKeyBackup();
+					console.info(
+						`matrix: bulk-restored key backup (imported=${result.imported} total=${result.total})`,
+					);
+				} catch (err) {
+					// Most common failure here is "decryption key not
+					// available" — the user hasn't unlocked SSSS on
+					// this device yet, so we can't read the backup.
+					// Fine — the EncryptionUnlockSheet path will
+					// prompt and re-run this on success.
+					console.warn("matrix: restoreKeyBackup failed (decryption key likely missing)", err);
+				}
+			})();
+		}
 
 		// Encrypted events arrive via Timeline as `m.room.encrypted`.
 		// We skip them there (see Timeline handler below) and instead
