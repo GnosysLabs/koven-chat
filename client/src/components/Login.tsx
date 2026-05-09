@@ -171,8 +171,18 @@ export function Login({ onLoggedIn }: LoginProps) {
 	// admin hasn't set a site key, the hook is a no-op and the
 	// `turnstileToken` stays null; we then still let the email
 	// submission through (engine also skips siteverify in that case).
+	//
+	// Skipped on the desktop shell — Cloudflare can't validate the
+	// WebView's `tauri://` / `tauri.localhost` origin so the widget
+	// just errors out.  The engine sees an X-Koven-Client header
+	// from the desktop fetch and bypasses captcha enforcement on
+	// that path; the existing email rate-limit still applies.
+	const isDesktop = typeof window !== "undefined"
+		&& (window as { __KOVEN_DESKTOP__?: boolean }).__KOVEN_DESKTOP__ === true;
 	const turnstileRef = useRef<HTMLDivElement | null>(null);
-	const turnstileSiteKey = (instance as { turnstile_site_key?: string }).turnstile_site_key ?? null;
+	const turnstileSiteKey = isDesktop
+		? null
+		: (instance as { turnstile_site_key?: string }).turnstile_site_key ?? null;
 	const turnstileEnabled = !!turnstileSiteKey;
 	const turnstile = useTurnstile(turnstileRef, step === "email" ? turnstileSiteKey : null);
 

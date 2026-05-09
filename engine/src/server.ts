@@ -268,7 +268,7 @@ function corsHeaders(): Record<string, string> {
 	return {
 		"Access-Control-Allow-Origin": "*",
 		"Access-Control-Allow-Methods": "GET, PUT, POST, OPTIONS",
-		"Access-Control-Allow-Headers": "Content-Type, Authorization, X-Matrix-Token",
+		"Access-Control-Allow-Headers": "Content-Type, Authorization, X-Matrix-Token, X-Koven-Client",
 	};
 }
 
@@ -556,10 +556,22 @@ export function startServer(): void {
 				// When unset, the auth flow runs unchanged so smaller
 				// installs that don't want bot protection don't have
 				// to do anything.
+				//
+				// Bypass for the desktop shell: the WebView serves the
+				// SPA from `tauri://localhost` / `tauri.localhost`, an
+				// origin Cloudflare's site-key validation rejects.  The
+				// desktop client sets `X-Koven-Client: desktop` so we
+				// can skip the captcha gate for it without wiring up
+				// per-origin Cloudflare configs.  Threat-model trade-
+				// off: a bot can spoof the header to bypass captcha
+				// here, but the email rate-limit + send-failure paths
+				// still apply, and bots overwhelmingly target the
+				// public web (where this header isn't set).
 				const cfg = readInstanceConfig();
 				const turnstileSecret = cfg["turnstile_secret_key"]?.trim();
 				const turnstileSite = cfg["turnstile_site_key"]?.trim();
-				if (turnstileSecret && turnstileSite) {
+				const isDesktopClient = req.headers.get("x-koven-client") === "desktop";
+				if (turnstileSecret && turnstileSite && !isDesktopClient) {
 					const token = typeof body.turnstile_token === "string"
 						? body.turnstile_token.trim()
 						: "";

@@ -26,15 +26,29 @@ export async function requestEmailCode(
 	email: string,
 	opts: { turnstileToken?: string | null } = {},
 ): Promise<RequestCodeResult> {
+	// Desktop app — Cloudflare can't validate the WebView's origin
+	// (`tauri://localhost` / `https://tauri.localhost`) so the
+	// Turnstile widget would just render an "unable to connect"
+	// error.  Desktop binaries are distributed via signed GitHub
+	// releases so the threat model that justifies Turnstile (email-
+	// spam bots hitting the public web) doesn't apply; engine
+	// reads the X-Koven-Client header below and skips the captcha
+	// gate when set.  Existing email rate-limits stay in place
+	// regardless.
+	const isDesktop = typeof window !== "undefined"
+		&& (window as { __KOVEN_DESKTOP__?: boolean }).__KOVEN_DESKTOP__ === true;
+	const headers: Record<string, string> = { "Content-Type": "application/json" };
+	if (isDesktop) headers["X-Koven-Client"] = "desktop";
 	let r: Response;
 	try {
 		r = await fetch(`${ENGINE_URL}/api/auth/request-code`, {
 			method: "POST",
-			headers: { "Content-Type": "application/json" },
+			headers,
 			// Always include the turnstile_token field when set so the
 			// engine can pass it through to Cloudflare's siteverify.
-			// Engine ignores it when the integration isn't configured,
-			// so leaving the field unconditionally is safe.
+			// Engine ignores it when the integration isn't configured
+			// or the desktop bypass header is set, so leaving the
+			// field unconditionally is safe.
 			body: JSON.stringify(
 				opts.turnstileToken
 					? { email, turnstile_token: opts.turnstileToken }
