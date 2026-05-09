@@ -9,9 +9,11 @@
 // shell paints below it; this version embraces the strip and treats
 // it as the bar's foundation.
 //
-// Four tabs:
+// Five tabs:
 //
-//   • Chats   — DMs + orphan rooms (one-on-one / small groups)
+//   • Chats   — DMs only (1:1 conversations)
+//   • Rooms   — orphan rooms not assigned to any space (small groups
+//               that don't belong to a community)
 //   • Spaces  — list of joined spaces; drilling in shows that
 //               space's channel list (RoomList)
 //   • Explore — discover new public rooms / spaces
@@ -23,10 +25,10 @@
 // know we changed style.
 
 import type { ReactNode } from "react";
-import { MessageSquare, Compass, LayoutGrid, User } from "lucide-react";
+import { MessageSquare, Compass, Hash, LayoutGrid, User } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export type MobileTab = "chats" | "spaces" | "explore" | "me";
+export type MobileTab = "chats" | "rooms" | "spaces" | "explore" | "me";
 
 interface MobileTabBarProps {
 	active: MobileTab;
@@ -44,6 +46,7 @@ interface TabDef {
 
 const TABS: TabDef[] = [
 	{ key: "chats",   label: "Chats",   icon: <MessageSquare className="h-[18px] w-[18px]" strokeWidth={2.2} /> },
+	{ key: "rooms",   label: "Rooms",   icon: <Hash          className="h-[18px] w-[18px]" strokeWidth={2.2} /> },
 	{ key: "spaces",  label: "Spaces",  icon: <LayoutGrid    className="h-[18px] w-[18px]" strokeWidth={2.2} /> },
 	{ key: "explore", label: "Explore", icon: <Compass       className="h-[18px] w-[18px]" strokeWidth={2.2} /> },
 	{ key: "me",      label: "Me",      icon: <User          className="h-[18px] w-[18px]" strokeWidth={2.2} /> },

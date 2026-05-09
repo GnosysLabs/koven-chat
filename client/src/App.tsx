@@ -1698,7 +1698,9 @@ export default function App() {
 								: state.activeSpace?.kind === "space"
 									|| state.activeSpace?.kind === "spaces_overview"
 									? "spaces"
-									: "chats"
+									: state.activeSpace?.kind === "rooms"
+										? "rooms"
+										: "chats"
 					}
 					onChange={(tab: MobileTab) => {
 						// Switching tabs always clears the Me overlay
@@ -1709,6 +1711,8 @@ export default function App() {
 						dispatch({ type: "set_active_room", roomId: null });
 						if (tab === "chats") {
 							dispatch({ type: "set_active_space", space: { kind: "dms" } });
+						} else if (tab === "rooms") {
+							dispatch({ type: "set_active_space", space: { kind: "rooms" } });
 						} else if (tab === "spaces") {
 							// Stay in the current space if we already
 							// have one selected — only drop into the
@@ -1722,7 +1726,11 @@ export default function App() {
 					}}
 					unreadByTab={{
 						chats: state.rooms.filter(
-							r => (r.kind === "dm" || r.parentSpaceIds.length === 0)
+							r => r.kind === "dm" && !r.isInvite && r.unreadCount > 0,
+						).length,
+						rooms: state.rooms.filter(
+							r => r.kind !== "dm"
+								&& r.parentSpaceIds.length === 0
 								&& !r.isInvite
 								&& r.unreadCount > 0,
 						).length,
