@@ -41,22 +41,29 @@ import { existsSync, mkdirSync, chownSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 const SCRATCH_ROOT = "/var/lib/koven-mcp";
-// `--as` caps VIRTUAL memory (address space), not resident memory.
-// V8 reserves a multi-GB virtual CodeRange on startup that's mostly
-// uncommitted physical pages — set the cap below it and the
-// subprocess OOMs immediately on `node` startup with
-// "Failed to reserve virtual memory for CodeRange".  2 GiB is
-// generous enough for V8 + a small MCP server's working set.
+// We DON'T cap RLIMIT_AS (virtual address space).  Tempting as a
+// runaway-leak guard, but modern Node ecosystems blow through any
+// reasonable cap legitimately:
+//   * V8 reserves a multi-GiB CodeRange on startup (uncommitted)
+//   * undici lazy-instantiates llhttp via WebAssembly on the first
+//     HTTP request — WASM reserves multi-GiB of guard-page virtual
+//     memory per instance, completely uncommitted
+//   * Same story for any package that uses wasm-bindgen / wasmtime
+// Set --as too low and the subprocess OOMs on first network call
+// with "WebAssembly.instantiate(): Out of memory" — the failure
+// mode that wasted hours hunting tubesurf bot's fake responses.
 //
-// The actual physical-memory cap should come from cgroups
-// (Docker --memory or systemd-run MemoryMax=) — RLIMIT_AS is a
-// safety net for runaway leaks, not a hard ceiling.  RLIMIT_RSS
-// is a no-op on Linux since 2.4.30 (kernel doesn't enforce it),
-// which is why we don't bother setting it.
-const RLIMIT_AS_BYTES = 2 * 1024 * 1024 * 1024;
+// Physical-memory protection lives at the cgroup layer (Docker's
+// --memory on the engine container), which is the right place — it
+// caps RSS, not virtual reservations.  RLIMIT_RSS is a no-op on
+// Linux since 2.4.30 so we don't set it either.
 const RLIMIT_CPU_SECONDS = 60;
 const RLIMIT_NPROC = 64;
-const RLIMIT_NOFILE = 256;
+// 1024 chosen to match Linux's default soft `ulimit -n`.  256 was
+// too tight for HTTP/2-using packages (undici keeps a per-origin
+// connection pool with multiple fds each) and surfaced as cryptic
+// EMFILE failures deep in the package's own networking layer.
+const RLIMIT_NOFILE = 1024;
 // `nobody` UID/GID on Debian-based images.  Override via
 // KOVEN_MCP_SANDBOX_UID for hosts where nobody is a different UID.
 const DEFAULT_NOBODY_UID = 65534;
@@ -177,7 +184,9 @@ export function buildSandboxedInvocation(opts: SandboxOptions): SandboxInvocatio
 	};
 
 	const prlimitArgs = prlimit ? [
-		`--as=${RLIMIT_AS_BYTES}`,
+		// No --as: see the comment on RLIMIT_CPU_SECONDS for why.
+		// CPU + nproc + nofile still useful for runaway-process /
+		// fork-bomb / fd-leak protection.
 		`--cpu=${RLIMIT_CPU_SECONDS}`,
 		`--nproc=${RLIMIT_NPROC}`,
 		`--nofile=${RLIMIT_NOFILE}`,
