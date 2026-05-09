@@ -1573,7 +1573,17 @@ export class MatrixTransport {
 				kick: 100,
 				ban: 100,
 				redact: 100,
-				invite: opts.visibility === "public" ? 0 : 100,
+				// Invites: open to all members regardless of room
+				// visibility.  "Private" controls who can JOIN without
+				// an invitation — not who can issue invitations.
+				// Discord, Slack, Telegram all let any member of a
+				// private room invite others; gating it to the creator
+				// turned every "add @bot" and "pull in a friend" into
+				// a "ping the founder" detour.  Content-moderation
+				// risk stays bounded because the engine's flag /
+				// consensus pipeline runs on every message regardless
+				// of who's in the room.
+				invite: 0,
 				events_default: 0,
 			}, "");
 		} catch (err) {
@@ -1695,10 +1705,11 @@ export class MatrixTransport {
 				kick: 100,
 				ban: 100,
 				redact: 100,
-				// Invites: creator-only on private spaces; open on
-				// public spaces (anyone can invite a friend to a
-				// public space, same as joining themselves).
-				invite: opts.visibility === "public" ? 0 : 100,
+				// Invites: open to all members.  See createRoom for
+				// the rationale — "private" describes who can join
+				// uninvited, not who is allowed to extend the
+				// invitation in the first place.
+				invite: 0,
 				// Messages / reactions in chat rooms — this PL applies
 				// to non-state events too via events_default.  Open
 				// to all members.  (Spaces don't have timelines but
