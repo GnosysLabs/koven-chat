@@ -326,24 +326,27 @@ function DetailsStage({
 				/>
 			</div>
 
-			{/* Permanent NSFW flag.  Always visible on the create-
-			    space form — operators creating a space need to be
-			    able to mark it appropriately at creation time
-			    regardless of their own discovery preferences. */}
-			<div className="flex items-start justify-between gap-3 rounded-md border border-border bg-card/40 px-3 py-2">
-				<div className="flex-1 min-w-0">
-					<Label htmlFor="space-nsfw" className="text-xs cursor-pointer">Mark as NSFW</Label>
-					<p className="text-[10px] text-muted-foreground leading-snug mt-0.5">
-						Hides the space from Explore for users who haven&rsquo;t opted into NSFW content. <strong className="text-foreground">This can&rsquo;t be reversed.</strong>
-					</p>
+			{showNsfw && (
+				// Permanent flag — same wording the room create form
+				// uses.  Hidden when the viewer doesn't have "Show
+				// NSFW rooms" on, so users can't mark a space NSFW
+				// without first opting into seeing such content
+				// themselves.
+				<div className="flex items-start justify-between gap-3 rounded-md border border-border bg-card/40 px-3 py-2">
+					<div className="flex-1 min-w-0">
+						<Label htmlFor="space-nsfw" className="text-xs cursor-pointer">Mark as NSFW</Label>
+						<p className="text-[10px] text-muted-foreground leading-snug mt-0.5">
+							Hides the space from Explore for users who haven&rsquo;t opted into NSFW content. <strong className="text-foreground">This can&rsquo;t be reversed.</strong>
+						</p>
+					</div>
+					<Switch
+						id="space-nsfw"
+						checked={nsfw}
+						onCheckedChange={setNsfw}
+						className="mt-0.5"
+					/>
 				</div>
-				<Switch
-					id="space-nsfw"
-					checked={nsfw}
-					onCheckedChange={setNsfw}
-					className="mt-0.5"
-				/>
-			</div>
+			)}
 
 			{error && (
 				<div className="text-xs text-destructive border border-destructive/40 bg-destructive/10 rounded px-2 py-1.5">
