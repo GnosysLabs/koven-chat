@@ -548,14 +548,21 @@ export default function App() {
 				const isDm = room?.kind === "dm";
 				if (!isDm && !mentionsMe && !repliesToMe) return;
 
-				// Skip if the user is already looking at this room
-				// AND the tab is focused / visible.
+				// Skip if the user is already looking at this room AND
+				// the tab is visible.  We deliberately do NOT also gate
+				// on `document.hasFocus()` — Tauri's webview reports
+				// focus inconsistently (returns false while the user
+				// is mid-input in some cases, or right after the OS
+				// hands focus back to the window), which manifested as
+				// "I'm in the DM with my bot, the bot replies, and I
+				// still get an OS notification."  Visibility alone is
+				// the correct signal for "is the user looking?" — if
+				// the tab is visible AND the room is active, they're
+				// looking, period.
 				const looking =
 					activeRoomIdRef.current === message.roomId &&
 					typeof document !== "undefined" &&
-					document.visibilityState === "visible" &&
-					typeof document.hasFocus === "function" &&
-					document.hasFocus();
+					document.visibilityState === "visible";
 				if (looking) return;
 
 				const senderName = message.senderDisplayName || message.sender;

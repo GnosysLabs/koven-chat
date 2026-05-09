@@ -648,13 +648,17 @@ export class MatrixTransport {
 			this.handlers.onMembersUpdated(member.roomId as RoomId);
 		});
 
-		// m.read receipts — drives the "seen by" indicators in chat.
-		// matrix-js-sdk fires Receipt with the room context after it
-		// has updated its internal receipts map, so getMessageSeenBy
-		// will return fresh data on the next call.
+		// m.read receipts — drives the "seen by" indicators in chat
+		// AND clears the room's unread dot when our own receipt
+		// arrives.  Without the emitRoomList kick, room.getUnread
+		// NotificationCount() updates internally after the receipt
+		// is processed but our App-side cached roomList still shows
+		// the stale count, so the DM tab keeps glowing "unread"
+		// after the user has obviously read everything.
 		this.client.on(RoomEvent.Receipt, (_event, room) => {
 			if (!room) return;
 			this.handlers.onReceiptsUpdated(room.roomId as RoomId);
+			this.emitRoomList();
 		});
 
 		// Presence updates — fire onMembersUpdated for every room
