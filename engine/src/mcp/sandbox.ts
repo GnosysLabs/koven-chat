@@ -142,6 +142,25 @@ export function buildSandboxedInvocation(opts: SandboxOptions): SandboxInvocatio
 	] : [];
 
 	if (bwrap) {
+		// bwrap inside Docker — pared-down config that works under
+		// Docker's restricted mount/pivot_root permissions even with
+		// CAP_SYS_ADMIN + apparmor=unconfined + seccomp=unconfined:
+		//   * Use --ro-bind /proc (not --proc) — Docker blocks
+		//     remounting procfs from inside the container.  Read-only
+		//     bind of the host's /proc is acceptable because the
+		//     subprocess runs as nobody and cross-UID /proc reads are
+		//     blocked by the kernel anyway.
+		//   * Drop --unshare-pid — depends on the procfs remount we
+		//     can't do.  Subprocess shares the engine's PID namespace
+		//     but is still UID-isolated.
+		//   * Keep --unshare-uts/-ipc/-user-try and the filesystem
+		//     mounts — those are the load-bearing parts (the
+		//     subprocess can't see /data, /synapse-data, the
+		//     engine's own filesystem, or other bots' scratch dirs).
+		// Net trust: filesystem + capability isolation + env strip
+		// remain.  PID namespace isolation is sacrificed; not a real
+		// loss in our threat model since the subprocess is non-root
+		// and can't signal anything outside its own UID.
 		const bwrapArgs = [
 			"--ro-bind", "/usr", "/usr",
 			"--ro-bind", "/lib", "/lib",
@@ -151,13 +170,13 @@ export function buildSandboxedInvocation(opts: SandboxOptions): SandboxInvocatio
 			"--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
 			"--ro-bind", "/etc/ssl", "/etc/ssl",
 			...(existsSync("/etc/ca-certificates") ? ["--ro-bind", "/etc/ca-certificates", "/etc/ca-certificates"] : []),
-			"--ro-bind", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
-			"--ro-bind", "/etc/hosts", "/etc/hosts",
+			...(existsSync("/etc/nsswitch.conf") ? ["--ro-bind", "/etc/nsswitch.conf", "/etc/nsswitch.conf"] : []),
+			...(existsSync("/etc/hosts") ? ["--ro-bind", "/etc/hosts", "/etc/hosts"] : []),
 			// /etc/passwd + group needed for getpwnam("nobody") and
 			// for stdlib calls (Node os.userInfo, Python pwd module).
 			"--ro-bind", "/etc/passwd", "/etc/passwd",
 			"--ro-bind", "/etc/group", "/etc/group",
-			"--proc", "/proc",
+			"--ro-bind", "/proc", "/proc",
 			"--dev", "/dev",
 			"--tmpfs", "/tmp",
 			// Persistent home: npm/uv caches survive across spawns
@@ -165,7 +184,6 @@ export function buildSandboxedInvocation(opts: SandboxOptions): SandboxInvocatio
 			"--bind", opts.scratchDir, "/home/sandbox",
 			"--setenv", "HOME", "/home/sandbox",
 			"--chdir", "/home/sandbox",
-			"--unshare-pid",
 			"--unshare-uts",
 			"--unshare-ipc",
 			"--unshare-user-try",
