@@ -536,6 +536,16 @@ export class MatrixTransport {
 				this.emitRoomList();
 				this.emitSpaceList();
 			}
+			if (mapped === "ready") {
+				// Self-heal the current device's display name on every
+				// boot so the Sessions list distinguishes Web / Desktop /
+				// Mobile clients without relying on whatever label the
+				// engine wrote at login time.  Idempotent — same input
+				// produces the same PUT, which Synapse short-circuits.
+				void this.syncOwnDeviceLabel().catch(err =>
+					console.warn("matrix: device-label sync failed", err),
+				);
+			}
 		});
 
 		this.client.on(RoomEvent.Timeline, (
@@ -3236,6 +3246,35 @@ export class MatrixTransport {
 	 * tell the user "you've got N sessions" and disable the revoke
 	 * button when there are no others.
 	 */
+	/** Push the current client's platform-aware label into Synapse's
+	 * device record so the Sessions list shows "Koven Desktop" /
+	 * "Koven Mobile" / "Koven Web" instead of every row reading
+	 * "Koven Web" regardless of where the user signed in.
+	 *
+	 * Self-healing: re-runs every successful sync, so existing
+	 * sessions get relabelled without an explicit user gesture.
+	 * Engine's login-time label is now redundant; the client owns
+	 * its own identity. */
+	async syncOwnDeviceLabel(): Promise<void> {
+		const c = this.requireClient();
+		const deviceId = c.getDeviceId();
+		if (!deviceId) return;
+		const desired = computeDeviceLabel();
+		// Read the current label first — Synapse caches device info
+		// in its own DB; matrix-js-sdk's User cache might not have
+		// it.  We use getDevice() to read current state.
+		try {
+			const devices = (await c.getDevices()).devices;
+			const me = devices.find(d => d.device_id === deviceId);
+			if (me?.display_name === desired) return; // already correct, skip the PUT
+			await c.setDeviceDetails(deviceId, { display_name: desired });
+		} catch (err) {
+			// Non-fatal — Sessions list still works, it just shows
+			// whatever stale label was there.
+			console.debug("matrix: setDeviceDetails skipped", err);
+		}
+	}
+
 	async fetchSessions(): Promise<Array<{
 		deviceId: string;
 		displayName: string | null;
@@ -4148,6 +4187,52 @@ export class MatrixTransport {
  * The leading lines are recognizable: each starts with "> ", and the
  * block ends with a blank line.
  */
+/** Build the device label written to Synapse so the Sessions list
+ * tells Web / Desktop / Mobile sessions apart.  Detects the platform
+ * from the same signals other parts of the SPA use:
+ *   - `__KOVEN_DESKTOP__` window flag (set by the Tauri shell init)
+ *   - `mobile-shell` class on <html> (set by the Tauri mobile shell
+ *     init script before any SPA JS runs)
+ *   - Falls back to "Koven Web" with a small browser hint so two
+ *     browser sessions on the same OS read distinguishably. */
+function computeDeviceLabel(): string {
+	if (typeof window !== "undefined"
+		&& (window as { __KOVEN_DESKTOP__?: boolean }).__KOVEN_DESKTOP__ === true
+	) {
+		return `Koven Desktop${osHint()}`;
+	}
+	if (typeof document !== "undefined"
+		&& document.documentElement.classList.contains("mobile-shell")
+	) {
+		return `Koven Mobile${osHint()}`;
+	}
+	return `Koven Web${browserHint()}`;
+}
+
+function osHint(): string {
+	const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+	if (/Mac OS X/.test(ua)) return " (macOS)";
+	if (/Windows/.test(ua)) return " (Windows)";
+	if (/Android/.test(ua)) return " (Android)";
+	if (/iPhone|iPad|iPod/.test(ua)) return " (iOS)";
+	if (/Linux/.test(ua)) return " (Linux)";
+	return "";
+}
+
+function browserHint(): string {
+	const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+	// Brand sniffing keeps Chromium derivatives (Brave / Edge / Arc)
+	// distinct from vanilla Chrome where possible.  Order matters —
+	// many of these include the upstream brand string further along.
+	if (/Brave/i.test(ua)) return " (Brave)";
+	if (/Edg\//.test(ua)) return " (Edge)";
+	if (/Arc\//i.test(ua)) return " (Arc)";
+	if (/Firefox/.test(ua)) return " (Firefox)";
+	if (/Chrome/.test(ua)) return " (Chrome)";
+	if (/Safari/.test(ua)) return " (Safari)";
+	return "";
+}
+
 /** Crypto-random URL-safe id used as MSC3381 answer ids on outbound
  * polls.  16 hex chars (~64 bits) is more than enough to avoid
  * collisions across federated participants while staying short
