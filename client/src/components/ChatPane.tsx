@@ -2653,8 +2653,20 @@ function SeenIndicator({
 	const seen = useMemo(() => {
 		if (!transport) return [];
 		const all = transport.getMessageSeenBy(roomId, eventId);
-		if (!botMxids || botMxids.size === 0) return all;
-		return all.filter(s => !botMxids.has(s.userId));
+		// Engine appservice user reads everything for moderation /
+		// fanout — its receipts would always show up on every
+		// message, which is meaningless to a human reader.  Filter it
+		// out unconditionally.  Bot receipts are also filtered when
+		// we know the roster (botMxids), but the engine appservice
+		// isn't in that roster (it's a service identity, not a bot).
+		const myServer = transport.currentUserId?.split(":")[1] ?? "";
+		const enginePrefix = myServer ? `@engine:${myServer}` : null;
+		const filtered = all.filter(s => {
+			if (enginePrefix && s.userId === enginePrefix) return false;
+			if (botMxids && botMxids.has(s.userId)) return false;
+			return true;
+		});
+		return filtered;
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [transport, roomId, eventId, receiptsVersion, botMxids]);
 
