@@ -44,6 +44,7 @@ import { FloorReviewSheet } from "@/components/FloorReviewSheet";
 import { botKickBan, deleteOwnMessage, fetchAdminStatus, fetchFloorQueue, fetchMyStatus, fetchPublishQuota, flagRoom, type PublishQuota, type SuspensionSummary } from "@/lib/instance";
 import { fetchIntegrationsStatus } from "@/lib/giphy";
 import { ENGINE_URL } from "@/lib/urls";
+import { setAppBadge } from "@/lib/appBadge";
 import { PublishLimitDialog } from "@/components/PublishLimitDialog";
 import { AddExistingRoomDialog } from "@/components/AddExistingRoomDialog";
 import { useCollapsedRooms } from "@/lib/collapsedRooms";
@@ -113,6 +114,14 @@ export default function App() {
 	useEffect(() => {
 		notificationsRefreshRef.current = notifications.refresh;
 	}, [notifications.refresh]);
+
+	// Mirror the bell's unread count onto the OS app icon — Tauri
+	// dock badge on macOS, Web App Badging API for installed PWAs.
+	// Cleared when the user signs out so a stale number doesn't
+	// linger on the icon after the next launch.
+	useEffect(() => {
+		void setAppBadge(creds ? notifications.unreadCount : 0);
+	}, [creds, notifications.unreadCount]);
 
 	// Click handler shared by both bell instances (mobile topbar
 	// icon + desktop FAB).  Two responsibilities:
