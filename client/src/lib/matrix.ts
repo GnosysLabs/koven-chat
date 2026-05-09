@@ -648,16 +648,30 @@ export class MatrixTransport {
 			this.handlers.onMembersUpdated(member.roomId as RoomId);
 		});
 
-		// m.read receipts — drives the "seen by" indicators in chat
-		// AND clears the room's unread dot when our own receipt
-		// arrives.  Without the emitRoomList kick, room.getUnread
-		// NotificationCount() updates internally after the receipt
-		// is processed but our App-side cached roomList still shows
-		// the stale count, so the DM tab keeps glowing "unread"
-		// after the user has obviously read everything.
+		// m.read receipts — drives the "seen by" indicators in chat.
 		this.client.on(RoomEvent.Receipt, (_event, room) => {
 			if (!room) return;
 			this.handlers.onReceiptsUpdated(room.roomId as RoomId);
+		});
+
+		// notification_count changes — fires when the server reports
+		// new unread counts via the /sync `unread_notifications`
+		// block (also after OUR own read marker / receipt clears the
+		// count).  This is the correct signal for "the room's unread
+		// dot needs to redraw"; RoomEvent.Receipt is for INCOMING
+		// receipts and doesn't fire for our own count-clearing
+		// roundtrip.  Without this listener, sending a read receipt
+		// updates room.getUnreadNotificationCount() under the hood
+		// but the App-side cached roomList stays stale, leaving the
+		// DM tab glowing after the user has obviously read it.
+		// matrix-js-sdk's MatrixClient.on type union doesn't include
+		// the per-Room UnreadNotifications event in the strict
+		// signature even though the runtime fires it on the client.
+		// Cast through unknown to a permissive type so this listener
+		// compiles without changing the SDK typings.
+		(this.client as unknown as {
+			on(name: string, cb: () => void): void;
+		}).on(RoomEvent.UnreadNotifications, () => {
 			this.emitRoomList();
 		});
 

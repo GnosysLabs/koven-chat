@@ -550,15 +550,16 @@ export default function App() {
 
 				// Skip if the user is already looking at this room AND
 				// the tab is visible.  We deliberately do NOT also gate
-				// on `document.hasFocus()` — Tauri's webview reports
-				// focus inconsistently (returns false while the user
-				// is mid-input in some cases, or right after the OS
-				// hands focus back to the window), which manifested as
-				// "I'm in the DM with my bot, the bot replies, and I
-				// still get an OS notification."  Visibility alone is
-				// the correct signal for "is the user looking?" — if
-				// the tab is visible AND the room is active, they're
-				// looking, period.
+				// on `document.hasFocus()` — that flag returns false in
+				// plenty of legitimate "user is reading this tab" cases:
+				// DevTools is focused, the URL bar is focused, another
+				// app has window focus, the user just clicked a link in
+				// another window — across browsers AND embedded
+				// webviews.  The bug it caused: "I'm in the DM with my
+				// bot, the bot replies, and I still get an OS
+				// notification."  Visibility + activeRoomId is the
+				// correct signal for "is this room on the user's screen
+				// right now?"
 				const looking =
 					activeRoomIdRef.current === message.roomId &&
 					typeof document !== "undefined" &&
@@ -585,11 +586,20 @@ export default function App() {
 						dispatch({ type: "set_active_room", roomId: message.roomId });
 					},
 				});
-				// Bell red dot was lagging up to 30s (the poll cadence)
-				// behind the OS notification — engine wrote the row,
-				// but the SPA hadn't asked.  Pull a fresh unread count
-				// now so the badge lights as soon as the event lands.
+				// Bell red dot used to lag the 30s poll cadence behind
+				// the actual event.  Refresh now AND again after a
+				// short delay: Synapse sends the event to our /sync
+				// in parallel with sending it to the engine's
+				// /transactions appservice stream, and the engine's
+				// notification fanout (which writes the row the bell
+				// reads) finishes some milliseconds AFTER our /sync
+				// delivers the event.  An immediate refresh races
+				// the fanout and can return the pre-write count;
+				// the 1.2s follow-up catches the row reliably.
 				void notificationsRefreshRef.current?.();
+				window.setTimeout(() => {
+					void notificationsRefreshRef.current?.();
+				}, 1_200);
 			},
 			onReaction: (reaction) => dispatch({
 				type: "reaction_arrived",
