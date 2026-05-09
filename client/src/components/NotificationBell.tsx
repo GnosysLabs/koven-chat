@@ -20,6 +20,7 @@ import {
 import { cn } from "@/lib/utils";
 import type { NotificationEntry, NotificationKind } from "@/lib/notifications-api";
 import type { UseNotificationsResult } from "@/state/use-notifications";
+import { useBellOffset } from "@/state/bell-offset";
 
 interface NotificationBellProps {
 	notifications: UseNotificationsResult;
@@ -57,6 +58,11 @@ export function NotificationBell({
 }: NotificationBellProps) {
 	const [open, setOpen] = useState(false);
 	const { unreadCount, entries, error, refresh, markRead, markAllRead, dismissAll } = notifications;
+	// Extra px the FAB needs to lift to clear sticky pane footers
+	// (e.g. the bot edit form's Cancel/Create buttons).  Drives the
+	// `bottom` calc below; ignored for the icon variant which sits in
+	// flow inside the mobile top bar and never overlaps anything.
+	const bellOffset = useBellOffset();
 
 	async function handleOpenChange(next: boolean) {
 		setOpen(next);
@@ -106,9 +112,10 @@ export function NotificationBell({
 				// inset, so the calc() is harmless there.
 				style={{
 					position: "fixed",
-					bottom: "calc(env(safe-area-inset-bottom, 0px) + 1.5rem)",
+					bottom: `calc(env(safe-area-inset-bottom, 0px) + 1.5rem + ${bellOffset}px)`,
 					right: "calc(env(safe-area-inset-right, 0px) + 1.5rem)",
 					zIndex: 40,
+					transition: "bottom 150ms ease",
 				}}
 				className={cn(
 					// 56x56 round button.  Same diameter Discord /
@@ -303,6 +310,7 @@ export function NotificationBell({
 				<ChatbotPanel
 					open={open}
 					onClose={() => handleOpenChange(false)}
+					bellOffsetPx={bellOffset}
 				>
 					{panelBody}
 				</ChatbotPanel>
@@ -342,10 +350,14 @@ function ChatbotPanel({
 	open,
 	onClose,
 	children,
+	bellOffsetPx,
 }: {
 	open: boolean;
 	onClose(): void;
 	children: React.ReactNode;
+	/** Extra px the FAB has been pushed up by (sticky pane footers,
+	 * etc).  Panel sits above the FAB so it gets the same lift. */
+	bellOffsetPx: number;
 }) {
 	const ref = useRef<HTMLDivElement | null>(null);
 	const [mounted, setMounted] = useState(false);
@@ -403,7 +415,7 @@ function ChatbotPanel({
 				// Sit above the FAB.  FAB is at bottom: 1.5rem with
 				// height 56px; we add the height + a 12px gap so
 				// the panel never overlaps the bell.
-				bottom: "calc(env(safe-area-inset-bottom, 0px) + 1.5rem + 56px + 12px)",
+				bottom: `calc(env(safe-area-inset-bottom, 0px) + 1.5rem + 56px + 12px + ${bellOffsetPx}px)`,
 				right: "calc(env(safe-area-inset-right, 0px) + 1.5rem)",
 				width: "min(380px, calc(100vw - 3rem))",
 				// max-height reserves ~5rem at the bottom (FAB clearance,
