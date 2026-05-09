@@ -28,6 +28,7 @@ import { listMyBots, deleteBot as apiDeleteBot, type BotSummary } from "@/lib/bo
 import { MemberList } from "@/components/MemberList";
 import { DmProfilePanel } from "@/components/DmProfilePanel";
 import { CreateRoomSheet } from "@/components/CreateRoomSheet";
+import { CreateSpaceSheet } from "@/components/CreateSpaceSheet";
 import { StartDmSheet } from "@/components/StartDmSheet";
 import { SpaceEditSheet } from "@/components/SpaceEditSheet";
 import { RoomEditSheet } from "@/components/RoomEditSheet";
@@ -180,6 +181,7 @@ export default function App() {
 	const [transport, setTransport] = useState<MatrixTransport | null>(null);
 	const [bootError, setBootError] = useState<string | null>(null);
 	const [createRoomOpen, setCreateRoomOpen] = useState(false);
+	const [createSpaceOpen, setCreateSpaceOpen] = useState(false);
 	// Surfaced when the user clicks Create room / Create space but
 	// the engine's pre-flight publish-quota check returns
 	// `allowed: false`.  Holds the quota payload (count, threshold,
@@ -1219,28 +1221,26 @@ export default function App() {
 					onSelectBots={() => dispatch({ type: "set_active_space", space: { kind: "bots" } })}
 					onSelectRooms={() => dispatch({ type: "set_active_space", space: { kind: "rooms" } })}
 					onSelectSpace={(id: SpaceId) => dispatch({ type: "set_active_space", space: { kind: "space", id } })}
-					onCreateSpace={async (opts) => {
-						if (!transport) throw new Error("Not connected");
-						// `opts` already carries `nsfw` from the create
-						// popover; createSpace forwards it as a
-						// chat.koven.nsfw state event after creation.
-						const spaceId = await transport.createSpace(opts);
-						dispatch({ type: "set_active_space", space: { kind: "space", id: spaceId } });
-					}}
-					showNsfw={!!settings.showNsfw}
-					onBeforeOpenCreateSpace={async () => {
-						// Pre-flight rate-limit check before the
-						// create-space popover opens.  See onCreateRoom
-						// upstream for the same pattern + rationale.
-						// Soft-fail on quota fetch errors so a transient
-						// engine blip doesn't block creation.
-						if (!creds?.access_token) return true;
-						const quota = await fetchPublishQuota(creds.access_token, "space");
-						if (quota && !quota.allowed && quota.reason === "rate_limited") {
-							setPublishLimitInfo(quota);
-							return false;
+					onOpenCreateSpace={async () => {
+						// Pre-flight rate-limit check before the create-
+						// space modal opens.  See onCreateRoom upstream
+						// for the same pattern + rationale.  Soft-fail
+						// on quota fetch errors so a transient engine
+						// blip doesn't block creation.
+						if (!creds?.access_token) {
+							setCreateSpaceOpen(true);
+							return;
 						}
-						return true;
+						try {
+							const quota = await fetchPublishQuota(creds.access_token, "space");
+							if (quota && !quota.allowed && quota.reason === "rate_limited") {
+								setPublishLimitInfo(quota);
+								return;
+							}
+						} catch {
+							/* ignore — open the modal anyway */
+						}
+						setCreateSpaceOpen(true);
 					}}
 					onOpenProfile={() => setViewedUserId(creds.user_id as UserId)}
 					onOpenSettings={() => setSettingsOpen(true)}
@@ -1774,6 +1774,16 @@ export default function App() {
 						: undefined;
 					const roomId = await transport.createRoom({ ...opts, parentSpaceId });
 					dispatch({ type: "set_active_room", roomId });
+				}}
+			/>
+			<CreateSpaceSheet
+				open={createSpaceOpen}
+				onOpenChange={setCreateSpaceOpen}
+				showNsfw={!!settings.showNsfw}
+				onCreate={async (opts) => {
+					if (!transport) throw new Error("Not connected");
+					const spaceId = await transport.createSpace(opts);
+					dispatch({ type: "set_active_space", space: { kind: "space", id: spaceId } });
 				}}
 			/>
 			<StartDmSheet

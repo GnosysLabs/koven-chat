@@ -8,7 +8,6 @@ import { cn } from "@/lib/utils";
 import type { Room, Space } from "@koven/shared";
 import { Bot, Compass, Hash, LogOut, Plus, Settings, ShieldAlert, User } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
-import { SpaceCreateMenu } from "@/components/SpaceCreateMenu";
 import type { ActiveSpace } from "@/state/store";
 
 export interface SpaceBarProps {
@@ -30,21 +29,10 @@ export interface SpaceBarProps {
 	onSelectBots(): void;
 	onSelectRooms(): void;
 	onSelectSpace(spaceId: string): void;
-	onCreateSpace(opts: {
-		name: string;
-		topic: string;
-		visibility: "public" | "private";
-		avatarFile?: File;
-		nsfw: boolean;
-	}): Promise<void>;
-	/** Drives visibility of the NSFW toggle in the space-create
-	 * popover.  Same gate as the room create form. */
-	showNsfw?: boolean;
-	// Pre-flight rate-limit gate fired before the create-space
-	// popover opens.  Same shape as SpaceCreateMenu.onBeforeOpen —
-	// just threaded through this layer.  Resolves true to proceed,
-	// false to swallow the click; parent shows denial UI.
-	onBeforeOpenCreateSpace?(): Promise<boolean>;
+	/** Open the create-space modal.  Pre-flight rate-limit check is
+	 * the parent's responsibility — this fires unconditionally on
+	 * click, parent decides whether to actually open the modal. */
+	onOpenCreateSpace(): void;
 	onOpenProfile(): void;
 	onOpenSettings(): void;
 	onSignOut(): void;
@@ -66,9 +54,7 @@ export function SpaceBar({
 	onSelectBots,
 	onSelectRooms,
 	onSelectSpace,
-	onCreateSpace,
-	showNsfw,
-	onBeforeOpenCreateSpace,
+	onOpenCreateSpace,
 	onOpenProfile,
 	onOpenSettings,
 	onSignOut,
@@ -185,19 +171,13 @@ export function SpaceBar({
 						</TileButton>
 					);
 				})}
-				<SpaceCreateMenu
-					onCreate={onCreateSpace}
-					onBeforeOpen={onBeforeOpenCreateSpace}
-					showNsfw={showNsfw}
-					trigger={
-						<TileButton
-							title="Create a space"
-							ariaLabel="Create a space"
-						>
-							<Plus className="h-5 w-5" />
-						</TileButton>
-					}
-				/>
+				<TileButton
+					title="Create a space"
+					ariaLabel="Create a space"
+					onClick={onOpenCreateSpace}
+				>
+					<Plus className="h-5 w-5" />
+				</TileButton>
 			</div>
 
 			<div className="flex flex-col items-center gap-1 pb-1">
