@@ -518,6 +518,17 @@ export default function App() {
 				// the tab is focused — popping a notification for a
 				// message that's already on their screen is noise.
 				if (!live || message.isSelf) return;
+				// Skip catch-up replays.  matrix-js-sdk delivers events
+				// that arrived since the user's last sync token as
+				// `liveEvent: true` during the initial sync after
+				// login.  From the SDK's perspective these are "live"
+				// (just received), but from the user's they're old —
+				// firing OS notifications for them replays days of
+				// missed messages on every cold boot.  Drop anything
+				// older than 30 seconds; real-time messages are well
+				// inside that window.
+				const RECENT_MS = 30_000;
+				if (Date.now() - message.timestamp > RECENT_MS) return;
 				const myMxid = creds.user_id;
 				const localpart = myMxid.split(":")[0] ?? ""; // includes leading @
 				const text = message.text ?? "";
