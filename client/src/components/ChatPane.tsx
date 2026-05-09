@@ -24,6 +24,8 @@ import { FlagDialog } from "@/components/FlagDialog";
 import { DeleteMessageDialog } from "@/components/DeleteMessageDialog";
 import { firstLink, linkify } from "@/lib/linkify";
 import { renderWithMentions } from "@/lib/mentionRender";
+import { findYouTubeMatches, stripYouTubeUrls } from "@/lib/youtube";
+import { YouTubeEmbed } from "@/components/YouTubeEmbed";
 import { GifPicker } from "@/components/GifPicker";
 import { PollCard } from "@/components/PollCard";
 import { CreatePollDialog } from "@/components/CreatePollDialog";
@@ -1765,30 +1767,63 @@ function MessageBubble({
 		);
 	}
 
+	// YouTube embeds: pull every YouTube URL out of the body, render
+	// the surviving text through the normal pipeline (with the URLs
+	// stripped so they don't print alongside the embed), and append
+	// each video as its own player below the bubble.  Markdown
+	// messages skip this — markdown already has its own URL handling
+	// and the embed/markdown interaction isn't worth the complexity
+	// for v1.
 	const isMarkdown = looksLikeMarkdown(message.text);
-	return (
-		<div className={cn(
-			baseBubble,
-			message.isSelf ? selfBubble : otherBubble,
-			// Plain-text path keeps Matrix's literal newlines via
-			// pre-wrap.  Markdown owns its own whitespace.
-			!isMarkdown && "whitespace-pre-wrap",
+	const youtubeMatches = isMarkdown ? [] : findYouTubeMatches(message.text);
+	const strippedText = youtubeMatches.length > 0
+		? stripYouTubeUrls(message.text, youtubeMatches)
+		: message.text;
+	const hasBubbleContent = strippedText.length > 0;
+	const editedBadge = message.edited ? (
+		<span className={cn(
+			"ml-1.5 text-[10px]",
+			message.isSelf ? "text-primary-foreground/60" : "text-muted-foreground",
 		)}>
-			{isMarkdown ? (
-				<MarkdownContent text={message.text} tone={message.isSelf ? "self" : "other"} />
-			) : (
-				renderWithMentions({
-					text: message.text,
-					members: memberNames,
-					onMentionClick,
-					tone: message.isSelf ? "self" : "other",
-				})
-			)}
-			{message.edited && (
-				<span className={cn(
-					"ml-1.5 text-[10px]",
-					message.isSelf ? "text-primary-foreground/60" : "text-muted-foreground"
+			(edited)
+		</span>
+	) : null;
+
+	return (
+		<div className="inline-flex flex-col gap-1.5 max-w-md">
+			{(hasBubbleContent || isMarkdown) && (
+				<div className={cn(
+					baseBubble,
+					message.isSelf ? selfBubble : otherBubble,
+					// Plain-text path keeps Matrix's literal newlines via
+					// pre-wrap.  Markdown owns its own whitespace.
+					!isMarkdown && "whitespace-pre-wrap",
 				)}>
+					{isMarkdown ? (
+						<MarkdownContent text={message.text} tone={message.isSelf ? "self" : "other"} />
+					) : (
+						renderWithMentions({
+							text: strippedText,
+							members: memberNames,
+							onMentionClick,
+							tone: message.isSelf ? "self" : "other",
+						})
+					)}
+					{editedBadge}
+				</div>
+			)}
+			{youtubeMatches.map((m, i) => (
+				<YouTubeEmbed
+					key={`${m.videoId}-${i}`}
+					videoId={m.videoId}
+					startSeconds={m.startSeconds}
+				/>
+			))}
+			{!hasBubbleContent && !isMarkdown && message.edited && (
+				// All-YouTube body with no surviving text still wants
+				// the (edited) badge somewhere — tuck it under the
+				// last embed.
+				<span className="text-[10px] text-muted-foreground self-start">
 					(edited)
 				</span>
 			)}
@@ -2021,8 +2056,15 @@ function PendingAttachmentChip({
 // for it, render a Discord-style preview card under the bubble.  Skips
 // rendering entirely when there's no URL or no preview was returned —
 // no flicker, no empty cards.
+//
+// Suppressed for YouTube URLs — those render as native iframe embeds
+// in MessageBubble; an OG card alongside the player would be redundant.
 function UrlPreviewSlot({ text }: { text: string }) {
-	const url = firstLink(text);
+	const youtubeMatches = findYouTubeMatches(text);
+	const textWithoutYouTube = youtubeMatches.length > 0
+		? stripYouTubeUrls(text, youtubeMatches)
+		: text;
+	const url = firstLink(textWithoutYouTube);
 	const preview = useUrlPreview(url);
 	const imageUrl = useMatrixMedia(preview?.imageMxc);
 	if (!url || !preview) return null;
