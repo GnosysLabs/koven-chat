@@ -1,10 +1,12 @@
-// Member list — the right sidebar of a room.  Two-section split by
-// presence: "Online" (active or recently active) above, "Offline"
-// below.  No power-level grouping — Koven doesn't have a moderator
-// tier (community moderation lives in the engine), so PL distinctions
-// other than "creator" don't carry meaning in the UI.  Bots always
-// render as online; the engine keeps them connected and they don't
-// emit Matrix presence in a way the SDK reflects reliably.
+// Member list — the right sidebar of a room.  Three-section split:
+// "Online" (humans active or recently active), "Bots" (always-on
+// services, called out as their own bucket so it's clear what's a
+// person vs. a service), and "Offline" (humans we haven't seen
+// recently).  No power-level grouping — Koven doesn't have a
+// moderator tier (community moderation lives in the engine), so PL
+// distinctions other than "creator" don't carry meaning in the UI.
+// Bots don't emit Matrix presence reliably; the engine keeps them
+// connected so we treat them as a peer category to online humans.
 
 import { cn } from "@/lib/utils";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
@@ -65,17 +67,17 @@ export function MemberList({ members, currentUserId, onSelectMember, botMxids }:
 		return { m, isBot, presence: effectivePresence(m, isBot) };
 	});
 
-	// Sort: bots first within each section (the engine keeps them
-	// online, they're often the most relevant participant), then
-	// alphabetical by display name.  Power level is intentionally
-	// not part of the sort — see the file header.
-	const sortRows = (a: typeof decorated[number], b: typeof decorated[number]) => {
-		if (a.isBot !== b.isBot) return a.isBot ? -1 : 1;
-		return a.m.displayName.localeCompare(b.m.displayName);
-	};
+	// Within a section: alphabetical by display name.  Power level is
+	// intentionally not part of the sort — see the file header.
+	const sortRows = (a: typeof decorated[number], b: typeof decorated[number]) =>
+		a.m.displayName.localeCompare(b.m.displayName);
 
-	const online = decorated.filter(d => isInOnlineSection(d.presence)).sort(sortRows);
-	const offline = decorated.filter(d => !isInOnlineSection(d.presence)).sort(sortRows);
+	// Three buckets: bots get their own section between online and
+	// offline.  Bots are excluded from the online bucket so we don't
+	// double-count them.
+	const bots    = decorated.filter(d => d.isBot).sort(sortRows);
+	const online  = decorated.filter(d => !d.isBot &&  isInOnlineSection(d.presence)).sort(sortRows);
+	const offline = decorated.filter(d => !d.isBot && !isInOnlineSection(d.presence)).sort(sortRows);
 
 	return (
 		<aside className="w-56 border-l border-border bg-card flex flex-col">
@@ -92,6 +94,20 @@ export function MemberList({ members, currentUserId, onSelectMember, botMxids }:
 						{online.length > 0 && (
 							<Section label="Online" count={online.length}>
 								{online.map(d => (
+									<MemberRow
+										key={d.m.userId}
+										member={d.m}
+										isSelf={d.m.userId === currentUserId}
+										isBot={d.isBot}
+										presence={d.presence}
+										onClick={() => onSelectMember(d.m.userId)}
+									/>
+								))}
+							</Section>
+						)}
+						{bots.length > 0 && (
+							<Section label="Bots" count={bots.length}>
+								{bots.map(d => (
 									<MemberRow
 										key={d.m.userId}
 										member={d.m}
