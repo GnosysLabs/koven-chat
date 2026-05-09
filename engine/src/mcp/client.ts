@@ -108,9 +108,23 @@ export async function openStdioMcpSession(opts: {
 		command: inv.command,
 		args: inv.args,
 		env: inv.env,
-		// Pipe stderr so we can promote it to engine logs below.
+		// Pipe stderr so we can promote it to engine logs.
 		stderr: "pipe",
 	});
+	// IMPORTANT: attach the stderr listener BEFORE client.connect().
+	// The SDK exposes transport.stderr as a PassThrough immediately
+	// after construction — listeners attached now still capture
+	// output that arrives during the transport.start() spawn (which
+	// connect() invokes).  When connect() fails (subprocess crashes
+	// during init: missing API key, package not found, sandbox
+	// refused, etc.) the only signal is whatever the subprocess
+	// printed to stderr before dying — losing that stream means
+	// "MCP connection closed" with zero diagnostic value.
+	if (transport.stderr) {
+		transport.stderr.on("data", (chunk: Buffer) => {
+			console.warn(`mcp/stdio[${opts.label}]: ${chunk.toString().trimEnd()}`);
+		});
+	}
 	const client = new Client(KOVEN_CLIENT_INFO, { capabilities: {} });
 	try {
 		await client.connect(transport);
@@ -120,14 +134,6 @@ export async function openStdioMcpSession(opts: {
 		// transport's close() handles tearing down the partial spawn.
 		try { await transport.close(); } catch { /* already gone */ }
 		throw err;
-	}
-	// Promote stderr to engine logs so users debugging an attachment
-	// can see what their server is complaining about.  After connect()
-	// the transport has spawned and exposes the stderr stream.
-	if (transport.stderr) {
-		transport.stderr.on("data", (chunk: Buffer) => {
-			console.warn(`mcp/stdio[${opts.label}]: ${chunk.toString().trimEnd()}`);
-		});
 	}
 	return {
 		client,
