@@ -42,6 +42,7 @@ import { SuspendedBanner } from "@/components/SuspendedBanner";
 import { ModLogSheet } from "@/components/ModLogSheet";
 import { FloorReviewSheet } from "@/components/FloorReviewSheet";
 import { botKickBan, deleteOwnMessage, fetchAdminStatus, fetchFloorQueue, fetchMyStatus, fetchPublishQuota, flagRoom, type PublishQuota, type SuspensionSummary } from "@/lib/instance";
+import { fetchIntegrationsStatus } from "@/lib/giphy";
 import { PublishLimitDialog } from "@/components/PublishLimitDialog";
 import { AddExistingRoomDialog } from "@/components/AddExistingRoomDialog";
 import { useCollapsedRooms } from "@/lib/collapsedRooms";
@@ -249,6 +250,10 @@ export default function App() {
 	const [isAdmin, setIsAdmin] = useState(false);
 	const [pendingReviewCount, setPendingReviewCount] = useState(0);
 	const [reviewSheetOpen, setReviewSheetOpen] = useState(false);
+	// Instance-wide third-party integrations.  Polled once on sign-in
+	// (admin re-saves invalidate it via a refresh — see InstanceAdmin
+	// section).  Drives the GIF picker visibility in the composer.
+	const [giphyEnabled, setGiphyEnabled] = useState(false);
 	// 1:1 call state.  At most one of these is non-null:
 	//   - incomingCall: a remote ringing us; renders the accept/decline sheet
 	//   - activeCall: we're in a call (just-placed outbound, or accepted inbound)
@@ -367,6 +372,27 @@ export default function App() {
 			cancelled = true;
 			window.clearInterval(id);
 		};
+	}, [creds]);
+
+	// Integrations status — polled once at sign-in; admin saves
+	// re-invalidate from inside InstanceAdminSection (which re-fetches
+	// itself).  Out-of-band changes (admin on another session)
+	// pick up on next sign-in, which is good enough for v1.
+	useEffect(() => {
+		if (!creds) {
+			setGiphyEnabled(false);
+			return;
+		}
+		let cancelled = false;
+		fetchIntegrationsStatus(creds.access_token)
+			.then(integ => {
+				if (!cancelled) setGiphyEnabled(integ.giphy.configured);
+			})
+			.catch(() => {
+				/* engine may be older than the integrations endpoint;
+				   leave giphy disabled.  Not worth surfacing. */
+			});
+		return () => { cancelled = true; };
 	}, [creds]);
 
 	// Manual refresh hook — fired by the FloorReviewSheet after every
@@ -1462,6 +1488,8 @@ export default function App() {
 					isSuspended={!!suspension}
 					onOpenModLog={(roomId) => setModLogRoomId(roomId as RoomId)}
 					onOpenProfile={(userId) => setViewedUserId(userId as UserId)}
+					accessToken={creds.access_token}
+					giphyEnabled={giphyEnabled}
 				/>
 				)}
 				</div>

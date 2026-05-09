@@ -24,6 +24,7 @@ import { FlagDialog } from "@/components/FlagDialog";
 import { DeleteMessageDialog } from "@/components/DeleteMessageDialog";
 import { firstLink, linkify } from "@/lib/linkify";
 import { renderWithMentions } from "@/lib/mentionRender";
+import { GifPicker } from "@/components/GifPicker";
 import { MarkdownContent } from "@/components/MarkdownContent";
 
 // Heuristic: does this body have any markdown shape?  Cheap regex
@@ -154,6 +155,16 @@ export interface ChatPaneProps {
 	// sheet.  Optional; without it the pills still render but
 	// clicks are no-ops.
 	onOpenProfile?(userId: UserId): void;
+	// Bearer token used for the engine's Giphy proxy (search /
+	// trending).  Required for the GIF picker to work; absent or
+	// empty keeps the picker hidden even if the integration is
+	// configured.
+	accessToken?: string;
+	// True when the instance admin has set a Giphy API key — drives
+	// the GIF picker affordance next to the paperclip.  Optional;
+	// defaults to "off" so instances without Giphy don't see the
+	// button at all.
+	giphyEnabled?: boolean;
 }
 
 // Threshold for "this message is part of the same group as the
@@ -176,6 +187,8 @@ export function ChatPane({
 	receiptsVersion,
 	viewerUserId,
 	onOpenProfile,
+	accessToken,
+	giphyEnabled,
 }: ChatPaneProps) {
 	// Consensus flagging only works where the local engine can act:
 	//   - DMs are 1-on-1 — no quorum to gather, no consensus to reach.
@@ -523,6 +536,23 @@ export function ChatPane({
 
 	function pickAttachment(file: File) {
 		setPendingAttachment(file);
+	}
+
+	// GIFs from the Giphy picker bypass the preview/caption flow:
+	// users expect a one-click "send" the way Discord does it,
+	// and a second confirm step would feel like friction.  Caption
+	// support could come back if anyone asks; reply-to is preserved
+	// since it was already targeted before the picker opened.
+	async function sendGif(file: File) {
+		if (!onSendAttachment) return;
+		const replyToId = replyTarget?.id ?? null;
+		setUploading(true);
+		try {
+			await onSendAttachment(file, replyToId, null);
+			setReplyTarget(null);
+		} finally {
+			setUploading(false);
+		}
 	}
 
 	function toggleReaction(message: Message, key: string) {
@@ -891,6 +921,29 @@ export function ChatPane({
 								<Paperclip className="h-4 w-4" />
 							</button>
 						</>
+					)}
+					{onSendAttachment && giphyEnabled && accessToken && (
+						// GIF picker — only renders when the instance admin
+						// has set a Giphy API key (giphyEnabled).  Click
+						// drops the popover, pick auto-sends through the
+						// attachment pipeline.  No "GIF" SVG in lucide so
+						// we use a tight text pill, the same convention
+						// Discord uses on web.
+						<GifPicker
+							accessToken={accessToken}
+							disabled={isSuspended || uploading || !!pendingAttachment}
+							onPick={sendGif}
+						>
+							<button
+								type="button"
+								disabled={isSuspended || uploading || !!pendingAttachment}
+								className="px-1.5 py-1 rounded-md text-[10px] font-bold tracking-wide text-muted-foreground hover:text-foreground hover:bg-accent border border-current transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+								title="Send a GIF"
+								aria-label="Send a GIF"
+							>
+								GIF
+							</button>
+						</GifPicker>
 					)}
 					<div className="relative flex-1">
 						{mentionToken && matches.length > 0 && (

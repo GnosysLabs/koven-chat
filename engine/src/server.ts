@@ -186,7 +186,31 @@ const ALLOWED_CONFIG_KEYS = new Set([
 	"login_tagline",
 	"logo_url",
 	"default_space_id",
+	// Integrations — written via PUT /api/instance, never returned by
+	// the public GET /api/instance (filtered by SENSITIVE_CONFIG_KEYS
+	// below).  Adding a new integration here means adding it to the
+	// sensitive set too if it's a credential.
+	"giphy_api_key",
 ]);
+
+// Keys that hold credentials / secrets.  Stripped from the public
+// GET /api/instance response — only the admin-only integrations
+// endpoint reveals "configured: true|false" without exposing the
+// value itself.  ALLOWED_CONFIG_KEYS may contain non-sensitive
+// integration keys too; this set is purely about what's safe to
+// return unauthenticated.
+const SENSITIVE_CONFIG_KEYS = new Set([
+	"giphy_api_key",
+]);
+
+function publicInstanceConfig(): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const [k, v] of Object.entries(readInstanceConfig())) {
+		if (SENSITIVE_CONFIG_KEYS.has(k)) continue;
+		out[k] = v;
+	}
+	return out;
+}
 
 function isAuthorizedAsHomeserver(req: Request): boolean {
 	const url = new URL(req.url);
@@ -445,7 +469,10 @@ export function startServer(): void {
 			// Public read — login screen needs this before the user is
 			// authenticated, so no token check.
 			if (req.method === "GET" && path === "/api/instance") {
-				return json({ config: readInstanceConfig() });
+				// Strips sensitive keys (e.g. giphy_api_key) — this
+				// endpoint is unauthenticated so the login screen can
+				// load branding without a session.
+				return json({ config: publicInstanceConfig() });
 			}
 
 			// ─── Email-code auth ─────────────────────────────────────
@@ -2205,6 +2232,103 @@ export function startServer(): void {
 			// name text on the login screen when set).
 			if (req.method === "POST" && path === "/api/instance/logo") {
 				return handleAdminImageUpload(req, "logo_url");
+			}
+
+			// Admin-only: report which integrations are configured (by
+			// presence of their credential, not its value).  The value
+			// itself is never returned over the wire; the admin form
+			// uses this to render "Configured / Not configured" badges
+			// next to a write-only input.
+			if (req.method === "GET" && path === "/api/instance/integrations") {
+				const auth = await requireAdmin(req);
+				if (auth instanceof Response) return auth;
+				const cfg = readInstanceConfig();
+				return json({
+					integrations: {
+						giphy: { configured: !!cfg["giphy_api_key"] },
+					},
+				});
+			}
+
+			// ─── Giphy proxy ─────────────────────────────────────────
+			// Forwards search / trending requests to Giphy's API using
+			// the instance-wide API key from instance_config.  Keeps
+			// the key server-side (never sent to clients).  Returns
+			// 503 when the key isn't configured so the SPA can hide
+			// the GIF picker.  Auth: any logged-in user — Giphy
+			// requests aren't free, so we gate on a valid Matrix
+			// access token to avoid unauthenticated clients burning
+			// the quota.
+			if (req.method === "GET" && (path === "/api/giphy/search" || path === "/api/giphy/trending")) {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				const apiKey = readInstanceConfig()["giphy_api_key"];
+				if (!apiKey) return json({ errcode: "M_NOT_FOUND", error: "giphy_not_configured" }, { status: 503 });
+				const params = new URL(req.url).searchParams;
+				// Clamp limit to Giphy's accepted range to keep
+				// response sizes predictable.
+				const limit = Math.max(1, Math.min(50, parseInt(params.get("limit") ?? "24", 10) || 24));
+				// pg-13 by default — the brand-side Giphy default;
+				// keeps the picker chat-appropriate without forcing
+				// G-rated only.  Hardcoded for v1; could become an
+				// instance setting later if anyone asks.
+				const rating = "pg-13";
+				const upstream = new URL(
+					path === "/api/giphy/search"
+						? "https://api.giphy.com/v1/gifs/search"
+						: "https://api.giphy.com/v1/gifs/trending",
+				);
+				upstream.searchParams.set("api_key", apiKey);
+				upstream.searchParams.set("limit", String(limit));
+				upstream.searchParams.set("rating", rating);
+				if (path === "/api/giphy/search") {
+					const q = (params.get("q") ?? "").trim();
+					if (!q) return json({ errcode: "M_INVALID_PARAM", error: "q required" }, { status: 400 });
+					upstream.searchParams.set("q", q);
+				}
+				try {
+					const r = await fetch(upstream);
+					if (!r.ok) {
+						return json(
+							{ errcode: "M_UNKNOWN", error: `giphy_upstream_${r.status}` },
+							{ status: 502 },
+						);
+					}
+					// Reshape Giphy's response down to the fields the
+					// client actually uses.  Avoids leaking irrelevant
+					// metadata and keeps the wire format stable if
+					// Giphy reorganises their schema.
+					const raw = await r.json() as {
+						data?: Array<{
+							id?: string;
+							title?: string;
+							images?: {
+								fixed_width?: { url?: string; width?: string; height?: string };
+								original?: { url?: string; mp4?: string; width?: string; height?: string };
+								preview_gif?: { url?: string };
+							};
+						}>;
+					};
+					const results = (raw.data ?? []).flatMap(item => {
+						const preview = item.images?.fixed_width?.url ?? item.images?.preview_gif?.url;
+						const original = item.images?.original?.url;
+						if (!item.id || !preview || !original) return [];
+						return [{
+							id: item.id,
+							title: item.title ?? "",
+							preview_url: preview,
+							original_url: original,
+							width: parseInt(item.images?.original?.width ?? "0", 10) || 0,
+							height: parseInt(item.images?.original?.height ?? "0", 10) || 0,
+						}];
+					});
+					return json({ results });
+				} catch (err) {
+					return json(
+						{ errcode: "M_UNKNOWN", error: err instanceof Error ? err.message : String(err) },
+						{ status: 502 },
+					);
+				}
 			}
 
 			// ─── User profiles (bios) ────────────────────────────────

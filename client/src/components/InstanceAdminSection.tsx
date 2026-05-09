@@ -15,9 +15,10 @@ import {
 	uploadLogo,
 	type InstanceConfig,
 } from "@/lib/instance";
-import { Camera, Trash2 } from "lucide-react";
+import { Camera, Check, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { MatrixTransport } from "@/lib/matrix";
+import { fetchIntegrationsStatus, type IntegrationsStatus } from "@/lib/giphy";
 
 export interface InstanceAdminSectionProps {
 	accessToken: string;
@@ -43,6 +44,13 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
 	const logoInputRef = useRef<HTMLInputElement | null>(null);
 
+	// Integrations — Giphy etc.  The API key itself is never returned
+	// from the engine (write-only); we only learn whether one is set
+	// via /api/instance/integrations.  `giphyKeyDraft` holds the
+	// admin's pending input until they hit Save.
+	const [integrations, setIntegrations] = useState<IntegrationsStatus | null>(null);
+	const [giphyKeyDraft, setGiphyKeyDraft] = useState("");
+
 	useEffect(() => {
 		let cancelled = false;
 		// Config + public-space directory in parallel — directory feeds
@@ -53,7 +61,10 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 			transport
 				? transport.discoverPublicRooms({ limit: 100 }).catch(() => [])
 				: Promise.resolve([]),
-		]).then(([cfg, dirEntries]) => {
+			fetchIntegrationsStatus(accessToken).catch(
+				() => ({ giphy: { configured: false } } as IntegrationsStatus),
+			),
+		]).then(([cfg, dirEntries, integ]) => {
 			if (cancelled) return;
 			setConfig(cfg);
 			setName(cfg.name ?? "");
@@ -64,6 +75,7 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 					.filter(e => e.isSpace)
 					.map(e => ({ roomId: e.roomId, name: e.name, memberCount: e.memberCount })),
 			);
+			setIntegrations(integ);
 			setLoading(false);
 		});
 		return () => { cancelled = true; };
@@ -128,6 +140,43 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 			const next = await uploadLogo(accessToken, file);
 			setConfig(next);
 			setInfo("Logo updated.");
+		} catch (err) {
+			setError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setPending(false);
+		}
+	}
+
+	async function saveGiphyKey() {
+		if (!giphyKeyDraft.trim()) return;
+		setPending(true);
+		setError(null);
+		setInfo(null);
+		try {
+			await updateInstanceConfig(accessToken, { giphy_api_key: giphyKeyDraft.trim() });
+			// Re-fetch integrations to flip the badge to "configured"
+			// without exposing the value we just wrote.
+			const next = await fetchIntegrationsStatus(accessToken);
+			setIntegrations(next);
+			setGiphyKeyDraft("");
+			setInfo("Giphy API key saved.");
+		} catch (err) {
+			setError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setPending(false);
+		}
+	}
+
+	async function clearGiphyKey() {
+		setPending(true);
+		setError(null);
+		setInfo(null);
+		try {
+			await updateInstanceConfig(accessToken, { giphy_api_key: null });
+			const next = await fetchIntegrationsStatus(accessToken);
+			setIntegrations(next);
+			setGiphyKeyDraft("");
+			setInfo("Giphy disabled.");
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
 		} finally {
@@ -314,6 +363,71 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 								e.target.value = "";
 							}}
 						/>
+					</div>
+				</div>
+
+				{/* ── Integrations ───────────────────────────────────
+				    Third-party services keyed at the instance level.
+				    The API key is write-only — once saved, the engine
+				    never returns it.  The "Configured" badge is the
+				    only feedback that a key is set, which is enough
+				    for an admin re-visiting the form to know they
+				    don't need to paste it again. */}
+				<div className="pt-4 border-t border-border space-y-3">
+					<div>
+						<h3 className="text-sm font-semibold">Integrations</h3>
+						<p className="text-[10px] text-muted-foreground leading-snug">
+							Optional third-party services. Keys are stored on this server only and never sent back to clients.
+						</p>
+					</div>
+
+					<div className="space-y-1.5">
+						<div className="flex items-center justify-between">
+							<Label htmlFor="giphy-api-key">Giphy API key</Label>
+							{integrations?.giphy.configured ? (
+								<span className="inline-flex items-center gap-1 text-[10px] text-emerald-500/90">
+									<Check className="h-3 w-3" />
+									Configured
+								</span>
+							) : (
+								<span className="text-[10px] text-muted-foreground">Not configured</span>
+							)}
+						</div>
+						<div className="flex gap-2">
+							<Input
+								id="giphy-api-key"
+								type="password"
+								autoComplete="off"
+								value={giphyKeyDraft}
+								onChange={(e) => setGiphyKeyDraft(e.target.value)}
+								placeholder={integrations?.giphy.configured ? "•••••••• (paste a new key to replace)" : "Paste your Giphy API key"}
+								disabled={pending}
+							/>
+							<Button
+								type="button"
+								variant="outline"
+								size="sm"
+								onClick={saveGiphyKey}
+								disabled={pending || !giphyKeyDraft.trim()}
+							>
+								Save
+							</Button>
+							{integrations?.giphy.configured && (
+								<Button
+									type="button"
+									variant="ghost"
+									size="sm"
+									onClick={clearGiphyKey}
+									disabled={pending}
+									className="text-muted-foreground hover:text-destructive"
+								>
+									Clear
+								</Button>
+							)}
+						</div>
+						<p className="text-[10px] text-muted-foreground leading-snug">
+							Get a key at <a href="https://developers.giphy.com/dashboard/" target="_blank" rel="noreferrer" className="underline">developers.giphy.com</a> — pick the <strong>API</strong> option (not SDK). When set, members get a GIF picker in the message composer.
+						</p>
 					</div>
 				</div>
 
