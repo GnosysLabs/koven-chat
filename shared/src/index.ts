@@ -221,6 +221,14 @@ export interface Message {
 	// SDK error string ("** Unable to decrypt: …. **") into the
 	// timeline.
 	decryptionFailed?: boolean;
+	// When `decryptionFailed`, the SDK's specific reason code
+	// (matrix-js-sdk DecryptionFailureCode enum, kept loose as string
+	// so the shared package doesn't have to depend on the SDK).  Lets
+	// the renderer pick a per-reason explanation: "waiting for
+	// sender's key" vs. "sent before this device existed" vs. "key
+	// withheld — verify your device" rather than the same opaque
+	// padlock for everything.
+	decryptionFailureReason?: string;
 	// True for events whose send hasn't been confirmed by the homeserver
 	// yet — local echoes still in flight, queued retries after a network
 	// drop, encryption-in-progress, or hard-failed sends matrix-js-sdk

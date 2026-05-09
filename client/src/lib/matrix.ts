@@ -549,6 +549,31 @@ export class MatrixTransport {
 		// rest of start() and trips over its now-null this.client.
 		if (this.stopped || !this.client) return;
 
+		// Wire up automatic key-backup restore.  Without this call,
+		// `crypto.restoreKeyBackup()` only runs once during the manual
+		// passphrase-unlock flow — meaning any megolm session that
+		// landed in backup AFTER the user last unlocked never flows
+		// down, and individual UTDs ("🔒 Couldn't decrypt this
+		// message") stay broken until the user manually re-unlocks.
+		//
+		// `checkKeyBackupAndEnable` (rust-crypto API) does two things:
+		//   1. Fetches the current backup version from the server and
+		//      validates it's signed by a trusted cross-signing key.
+		//   2. Marks backup as enabled in the rust crypto stack — from
+		//      this point the rust SDK transparently fetches missing
+		//      megolm sessions from /room_keys whenever a UTD lands,
+		//      and re-fires the Decrypted event when the cleartext
+		//      becomes available.
+		//
+		// Idempotent + cheap (one HTTP GET when backup state is
+		// already correct), so safe to call on every start.  Failure
+		// is non-fatal — most likely cause is "no backup exists yet"
+		// (pre-setup user) which is correctly handled as "no auto-
+		// restore until they enable it".
+		void this.client.getCrypto()?.checkKeyBackupAndEnable().catch(err => {
+			console.warn("matrix: checkKeyBackupAndEnable failed (auto-restore won't work this session)", err);
+		});
+
 		// Encrypted events arrive via Timeline as `m.room.encrypted`.
 		// We skip them there (see Timeline handler below) and instead
 		// process them here once decryption resolves their cleartext
@@ -558,17 +583,18 @@ export class MatrixTransport {
 		this.client.on(MatrixEventEvent.Decrypted, (event: MatrixEvent) => {
 			const room = this.client?.getRoom(event.getRoomId() ?? "");
 			if (!room) return;
-			// On UTD ("Unable To Decrypt"): actively request the
-			// megolm session key from the sender's other devices.
-			// rust-crypto handles re-decryption automatically once a
-			// matching key arrives — the Decrypted event will re-fire
-			// for the same MatrixEvent, this time with the real
-			// content, and routeDecryptedEvent below renders it like
-			// any other message.  We dedupe per event-id so a stuck
-			// session doesn't spam outbound /sendToDevice traffic.
-			if (typeof event.isDecryptionFailure === "function" && event.isDecryptionFailure()) {
-				void this.requestKeyForUndecryptable(event);
-			}
+			// UTD recovery is handled INSIDE the rust crypto stack —
+			// it auto-pulls missing megolm sessions from key backup
+			// (enabled via checkKeyBackupAndEnable in start()) and
+			// auto-issues m.room_key_request to-device messages to
+			// the sender's other devices.  When a key eventually
+			// arrives, rust-crypto re-decrypts and re-fires this
+			// Decrypted event with the cleartext.  Manual
+			// `cancelAndResendEventRoomKeyRequest` from MatrixClient
+			// is a libolm-era API the SDK marks `@deprecated Not
+			// supported for Rust Cryptography` — it throws inside
+			// the SDK on rust-crypto, so we'd be silently swallowing
+			// errors with no actual recovery.  Trust the rust stack.
 			this.routeDecryptedEvent(event, room, false);
 		});
 
@@ -597,6 +623,16 @@ export class MatrixTransport {
 				void this.syncOwnDeviceLabel().catch(err =>
 					console.warn("matrix: device-label sync failed", err),
 				);
+				// Re-validate key-backup state on every "ready"
+				// transition.  The first call fires from start(); this
+				// one catches the case where the user setup or rotated
+				// their backup on another device while this session
+				// was offline.  Without it, the rust SDK keeps trying
+				// against the dead backup version and every UTD
+				// stays stuck.
+				void this.client?.getCrypto()?.checkKeyBackupAndEnable().catch(err => {
+					console.warn("matrix: post-sync checkKeyBackupAndEnable failed", err);
+				});
 			}
 		});
 
@@ -4299,52 +4335,6 @@ export class MatrixTransport {
 	 * path as their cleartext counterparts — no double-listing of
 	 * type checks, no encrypted-only paths going stale.
 	 */
-	/** Per-event id dedupe so we don't re-fire room-key requests on
-	 * every Decrypted event for the same stuck megolm session.  The
-	 * SDK retries decryption automatically when keys arrive, which
-	 * fires Decrypted again — without this, a busted session would
-	 * spam outbound /sendToDevice requests on every retry tick. */
-	private requestedKeysFor = new Set<string>();
-
-	/** Ask the sender's other devices to re-share the room key for
-	 * an event we couldn't decrypt.  Uses matrix-js-sdk's
-	 * `cancelAndResendEventRoomKeyRequest` which:
-	 *   1. Cancels any in-flight key request for this session.
-	 *   2. Sends a fresh `m.room_key_request` to-device event to
-	 *      the sender.
-	 *   3. Returns; rust-crypto handles re-decryption automatically
-	 *      when the key arrives, re-firing the Decrypted event with
-	 *      the real content this time.
-	 *
-	 * Best-effort and idempotent — failures (sender offline,
-	 * network) are logged and forgotten. */
-	private async requestKeyForUndecryptable(event: MatrixEvent): Promise<void> {
-		const id = event.getId();
-		if (!id || this.requestedKeysFor.has(id)) return;
-		this.requestedKeysFor.add(id);
-		// Cap the dedupe set so a long-running session with lots of
-		// UTDs doesn't grow it unbounded.  Drop oldest when over.
-		if (this.requestedKeysFor.size > 500) {
-			const first = this.requestedKeysFor.values().next().value;
-			if (first) this.requestedKeysFor.delete(first);
-		}
-		try {
-			const c = this.client;
-			if (!c) return;
-			// matrix-js-sdk exposes this off MatrixClient; signature
-			// hasn't been on the public .d.ts in some versions, so
-			// access via the indexed form to keep the typecheck
-			// quiet without committing to a SDK-internal type.
-			const fn = (c as unknown as {
-				cancelAndResendEventRoomKeyRequest?: (e: MatrixEvent) => Promise<void>;
-			}).cancelAndResendEventRoomKeyRequest;
-			if (typeof fn !== "function") return;
-			await fn.call(c, event);
-		} catch (err) {
-			console.warn(`matrix: room-key request for ${event.getId()} failed`, err);
-		}
-	}
-
 	private routeDecryptedEvent(event: MatrixEvent, room: SdkRoom, live: boolean): void {
 		const type = event.getType();
 
@@ -4504,13 +4494,19 @@ export class MatrixTransport {
 		// "** Unable to decrypt: DecryptionError: This message was sent
 		// before this device logged in, and key backup is not working. **".
 		// Replace with a clean placeholder so the user gets a calm
-		// "🔒 Couldn't decrypt this message" bubble instead of an
-		// alarming wall of stack-trace-ish text.  The renderer dims
-		// the bubble (decryptionFailed flag) so it reads as system
-		// metadata rather than a real chat message.
+		// "🔒 …" bubble instead of an alarming wall of stack-trace-ish
+		// text.  The renderer dims the bubble (decryptionFailed flag)
+		// so it reads as system metadata rather than a real chat
+		// message.  We also surface the SDK's specific failure code
+		// so the renderer can pick a per-reason explanation — opaque
+		// "Couldn't decrypt" tells the user nothing about whether to
+		// wait, log in elsewhere, or accept it's gone.
 		const decryptionFailed = typeof event.isDecryptionFailure === "function"
 			? event.isDecryptionFailure()
 			: false;
+		const decryptionFailureReason: string | undefined = decryptionFailed
+			? ((event as unknown as { decryptionFailureReason?: string | null }).decryptionFailureReason ?? undefined)
+			: undefined;
 
 		const msgtype = content.msgtype as string | undefined;
 		let kind: MessageKind = "text";
@@ -4522,7 +4518,7 @@ export class MatrixTransport {
 		let mediaHeight: number | undefined;
 		let mediaEncrypted: import("@koven/shared").MediaEncryption | undefined;
 		let text = decryptionFailed
-			? "🔒 Couldn't decrypt this message"
+			? formatDecryptionFailure(decryptionFailureReason)
 			: (content.body as string | undefined) ?? "";
 		let caption: string | undefined;
 
@@ -4645,6 +4641,8 @@ export class MatrixTransport {
 			edited: !!event.replacingEvent(),
 			replyTo,
 			pending,
+			decryptionFailed: decryptionFailed || undefined,
+			decryptionFailureReason,
 		};
 	}
 
@@ -4724,6 +4722,57 @@ function cryptoRandomId(): string {
 	const bytes = new Uint8Array(8);
 	crypto.getRandomValues(bytes);
 	return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Map a matrix-js-sdk DecryptionFailureCode to the placeholder text
+ * we render in the timeline.  Specific reasons get specific guidance
+ * — opaque "Couldn't decrypt" tells the user nothing about whether
+ * the message will heal, whether they should log in elsewhere, or
+ * whether it's gone forever.
+ *
+ * Reason codes come from
+ * matrix-js-sdk/src/crypto-api/index.ts → DecryptionFailureCode.  We
+ * accept `string | undefined` to stay loose against SDK changes —
+ * unrecognized codes fall through to the generic message rather than
+ * crashing the timeline. */
+function formatDecryptionFailure(reason: string | undefined): string {
+	switch (reason) {
+		case "MEGOLM_UNKNOWN_INBOUND_SESSION_ID":
+			// Most common case: sender's megolm key never reached this
+			// device.  Rust crypto auto-requests it from the sender's
+			// other devices and from key backup; usually heals within
+			// a few seconds if the sender is online.  Worded so the
+			// user knows to wait, not retry.
+			return "🔒 Waiting for the sender's key…";
+		case "MEGOLM_KEY_WITHHELD":
+			return "🔒 The sender's app refused to share the key for this message.";
+		case "MEGOLM_KEY_WITHHELD_FOR_UNVERIFIED_DEVICE":
+			// Sender's policy: only share with verified devices.  Tell
+			// the user the actionable fix rather than the protocol
+			// detail — verifying happens via the Sessions sheet on a
+			// second device they're already logged into.
+			return "🔒 Verify this device on your other login to read this message.";
+		case "HISTORICAL_MESSAGE_NO_KEY_BACKUP":
+		case "HISTORICAL_MESSAGE_BACKUP_UNCONFIGURED":
+			// Sent before this device existed AND no backup is
+			// reachable — the message is permanently lost on this
+			// device.  Honest framing beats false hope of an eventual
+			// retry.
+			return "🔒 Sent before this device — no backup available.";
+		case "HISTORICAL_MESSAGE_WORKING_BACKUP":
+			// Sent before this device existed but backup IS working —
+			// rust-crypto is fetching from /room_keys; will heal once
+			// the session arrives.
+			return "🔒 Restoring from backup…";
+		case "HISTORICAL_MESSAGE_USER_NOT_JOINED":
+			return "🔒 You weren't in the room when this was sent.";
+		case "SENDER_IDENTITY_PREVIOUSLY_VERIFIED":
+		case "UNSIGNED_SENDER_DEVICE":
+		case "UNKNOWN_SENDER_DEVICE":
+			return "🔒 Sender's identity couldn't be verified.";
+		default:
+			return "🔒 Couldn't decrypt this message";
+	}
 }
 
 function stripReplyFallback(body: string): string {
