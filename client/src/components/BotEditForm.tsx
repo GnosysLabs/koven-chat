@@ -144,6 +144,96 @@ function parseLimit(s: string): number {
 	return Math.floor(n);
 }
 
+/** Options for the Limits-tab dropdowns.  Stored value is a string
+ * (matches FormState which keeps everything as strings); empty
+ * string = "unlimited" sentinel (maps to 0 on the wire via
+ * parseLimit).  Labels use compact suffixes (1K / 1M) so the
+ * column stays narrow.  Update freely — the engine clamps to its
+ * own ceilings (1M for max-per-reply, 1B for daily-tokens, 1M for
+ * daily-calls), so adding bigger values here is safe. */
+interface LimitOption {
+	value: string;
+	label: string;
+}
+
+const MAX_REPLY_OPTIONS: LimitOption[] = [
+	{ value: "",      label: "Unlimited" },
+	{ value: "256",   label: "256" },
+	{ value: "512",   label: "512" },
+	{ value: "1024",  label: "1K" },
+	{ value: "2048",  label: "2K" },
+	{ value: "4096",  label: "4K" },
+	{ value: "8192",  label: "8K" },
+	{ value: "16384", label: "16K" },
+	{ value: "32768", label: "32K" },
+];
+
+const DAILY_TOKEN_OPTIONS: LimitOption[] = [
+	{ value: "",          label: "Unlimited" },
+	{ value: "100000",    label: "100K" },
+	{ value: "500000",    label: "500K" },
+	{ value: "1000000",   label: "1M" },
+	{ value: "3000000",   label: "3M" },
+	{ value: "5000000",   label: "5M" },
+	{ value: "10000000",  label: "10M" },
+	{ value: "25000000",  label: "25M" },
+	{ value: "50000000",  label: "50M" },
+	{ value: "100000000", label: "100M" },
+];
+
+const DAILY_CALL_OPTIONS: LimitOption[] = [
+	{ value: "",     label: "Unlimited" },
+	{ value: "10",   label: "10" },
+	{ value: "25",   label: "25" },
+	{ value: "50",   label: "50" },
+	{ value: "100",  label: "100" },
+	{ value: "250",  label: "250" },
+	{ value: "500",  label: "500" },
+	{ value: "1000", label: "1,000" },
+	{ value: "5000", label: "5,000" },
+];
+
+/** Styled `<select>` for the Limits tab, matching the Provider /
+ * Bearer dropdowns elsewhere in the form (appearance-none plus a
+ * stacked ChevronDown to keep the chevron off the border).  When
+ * the bot's saved value isn't in the option list (e.g. an admin
+ * tweaked the column directly, or the option list shrank in a
+ * later release), we surface the raw value as a "Custom: N" entry
+ * so the user can see + keep their existing setting rather than
+ * having it silently snap to the closest preset. */
+function LimitSelect({
+	id, value, onChange, options,
+}: {
+	id: string;
+	value: string;
+	onChange(v: string): void;
+	options: LimitOption[];
+}) {
+	const knownValues = new Set(options.map(o => o.value));
+	const showCustom = value !== "" && !knownValues.has(value);
+	return (
+		<div className="relative">
+			<select
+				id={id}
+				value={value}
+				onChange={e => onChange(e.target.value)}
+				className="h-9 w-full appearance-none rounded-md border border-foreground/15 bg-background pl-3 pr-9 text-sm shadow-sm transition-colors hover:border-foreground/25 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:border-ring"
+			>
+				{options.map(o => (
+					<option key={o.value} value={o.value}>{o.label}</option>
+				))}
+				{showCustom && (
+					<option value={value}>Custom: {Number(value).toLocaleString()}</option>
+				)}
+			</select>
+			<ChevronDown
+				className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none"
+				aria-hidden
+			/>
+		</div>
+	);
+}
+
 const NAME_PATTERN = /^[a-z0-9-]{1,21}$/;
 
 /** MCP attachment queued during create mode.  Same shape as the
@@ -1158,13 +1248,11 @@ export function BotEditForm({
 					<Label htmlFor="bot-max-tokens">
 						Max tokens per reply <span className="text-muted-foreground font-normal">(optional)</span>
 					</Label>
-					<Input
+					<LimitSelect
 						id="bot-max-tokens"
-						type="number"
-						min={0}
 						value={form.maxTokensPerReply}
-						onChange={e => update("maxTokensPerReply", e.target.value)}
-						placeholder="Unlimited"
+						onChange={v => update("maxTokensPerReply", v)}
+						options={MAX_REPLY_OPTIONS}
 					/>
 					<p className="text-xs text-muted-foreground">
 						Caps the output length of a single LLM call. Useful when the model gets chatty — passes through to OpenAI's <code className="font-mono text-[11px]">max_tokens</code>.
@@ -1175,13 +1263,11 @@ export function BotEditForm({
 					<Label htmlFor="bot-daily-tokens">
 						Daily token limit <span className="text-muted-foreground font-normal">(optional)</span>
 					</Label>
-					<Input
+					<LimitSelect
 						id="bot-daily-tokens"
-						type="number"
-						min={0}
 						value={form.dailyTokenLimit}
-						onChange={e => update("dailyTokenLimit", e.target.value)}
-						placeholder="Unlimited"
+						onChange={v => update("dailyTokenLimit", v)}
+						options={DAILY_TOKEN_OPTIONS}
 					/>
 					<p className="text-xs text-muted-foreground">
 						Total prompt + completion tokens across all replies in a UTC day. The bot will quietly refuse new mentions once exceeded.
@@ -1192,13 +1278,11 @@ export function BotEditForm({
 					<Label htmlFor="bot-daily-calls">
 						Daily call limit <span className="text-muted-foreground font-normal">(optional)</span>
 					</Label>
-					<Input
+					<LimitSelect
 						id="bot-daily-calls"
-						type="number"
-						min={0}
 						value={form.dailyCallLimit}
-						onChange={e => update("dailyCallLimit", e.target.value)}
-						placeholder="Unlimited"
+						onChange={v => update("dailyCallLimit", v)}
+						options={DAILY_CALL_OPTIONS}
 					/>
 					<p className="text-xs text-muted-foreground">
 						Number of times the bot can be triggered in a UTC day, regardless of token count. Useful when the model is cheap-per-call but a single conversation could fan out to many tool-use iterations.
@@ -1508,7 +1592,7 @@ function ToolsTab({
 		<section className="space-y-6">
 			<SectionHeader
 				title="Tools"
-				subtitle="Attach MCP servers your bot can call. Paste any Streamable-HTTP MCP endpoint and (optional) auth — no catalog, no platform-specific glue."
+				subtitle="Attach MCP servers your bot can call. Paste any Streamable-HTTP MCP endpoint and (optional) auth."
 			/>
 
 			{/* Attached / Queued list */}
