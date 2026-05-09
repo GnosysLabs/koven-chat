@@ -84,6 +84,13 @@ export interface AppState {
 	flagsByMessage: FlagsByMessage;
 	flagRefs: Map<EventId, FlagRef>;
 	collapsesByMessage: CollapsesByMessage;
+	// Per-room counter incremented every time matrix-js-sdk fires
+	// Room.Receipt.  ChatPane / SeenIndicator components read the
+	// counter for the active room to know they need to re-query
+	// transport.getMessageSeenBy.  We don't store receipt data
+	// itself in state — matrix-js-sdk already owns that — just a
+	// version number so React knows when to re-render.
+	receiptsVersionByRoom: Map<RoomId, number>;
 	activeRoomId: RoomId | null;
 	activeSpace: ActiveSpace;
 	error: string | null;
@@ -102,6 +109,7 @@ export const initialState: AppState = {
 	flagsByMessage: new Map(),
 	flagRefs: new Map(),
 	collapsesByMessage: new Map(),
+	receiptsVersionByRoom: new Map(),
 	activeRoomId: null,
 	activeSpace: { kind: "rooms" },
 	error: null,
@@ -125,6 +133,7 @@ export type Action =
 	| { type: "collapse_arrived"; collapse: CollapseEventLite }
 	| { type: "set_active_room"; roomId: RoomId | null }
 	| { type: "set_active_space"; space: ActiveSpace }
+	| { type: "receipts_updated"; roomId: RoomId }
 	| { type: "error"; message: string };
 
 export function reduce(state: AppState, action: Action): AppState {
@@ -258,6 +267,18 @@ export function reduce(state: AppState, action: Action): AppState {
 			// pick the first available room in the new view, or land on
 			// an empty pane.
 			return { ...state, activeSpace: action.space, activeRoomId: null };
+
+		case "receipts_updated": {
+			// Bump the version counter for this room.  ChatPane's
+			// per-message SeenIndicator components subscribe to it
+			// and re-query transport.getMessageSeenBy when it
+			// changes.  The actual receipt data lives in matrix-
+			// js-sdk; we only track the version to know when to
+			// re-render.
+			const next = new Map(state.receiptsVersionByRoom);
+			next.set(action.roomId, (next.get(action.roomId) ?? 0) + 1);
+			return { ...state, receiptsVersionByRoom: next };
+		}
 
 		case "error":
 			return { ...state, error: action.message };

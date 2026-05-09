@@ -43,6 +43,13 @@ function looksLikeMarkdown(s: string): boolean {
 import { useMatrixAttachment } from "@/lib/useMatrixAttachment";
 import { useMatrixMedia } from "@/lib/useMatrixMedia";
 import { useUrlPreview } from "@/lib/useUrlPreview";
+import { useTransport } from "@/lib/transportContext";
+import {
+	Dialog,
+	DialogContent,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
 import { AlertTriangle, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Lock, Network, Paperclip, Phone, Scale, Settings, UserPlus, Video, X } from "lucide-react";
 
 export interface ChatPaneProps {
@@ -129,6 +136,13 @@ export interface ChatPaneProps {
 	// false at the start-of-room.  Caller is responsible for
 	// re-emitting the message list to state after success.
 	onLoadMoreHistory?(roomId: RoomId): Promise<boolean>;
+	// Per-room version counter that bumps on every Room.Receipt event
+	// matrix-js-sdk delivers for this room.  Drives re-renders of the
+	// SeenIndicator components on each message (which re-query
+	// transport.getMessageSeenBy when the version changes).  Optional;
+	// defaults to 0 — without it the indicators just won't update
+	// live, but the initial render is still correct.
+	receiptsVersion?: number;
 }
 
 // Threshold for "this message is part of the same group as the
@@ -148,6 +162,7 @@ export function ChatPane({
 	members,
 	viewerServer,
 	onLoadMoreHistory,
+	receiptsVersion,
 }: ChatPaneProps) {
 	// Consensus flagging only works where the local engine can act:
 	//   - DMs are 1-on-1 — no quorum to gather, no consensus to reach.
@@ -370,6 +385,17 @@ export function ChatPane({
 	// and surface the popover.
 
 	const mentionToken = activeMentionToken(draft, cursor);
+
+	// userId → display name lookup, for the SeenIndicator's
+	// avatar-stack tooltip + the "seen by" modal list.  Falls back
+	// to localpart when a member has no displayname set.
+	const memberNamesByUserId = useMemo<Map<string, string>>(() => {
+		const m = new Map<string, string>();
+		for (const member of (members ?? [])) {
+			m.set(member.userId, member.displayName ?? localpartOf(member.userId));
+		}
+		return m;
+	}, [members]);
 
 	const allCandidates = useMemo<AutocompleteCandidate[]>(() => {
 		const seen = new Set<string>();
@@ -683,6 +709,10 @@ export function ChatPane({
 								reactions={reactionsByMessage.get(m.id) ?? []}
 								flags={flagsByMessage.get(m.id)}
 								collapse={collapsesByMessage.get(m.id)}
+								isDm={room.kind === "dm"}
+								receiptsVersion={receiptsVersion ?? 0}
+								memberAvatars={memberAvatars}
+								memberNames={memberNamesByUserId}
 								onReact={(emoji) => toggleReaction(m, emoji)}
 								onReply={() => setReplyTarget(m)}
 								onFlag={(category, rationale) => onFlag(m.id, category, rationale)}
@@ -932,6 +962,7 @@ function MessageRow({
 	message, avatarMxc, continuesGroup, isFirst, flaggable, roomEncrypted,
 	reactions, flags, collapse, onReact, onReply, onFlag, onTogglePillFlag, onToggleReactionPill, isBot,
 	isOwnedBot, isHovered, onDelete,
+	isDm, receiptsVersion, memberAvatars, memberNames,
 }: {
 	message: Message;
 	avatarMxc: string | undefined;
@@ -979,6 +1010,18 @@ function MessageRow({
 	// await the real network call and show errors inline (403, 502,
 	// network) without flickering closed first.
 	onDelete?(): void | Promise<void>;
+	// Drives the SeenIndicator on this row's bubble — DM gets a
+	// "Read 2:41 PM" / nothing pair under the bubble; non-DM rooms
+	// get a small avatar stack + count next to the bubble that
+	// expands to a list modal on click.  isDm distinguishes the
+	// two render styles; receiptsVersion forces a re-render when
+	// matrix-js-sdk delivers a new Room.Receipt; memberAvatars +
+	// memberNames feed the avatar stack.  Only meaningful on
+	// `isSelf` rows; the indicator no-ops for others' messages.
+	isDm: boolean;
+	receiptsVersion: number;
+	memberAvatars: Map<string, string | undefined>;
+	memberNames: Map<string, string>;
 }) {
 	const [flagDialogOpen, setFlagDialogOpen] = useState(false);
 	const [expanded, setExpanded] = useState(false);
@@ -1124,6 +1167,20 @@ function MessageRow({
 						<CollapsedBubble collapse={collapse!} onExpand={() => setExpanded(true)} />
 					) : (
 						<MessageBubble message={message} />
+					)}
+					{/* Seen-by indicator on YOUR sent messages.  In a
+					    DM, renders a small "Read · time" line; in a
+					    room, renders an avatar stack + count that
+					    opens a modal listing every reader. */}
+					{message.isSelf && !message.pending && !isCollapsed && (
+						<SeenIndicator
+							roomId={message.roomId}
+							eventId={message.id}
+							isDm={isDm}
+							receiptsVersion={receiptsVersion}
+							memberAvatars={memberAvatars}
+							memberNames={memberNames}
+						/>
 					)}
 					{flaggable && flags && flags.count > 0 && (
 						<FlagPill
@@ -1680,4 +1737,137 @@ function formatChatTimestamp(ts: number): string {
 		return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + ` ${time}`;
 	}
 	return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+/** Strip the leading `@` and the `:server` suffix off a Matrix MXID,
+ * leaving just the localpart.  Fallback display when a member has no
+ * displayname set.  Idempotent on already-bare strings. */
+function localpartOf(mxid: string): string {
+	const at = mxid.indexOf("@");
+	const colon = mxid.indexOf(":");
+	if (at !== 0 || colon < 2) return mxid;
+	return mxid.slice(1, colon);
+}
+
+/** Seen-by indicator on a sent message.
+ *
+ *   - DM: a small "Read · 2:41 PM" line (when at least one other
+ *     party has read past this message).  Hidden until the read
+ *     receipt arrives — sender doesn't need to see "Sent" on every
+ *     message they just sent.
+ *   - Group room: an avatar stack (max 4 visible) + count.  Click
+ *     opens a modal listing every reader with timestamp.
+ *
+ * Re-renders when `receiptsVersion` bumps (which happens every time
+ * matrix-js-sdk delivers a Room.Receipt for the active room).
+ * Calls transport.getMessageSeenBy on every render — cheap, in-
+ * memory matrix-js-sdk lookup; no network. */
+function SeenIndicator({
+	roomId,
+	eventId,
+	isDm,
+	receiptsVersion,
+	memberAvatars,
+	memberNames,
+}: {
+	roomId: RoomId;
+	eventId: EventId;
+	isDm: boolean;
+	receiptsVersion: number;
+	memberAvatars: Map<string, string | undefined>;
+	memberNames: Map<string, string>;
+}) {
+	const transport = useTransport();
+	const [open, setOpen] = useState(false);
+
+	// receiptsVersion in deps via useMemo so we re-query when it
+	// bumps.  matrix-js-sdk owns the actual receipt cache; we just
+	// trigger a re-read.
+	const seen = useMemo(() => {
+		if (!transport) return [];
+		return transport.getMessageSeenBy(roomId, eventId);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [transport, roomId, eventId, receiptsVersion]);
+
+	if (seen.length === 0) return null;
+
+	if (isDm) {
+		// DM: show "Read · 2:41 PM" subtle text.  Most recent reader's
+		// timestamp (in DMs there's only one possible reader anyway).
+		const ts = seen[0]!.ts;
+		return (
+			<span className="text-[10px] text-muted-foreground/70 tabular-nums whitespace-nowrap">
+				Read · {formatChatTimestamp(ts)}
+			</span>
+		);
+	}
+
+	// Group room: avatar stack + count, click → modal.
+	const visible = seen.slice(0, 4);
+	const moreCount = seen.length - visible.length;
+
+	return (
+		<>
+			<button
+				type="button"
+				onClick={() => setOpen(true)}
+				className={cn(
+					"inline-flex items-center gap-1",
+					"px-1.5 py-0.5 rounded-full",
+					"text-[10px] text-muted-foreground/70",
+					"hover:bg-accent hover:text-foreground transition-colors",
+				)}
+				aria-label={`Seen by ${seen.length} ${seen.length === 1 ? "person" : "people"}`}
+			>
+				{/* Avatars stack horizontally with negative margin so
+				    they overlap slightly — same convention Slack /
+				    Linear / Telegram use for compact reader lists. */}
+				<span className="flex -space-x-1">
+					{visible.map(s => (
+						<MatrixAvatar
+							key={s.userId}
+							mxc={memberAvatars.get(s.userId) ?? undefined}
+							seed={s.userId}
+							kind="user"
+							className="h-4 w-4 rounded-full ring-1 ring-background"
+						/>
+					))}
+				</span>
+				{moreCount > 0 && <span className="tabular-nums">+{moreCount}</span>}
+			</button>
+
+			<Dialog open={open} onOpenChange={setOpen}>
+				<DialogContent className="sm:max-w-xs max-h-[80vh] flex flex-col gap-0 p-0 overflow-hidden">
+					<DialogHeader className="px-4 pt-4 pb-3 border-b border-border/50">
+						<DialogTitle className="text-base">
+							Seen by {seen.length}
+						</DialogTitle>
+					</DialogHeader>
+					<div className="flex-1 overflow-y-auto py-1">
+						{seen.map(s => (
+							<div
+								key={s.userId}
+								className="px-4 py-2 flex items-center gap-3"
+							>
+								<MatrixAvatar
+									mxc={memberAvatars.get(s.userId) ?? undefined}
+									seed={s.userId}
+									kind="user"
+									className="h-8 w-8 rounded-full shrink-0"
+								/>
+								<div className="flex-1 min-w-0">
+									<div className="text-sm font-medium truncate">
+										{memberNames.get(s.userId) ?? localpartOf(s.userId)}
+									</div>
+								</div>
+								<div className="text-[10px] text-muted-foreground tabular-nums shrink-0">
+									{formatChatTimestamp(s.ts)}
+								</div>
+							</div>
+						))}
+					</div>
+				</DialogContent>
+			</Dialog>
+		</>
+	);
 }

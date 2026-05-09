@@ -206,6 +206,12 @@ export interface MatrixHandlers {
 	onFlagRedacted(roomId: RoomId, flagEventId: EventId): void;
 	onCollapse(collapse: CollapseEventLite, options: { live: boolean }): void;
 	onMembersUpdated(roomId: RoomId): void;
+	/// Fires when m.read receipts change in a room — drives the
+	/// "seen by" indicators on chat messages.  Coarse: just the room
+	/// id.  Consumer re-queries getMessageSeenBy for the visible
+	/// messages.  matrix-js-sdk batches receipt deltas, so this is
+	/// firing-rate-acceptable without further debouncing.
+	onReceiptsUpdated(roomId: RoomId): void;
 	// Fires when a remote party rings us.  The caller in App.tsx
 	// renders the incoming-call sheet; accept/decline drives the
 	// MatrixCall directly.  Only one inbound call is surfaced at a
@@ -583,6 +589,15 @@ export class MatrixTransport {
 
 		this.client.on(RoomMemberEvent.Membership, (_event, member) => {
 			this.handlers.onMembersUpdated(member.roomId as RoomId);
+		});
+
+		// m.read receipts — drives the "seen by" indicators in chat.
+		// matrix-js-sdk fires Receipt with the room context after it
+		// has updated its internal receipts map, so getMessageSeenBy
+		// will return fresh data on the next call.
+		this.client.on(RoomEvent.Receipt, (_event, room) => {
+			if (!room) return;
+			this.handlers.onReceiptsUpdated(room.roomId as RoomId);
 		});
 
 		// Presence updates — fire onMembersUpdated for every room
@@ -2197,6 +2212,60 @@ export class MatrixTransport {
 			console.warn("markAsRead: sendReadReceipt failed", err);
 		}
 		this.emitRoomList();
+	}
+
+	/** Who has read this message (excluding the sender)?  Returns
+	 * one entry per joined member whose latest read receipt is at
+	 * THIS event or any later event in the room's live timeline.
+	 *
+	 * Cheap — pure in-memory walk over the timeline + matrix-js-sdk's
+	 * receipts cache.  Safe to call on every render.  Returns []
+	 * when the room or event isn't loaded into memory yet (e.g. a
+	 * scrolled-out message that hasn't been backpaginated into the
+	 * live timeline).
+	 *
+	 * Used by:
+	 *   • DM "Read" indicator under sent messages
+	 *   • Room "seen by N" avatar stack + the modal that expands it */
+	getMessageSeenBy(roomId: RoomId, eventId: EventId): { userId: UserId; ts: number }[] {
+		const c = this.requireClient();
+		const room = c.getRoom(roomId);
+		if (!room) return [];
+		const sourceEvent = room.findEventById(eventId);
+		if (!sourceEvent) return [];
+		const events = room.getLiveTimeline().getEvents();
+		const eventIdx = events.findIndex(e => e.getId() === eventId);
+		if (eventIdx < 0) return [];
+		const sender = sourceEvent.getSender();
+		// Walk forward from this event collecting m.read receipts;
+		// the first occurrence of each user wins (their EARLIEST
+		// receipt at-or-after this event).  Each receipt's ts is
+		// when they read up to that anchor — close-enough to "when
+		// they saw the message" for the UI.
+		const seen = new Map<string, number>();
+		for (let i = eventIdx; i < events.length; i++) {
+			const ev = events[i];
+			if (!ev) continue;
+			// matrix-js-sdk: getReceiptsForEvent returns the receipts
+			// (any type) attached to THIS event's id.  We filter to
+			// m.read.
+			const receipts = room.getReceiptsForEvent(ev) ?? [];
+			for (const r of receipts) {
+				if (r.type !== "m.read") continue;
+				if (r.userId === sender) continue;
+				if (seen.has(r.userId)) continue;
+				const ts = (r.data as { ts?: number } | undefined)?.ts;
+				seen.set(r.userId, typeof ts === "number" ? ts : Date.now());
+			}
+		}
+		const result: { userId: UserId; ts: number }[] = [];
+		for (const [userId, ts] of seen) {
+			result.push({ userId: userId as UserId, ts });
+		}
+		// Most recent first — matches how Telegram orders the seen-by
+		// list (latest reader at the top).
+		result.sort((a, b) => b.ts - a.ts);
+		return result;
 	}
 
 	/**

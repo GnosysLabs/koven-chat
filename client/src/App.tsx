@@ -536,6 +536,14 @@ export default function App() {
 				const members = t.getRoomMembers(roomId);
 				dispatch({ type: "members_loaded", roomId, members });
 			},
+			onReceiptsUpdated: (roomId) => {
+				// Bump a per-room version counter so the active
+				// ChatPane re-renders its message list (and the
+				// per-message SeenIndicator components re-query
+				// transport.getMessageSeenBy).  Cheap — we don't
+				// store receipt data in our state, just a counter.
+				dispatch({ type: "receipts_updated", roomId });
+			},
 			onIncomingCall: (call) => {
 				// If we're already in a call, auto-reject overlapping
 				// invites.  Single-call semantics for v1; "call waiting"
@@ -1328,6 +1336,7 @@ export default function App() {
 					// flashes the banner.
 					messagesLoaded={!!state.activeRoomId && state.loadedTimelines.has(state.activeRoomId)}
 					viewerServer={creds.user_id ? creds.user_id.split(":")[1] ?? null : null}
+					receiptsVersion={state.activeRoomId ? state.receiptsVersionByRoom.get(state.activeRoomId) ?? 0 : 0}
 					onLoadMoreHistory={async (roomId) => {
 						if (!transport) return false;
 						const got = await transport.loadMoreHistory(roomId, 50);
