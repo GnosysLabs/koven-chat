@@ -22,6 +22,7 @@ import {
 import { serverOf } from "@/lib/mxid";
 import { FlagDialog } from "@/components/FlagDialog";
 import { DeleteMessageDialog } from "@/components/DeleteMessageDialog";
+import { MediaContextMenu } from "@/components/MediaContextMenu";
 import { firstLink, linkify } from "@/lib/linkify";
 import { renderWithMentions } from "@/lib/mentionRender";
 import { findYouTubeMatches, isYouTubeUrl, stripYouTubeUrls } from "@/lib/youtube";
@@ -1958,42 +1959,86 @@ function MessageBubble({
 // needed) decrypted blob: URL.  While the fetch is in flight they
 // render a tiny placeholder so the layout doesn't jump.
 
+/**
+ * Right-click handlers for an in-timeline media element.  Returns the
+ * onContextMenu prop to attach to the rendered media node and a
+ * `menu` ReactNode the parent splices in alongside the media — when
+ * the user has right-clicked, `menu` resolves to the MediaContextMenu
+ * portalled onto document.body; otherwise it's null.
+ *
+ * Disabled when there's no resolved URL yet (initial load
+ * placeholders) — without a URL there's nothing to download or copy.
+ */
+function useMediaContextMenu(url: string | null | undefined, filename: string) {
+	const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+	const onContextMenu = (e: React.MouseEvent) => {
+		if (!url) return;
+		e.preventDefault();
+		e.stopPropagation();
+		setPos({ x: e.clientX, y: e.clientY });
+	};
+	const menu = pos && url ? (
+		<MediaContextMenu
+			x={pos.x}
+			y={pos.y}
+			url={url}
+			filename={filename}
+			onClose={() => setPos(null)}
+		/>
+	) : null;
+	return { onContextMenu, menu };
+}
+
 function AttachmentImage({ message }: { message: Message }) {
 	const url = useMatrixAttachment(message);
+	const { onContextMenu, menu } = useMediaContextMenu(url, message.mediaName ?? "attachment");
 	if (!url) {
 		return (
 			<div className="w-64 h-40 rounded-lg bg-muted-foreground/10 animate-pulse" />
 		);
 	}
 	return (
-		<img
-			src={url}
-			alt={message.mediaName ?? "attachment"}
-			className="max-w-md max-h-80 rounded-lg block"
-		/>
+		<>
+			<img
+				src={url}
+				alt={message.mediaName ?? "attachment"}
+				className="max-w-md max-h-80 rounded-lg block"
+				onContextMenu={onContextMenu}
+			/>
+			{menu}
+		</>
 	);
 }
 
 function AttachmentVideo({ message }: { message: Message }) {
 	const url = useMatrixAttachment(message);
+	const { onContextMenu, menu } = useMediaContextMenu(url, message.mediaName ?? "video");
 	if (!url) {
 		return (
 			<div className="w-72 h-44 rounded-lg bg-muted-foreground/10 animate-pulse" />
 		);
 	}
 	return (
-		<video
-			src={url}
-			controls
-			className="max-w-md max-h-80 rounded-lg block"
-		/>
+		<>
+			<video
+				src={url}
+				controls
+				className="max-w-md max-h-80 rounded-lg block"
+				onContextMenu={onContextMenu}
+			/>
+			{menu}
+		</>
 	);
 }
 
 function AttachmentAudio({ message }: { message: Message }) {
 	const url = useMatrixAttachment(message);
+	const { onContextMenu, menu } = useMediaContextMenu(url, message.mediaName ?? "audio");
 	return (
-		<div className="flex flex-col gap-1 min-w-[14rem] max-w-xs">
+		<div
+			className="flex flex-col gap-1 min-w-[14rem] max-w-xs"
+			onContextMenu={onContextMenu}
+		>
 			<div className="text-[11px] font-medium truncate px-1">
 				{message.mediaName ?? "Audio"}
 			</div>
@@ -2002,6 +2047,7 @@ function AttachmentAudio({ message }: { message: Message }) {
 			) : (
 				<div className="h-10 rounded bg-muted-foreground/10 animate-pulse" />
 			)}
+			{menu}
 		</div>
 	);
 }
@@ -2082,20 +2128,34 @@ function AttachmentFileCard({ message }: { message: Message }) {
 			</div>
 		</>
 	);
+	const { onContextMenu, menu } = useMediaContextMenu(url, name);
 	if (!url) {
 		// Pre-fetch placeholder.  Same shape so layout is stable.
 		return <div className={containerCn}>{inner}</div>;
 	}
+	// Whole card is the click target: clicking opens the same
+	// download flow the right-click menu's Download item triggers,
+	// so the affordance is obvious without forcing the user to
+	// right-click for the most common action.  Right-click still
+	// works on top of the click handler; e.preventDefault inside
+	// onContextMenu blocks the native menu before it appears.
 	return (
-		<a
-			href={url}
-			download={name}
-			className={containerCn}
-			title={`Download ${name}`}
-			aria-label={`Download ${name}`}
-		>
-			{inner}
-		</a>
+		<>
+			<button
+				type="button"
+				onClick={async () => {
+					const { downloadMediaUrl } = await import("@/lib/downloadMedia");
+					await downloadMediaUrl(url, name);
+				}}
+				onContextMenu={onContextMenu}
+				className={cn(containerCn, "text-left")}
+				title={`Download ${name}`}
+				aria-label={`Download ${name}`}
+			>
+				{inner}
+			</button>
+			{menu}
+		</>
 	);
 }
 

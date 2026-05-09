@@ -1024,6 +1024,18 @@ export default function App() {
 			console.warn(`switchAccount: ${userId} not in accounts`);
 			return;
 		}
+		// Reset the navigation state to a safe landing BEFORE the
+		// transport swap.  Without this, the previous account's
+		// activeSpace + activeRoomId carry over to the new account —
+		// which usually points at a space the new account isn't a
+		// member of, so the RoomList paints "No rooms in this space
+		// yet" while the chat pane shows "Pick a room from the
+		// sidebar" — a confusing limbo.  Drop the active room and
+		// default to the DMs view: every account has DMs (even if
+		// empty), it's a familiar starting point, and the user can
+		// navigate to spaces / rooms from there.
+		dispatch({ type: "set_active_room", roomId: null });
+		dispatch({ type: "set_active_space", space: { kind: "dms" } });
 		setActiveUserIdState(userId);
 		saveActiveUserId(userId);
 		// The effect below sees the derived `creds` change and runs
