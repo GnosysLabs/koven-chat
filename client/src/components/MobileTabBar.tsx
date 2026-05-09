@@ -55,18 +55,26 @@ export function MobileTabBar({ active, onChange, unreadByTab }: MobileTabBarProp
 			aria-label="Primary"
 			className={cn(
 				"shrink-0 w-full",
-				// Solid bar surface that extends through the safe-area
-				// zone at the bottom — `pb-[env(...)]` keeps the
-				// home-indicator strip painted in the same colour as
-				// the bar so they read as one piece.
-				"bg-card",
+				// Bg-background = the same colour the safe-area /
+				// home-indicator strip paints with (body's resolved
+				// background).  Painting the bar with the same colour
+				// means the bar + the strip read as one continuous
+				// surface; no visible seam between the two.
+				"bg-background",
+				// Top corners rounded on the container itself — the
+				// bar reads as a single shape that swoops down from
+				// the chat content into the home-indicator zone.
+				// Buttons inside stay flat / unstyled.
+				"rounded-t-3xl",
+				// Safe-area-bottom padding keeps the home-indicator
+				// strip painted in the bar's colour.
 				"pb-[env(safe-area-inset-bottom)]",
 				// Top hairline separates the bar from chat content
-				// scrolling above it without painting a heavy line.
+				// scrolling above it.
 				"border-t border-border",
 			)}
 		>
-			<div className="flex items-stretch gap-1 px-1 pt-1">
+			<div className="flex items-stretch px-1 pt-1.5">
 				{TABS.map(t => {
 					const isActive = active === t.key;
 					const unread = unreadByTab?.[t.key] ?? 0;
@@ -80,23 +88,18 @@ export function MobileTabBar({ active, onChange, unreadByTab }: MobileTabBarProp
 							className={cn(
 								"flex-1 flex flex-col items-center justify-center gap-1",
 								// Total tab height ~52px, paired with
-								// the nav's pt-1 + the safe-area pb so
-								// the parent's 56px reserve still
+								// the nav's pt-1.5 + the safe-area pb
+								// so the parent's 56px reserve still
 								// clears the bar.
 								"min-h-[52px] py-1.5 px-1",
-								// Rounded top corners only — flat at
-								// the bottom so the tab merges into
-								// the bar without a visible seam.
-								"rounded-t-2xl transition-colors duration-150",
+								"transition-colors duration-150",
 								"select-none",
-								isActive
-									// Active tab: tinted accent fill so
-									// the rounded shape pops out of
-									// the bar AND the colour distin-
-									// guishes it from the inactive
-									// tabs that share the bar's bg.
-									? "bg-accent text-foreground"
-									: "text-muted-foreground active:bg-accent/50",
+								// No per-button bg fill — only the
+								// glyph + label colour signals which
+								// tab is active.  Keeps the bar
+								// reading as a single solid surface
+								// with the buttons just sitting on it.
+								isActive ? "text-primary" : "text-muted-foreground",
 							)}
 						>
 							<div className="relative">
@@ -112,7 +115,7 @@ export function MobileTabBar({ active, onChange, unreadByTab }: MobileTabBarProp
 											// Ring matches the bar's bg
 											// so the dot reads as
 											// floating above the icon.
-											"ring-2 ring-card",
+											"ring-2 ring-background",
 										)}
 									>
 										{unread > 99 ? "99+" : unread}
