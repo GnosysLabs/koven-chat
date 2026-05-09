@@ -1356,14 +1356,29 @@ function MessageRow({
 	// timeline reads as steady rhythm and the gutter doubles as the
 	// landing zone for absolutely-positioned reaction pills.
 	//
-	// Sized so one row of reaction pills (~26px tall counting the
-	// 4px mt-1) fits between two adjacent bubbles WITHOUT pushing
-	// the next message:
-	//   - Continuation (same sender): py-3 (12px each side → 24px
-	//     between rows; one pill row at 22px fits with 2px clearance).
-	//   - New sender / group: py-4 (16px each side → 32px between
-	//     groups; same fit, more breathing room).
-	const rowPadding = continuesGroup ? "py-3" : "py-4";
+	// Two-axis padding: pt controls how far this row starts below
+	// the previous row, pb controls the landing zone for THIS row's
+	// reaction pills (which are absolutely-positioned in the gutter
+	// below the bubble — see the `top-full mt-1` block further down).
+	//
+	// Splitting them lets us tighten the Discord-style stack of
+	// consecutive non-reacted messages from the same sender to a
+	// near-flush layout (pt-1 + pb-0.5 = 6px between rows) while
+	// still reserving ~22px of clearance below any row that does
+	// have reactions, so pills never overlap the next bubble.
+	//
+	//   - Continuation row pt: pt-1 (4px) — tight stack
+	//   - New-group row pt:    pt-4 (16px) — clear group separator
+	//   - Reacted row pb:      pb-5 (20px) + 4px mt on the pills =
+	//                          ~24px below the bubble; pills (≈22px)
+	//                          fit with 2px tolerance into the next
+	//                          row's pt without pushing flow
+	//   - Non-reacted row pb:  pb-0.5 (2px) — no pills to make room
+	//                          for, no wasted gutter
+	const rowPadding = cn(
+		continuesGroup ? "pt-1" : "pt-4",
+		reactions.length > 0 ? "pb-5" : "pb-0.5",
+	);
 
 	// Discord-style mention highlight: left accent border + faint
 	// background wash spanning the full row.  Subtle but unmissable
