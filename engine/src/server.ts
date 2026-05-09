@@ -70,6 +70,7 @@ import {
 	hasUserIntegration,
 	setUserIntegrationSecret,
 	clearUserIntegrationSecret,
+	getUserIntegrationSecretEnc,
 	addBotMcpServer,
 	listBotMcpServers,
 	getBotMcpServerById,
@@ -121,6 +122,7 @@ import { sendLoginCodeEmail } from "./email";
 import { extractToken, whoami } from "./auth";
 import { extractKnowledgeText } from "./knowledge_extract";
 import { reconcileOne, startOne, stopOne } from "./bot_manager";
+import { searchSmitheryServers, getSmitheryServer } from "./mcp/registry";
 import { WEIGHT_FLOOR } from "./weight";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -357,6 +359,21 @@ function json(body: unknown, init: ResponseInit = {}): Response {
 		...init,
 		headers: { "Content-Type": "application/json", ...corsHeaders(), ...(init.headers ?? {}) },
 	});
+}
+
+/** Decrypt a user's stored Smithery API key, or return null when no
+ * key is configured / decryption fails.  Centralised here so every
+ * caller (catalog search, bot tool runtime — well, the runtime gets
+ * its own copy via openSecret) handles "no key" the same way. */
+function decryptUserSmitheryKey(userId: string): string | null {
+	const enc = getUserIntegrationSecretEnc(userId, "smithery");
+	if (!enc) return null;
+	try {
+		return openSecret(enc);
+	} catch (err) {
+		console.error(`smithery: failed to decrypt key for ${userId}`, err);
+		return null;
+	}
 }
 
 // Loose email validation: well-formed enough to be worth sending.
@@ -981,6 +998,59 @@ export function startServer(): void {
 				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
 				clearUserIntegrationSecret(userId, "smithery");
 				return json({ ok: true });
+			}
+
+			// ─── Smithery catalog proxy ─────────────────────────────
+			// The bot edit UI's "Tools" tab needs to browse Smithery's
+			// registry to attach MCP servers.  We proxy the call (vs.
+			// hitting registry.smithery.ai from the browser) for two
+			// reasons: the registry needs a Bearer token (the user's
+			// personal Smithery key), which we hold encrypted server-
+			// side and never expose to the client; and it dodges any
+			// CORS issues with the third-party registry.
+			//
+			//   GET /api/smithery/search?q=...           → list
+			//   GET /api/smithery/servers/<qualifiedName> → detail + schema
+			//
+			// 503 when the user hasn't configured a Smithery key yet —
+			// the UI nudges them to Account settings in that case.
+			if (req.method === "GET" && path === "/api/smithery/search") {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				const apiKey = decryptUserSmitheryKey(userId);
+				if (!apiKey) {
+					return json({ error: "smithery_key_missing", detail: "Configure your Smithery API key in Account settings before browsing the catalog." }, { status: 503 });
+				}
+				const q = url.searchParams.get("q") ?? "";
+				try {
+					const result = await searchSmitheryServers(apiKey, q);
+					return json(result);
+				} catch (err) {
+					return json({ error: "smithery_search_failed", detail: err instanceof Error ? err.message : String(err) }, { status: 502 });
+				}
+			}
+
+			{
+				// Detail endpoint — qualified names contain "@" and "/"
+				// (e.g. "@modelcontextprotocol/server-github") which we
+				// pull out of the path with a tail-capture regex rather
+				// than splitting on "/" naively.
+				const m = path.match(/^\/api\/smithery\/servers\/(.+)$/);
+				if (req.method === "GET" && m) {
+					const userId = await whoami(extractToken(req));
+					if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+					const apiKey = decryptUserSmitheryKey(userId);
+					if (!apiKey) {
+						return json({ error: "smithery_key_missing" }, { status: 503 });
+					}
+					const qualifiedName = decodeURIComponent(m[1]!);
+					try {
+						const detail = await getSmitheryServer(apiKey, qualifiedName);
+						return json(detail);
+					} catch (err) {
+						return json({ error: "smithery_detail_failed", detail: err instanceof Error ? err.message : String(err) }, { status: 502 });
+					}
+				}
 			}
 
 			// ─── Suspension state ────────────────────────────────────
