@@ -40,6 +40,32 @@ import {
 } from "./mcp/bot_tools";
 import { config } from "./config";
 
+// (botId, eventId) → "we already responded to this event, do not
+// charge the model owner for a re-run".  matrix-js-sdk re-fires
+// Timeline events on certain sync state transitions (reconnect,
+// post-decryption fan-out), and the older inFlight gate was keyed
+// only by (botId, roomId) — once the first run finished and cleared
+// inFlight, the re-fired event slipped through and we paid for the
+// LLM call a second time, with a second reply landing in the room.
+// Tracking event ids per bot is the only correct dedupe; a Set with
+// LRU eviction caps memory at a fixed bound for long-running bots.
+const processedEvents = new Map<string, true>();
+const PROCESSED_EVENTS_CAP = 4_000;
+function markEventProcessed(botId: number, eventId: string): void {
+	const key = `${botId}:${eventId}`;
+	processedEvents.set(key, true);
+	// Evict oldest entries when over the cap.  Map iteration order
+	// is insertion order, so the first key is the oldest.
+	while (processedEvents.size > PROCESSED_EVENTS_CAP) {
+		const oldest = processedEvents.keys().next().value;
+		if (oldest === undefined) break;
+		processedEvents.delete(oldest);
+	}
+}
+function hasEventBeenProcessed(botId: number, eventId: string): boolean {
+	return processedEvents.has(`${botId}:${eventId}`);
+}
+
 // (botId, roomId) → "currently waiting on the LLM, ignore further
 // mentions until done".  Cleared in the finally block of `dispatch`.
 const inFlight = new Set<string>();
@@ -105,6 +131,21 @@ export async function maybeHandleMention(deps: PipelineDeps): Promise<void> {
 	}
 
 	if (!isMentionOf(event, bot.mxid, room)) return;
+
+	// Per-event dedupe.  Mark FIRST, before the in-flight gate, so
+	// even concurrent re-fires of the same event id (matrix-js-sdk
+	// will replay the same Timeline event on certain sync state
+	// transitions) bail before doing any work.  Without this we paid
+	// for the LLM call twice and posted two different replies to a
+	// single user message.
+	const eventId = event.getId();
+	if (eventId) {
+		if (hasEventBeenProcessed(bot.id, eventId)) {
+			console.log(`bot ${bot.mxid}: ignoring re-fire of ${eventId} in ${room.roomId}`);
+			return;
+		}
+		markEventProcessed(bot.id, eventId);
+	}
 
 	const flightKey = `${bot.id}:${room.roomId}`;
 	if (inFlight.has(flightKey)) {

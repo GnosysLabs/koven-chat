@@ -2480,13 +2480,21 @@ export class MatrixTransport {
 		const burst = userIds.slice(0, burstCount);
 		const rest = userIds.slice(burstCount);
 
-		// Tracks whether we've already asked the engine to repair this
-		// room's PL during this call.  We trigger at most one repair
-		// per inviteUsers() — if the first failure was something other
-		// than a PL issue (e.g. the user is banned, the target is on a
-		// blocked server), repeated repair attempts wouldn't help and
-		// would just slow things down.
-		let repairAttempted = false;
+		// Always repair the room's invite PL before firing any
+		// invites.  The endpoint is a cheap no-op when invite is
+		// already 0 (it reads PL state and returns immediately), and
+		// rooms created before the atomic-PL fix carry a stranded
+		// invite>0 that would 403 every invite without this.  Doing
+		// it here (vs. in the dialog) means it works regardless of
+		// which UI surface called inviteUsers — InviteSheet,
+		// CreateRoomSheet's post-create fan-out, future surfaces, or
+		// programmatic callers like /add-bot.  Awaited because we
+		// want the PL fixed before we hit Synapse's auth check.
+		// repairAttempted=true after a successful pre-flight skips
+		// the post-failure retry below; if pre-flight failed (engine
+		// down, network) we still try one retry on 403 in case the
+		// engine comes back.
+		let repairAttempted = await this.repairRoomInvitePermissions(roomId);
 
 		const tryInvite = async (u: UserId) => {
 			try {
