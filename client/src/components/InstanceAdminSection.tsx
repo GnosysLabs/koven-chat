@@ -50,6 +50,12 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 	// admin's pending input until they hit Save.
 	const [integrations, setIntegrations] = useState<IntegrationsStatus | null>(null);
 	const [giphyKeyDraft, setGiphyKeyDraft] = useState("");
+	// Turnstile uses two keys: site (public, embedded in login HTML)
+	// and secret (private, used for siteverify).  Both required for
+	// the integration to function — engine reports `configured` true
+	// only when both are set.
+	const [turnstileSiteDraft, setTurnstileSiteDraft] = useState("");
+	const [turnstileSecretDraft, setTurnstileSecretDraft] = useState("");
 
 	useEffect(() => {
 		let cancelled = false;
@@ -70,6 +76,11 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 			setName(cfg.name ?? "");
 			setTagline(cfg.login_tagline ?? "");
 			setDefaultSpaceId(cfg.default_space_id ?? "");
+			// Public config exposes the Turnstile site key — it's
+			// embedded in the login HTML so it's not a secret.  Pre-
+			// fill the input so admins can see what's set without
+			// re-pasting from Cloudflare.
+			setTurnstileSiteDraft((cfg as { turnstile_site_key?: string }).turnstile_site_key ?? "");
 			setPublicSpaces(
 				dirEntries
 					.filter(e => e.isSpace)
@@ -97,14 +108,36 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 			// something — never overwrite an existing key with empty
 			// (Clear is the explicit way to remove it).
 			if (giphyKeyDraft.trim()) patch.giphy_api_key = giphyKeyDraft.trim();
+			// Turnstile site key is editable in-place (it's public),
+			// so write it whenever it differs from the saved value.
+			// Empty input clears the saved key (passes null).
+			const currentSite = (config as { turnstile_site_key?: string }).turnstile_site_key ?? "";
+			const trimmedSite = turnstileSiteDraft.trim();
+			if (trimmedSite !== currentSite) {
+				patch.turnstile_site_key = trimmedSite || null;
+			}
+			// Secret key is write-only.  Same rule as Giphy: only
+			// write on non-empty draft.
+			if (turnstileSecretDraft.trim()) {
+				patch.turnstile_secret_key = turnstileSecretDraft.trim();
+			}
 			const next = await updateInstanceConfig(accessToken, patch);
 			setConfig(next);
-			if (giphyKeyDraft.trim()) {
+			const wroteIntegration = !!(
+				giphyKeyDraft.trim() || turnstileSecretDraft.trim() || trimmedSite !== currentSite
+			);
+			if (wroteIntegration) {
 				// Re-fetch integrations to flip the badge to "configured"
-				// and clear the draft so the input goes back to placeholder.
+				// and clear write-only drafts back to placeholder.
 				const integ = await fetchIntegrationsStatus(accessToken);
 				setIntegrations(integ);
 				setGiphyKeyDraft("");
+				setTurnstileSecretDraft("");
+				// Site key is left in-place — pre-fills from the freshly-
+				// loaded config below.
+				setTurnstileSiteDraft(
+					(next as { turnstile_site_key?: string }).turnstile_site_key ?? "",
+				);
 			}
 			setInfo("Saved.");
 		} catch (err) {
@@ -176,6 +209,33 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 		}
 	}
 
+	async function clearTurnstile() {
+		setPending(true);
+		setError(null);
+		setInfo(null);
+		try {
+			// Clearing wipes BOTH keys — leaving one half configured
+			// produces a half-broken state where the engine refuses
+			// requests but the login HTML doesn't render the widget,
+			// so users hit captcha_required errors with nothing to
+			// solve.  Atomic clear keeps the state coherent.
+			const next = await updateInstanceConfig(accessToken, {
+				turnstile_site_key: null,
+				turnstile_secret_key: null,
+			});
+			setConfig(next);
+			const integ = await fetchIntegrationsStatus(accessToken);
+			setIntegrations(integ);
+			setTurnstileSiteDraft("");
+			setTurnstileSecretDraft("");
+			setInfo("Turnstile disabled.");
+		} catch (err) {
+			setError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setPending(false);
+		}
+	}
+
 	async function removeLogo() {
 		setPending(true);
 		setError(null);
@@ -193,11 +253,14 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 
 	const bgUrl = resolveAssetUrl(config.login_background_url);
 	const logoUrl = resolveAssetUrl(config.logo_url);
+	const currentTurnstileSite = (config as { turnstile_site_key?: string }).turnstile_site_key ?? "";
 	const dirty =
 		name.trim() !== (config.name ?? "") ||
 		tagline.trim() !== (config.login_tagline ?? "") ||
 		defaultSpaceId !== (config.default_space_id ?? "") ||
-		giphyKeyDraft.trim() !== "";
+		giphyKeyDraft.trim() !== "" ||
+		turnstileSiteDraft.trim() !== currentTurnstileSite ||
+		turnstileSecretDraft.trim() !== "";
 
 	return (
 		<section>
@@ -411,6 +474,61 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 						</div>
 						<p className="text-[10px] text-muted-foreground leading-snug">
 							Get a key at <a href="https://developers.giphy.com/dashboard/" target="_blank" rel="noreferrer" className="underline">developers.giphy.com</a> — pick the <strong>API</strong> option (not SDK). When set, members get a GIF picker in the message composer.
+						</p>
+					</div>
+
+					{/* Cloudflare Turnstile — bot detection on email
+					    sign-in.  Two fields because Turnstile's API is
+					    split: a public site key (embedded in the
+					    login HTML) and a private secret key (used
+					    server-side for siteverify).  Both required to
+					    enforce. */}
+					<div className="space-y-1.5 pt-2">
+						<div className="flex items-center justify-between">
+							<Label htmlFor="turnstile-site-key">Cloudflare Turnstile</Label>
+							{integrations?.turnstile?.configured ? (
+								<span className="inline-flex items-center gap-1 text-[10px] text-emerald-500/90">
+									<Check className="h-3 w-3" />
+									Configured
+								</span>
+							) : (
+								<span className="text-[10px] text-muted-foreground">Not configured</span>
+							)}
+						</div>
+						<Input
+							id="turnstile-site-key"
+							type="text"
+							autoComplete="off"
+							value={turnstileSiteDraft}
+							onChange={(e) => setTurnstileSiteDraft(e.target.value)}
+							placeholder="Site key (public, e.g. 0x4AAA…)"
+							disabled={pending}
+						/>
+						<div className="flex gap-2">
+							<Input
+								id="turnstile-secret-key"
+								type="password"
+								autoComplete="off"
+								value={turnstileSecretDraft}
+								onChange={(e) => setTurnstileSecretDraft(e.target.value)}
+								placeholder={integrations?.turnstile?.configured ? "•••••••• (paste a new secret to replace)" : "Secret key (private)"}
+								disabled={pending}
+							/>
+							{integrations?.turnstile?.configured && (
+								<Button
+									type="button"
+									variant="ghost"
+									size="sm"
+									onClick={clearTurnstile}
+									disabled={pending}
+									className="text-muted-foreground hover:text-destructive"
+								>
+									Clear
+								</Button>
+							)}
+						</div>
+						<p className="text-[10px] text-muted-foreground leading-snug">
+							Get both keys from <a href="https://dash.cloudflare.com/?to=/:account/turnstile" target="_blank" rel="noreferrer" className="underline">Cloudflare → Turnstile</a>. When both are set, the email sign-in step requires passing a managed-challenge before a code is sent — blocks bots from burning the email quota.
 						</p>
 					</div>
 				</div>

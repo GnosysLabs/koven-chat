@@ -192,6 +192,12 @@ const ALLOWED_CONFIG_KEYS = new Set([
 	// below).  Adding a new integration here means adding it to the
 	// sensitive set too if it's a credential.
 	"giphy_api_key",
+	// Cloudflare Turnstile — site key is public (the login page must
+	// embed it to render the widget); secret key is the
+	// server-side credential used for siteverify.  Only the secret
+	// is in SENSITIVE_CONFIG_KEYS below.
+	"turnstile_site_key",
+	"turnstile_secret_key",
 ]);
 
 // Keys that hold credentials / secrets.  Stripped from the public
@@ -202,7 +208,43 @@ const ALLOWED_CONFIG_KEYS = new Set([
 // return unauthenticated.
 const SENSITIVE_CONFIG_KEYS = new Set([
 	"giphy_api_key",
+	"turnstile_secret_key",
 ]);
+
+/** Validate a Cloudflare Turnstile token via siteverify.  Returns
+ * true when Cloudflare confirms the token; false on any failure
+ * (network error, bad token, expired, secret mismatch, etc.) so
+ * callers can hard-fail uniformly without needing to branch on the
+ * error category.  We also pass the client's IP when we can extract
+ * it — Cloudflare uses it to weight challenge difficulty. */
+async function verifyTurnstileToken(
+	token: string,
+	secret: string,
+	req: Request,
+): Promise<boolean> {
+	try {
+		const form = new URLSearchParams();
+		form.set("secret", secret);
+		form.set("response", token);
+		// Best-effort client IP from the proxy headers nginx writes.
+		// Cloudflare accepts the field as optional; missing it just
+		// means the challenge weight is computed without that signal.
+		const xff = req.headers.get("x-forwarded-for");
+		const ip = xff?.split(",")[0]?.trim();
+		if (ip) form.set("remoteip", ip);
+		const r = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+			method: "POST",
+			headers: { "Content-Type": "application/x-www-form-urlencoded" },
+			body: form,
+		});
+		if (!r.ok) return false;
+		const data = (await r.json().catch(() => null)) as { success?: boolean } | null;
+		return data?.success === true;
+	} catch (err) {
+		console.warn("turnstile: siteverify failed", err);
+		return false;
+	}
+}
 
 function publicInstanceConfig(): Record<string, string> {
 	const out: Record<string, string> = {};
@@ -499,10 +541,41 @@ export function startServer(): void {
 			//   → { error: "email_disabled" }               (503) when not configured
 			//   → { error: "invalid_email" }                (400)
 			if (req.method === "POST" && path === "/api/auth/request-code") {
-				const body = (await req.json().catch(() => ({}))) as { email?: string };
+				const body = (await req.json().catch(() => ({}))) as {
+					email?: string;
+					turnstile_token?: string;
+				};
 				const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
 				if (!isValidEmail(email)) {
 					return json({ error: "invalid_email" }, { status: 400 });
+				}
+				// Cloudflare Turnstile bot-detection — only enforced
+				// when the admin has set BOTH the public site key
+				// (which the client uses to render the widget) and
+				// the secret key (which we use here for siteverify).
+				// When unset, the auth flow runs unchanged so smaller
+				// installs that don't want bot protection don't have
+				// to do anything.
+				const cfg = readInstanceConfig();
+				const turnstileSecret = cfg["turnstile_secret_key"]?.trim();
+				const turnstileSite = cfg["turnstile_site_key"]?.trim();
+				if (turnstileSecret && turnstileSite) {
+					const token = typeof body.turnstile_token === "string"
+						? body.turnstile_token.trim()
+						: "";
+					if (!token) {
+						return json(
+							{ error: "captcha_required", detail: "Turnstile token missing." },
+							{ status: 403 },
+						);
+					}
+					const verifyOk = await verifyTurnstileToken(token, turnstileSecret, req);
+					if (!verifyOk) {
+						return json(
+							{ error: "captcha_failed", detail: "Bot-detection challenge didn't pass — refresh and try again." },
+							{ status: 403 },
+						);
+					}
 				}
 				const issued = issueAuthCode(email, config.emailCodeTtlMs);
 				if ("error" in issued) {
@@ -2355,6 +2428,13 @@ export function startServer(): void {
 				return json({
 					integrations: {
 						giphy: { configured: !!cfg["giphy_api_key"] },
+						// Turnstile counts as configured only when BOTH
+						// keys are set — neither half on its own is
+						// usable, so the admin form should report it
+						// honestly.
+						turnstile: {
+							configured: !!cfg["turnstile_site_key"] && !!cfg["turnstile_secret_key"],
+						},
 					},
 				});
 			}

@@ -37,6 +37,9 @@ interface GiphyError {
  * Used by the SPA to hide the GIF picker on instances without a key. */
 export interface IntegrationsStatus {
 	giphy: { configured: boolean };
+	/** True only when BOTH the public site key and the secret key are
+	 * set — neither half on its own is usable. */
+	turnstile?: { configured: boolean };
 }
 
 export async function fetchIntegrationsStatus(accessToken: string): Promise<IntegrationsStatus> {

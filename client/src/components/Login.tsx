@@ -9,7 +9,7 @@
 // follow-on UIA challenge (encryption setup at signup).  Subsequent
 // UIA challenges call /api/auth/uia-password to rotate fresh.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -24,6 +24,7 @@ import {
 	type VerifyCodeError,
 } from "@/lib/auth";
 import { HOMESERVER_URL } from "@/lib/urls";
+import { useTurnstile } from "@/lib/turnstile";
 
 export interface LoginProps {
 	onLoggedIn(creds: MatrixCredentials, uiaPassword: string): void;
@@ -104,9 +105,18 @@ export function Login({ onLoggedIn }: LoginProps) {
 		setError(null);
 		setInfo(null);
 		setPending(true);
-		const r = await requestEmailCode(trimmed);
+		const r = await requestEmailCode(trimmed, {
+			turnstileToken: turnstile.token,
+		});
 		setPending(false);
 		if (!r.ok) {
+			// On captcha failure, reset the widget so the user can
+			// try again without reloading.  Other errors leave the
+			// widget alone — its token may still be valid for a
+			// retry.
+			if (r.error === "captcha_failed" || r.error === "captcha_required") {
+				turnstile.reset();
+			}
 			setError(requestErrorMessage(r.error));
 			return;
 		}
@@ -155,8 +165,19 @@ export function Login({ onLoggedIn }: LoginProps) {
 		onLoggedIn(r.creds, r.uiaPassword);
 	}
 
+	// Cloudflare Turnstile (instance-configurable bot detection).
+	// Only relevant on the email step — verify-code is gated by the
+	// 6-digit code so it's already self-protected.  When the instance
+	// admin hasn't set a site key, the hook is a no-op and the
+	// `turnstileToken` stays null; we then still let the email
+	// submission through (engine also skips siteverify in that case).
+	const turnstileRef = useRef<HTMLDivElement | null>(null);
+	const turnstileSiteKey = (instance as { turnstile_site_key?: string }).turnstile_site_key ?? null;
+	const turnstileEnabled = !!turnstileSiteKey;
+	const turnstile = useTurnstile(turnstileRef, step === "email" ? turnstileSiteKey : null);
+
 	const continueDisabled = pending || (step === "email"
-		? !email.trim()
+		? !email.trim() || (turnstileEnabled && !turnstile.token)
 		: !code.trim() || (isNewAccount && !username.trim()));
 
 	return (
@@ -259,6 +280,15 @@ export function Login({ onLoggedIn }: LoginProps) {
 									autoFocus
 								/>
 							</div>
+
+							{turnstileEnabled && (
+								// Cloudflare's widget renders here once the
+								// script loads.  Stays mounted while step ===
+								// "email"; the hook unmounts it on step
+								// transition so it doesn't keep ticking in
+								// the background.
+								<div ref={turnstileRef} className="flex justify-center min-h-[65px]" />
+							)}
 
 							{error && (
 								<div className="text-xs text-destructive border border-destructive/40 bg-destructive/10 rounded px-3 py-2">
@@ -403,12 +433,14 @@ function deriveServerName(): string {
 
 function requestErrorMessage(err: RequestCodeError): string {
 	switch (err) {
-		case "invalid_email":  return "That doesn't look like a valid email address.";
-		case "rate_limited":   return "Too many codes requested. Wait an hour and try again.";
-		case "email_disabled": return "Email sign-in isn't configured on this instance. Ask the operator to set RESEND_API_KEY.";
-		case "send_failed":    return "Couldn't deliver the email. Try again, or use a different address.";
-		case "network":        return "Can't reach the server. Check your connection and try again.";
-		default:               return "Something went wrong sending your code.";
+		case "invalid_email":     return "That doesn't look like a valid email address.";
+		case "rate_limited":      return "Too many codes requested. Wait an hour and try again.";
+		case "email_disabled":    return "Email sign-in isn't configured on this instance. Ask the operator to set RESEND_API_KEY.";
+		case "send_failed":       return "Couldn't deliver the email. Try again, or use a different address.";
+		case "captcha_required":  return "Bot-detection challenge didn't load. Refresh and try again.";
+		case "captcha_failed":    return "Bot-detection challenge failed. Try again — the widget should reset automatically.";
+		case "network":           return "Can't reach the server. Check your connection and try again.";
+		default:                  return "Something went wrong sending your code.";
 	}
 }
 

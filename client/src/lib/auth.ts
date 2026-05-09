@@ -18,15 +18,28 @@ export type RequestCodeError =
 	| "rate_limited"
 	| "email_disabled"
 	| "send_failed"
+	| "captcha_required"
+	| "captcha_failed"
 	| "network";
 
-export async function requestEmailCode(email: string): Promise<RequestCodeResult> {
+export async function requestEmailCode(
+	email: string,
+	opts: { turnstileToken?: string | null } = {},
+): Promise<RequestCodeResult> {
 	let r: Response;
 	try {
 		r = await fetch(`${ENGINE_URL}/api/auth/request-code`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ email }),
+			// Always include the turnstile_token field when set so the
+			// engine can pass it through to Cloudflare's siteverify.
+			// Engine ignores it when the integration isn't configured,
+			// so leaving the field unconditionally is safe.
+			body: JSON.stringify(
+				opts.turnstileToken
+					? { email, turnstile_token: opts.turnstileToken }
+					: { email },
+			),
 		});
 	} catch {
 		return { ok: false, error: "network" };
