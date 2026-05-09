@@ -90,11 +90,18 @@ function probeBins(): { bwrap: string | null; prlimit: string | null } {
  * spawns so npm/uv caches the package after the first cold-start.
  * GC'd by the disk janitor after N days of inactivity.
  *
- * Self-heals ownership.  If a previous (broken-UID) run wrote
- * root-owned files into the scratch dir, the next sandboxed spawn
- * (running as nobody) can't read/write them and npm dies with
- * EACCES.  Recursive chown on every call is cheap (small trees,
- * a no-op stat for already-correct files) and cleanest fix. */
+ * Owned by root:root OUTSIDE on purpose, NOT by nobody.  Counter-
+ * intuitive but it's how bwrap's user namespaces work:
+ *
+ *   bwrap --unshare-user-try --uid 65534 creates a uid_map of
+ *     inside_uid=65534  outside_uid=0  range=1
+ *   so files owned by OUTSIDE root (uid 0) appear as owned by
+ *   INSIDE nobody (uid 65534) — which is the UID our subprocess
+ *   runs as.  Files owned by outside-65534 (real nobody) appear
+ *   as the kernel overflow UID (4294967295) inside, unreadable.
+ *
+ * Self-healing chown ensures any leftover non-root-owned entries
+ * from older buggy versions get reset on the next spawn. */
 export function ensureBotScratchDir(botId: number): string {
 	const dir = join(SCRATCH_ROOT, String(botId));
 	if (!existsSync(dir)) {
@@ -105,13 +112,11 @@ export function ensureBotScratchDir(botId: number): string {
 			return dir;
 		}
 	}
-	// chown -R nobody:nogroup, but only entries currently owned by
-	// the engine's UID (root in production, possibly different in
-	// dev).  Skipping already-correct entries makes this fast on
-	// warm caches.  Failure is non-fatal — dev environments without
-	// root caps just see the warning + may have permission issues.
+	// chown -R 0:0 — see the docstring above for why root:root and
+	// not nobody:nogroup.  Skipped at the kernel layer for entries
+	// already owned correctly so warm-cache spawns are fast.
 	try {
-		chownRecursiveIfNeeded(dir, DEFAULT_NOBODY_UID, DEFAULT_NOBODY_GID);
+		chownRecursiveIfNeeded(dir, 0, 0);
 	} catch (err) {
 		console.warn(`mcp/sandbox: chown ${dir} (recursive) failed:`, err);
 	}
