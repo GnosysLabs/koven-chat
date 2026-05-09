@@ -173,6 +173,8 @@ export function buildSandboxedInvocation(opts: SandboxOptions): SandboxInvocatio
 		// remain.  PID namespace isolation is sacrificed; not a real
 		// loss in our threat model since the subprocess is non-root
 		// and can't signal anything outside its own UID.
+		const sandboxUid = envInt("KOVEN_MCP_SANDBOX_UID", DEFAULT_NOBODY_UID);
+		const sandboxGid = envInt("KOVEN_MCP_SANDBOX_GID", DEFAULT_NOBODY_GID);
 		const bwrapArgs = [
 			"--ro-bind", "/usr", "/usr",
 			"--ro-bind", "/lib", "/lib",
@@ -199,6 +201,14 @@ export function buildSandboxedInvocation(opts: SandboxOptions): SandboxInvocatio
 			"--unshare-uts",
 			"--unshare-ipc",
 			"--unshare-user-try",
+			// Drop privileges INSIDE the sandbox to nobody.  We
+			// can't drop in the parent shell before bwrap (bwrap
+			// needs CAP_SYS_ADMIN to set up the mount namespace —
+			// dropping to nobody first kills its ability to run);
+			// --uid moves the UID drop to AFTER bwrap has set up
+			// the sandbox but BEFORE the user's command exec's.
+			"--uid", String(sandboxUid),
+			"--gid", String(sandboxGid),
 			"--share-net",  // package needs to call its upstream API
 			"--new-session",
 			"--die-with-parent",
@@ -226,4 +236,11 @@ export function buildSandboxedInvocation(opts: SandboxOptions): SandboxInvocatio
 		};
 	}
 	return { command: opts.command, args: opts.args, env };
+}
+
+function envInt(key: string, fallback: number): number {
+	const raw = process.env[key];
+	if (!raw) return fallback;
+	const n = parseInt(raw, 10);
+	return Number.isFinite(n) ? n : fallback;
 }
