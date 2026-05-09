@@ -397,7 +397,12 @@ function ChatbotPanel({
 				bottom: "calc(env(safe-area-inset-bottom, 0px) + 1.5rem + 56px + 12px)",
 				right: "calc(env(safe-area-inset-right, 0px) + 1.5rem)",
 				width: "min(380px, calc(100vw - 3rem))",
-				maxHeight: "min(720px, calc(100dvh - 6rem))",
+				// max-height reserves ~5rem at the bottom (FAB clearance,
+				// 5.75rem to be exact) and ~5.5rem at the top — keeps
+				// the panel comfortably inset from the viewport edges
+				// on shorter windows where the previous `100dvh - 6rem`
+				// crammed it within a few px of the top.
+				maxHeight: "min(640px, calc(100dvh - 11rem))",
 				zIndex: 41, // one above the FAB so it can't sit behind
 				transform: mounted ? "translateY(0)" : "translateY(8px)",
 				opacity: mounted ? 1 : 0,
