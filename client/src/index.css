@@ -89,21 +89,26 @@
 			radial-gradient(ellipse at bottom, hsl(245 30% 10% / 0.4) 0%, transparent 65%);
 	}
 
-	/* Self-message bubble text on Midnight specifically.  Midnight's
-	 * `--primary` is near-white (no chroma), so `bg-primary/50`
-	 * composites to a light grey panel; the default
-	 * `dark:text-foreground` (also near-white) reads as a low-contrast
-	 * blur on top.  Override the text colour to the dark
-	 * `--primary-foreground` for that combo only.  Coloured dark
-	 * themes (Plum, Forest, Aurora, Cosmos, …) keep the
-	 * `text-foreground` light text since their bubble bg has actual
-	 * hue and reads fine against light text.
+	/* Self-message bubble background on Midnight specifically.
+	 * Midnight's `--primary` is near-white (no chroma), so the
+	 * Tailwind `dark:bg-primary/50` paint composites to a light
+	 * grey panel — bright enough to wash out white text.  Earlier
+	 * fix swapped the text to dark; user prefers white text + a
+	 * darker bubble surface, which reads easier on a dark canvas
+	 * and matches the rest of the timeline's tonal palette.
 	 *
-	 * Force-midnight subtrees get the same treatment so login screens
-	 * and other always-Midnight surfaces stay consistent. */
+	 * Override drops the bg alpha to 15% (≈ darker grey on
+	 * Midnight) and forces the text colour back to the light
+	 * --foreground.  Coloured dark themes (Plum, Forest, Aurora,
+	 * Cosmos, …) keep their hued bubble + light text — they already
+	 * read fine and have actual chroma we don't want to flatten.
+	 *
+	 * Force-midnight subtrees get the same treatment so login
+	 * screens and other always-Midnight surfaces stay consistent. */
 	[data-theme="midnight"].dark .bubble-self,
 	.force-midnight .bubble-self {
-		color: hsl(var(--primary-foreground));
+		background-color: hsl(var(--primary) / 0.15);
+		color: hsl(var(--foreground));
 	}
 
 	/* ── Force-midnight scope ──────────────────────────────────────
