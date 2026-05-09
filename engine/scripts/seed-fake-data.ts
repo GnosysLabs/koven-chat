@@ -28,7 +28,7 @@
 //   two DMs between admin + a couple of fakes
 
 import { config } from "../src/config";
-import { adminCreateUser, adminJoinUserToRoom, loginAsUser } from "../src/synapse";
+import { adminCreateUser, adminJoinUserToRoom, adminMintUserToken } from "../src/synapse";
 
 interface FakeUser {
 	localpart: string;
@@ -129,17 +129,25 @@ const ORPHAN_ROOM = {
 
 function assertSafeHomeserver(): void {
 	const name = config.homeserverName.toLowerCase();
+	// Accept anything that's clearly NOT a public DNS name a real
+	// production deploy would use:
+	//   - localhost / *.local / *.localhost / *.test
+	//   - any literal IP address (real prod uses a domain).  Covers
+	//     LAN dev (192.168.x), Docker bridges (172.x), and Tailscale
+	//     CGNAT IPs (100.x) without hard-coding ranges.
+	const isIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(name) || name.startsWith("[");
 	const safe =
 		name === "localhost"
 		|| name.endsWith(".local")
 		|| name.endsWith(".localhost")
-		|| name.endsWith(".test");
+		|| name.endsWith(".test")
+		|| isIp;
 	if (!safe) {
 		console.error(
 			`[seed] refusing to run against homeserver '${config.homeserverName}'.`,
 		);
 		console.error(
-			`       seeder is dev-only — homeserver name must be 'localhost' or end in .local / .localhost / .test.`,
+			`       seeder is dev-only — homeserver name must be 'localhost', a literal IP, or end in .local / .localhost / .test.`,
 		);
 		process.exit(2);
 	}
@@ -150,6 +158,32 @@ const TXN_COUNTER = { n: 0 };
 function nextTxn(): string {
 	TXN_COUNTER.n += 1;
 	return `seed-${Date.now()}-${TXN_COUNTER.n}`;
+}
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+/** fetch wrapper that auto-retries on 429 using the
+ * `retry_after_ms` Synapse provides.  Critical for batch seeders
+ * where createRoom / sendMessage / state-event PUTs collectively
+ * exceed Synapse's burst quota.  Caps retries so a stuck endpoint
+ * doesn't hang forever; capped wait per attempt so a 5-minute
+ * retry_after doesn't freeze the seeder. */
+async function fetchWithBackoff(
+	input: string,
+	init: RequestInit,
+	label: string,
+): Promise<Response> {
+	const MAX_ATTEMPTS = 12;
+	const MAX_WAIT_MS = 30_000;
+	for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+		const r = await fetch(input, init);
+		if (r.status !== 429) return r;
+		const body = await r.clone().json().catch(() => ({})) as { retry_after_ms?: number };
+		const wait = Math.min(MAX_WAIT_MS, Math.max(250, body.retry_after_ms ?? 1000));
+		console.log(`[seed]   429 on ${label}, waiting ${wait}ms (attempt ${attempt + 1})`);
+		await sleep(wait);
+	}
+	throw new Error(`${label}: rate-limited after ${MAX_ATTEMPTS} attempts`);
 }
 
 interface UserSession {
@@ -168,12 +202,15 @@ async function ensureUser(user: FakeUser): Promise<UserSession> {
 	if ("error" in create) {
 		console.warn(`[seed] adminCreateUser ${userId}: ${create.error} ${create.detail ?? ""}`);
 	}
-	const login = await loginAsUser(userId, PASSWORD);
-	if ("error" in login) {
-		throw new Error(`login ${userId}: ${login.error} ${login.detail ?? ""}`);
+	// Use the admin-mint endpoint instead of /v3/login — bypasses
+	// Synapse's per-IP login rate limit, so we can plough through
+	// the user roster without spacing the calls out by seconds.
+	const token = await adminMintUserToken(userId);
+	if ("error" in token) {
+		throw new Error(`admin-mint ${userId}: ${token.error} ${token.detail ?? ""}`);
 	}
 	console.log(`[seed]   ${userId} ready`);
-	return { userId, accessToken: login.access_token };
+	return { userId, accessToken: token.access_token };
 }
 
 interface CreatedRoom {
@@ -187,20 +224,24 @@ async function createPublicRoom(
 	topic: string,
 	opts: { space?: boolean } = {},
 ): Promise<CreatedRoom> {
-	const r = await fetch(`${config.homeserverUrl}/_matrix/client/v3/createRoom`, {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-			Authorization: `Bearer ${creator.accessToken}`,
+	const r = await fetchWithBackoff(
+		`${config.homeserverUrl}/_matrix/client/v3/createRoom`,
+		{
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${creator.accessToken}`,
+			},
+			body: JSON.stringify({
+				name,
+				topic,
+				visibility: "public",
+				preset: "public_chat",
+				...(opts.space ? { creation_content: { type: "m.space" } } : {}),
+			}),
 		},
-		body: JSON.stringify({
-			name,
-			topic,
-			visibility: "public",
-			preset: "public_chat",
-			...(opts.space ? { creation_content: { type: "m.space" } } : {}),
-		}),
-	});
+		`createRoom ${name}`,
+	);
 	if (!r.ok) {
 		const txt = await r.text().catch(() => "");
 		throw new Error(`createRoom ${name}: ${r.status} ${txt}`);
@@ -216,14 +257,18 @@ async function attachRoomToSpace(
 	roomId: string,
 ): Promise<void> {
 	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(spaceId)}/state/m.space.child/${encodeURIComponent(roomId)}`;
-	const r = await fetch(`${config.homeserverUrl}${path}`, {
-		method: "PUT",
-		headers: {
-			"Content-Type": "application/json",
-			Authorization: `Bearer ${creator.accessToken}`,
+	const r = await fetchWithBackoff(
+		`${config.homeserverUrl}${path}`,
+		{
+			method: "PUT",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${creator.accessToken}`,
+			},
+			body: JSON.stringify({ via: [config.homeserverName], suggested: true }),
 		},
-		body: JSON.stringify({ via: [config.homeserverName], suggested: true }),
-	});
+		"attachRoomToSpace",
+	);
 	if (!r.ok) {
 		const txt = await r.text().catch(() => "");
 		throw new Error(`attachRoomToSpace: ${r.status} ${txt}`);
@@ -245,14 +290,18 @@ async function sendMessage(
 	body: string,
 ): Promise<void> {
 	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(nextTxn())}`;
-	const r = await fetch(`${config.homeserverUrl}${path}`, {
-		method: "PUT",
-		headers: {
-			"Content-Type": "application/json",
-			Authorization: `Bearer ${user.accessToken}`,
+	const r = await fetchWithBackoff(
+		`${config.homeserverUrl}${path}`,
+		{
+			method: "PUT",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${user.accessToken}`,
+			},
+			body: JSON.stringify({ msgtype: "m.text", body }),
 		},
-		body: JSON.stringify({ msgtype: "m.text", body }),
-	});
+		`sendMessage`,
+	);
 	if (!r.ok) {
 		const txt = await r.text().catch(() => "");
 		console.warn(`[seed]   send ${user.userId} → ${roomId}: ${r.status} ${txt.slice(0, 100)}`);
@@ -264,18 +313,22 @@ async function createDm(
 	b: UserSession,
 	messages: string[],
 ): Promise<void> {
-	const r = await fetch(`${config.homeserverUrl}/_matrix/client/v3/createRoom`, {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-			Authorization: `Bearer ${a.accessToken}`,
+	const r = await fetchWithBackoff(
+		`${config.homeserverUrl}/_matrix/client/v3/createRoom`,
+		{
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${a.accessToken}`,
+			},
+			body: JSON.stringify({
+				invite: [b.userId],
+				is_direct: true,
+				preset: "trusted_private_chat",
+			}),
 		},
-		body: JSON.stringify({
-			invite: [b.userId],
-			is_direct: true,
-			preset: "trusted_private_chat",
-		}),
-	});
+		`createDm`,
+	);
 	if (!r.ok) {
 		const txt = await r.text().catch(() => "");
 		throw new Error(`createDm ${a.userId} ↔ ${b.userId}: ${r.status} ${txt}`);

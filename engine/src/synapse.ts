@@ -704,6 +704,35 @@ export async function setProfileAvatar(
 	return true;
 }
 
+/** Mint an access token for `userId` via Synapse's admin-only
+ * "login as a user" endpoint — `POST /_synapse/admin/v1/users/{id}/login`.
+ *
+ * Bypasses the regular `/v3/login` rate limit (which is per-IP and
+ * tightens fast under load), so it's the right path for batch
+ * scripts that need to mint tokens for many users in quick
+ * succession (e.g. dev seeders).  Production code should keep
+ * using `loginAsUser`; this helper is for tooling.
+ */
+export async function adminMintUserToken(userId: string): Promise<
+	| { access_token: string; device_id: string }
+	| { error: string; detail?: string }
+> {
+	const path = `/_synapse/admin/v1/users/${encodeURIComponent(userId)}/login`;
+	const r = await adminFetch(path, { method: "POST", body: JSON.stringify({}) });
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		return { error: `synapse_${r.status}`, detail: txt.slice(0, 300) };
+	}
+	const body = (await r.json()) as { access_token?: string; device_id?: string };
+	if (!body.access_token) {
+		return { error: "no_access_token" };
+	}
+	return {
+		access_token: body.access_token,
+		device_id: body.device_id ?? "koven-seed",
+	};
+}
+
 export async function loginAsUser(userId: string, password: string): Promise<
 	| { access_token: string; device_id: string; user_id: string }
 	| { error: string; detail?: string }

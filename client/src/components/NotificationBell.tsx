@@ -311,7 +311,6 @@ export function NotificationBell({
 					<DialogContent
 						className={cn(
 							"sm:max-w-md max-h-[85vh] flex flex-col gap-0 p-0 overflow-hidden",
-							"[&>button]:hidden",
 						)}
 					>
 						<DialogHeader className="sr-only">
