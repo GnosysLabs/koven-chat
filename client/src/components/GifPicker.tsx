@@ -193,8 +193,30 @@ export function GifPicker({ accessToken, disabled, onPick, children }: GifPicker
 					)}
 				</div>
 
-				<div className="px-2 py-1.5 border-t border-border flex items-center justify-between text-[10px] text-muted-foreground">
-					<span>Powered by GIPHY</span>
+				{/* Required GIPHY attribution mark — shown verbatim per
+				    Giphy's brand guidelines (dark version on dark
+				    themes, light version on light themes).  Production
+				    API approval requires a visible "Powered by GIPHY"
+				    mark wherever results are displayed. */}
+				<div className="px-2 py-1.5 border-t border-border flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+					<a
+						href="https://giphy.com"
+						target="_blank"
+						rel="noreferrer"
+						aria-label="Powered by GIPHY"
+						className="flex items-center"
+					>
+						<img
+							src="/giphy/poweredby-on-dark.png"
+							alt="Powered by GIPHY"
+							className="h-4 w-auto hidden dark:block"
+						/>
+						<img
+							src="/giphy/poweredby-on-light.png"
+							alt="Powered by GIPHY"
+							className="h-4 w-auto dark:hidden"
+						/>
+					</a>
 					<span>{loading && results.length > 0 ? "Updating…" : ""}</span>
 				</div>
 			</PopoverContent>
