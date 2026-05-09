@@ -1276,6 +1276,30 @@ export default function App() {
 						/>
 					</div>
 				) : null}
+				{/* Explore on mobile.  The main pane is hidden in
+				    mobile-view="rooms" (no active room) so we render
+				    ExplorePane into the list pane instead — same
+				    pattern Bots / Spaces Overview use above. */}
+				{isMobileShell && state.activeSpace?.kind === "explore" ? (
+					<div className="contents" data-mobile-pane="list">
+						<ExplorePane
+							transport={transport}
+							rooms={state.rooms}
+							spaces={state.spaces}
+							accessToken={creds?.access_token ?? null}
+							collapsedRoomIds={collapsedRoomIds}
+							onCollapseRefresh={refreshCollapsedRooms}
+							showNsfw={!!settings.showNsfw}
+							onJoined={(roomId, isSpace) => {
+								if (isSpace) {
+									dispatch({ type: "set_active_space", space: { kind: "space", id: roomId } });
+								} else {
+									dispatch({ type: "set_active_room", roomId });
+								}
+							}}
+						/>
+					</div>
+				) : null}
 				{state.activeSpace?.kind !== "explore"
 					&& state.activeSpace?.kind !== "bots"
 					&& state.activeSpace?.kind !== "spaces_overview" && (
