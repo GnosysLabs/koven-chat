@@ -272,18 +272,28 @@ async function runToolLoop(
 				`bot ${bot.mxid}:   tool ${call.function.name}(${truncate(call.function.arguments, 120)})`,
 			);
 			// Show the tool name (srvN__ prefix stripped) plus the
-			// originating MCP server's qualified name in parens, so
-			// users see "calling search_web (exa)…" — useful when a
-			// bot has overlapping tool names attached from multiple
-			// servers, and reassuring in general because it makes the
-			// data path visible.  Args are intentionally omitted —
-			// they often contain raw URLs or full search queries that
-			// clutter the bubble without helping.
+			// originating MCP server's qualified name, with the
+			// server name bold in formatted_body so it stands out as
+			// "I'm hitting THIS service".  Plain-text fallback drops
+			// the formatting but keeps the same words.  Args are
+			// intentionally omitted — they often contain raw URLs or
+			// full search queries that clutter the bubble without
+			// helping.
 			const desc = describeToolCall(bundle, call.function.name);
-			const label = desc
-				? `${desc.tool} (${prettyServerName(desc.server)})`
-				: prettyToolName(call.function.name);
-			await progress.update(`🔧 calling ${label}…`);
+			if (desc) {
+				const server = prettyServerName(desc.server);
+				// Plain body uses markdown bold (`**server**`) — the
+				// Koven client's looksLikeMarkdown picks it up and
+				// renders it via the markdown path.  formatted_body
+				// adds the HTML form for any Matrix client that
+				// prefers that (Element et al).
+				await progress.update(
+					`🔧 calling ${desc.tool} with **${server}**…`,
+					`🔧 calling ${escapeHtml(desc.tool)} with <strong>${escapeHtml(server)}</strong>…`,
+				);
+			} else {
+				await progress.update(`🔧 calling ${prettyToolName(call.function.name)}…`);
+			}
 			const toolResult = await dispatchToolCall(bundle, call.function.name, args);
 			console.log(
 				`bot ${bot.mxid}:   ← ${call.function.name} ${toolResult.isError ? "ERROR" : "ok"}`
@@ -612,13 +622,17 @@ class BotProgress {
 	}
 
 	/** Edit the placeholder to a new body.  Used while tools fire
-	 * to surface "🔧 calling <tool>…" breadcrumbs — the placeholder
-	 * mutates in place via m.replace rather than spawning a fresh
-	 * message per status change.  No-op when the initial send
-	 * dropped (eventId never landed). */
-	async update(body: string): Promise<void> {
+	 * to surface "🔧 calling <tool> with <server>" breadcrumbs —
+	 * the placeholder mutates in place via m.replace rather than
+	 * spawning a fresh message per status change.  No-op when the
+	 * initial send dropped (eventId never landed).
+	 *
+	 * `formattedBody` is optional HTML (org.matrix.custom.html); when
+	 * provided, edit-aware clients render the HTML version while
+	 * older / minimal clients fall back to the plain `body`. */
+	async update(body: string, formattedBody?: string): Promise<void> {
 		if (!this.eventId) return;
-		await this.sendEdit(body);
+		await this.sendEdit(body, formattedBody);
 	}
 
 	/** Drop the placeholder (redact) and post the bot's final reply
@@ -653,30 +667,54 @@ class BotProgress {
 	 * The Matrix edit shape is two-bodied: the top-level `body` is a
 	 * fallback for clients that don't render edits (it carries a `*`
 	 * prefix per spec convention), and `m.new_content` is the
-	 * canonical replacement that edit-aware clients display. */
-	private async sendEdit(body: string): Promise<void> {
+	 * canonical replacement that edit-aware clients display.  When
+	 * `formattedBody` (HTML) is provided, we add `format` +
+	 * `formatted_body` at both levels so clients that render HTML
+	 * pick up the styled version. */
+	private async sendEdit(body: string, formattedBody?: string): Promise<void> {
 		try {
+			const newContent: Record<string, unknown> = {
+				msgtype: MsgType.Text,
+				body,
+			};
+			const fallback: Record<string, unknown> = {
+				msgtype: MsgType.Text,
+				body: `* ${body}`,
+				"m.new_content": newContent,
+				"m.relates_to": {
+					rel_type: "m.replace",
+					event_id: this.eventId!,
+				},
+			};
+			if (formattedBody) {
+				newContent["format"] = "org.matrix.custom.html";
+				newContent["formatted_body"] = formattedBody;
+				fallback["format"] = "org.matrix.custom.html";
+				fallback["formatted_body"] = `* ${formattedBody}`;
+			}
 			// matrix-js-sdk's sendMessage type doesn't expose the
 			// `m.new_content` / `m.relates_to` fields the spec adds
 			// for edits, so we cast through `any` once at the call
 			// site.  The shape is documented in MSC2676 (in-room
 			// message edits) — server-side it's just an opaque
 			// content blob.
-			await this.client.sendMessage(this.roomId, {
-				msgtype: MsgType.Text,
-				body: `* ${body}`,
-				"m.new_content": {
-					msgtype: MsgType.Text,
-					body,
-				},
-				"m.relates_to": {
-					rel_type: "m.replace",
-					event_id: this.eventId!,
-				},
-				// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			} as any);
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			await this.client.sendMessage(this.roomId, fallback as any);
 		} catch (err) {
 			console.warn(`bot progress edit failed in ${this.roomId}`, err);
 		}
 	}
+}
+
+/** Minimal HTML escape for safely embedding tool / server names in
+ * a `formatted_body`.  We only emit `<strong>` ourselves; everything
+ * else passes through this so a tool name like `<script>` becomes
+ * literal text rather than executable markup in the chat surface. */
+function escapeHtml(s: string): string {
+	return s
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#39;");
 }
