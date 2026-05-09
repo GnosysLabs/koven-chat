@@ -18,8 +18,12 @@ interface YouTubeEmbedProps {
 export function YouTubeEmbed({ videoId, startSeconds }: YouTubeEmbedProps) {
 	const src = buildEmbedUrl(videoId, startSeconds);
 	return (
-		<div className="max-w-md w-full">
-			<div className="relative w-full overflow-hidden rounded-lg bg-black aspect-video">
+		// EXPLICIT pixel width — the parent MessageBubble wrapper is
+		// inline-flex (shrinks to content), so a percentage-width
+		// child resolves to 0 (circular sizing).  448 px ≈ Tailwind's
+		// `max-w-md` so this lines up with the image-attachment sizing.
+		<div className="w-[448px] max-w-full">
+			<div className="relative w-full aspect-video overflow-hidden rounded-lg bg-black">
 				<iframe
 					src={src}
 					title="YouTube video"

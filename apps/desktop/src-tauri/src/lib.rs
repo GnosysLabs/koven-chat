@@ -77,7 +77,12 @@ const LINK_INTERCEPTOR_JS: &str = r#"
 			if (u.protocol === 'http:' || u.protocol === 'https:') {
 				return u.hostname === 'client.koven.chat'
 					|| u.hostname === 'tauri.localhost'
-					|| u.hostname === 'challenges.cloudflare.com';
+					|| u.hostname === 'challenges.cloudflare.com'
+					|| u.hostname === 'www.youtube-nocookie.com'
+					|| u.hostname === 'youtube-nocookie.com'
+					|| u.hostname === 'www.youtube.com'
+					|| u.hostname === 'youtube.com'
+					|| u.hostname === 'm.youtube.com';
 			}
 			return false;
 		} catch (_) {
@@ -149,6 +154,17 @@ const LINK_INTERCEPTOR_JS: &str = r#"
 ///                                challenge click inside it) gets
 ///                                routed out to the OS browser, which
 ///                                breaks login entirely.
+/// - `https://www.youtube-nocookie.com` and `https://www.youtube.com`
+///                                → YouTube iframe player.  The chat
+///                                renderer embeds youtube-nocookie's
+///                                /embed URL when a body contains a
+///                                YouTube link; the player itself
+///                                pulls related JS / thumbnail assets
+///                                from www.youtube.com once the user
+///                                hits play.  Without both whitelisted
+///                                the iframe never loads (or the play
+///                                click opens the video in the system
+///                                browser instead of inline).
 ///
 /// Cross-origin XHR / fetch isn't gated by this list; only top-level
 /// navigation requests pass through `on_navigation` below.
@@ -158,6 +174,8 @@ fn is_internal(url: &Url) -> bool {
 		"http" | "https" => match url.host_str() {
 			Some("client.koven.chat") | Some("tauri.localhost") => true,
 			Some("challenges.cloudflare.com") => true,
+			Some("www.youtube-nocookie.com") | Some("youtube-nocookie.com") => true,
+			Some("www.youtube.com") | Some("youtube.com") | Some("m.youtube.com") => true,
 			// Dev-only: localhost (Vite) counts as internal so
 			// in-SPA navigations don't get routed out to the OS
 			// browser when running `tauri dev`.  Production builds
