@@ -113,14 +113,18 @@ export function NotificationBell({
 					// enough to hit comfortably with a mouse, small
 					// enough to read as a control rather than a card.
 					"h-14 w-14 rounded-full flex items-center justify-center",
-					// Glassmorphic surface — matches the mobile tab
-					// pill recipe so the visual language carries.
-					"bg-white/[0.07] dark:bg-white/[0.06]",
-					"backdrop-blur-2xl backdrop-saturate-150",
-					"border border-white/10",
+					// Glassmorphic surface — uses themed tokens so it
+					// adapts to every palette (light + dark).  Card
+					// color at moderate alpha gives a frosted theme
+					// surface; border-border picks up the matching
+					// edge token.  Previously this was hardcoded white
+					// alpha, which was invisible on light themes and
+					// identical across every dark theme.
+					"bg-card/70 backdrop-blur-2xl backdrop-saturate-150",
+					"border border-border",
 					"text-foreground",
-					"shadow-[0_8px_28px_rgba(0,0,0,0.45),inset_0_1px_0_rgba(255,255,255,0.08)]",
-					"hover:bg-white/[0.10] active:bg-white/[0.12] active:scale-95",
+					"shadow-lg",
+					"hover:bg-card/85 active:bg-card active:scale-95",
 					"transition-all duration-150",
 				)}
 			>
@@ -148,10 +152,13 @@ export function NotificationBell({
 							"absolute top-[3px] right-[3px]",
 							"h-2.5 w-2.5",
 							"rounded-full bg-destructive",
-							// Ring matches the FAB's translucent
-							// surface so the dot reads as floating
-							// over it rather than welded to the rim.
-							"ring-2 ring-[#1a1a1d]",
+							// Ring picks up the page background so the
+							// dot reads as floating over the FAB rather
+							// than welded to the rim.  Previously hard-
+							// coded near-black, which broke on light
+							// themes and any theme whose canvas wasn't
+							// midnight-blue.
+							"ring-2 ring-background",
 						)}
 					/>
 				) : null}
@@ -301,7 +308,7 @@ export function NotificationBell({
 					<DialogContent
 						className={cn(
 							"sm:max-w-md max-h-[85vh] flex flex-col gap-0 p-0 overflow-hidden",
-							"force-midnight [&>button]:hidden",
+							"[&>button]:hidden",
 						)}
 					>
 						<DialogHeader className="sr-only">
@@ -410,15 +417,16 @@ function ChatbotPanel({
 			}}
 			className={cn(
 				"flex flex-col rounded-2xl overflow-hidden",
-				// Same glass treatment as the FAB so they read as
-				// one piece of UI rather than two unrelated chrome
-				// elements.  Tweaked alpha so text inside stays
-				// legible against blurred content underneath.
-				"bg-[hsl(235,18%,7%)]/95",
+				// Themed glass surface — popover bg at 95% alpha so
+				// each palette (light + dark) gets its own variant
+				// while the backdrop-blur preserves the frosted feel.
+				// Previously hardcoded a midnight HSL + force-midnight
+				// scope, which made the panel identical regardless of
+				// the user's theme choice.
+				"bg-popover/95 text-popover-foreground",
 				"backdrop-blur-2xl backdrop-saturate-150",
-				"border border-white/10",
-				"shadow-[0_24px_60px_rgba(0,0,0,0.55),inset_0_1px_0_rgba(255,255,255,0.06)]",
-				"force-midnight",
+				"border border-border",
+				"shadow-2xl",
 			)}
 		>
 			{children}
