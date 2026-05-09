@@ -191,9 +191,26 @@ export interface Message {
 	mediaMimeType?: string;
 	mediaName?: string;       // file/image filename (the m.image body)
 	mediaSize?: number;       // bytes
-	mediaWidth?: number;      // images only
+	mediaWidth?: number;      // images and videos
 	mediaHeight?: number;
 	mediaEncrypted?: MediaEncryption;
+	// Duration of media in milliseconds.  Set for m.video and m.audio
+	// from the event's `info.duration`.  Used for the "1:23" overlay
+	// on video tiles + the audio scrubber's total length without
+	// having to load the full media just to read its metadata.
+	mediaDurationMs?: number;
+	// Poster image for m.video events.  The sender extracts a frame
+	// at upload time and stamps the resulting mxc into
+	// `info.thumbnail_url` (plain rooms) or `info.thumbnail_file`
+	// (encrypted rooms, with AES-CTR keys + hashes).  Receivers fetch
+	// the poster and render it as `<video poster=…>` so the grid /
+	// chat bubble shows a real frame instead of the WKWebView black
+	// square that bare `preload="metadata"` paints.
+	mediaThumbMxc?: string;
+	mediaThumbMimeType?: string;
+	mediaThumbWidth?: number;
+	mediaThumbHeight?: number;
+	mediaThumbEncrypted?: MediaEncryption;
 	// True when this message has been edited (via m.replace).  Render
 	// with a "(edited)" indicator.
 	edited?: boolean;

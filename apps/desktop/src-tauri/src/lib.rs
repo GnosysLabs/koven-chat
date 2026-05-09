@@ -156,6 +156,12 @@ const LINK_INTERCEPTOR_JS: &str = r#"
 			if (u.protocol === 'http:' || u.protocol === 'https:') {
 				return u.hostname === 'client.koven.chat'
 					|| u.hostname === 'tauri.localhost'
+					// localhost / 127.0.0.1: the SPA itself when
+					// served by tauri-plugin-localhost (production)
+					// or by Vite (dev).  Mirrors the same hostname
+					// in the Rust `is_internal`.
+					|| u.hostname === 'localhost'
+					|| u.hostname === '127.0.0.1'
 					|| u.hostname === 'challenges.cloudflare.com'
 					|| u.hostname === 'www.youtube-nocookie.com'
 					|| u.hostname === 'youtube-nocookie.com'
@@ -255,12 +261,16 @@ fn is_internal(url: &Url) -> bool {
 			Some("challenges.cloudflare.com") => true,
 			Some("www.youtube-nocookie.com") | Some("youtube-nocookie.com") => true,
 			Some("www.youtube.com") | Some("youtube.com") | Some("m.youtube.com") => true,
-			// Dev-only: localhost (Vite) counts as internal so
-			// in-SPA navigations don't get routed out to the OS
-			// browser when running `tauri dev`.  Production builds
-			// never hit localhost, so this branch is gated on
-			// debug_assertions to keep the prod URL whitelist tight.
-			Some("localhost") | Some("127.0.0.1") if cfg!(debug_assertions) => true,
+			// localhost / 127.0.0.1 cover both dev (Vite on :1420)
+			// AND production (tauri-plugin-localhost on a portpicker-
+			// assigned port).  The production move from tauri:// to
+			// http://localhost was driven by third-party embed
+			// compatibility (see the plugin registration in run());
+			// once we're serving from localhost in prod, the
+			// navigation handler has to treat localhost as
+			// first-party so the SPA doesn't get bounced out to the
+			// OS browser on every internal click.
+			Some("localhost") | Some("127.0.0.1") => true,
 			_ => false,
 		},
 		_ => false,
@@ -295,6 +305,19 @@ fn build_init_script() -> String {
 }
 
 pub fn run() {
+	// Pin a free local port up front so the `is_internal` check + the
+	// webview URL agree on the same number.  Production only —
+	// development still loads from Vite at http://localhost:1420.
+	//
+	// We pick a port once at process start (rather than letting the
+	// localhost plugin pick on its own) so the value is reachable from
+	// both the navigation handler and the webview URL builder without
+	// having to thread it through closures.  portpicker hands us a
+	// random free port between 49152-65535 — collision-resistant
+	// across simultaneously-running Koven installs (each gets its own
+	// number) and across whatever else the user has running.
+	let local_port = portpicker::pick_unused_port().expect("no free local port available");
+
 	tauri::Builder::default()
 		// Keep one window per machine — second `koven-desktop` launch
 		// (or a `koven://` deep-link click) focuses the existing one
@@ -306,6 +329,17 @@ pub fn run() {
 				let _ = window.set_focus();
 			}
 		}))
+		// Embedded HTTP server serving the bundled SPA from
+		// http://localhost:<local_port>/.  See the comment on
+		// tauri-plugin-localhost in Cargo.toml for the full rationale
+		// — TL;DR custom-protocol parents (tauri://) break YouTube /
+		// Twitter / Spotify embeds, http://localhost is a real
+		// "potentially trustworthy" origin and embeds just work.
+		//
+		// Dev mode skips this entirely and keeps loading from Vite at
+		// http://localhost:1420 — same scheme, same secure-context
+		// treatment, no compatibility delta between dev and prod.
+		.plugin(tauri_plugin_localhost::Builder::new(local_port).build())
 		// OS-default URL / path handler.  Used by the navigation
 		// guard below to dispatch external links.
 		.plugin(tauri_plugin_opener::init())
@@ -341,7 +375,7 @@ pub fn run() {
 				tauri::generate_handler![reveal_app, save_download]
 			}
 		})
-		.setup(|app| {
+		.setup(move |app| {
 			// macOS application menu.  Tauri 2 doesn't auto-build one,
 			// and without an explicit menu the system falls back to a
 			// stub that names every item after the binary
@@ -422,7 +456,9 @@ pub fn run() {
 				let splash_url = if cfg!(debug_assertions) {
 					WebviewUrl::External("http://localhost:1420/splash.html".parse().unwrap())
 				} else {
-					WebviewUrl::App("splash.html".into())
+					WebviewUrl::External(
+						format!("http://localhost:{local_port}/splash.html").parse().unwrap(),
+					)
 				};
 				let splash = WebviewWindowBuilder::new(app, "splash", splash_url)
 					.title("")
@@ -487,10 +523,15 @@ pub fn run() {
 				// Synapse needed.
 				WebviewUrl::External("http://localhost:1420".parse().unwrap())
 			} else {
-				// Production: bundled `client/dist/` — Tauri serves
-				// it from `tauri://localhost/` on macOS / Linux and
-				// `https://tauri.localhost/` on Windows.
-				WebviewUrl::App("index.html".into())
+				// Production: bundled `client/dist/` is served by
+				// tauri-plugin-localhost on http://localhost:<local_port>/.
+				// We deliberately do NOT use WebviewUrl::App here —
+				// that would resolve to tauri://localhost/index.html
+				// (the custom-protocol scheme), which third-party
+				// embeds reject.  See the plugin registration above.
+				WebviewUrl::External(
+					format!("http://localhost:{local_port}/index.html").parse().unwrap(),
+				)
 			};
 
 			// Capture the AppHandle for the navigation closure so it

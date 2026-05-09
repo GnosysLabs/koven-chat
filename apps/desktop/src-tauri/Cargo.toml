@@ -1,6 +1,6 @@
 [package]
 name = "koven-desktop"
-version = "0.14.0"
+version = "0.15.0"
 description = "Koven desktop shell — Tauri WebView wrapping client.koven.chat with native window chrome, OS-routed external links, and a minisign-signed in-app updater."
 authors = ["Gnosys Labs"]
 edition = "2021"
@@ -31,6 +31,24 @@ tauri-plugin-notification = "2"
 # downloads landed silently in ~/Downloads/ — the user wants to pick
 # a location every time, the way browsers' "Save link as…" works.
 tauri-plugin-dialog = "2"
+# Embedded HTTP server that serves the bundled SPA from
+# http://localhost:<port>/ instead of Tauri's default custom-protocol
+# scheme (tauri://localhost on macOS/Linux, https://tauri.localhost
+# on Windows).
+#
+# Why this matters: third-party embeds (YouTube, Twitter/X, Spotify,
+# Loom, etc.) refuse to render in custom-protocol parents — their
+# postMessage origin checks treat anything that isn't http(s) as a
+# hostile parent and refuse to initialise the player.  YouTube
+# specifically throws error 153 ("Video player configuration error")
+# from the tauri:// origin.  http://localhost is a "potentially
+# trustworthy" origin per the Secure Contexts spec, so embeds treat
+# it the same as a real https site and just work.
+tauri-plugin-localhost = "2"
+# Random port pinning helper — the localhost plugin needs a port
+# that's free at app start; portpicker grabs one without us having to
+# hardcode (which would clash on machines already using the port).
+portpicker = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"

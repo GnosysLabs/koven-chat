@@ -10,6 +10,7 @@ import { Bot, Compass, Hash, Plus, Settings, ShieldAlert, User } from "lucide-re
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { AccountSwitcher } from "@/components/AccountSwitcher";
 import { SpaceTileContextMenu } from "@/components/SpaceTileContextMenu";
+import { buildInviteUrl } from "@/lib/inviteLink";
 import type { StoredAccount } from "@/lib/accounts";
 import type { ActiveSpace } from "@/state/store";
 import type { MatrixTransport } from "@/lib/matrix";
@@ -263,10 +264,10 @@ export function SpaceBar({
 					space={spaceCtxMenu.space}
 					currentUserId={currentUserId as UserId}
 					accessToken={accessToken}
-					roomsInSpace={rooms.filter(r => r.parentSpaceIds.includes(spaceCtxMenu.space.id))}
+					roomsInSpace={rooms.filter(r => roomBelongsToSpace(r, spaceCtxMenu.space))}
 					onMarkAllRead={() => {
 						const ids = rooms
-							.filter(r => r.parentSpaceIds.includes(spaceCtxMenu.space.id))
+							.filter(r => roomBelongsToSpace(r, spaceCtxMenu.space))
 							.map(r => r.id);
 						for (const rid of ids) {
 							transport.markAsRead(rid).catch(err => {
@@ -279,7 +280,7 @@ export function SpaceBar({
 						void navigator.clipboard.writeText(spaceCtxMenu.space.id);
 					}}
 					onCopyInviteLink={() => {
-						void navigator.clipboard.writeText(`https://matrix.to/#/${spaceCtxMenu.space.id}`);
+						void navigator.clipboard.writeText(buildInviteUrl(spaceCtxMenu.space.id));
 					}}
 					onEdit={onEditSpace ? () => onEditSpace(spaceCtxMenu.space.id) : undefined}
 					onAddRoom={onAddRoomToSpace ? () => onAddRoomToSpace(spaceCtxMenu.space.id) : undefined}
@@ -296,6 +297,16 @@ export function SpaceBar({
 			)}
 		</aside>
 	);
+}
+
+/** Resolve "is this room a member of this space?" using BOTH sides
+ * of the m.space.child / m.space.parent pair.  Most rooms only get
+ * the m.space.child link written (on the space, by whoever added the
+ * room), because writing m.space.parent on the room itself requires
+ * power level on the room.  Trusting only one direction misses the
+ * majority of real-world rooms. */
+function roomBelongsToSpace(room: Room, space: Space): boolean {
+	return space.childRoomIds.includes(room.id) || room.parentSpaceIds.includes(space.id);
 }
 
 interface TileButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {

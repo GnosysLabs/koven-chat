@@ -1526,6 +1526,30 @@ export class MatrixTransport {
 			} catch { /* dimensions are optional */ }
 		}
 
+		// For videos: extract a poster frame, capture dimensions /
+		// duration, and prepare a thumbnail blob to upload alongside
+		// the video.  All best-effort — a failed extraction (codec
+		// unsupported, decoder OOM, browser refused the source) just
+		// means the receiver falls back to the same broken
+		// `preload="metadata"` poster the sender's composer was
+		// living with before this fix.  See videoThumbnail.ts for
+		// the rationale on doing this client-side.
+		let videoThumb: { blob: Blob; width: number; height: number; objectUrl: string } | null = null;
+		if (msgtype === "m.video") {
+			try {
+				const { extractVideoThumbnail } = await import("@/lib/videoThumbnail");
+				const t = await extractVideoThumbnail(file);
+				if (t) {
+					info.w = t.width;
+					info.h = t.height;
+					info.duration = t.durationMs;
+					videoThumb = { blob: t.blob, width: t.width, height: t.height, objectUrl: t.objectUrl };
+				}
+			} catch (err) {
+				console.warn("uploadAndSendAttachment: video thumbnail extraction failed", err);
+			}
+		}
+
 		// MSC2530 caption form: when the user typed text alongside the
 		// attachment, `body` carries the caption and `filename` carries
 		// the real filename.  Receivers that know MSC2530 surface the
@@ -1536,6 +1560,45 @@ export class MatrixTransport {
 		const trimmedCaption = caption?.trim();
 		const body = trimmedCaption || file.name;
 		const includeFilename = !!trimmedCaption;
+
+		// Upload the video poster (if we extracted one) BEFORE the main
+		// file so we can stamp the thumbnail mxc into `info` before
+		// the event is sent.  Encryption mode matches the parent
+		// event — encrypted rooms get an encrypted thumbnail
+		// (info.thumbnail_file); plaintext rooms get info.thumbnail_url.
+		// Failures are non-fatal: the main upload still goes through,
+		// receivers fall back to render-time decode of the video itself.
+		if (videoThumb) {
+			try {
+				const thumbInfoBase = {
+					mimetype: "image/jpeg",
+					size: videoThumb.blob.size,
+					w: videoThumb.width,
+					h: videoThumb.height,
+				};
+				if (isEncrypted) {
+					const tBuffer = await videoThumb.blob.arrayBuffer();
+					const { encryptAttachment } = await import("matrix-encrypt-attachment");
+					const { data: tData, info: tEncInfo } = await encryptAttachment(tBuffer);
+					const tUpload = await c.uploadContent(new Blob([tData]), {
+						name: `${file.name}.thumb.jpg`,
+						type: "application/octet-stream",
+					} as any);
+					info.thumbnail_file = { ...tEncInfo, url: tUpload.content_uri };
+				} else {
+					const tUpload = await c.uploadContent(videoThumb.blob, {
+						name: `${file.name}.thumb.jpg`,
+						type: "image/jpeg",
+					} as any);
+					info.thumbnail_url = tUpload.content_uri;
+				}
+				info.thumbnail_info = thumbInfoBase;
+			} catch (err) {
+				console.warn("uploadAndSendAttachment: thumbnail upload failed", err);
+			} finally {
+				URL.revokeObjectURL(videoThumb.objectUrl);
+			}
+		}
 
 		let content: Record<string, unknown>;
 		if (isEncrypted) {
@@ -4561,6 +4624,12 @@ export class MatrixTransport {
 		let mediaWidth: number | undefined;
 		let mediaHeight: number | undefined;
 		let mediaEncrypted: import("@koven/shared").MediaEncryption | undefined;
+		let mediaDurationMs: number | undefined;
+		let mediaThumbMxc: string | undefined;
+		let mediaThumbMimeType: string | undefined;
+		let mediaThumbWidth: number | undefined;
+		let mediaThumbHeight: number | undefined;
+		let mediaThumbEncrypted: import("@koven/shared").MediaEncryption | undefined;
 		let text = decryptionFailed
 			? formatDecryptionFailure(decryptionFailureReason)
 			: (content.body as string | undefined) ?? "";
@@ -4593,6 +4662,33 @@ export class MatrixTransport {
 			mediaSize = info?.size as number | undefined;
 			mediaWidth = info?.w as number | undefined;
 			mediaHeight = info?.h as number | undefined;
+			// Duration: m.video / m.audio carry it in info.duration (ms).
+			// Lenient cast — some clients send a string; we want a number
+			// for math, so reject NaN-shaped values and leave undefined.
+			const rawDuration = info?.duration;
+			if (typeof rawDuration === "number" && Number.isFinite(rawDuration) && rawDuration > 0) {
+				mediaDurationMs = rawDuration;
+			}
+			// Poster thumbnail.  Mirrors the main media's encryption
+			// shape: encrypted rooms put the AES-CTR keys + ciphertext
+			// mxc into info.thumbnail_file; plaintext rooms put a bare
+			// mxc into info.thumbnail_url.  Either way we surface it via
+			// the mediaThumb* fields so the renderer can use it as the
+			// <video poster> instead of the WKWebView black square that
+			// `<video preload="metadata">` paints.
+			const tEnc = info?.thumbnail_file as import("@koven/shared").MediaEncryption | undefined;
+			if (tEnc?.url) {
+				mediaThumbMxc = tEnc.url;
+				mediaThumbEncrypted = tEnc;
+			} else if (typeof info?.thumbnail_url === "string") {
+				mediaThumbMxc = info.thumbnail_url;
+			}
+			const tInfo = info?.thumbnail_info as Record<string, unknown> | undefined;
+			if (tInfo) {
+				mediaThumbMimeType = tInfo.mimetype as string | undefined;
+				mediaThumbWidth = typeof tInfo.w === "number" ? tInfo.w : undefined;
+				mediaThumbHeight = typeof tInfo.h === "number" ? tInfo.h : undefined;
+			}
 			// MSC2530: when a media event carries an explicit `filename`
 			// field, `body` is the caption and `filename` is the real
 			// filename.  Absent `filename`, `body` IS the filename
@@ -4687,6 +4783,12 @@ export class MatrixTransport {
 			pending,
 			decryptionFailed: decryptionFailed || undefined,
 			decryptionFailureReason,
+			mediaDurationMs,
+			mediaThumbMxc,
+			mediaThumbMimeType,
+			mediaThumbWidth,
+			mediaThumbHeight,
+			mediaThumbEncrypted,
 		};
 	}
 

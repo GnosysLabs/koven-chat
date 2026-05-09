@@ -14,6 +14,7 @@ import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { RoomRowContextMenu } from "@/components/RoomRowContextMenu";
 import { ContextMenu, type ContextMenuItem } from "@/components/ui/context-menu";
 import { getRoomNotifyLevel, onNotifyPrefsChanged } from "@/lib/notifyPrefs";
+import { buildInviteUrl } from "@/lib/inviteLink";
 import type { ActiveSpace } from "@/state/store";
 import type { MatrixTransport } from "@/lib/matrix";
 
@@ -545,7 +546,7 @@ function RoomRow({
 						});
 					}}
 					onCopyInviteLink={() => {
-						void navigator.clipboard.writeText(`https://matrix.to/#/${room.id}`).catch(err => {
+						void navigator.clipboard.writeText(buildInviteUrl(room.id)).catch(err => {
 							console.warn("RoomRow: copy invite link failed", err);
 						});
 					}}

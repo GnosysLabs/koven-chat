@@ -26,6 +26,7 @@ import { MediaContextMenu } from "@/components/MediaContextMenu";
 import { MessageContextMenu } from "@/components/MessageContextMenu";
 import { firstLink, linkify } from "@/lib/linkify";
 import { renderWithMentions } from "@/lib/mentionRender";
+import { buildMessageUrl } from "@/lib/inviteLink";
 import { findYouTubeMatches, isYouTubeUrl, stripYouTubeUrls } from "@/lib/youtube";
 import { YouTubeEmbed } from "@/components/YouTubeEmbed";
 import { GifPicker } from "@/components/GifPicker";
@@ -83,7 +84,7 @@ function emojiOnlyCount(text: string): 1 | 2 | 3 | null {
 	}
 	return count === 1 || count === 2 || count === 3 ? count : null;
 }
-import { useMatrixAttachment } from "@/lib/useMatrixAttachment";
+import { useMatrixAttachment, useMatrixVideoPoster } from "@/lib/useMatrixAttachment";
 import { useMatrixMedia } from "@/lib/useMatrixMedia";
 import { useUrlPreview } from "@/lib/useUrlPreview";
 import { useTransport } from "@/lib/transportContext";
@@ -94,7 +95,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import { AlertTriangle, BarChart3, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Images, Lock, Network, Paperclip, Phone, Scale, Settings, UserPlus, Video, X } from "lucide-react";
+import { AlertTriangle, BarChart3, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Images, Lock, Network, Paperclip, Phone, Play, Scale, Settings, UserPlus, Video, X } from "lucide-react";
 
 export interface ChatPaneProps {
 	room: Room | null;
@@ -1746,8 +1747,7 @@ function MessageRow({
 						if (t) void navigator.clipboard.writeText(t);
 					}}
 					onCopyLink={() => {
-						const link = `https://matrix.to/#/${roomId}/${message.id}`;
-						void navigator.clipboard.writeText(link);
+						void navigator.clipboard.writeText(buildMessageUrl(roomId, message.id));
 					}}
 					onQuote={() => onQuote?.(message.text ?? "")}
 					onDelete={onDelete && !message.pending ? () => setDeleteDialogOpen(true) : undefined}
@@ -2124,8 +2124,26 @@ function AttachmentImage({ message }: { message: Message }) {
 
 function AttachmentVideo({ message }: { message: Message }) {
 	const url = useMatrixAttachment(message);
+	// Sender-supplied poster (info.thumbnail_*) — instant paint while
+	// the actual video bytes stream in.  Older messages without an
+	// embedded poster get the legacy black-square-then-first-frame
+	// behaviour, which is what shipped before this fix landed.
+	const poster = useMatrixVideoPoster(message);
 	const { onContextMenu, menu } = useMediaContextMenu(url, message.mediaName ?? "video");
 	if (!url) {
+		// While the main video URL is loading: if we already have the
+		// poster, show it instead of the dead grey skeleton.  The
+		// poster fetches FAR faster than the video (KB vs MB), so
+		// this dramatically reduces perceived load time.
+		if (poster) {
+			return (
+				<img
+					src={poster}
+					alt={message.mediaName ?? "video"}
+					className="max-w-md max-h-80 rounded-lg block"
+				/>
+			);
+		}
 		return (
 			<div className="w-72 h-44 rounded-lg bg-muted-foreground/10 animate-pulse" />
 		);
@@ -2135,6 +2153,8 @@ function AttachmentVideo({ message }: { message: Message }) {
 			<video
 				src={url}
 				controls
+				poster={poster}
+				preload="metadata"
 				className="max-w-md max-h-80 rounded-lg block"
 				onContextMenu={onContextMenu}
 			/>
@@ -2328,14 +2348,56 @@ function PendingAttachmentThumb({
 	// unmounts (or the file changes).  Skipped for non-image/video
 	// files to avoid pinning the bytes for nothing.
 	const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+	// Tracks whether the previewUrl points at an extracted JPEG
+	// thumbnail (true for videos) vs. the source bytes themselves
+	// (true for images).  Drives the renderer below: video previews
+	// render as <img> (fast, paints reliably across browsers);
+	// image previews render as <img> too but unwrapped.  Without
+	// this flag the UI couldn't tell whether to show a play badge
+	// over the still.
+	const [previewIsVideoStill, setPreviewIsVideoStill] = useState(false);
 	useEffect(() => {
 		if (!isImage && !isVideo) {
 			setPreviewUrl(null);
+			setPreviewIsVideoStill(false);
 			return;
 		}
 		let cancelled = false;
 		let revokeUrl: string | null = null;
 		const setUp = async () => {
+			if (isVideo) {
+				// Decode a real frame from the local file via canvas.
+				// The previous `<video preload="metadata">` pattern
+				// rendered black in WKWebView (the desktop app);
+				// extracting + showing as <img> is reliable across
+				// every supported renderer.  Bytes the upload
+				// pipeline will need anyway (it embeds the same
+				// thumbnail into the m.video event's
+				// info.thumbnail_*), so this isn't wasted work.
+				try {
+					const { extractVideoThumbnail } = await import("@/lib/videoThumbnail");
+					const t = await extractVideoThumbnail(file);
+					if (cancelled) {
+						if (t) URL.revokeObjectURL(t.objectUrl);
+						return;
+					}
+					if (t) {
+						revokeUrl = t.objectUrl;
+						setPreviewUrl(t.objectUrl);
+						setPreviewIsVideoStill(true);
+						return;
+					}
+				} catch (err) {
+					console.warn("PendingAttachmentThumb: video thumbnail decode failed", err);
+				}
+				// Decode failed: fall through to a generic file glyph
+				// by leaving previewUrl null.  Upload still works.
+				if (!cancelled) {
+					setPreviewUrl(null);
+					setPreviewIsVideoStill(false);
+				}
+				return;
+			}
 			let blob: Blob = file;
 			if (isHeic) {
 				try {
@@ -2347,7 +2409,10 @@ function PendingAttachmentThumb({
 					// preview URL.  Upload still proceeds; only the
 					// thumbnail is degraded.
 					console.warn("PendingAttachmentThumb: HEIC preview decode failed", err);
-					if (!cancelled) setPreviewUrl(null);
+					if (!cancelled) {
+						setPreviewUrl(null);
+						setPreviewIsVideoStill(false);
+					}
 					return;
 				}
 			}
@@ -2355,6 +2420,7 @@ function PendingAttachmentThumb({
 			const url = URL.createObjectURL(blob);
 			revokeUrl = url;
 			setPreviewUrl(url);
+			setPreviewIsVideoStill(false);
 		};
 		void setUp();
 		return () => {
@@ -2372,24 +2438,36 @@ function PendingAttachmentThumb({
 
 	return (
 		<div className="relative group h-20 w-20 shrink-0 rounded-md overflow-hidden bg-muted/60 border border-border flex items-center justify-center">
-			{previewUrl && isImage && (
+			{previewUrl && (isImage || (isVideo && previewIsVideoStill)) && (
 				<img
 					src={previewUrl}
 					alt=""
 					className="h-full w-full object-cover"
 				/>
 			)}
-			{previewUrl && isVideo && (
+			{previewUrl && isVideo && previewIsVideoStill && (
+				// Play-glyph overlay so video stills are visually
+				// distinct from image attachments at chip size.
+				// Pointer-events:none so the wrapping button still
+				// receives clicks (remove on hover).
+				<div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+					<div className="bg-background/70 rounded-full p-1">
+						<Play className="h-3 w-3 fill-foreground text-foreground" />
+					</div>
+				</div>
+			)}
+			{previewUrl && isVideo && !previewIsVideoStill && (
+				// Fallback path: decode failed, but we still have the
+				// raw object URL.  Use the legacy <video> approach so
+				// at least SOMETHING renders rather than the file
+				// glyph.  Cosmetic only; the upload itself still
+				// includes whatever thumbnail extraction managed,
+				// or none if both attempts failed.
 				<video
 					src={previewUrl}
 					className="h-full w-full object-cover"
 					muted
 					playsInline
-					// Autoplay paused — the first frame paints as the
-					// thumbnail without burning CPU on continuous
-					// playback.  Browsers without preload="metadata"
-					// support fall through to a black square, which
-					// is fine.
 					preload="metadata"
 				/>
 			)}

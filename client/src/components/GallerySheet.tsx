@@ -31,7 +31,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import { useMatrixAttachment } from "@/lib/useMatrixAttachment";
+import { useMatrixAttachment, useMatrixVideoPoster } from "@/lib/useMatrixAttachment";
 import type { Message } from "@koven/shared";
 import { cn } from "@/lib/utils";
 
@@ -156,8 +156,26 @@ export function GallerySheet({ open, onOpenChange, messages, roomName }: Gallery
 }
 
 function MediaThumb({ message, onClick }: { message: Message; onClick(): void }) {
-	const url = useMatrixAttachment(message);
 	const isVideo = message.kind === "video";
+	// For videos: prefer the sender-supplied poster from
+	// info.thumbnail_url / info.thumbnail_file.  Newly uploaded videos
+	// always have one (see videoThumbnail.ts + uploadAndSendAttachment);
+	// older messages and external Matrix clients that don't include a
+	// thumbnail fall back to the legacy `<video preload="metadata">`
+	// pattern, which works in Chromium-based renderers but paints
+	// black on WKWebView.  The fallback isn't great, but it matches
+	// the prior behaviour exactly; the fix is purely additive.
+	const poster = useMatrixVideoPoster(message);
+	// We only need the main media URL when we DON'T have a poster
+	// (else the <img> path is enough and we save the full-resolution
+	// fetch + decode cost the gallery doesn't need).  Hooks have to
+	// be called unconditionally; useMatrixAttachment treats an
+	// undefined `mediaMxc` as a no-op and never starts the fetch.
+	const skipMain = isVideo && !!poster;
+	const url = useMatrixAttachment(skipMain
+		? { mediaMxc: undefined, mediaMimeType: undefined, mediaEncrypted: undefined }
+		: message,
+	);
 	return (
 		<button
 			type="button"
@@ -169,11 +187,25 @@ function MediaThumb({ message, onClick }: { message: Message; onClick(): void })
 			)}
 			aria-label={message.mediaName ?? (isVideo ? "Video" : "Image")}
 		>
-			{url ? (
+			{isVideo && poster ? (
+				// Sender-provided poster: render as a flat <img>.  No
+				// <video> element needed in the grid — playback only
+				// happens in the lightbox below, so we save the
+				// per-tile media-element cost on rooms with lots of
+				// videos.
+				<img
+					src={poster}
+					alt={message.mediaName ?? "video"}
+					loading="lazy"
+					className="w-full h-full object-cover block"
+				/>
+			) : url ? (
 				isVideo ? (
-					// Use the video element directly — it auto-paints
-					// the first frame as a poster.  No autoplay so the
-					// grid doesn't melt CPUs on a 100-video room.
+					// Legacy fallback: no embedded poster, ask the
+					// browser to paint the first frame.  Works in
+					// Chromium; paints black in WKWebView (the
+					// limitation that motivated the embedded-poster
+					// fix in the first place).
 					<video
 						src={url}
 						muted
@@ -221,6 +253,7 @@ function MediaLightbox({
 	onClose(): void;
 }) {
 	const url = useMatrixAttachment(message);
+	const poster = useMatrixVideoPoster(message);
 	const isVideo = message.kind === "video";
 	if (typeof document === "undefined") return null;
 	// Portal to document.body so the fixed overlay actually fills the
@@ -303,6 +336,13 @@ function MediaLightbox({
 							src={url}
 							controls
 							autoPlay
+							// `poster` paints instantly from the
+							// embedded thumbnail mxc while the actual
+							// video bytes stream in.  Without it,
+							// WKWebView shows a black square until the
+							// first keyframe decodes (which can be
+							// 1-2s on a 4K source).
+							poster={poster}
 							// Both axes capped — the natural aspect
 							// ratio is preserved because <video> with
 							// explicit max-w + max-h shrinks

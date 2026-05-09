@@ -27,6 +27,7 @@ import { MobileTabBar, type MobileTab } from "@/components/MobileTabBar";
 import { MobileSpacesList } from "@/components/MobileSpacesList";
 import { MobileMeScreen } from "@/components/MobileMeScreen";
 import { isMobileShell } from "@/lib/mobile";
+import { parseShareIntent, clearShareUrl } from "@/lib/inviteLink";
 import { ChatPane } from "@/components/ChatPane";
 import { SpaceLanding } from "@/components/SpaceLanding";
 import { ExplorePane } from "@/components/ExplorePane";
@@ -981,6 +982,68 @@ export default function App() {
 		document.addEventListener("visibilitychange", onVisible);
 		return () => document.removeEventListener("visibilitychange", onVisible);
 	}, [transport]);
+
+	// Share-link handler.  Boot path consumes one of:
+	//   /invite/<roomOrSpaceIdOrAlias>  → join (if not already in)
+	//                                      then navigate
+	//   /r/<roomId>/<eventId>           → navigate to the room (event-
+	//                                      level scrolling is a future
+	//                                      enhancement; for now landing
+	//                                      in the room is the win)
+	// Runs once per session: a ref guards against re-firing on every
+	// sync transition, and clearShareUrl() rewrites the address bar
+	// so a refresh doesn't repeat the auto-navigate (which would be
+	// confusing if the user has since left the room or routed away).
+	const shareIntentConsumedRef = useRef(false);
+	useEffect(() => {
+		if (shareIntentConsumedRef.current) return;
+		if (!transport || !creds) return;
+		// Wait for sync to be at least syncing — joinRoom needs a
+		// live client and dispatching set_active_room on a room that
+		// hasn't synced yet leaves the timeline empty until the
+		// next room-list refresh.
+		if (state.syncState !== "ready" && state.syncState !== "syncing") return;
+		const intent = parseShareIntent();
+		if (!intent) {
+			shareIntentConsumedRef.current = true;
+			return;
+		}
+		shareIntentConsumedRef.current = true;
+		void (async () => {
+			try {
+				let roomId: string;
+				if (intent.kind === "invite") {
+					// joinRoomById is idempotent — already-joined rooms
+					// resolve immediately to their roomId.  Aliases get
+					// resolved server-side as part of the join.
+					roomId = await transport.joinRoomById(intent.target);
+				} else {
+					roomId = intent.roomId;
+				}
+				// Pick the right "active space" so the room actually
+				// shows up in the rendered list.  Reuses the same
+				// resolution logic as openRoomFromNotification.
+				const room = roomsRef.current.find(r => r.id === roomId);
+				if (room) {
+					if (room.kind === "dm") {
+						dispatch({ type: "set_active_space", space: { kind: "dms" } });
+					} else if (room.parentSpaceIds.length > 0) {
+						dispatch({
+							type: "set_active_space",
+							space: { kind: "space", id: room.parentSpaceIds[0] as SpaceId },
+						});
+					} else {
+						dispatch({ type: "set_active_space", space: { kind: "rooms" } });
+					}
+				}
+				dispatch({ type: "set_active_room", roomId: roomId as RoomId });
+			} catch (err) {
+				console.warn("share-intent: failed to consume", intent, err);
+			} finally {
+				clearShareUrl();
+			}
+		})();
+	}, [transport, creds, state.syncState]);
 
 	// When the active room changes, load its existing timeline + members
 	// + reactions from the matrix-js-sdk's in-memory state.
