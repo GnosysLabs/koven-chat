@@ -1351,10 +1351,6 @@ function MessageRow({
 	// floor pipeline is that this content is never re-served.  No
 	// click-to-view affordance, no way for `expanded` to flip true.
 	const isCollapsed = !!collapse && (collapse.fastTrack || !expanded);
-	// Poll bubbles render at fixed width; non-poll bubbles are
-	// content-sized.  This drives the sidecar layout below — see the
-	// comment on the wrapper for why polls stack and others go inline.
-	const isPoll = message.kind === "poll" && !!message.poll;
 	// Spacing rules:
 	//   - First row in the scroll: no top margin.
 	//   - Same-sender continuation: small (4px) — bubbles read as a unit.
@@ -1454,18 +1450,18 @@ function MessageRow({
 					</div>
 				)}
 				{message.replyTo && <ReplyQuote replyTo={message.replyTo} />}
-				{/* Sidecar layout depends on the message kind:
-				    - Polls: stack (seen-by + actions in a vertical
-				      column on the right).  Polls render at full
-				      bubble width, so an inline action toolbar
-				      appearing on hover would shrink the poll mid-
-				      interaction; stacking pins the bubble's width.
-				    - Everything else: inline (single horizontal row).
-				      The bubble is variable-width and small enough
-				      that the toolbar appearing on hover doesn't
-				      cause distracting resizes.  Inline keeps the
-				      vertical rhythm of the timeline tighter. */}
-				<div className={cn("flex gap-2", isPoll ? "items-start" : "items-center")}>
+				{/* Bubble on the left, sidecar (seen-by + flag pill +
+				    hover actions) stacked in a thin column on the
+				    right.  Stacking keeps the sidecar's footprint
+				    constant whether or not the action toolbar is
+				    showing — without it, the toolbar appearing on
+				    hover would force the bubble to shrink to make
+				    room (very visible on full-width content like
+				    polls, but the same effect on text bubbles is a
+				    smaller-but-still-distracting reflow).  Universal
+				    stacking is steadier visually than branching by
+				    message kind. */}
+				<div className="flex items-start gap-2">
 					{isCollapsed ? (
 						<CollapsedBubble collapse={collapse!} onExpand={() => setExpanded(true)} />
 					) : (
@@ -1479,10 +1475,7 @@ function MessageRow({
 							onPollEnd={onPollEnd}
 						/>
 					)}
-					<div className={cn(
-						"flex shrink-0 gap-1",
-						isPoll ? "flex-col items-start" : "flex-row items-center",
-					)}>
+					<div className="flex flex-col items-start gap-1 shrink-0">
 						{/* Seen-by indicator on YOUR sent messages.
 						    DM rooms get a "Read · time" line; group
 						    rooms get an avatar stack + count that
