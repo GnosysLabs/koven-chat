@@ -424,10 +424,25 @@ export async function repairRoomInvitePL(
 		return { ok: true, repaired: false };
 	}
 
-	// Step 1: give the engine's appservice user enough PL to write
-	// m.room.power_levels.  make_room_admin sets PL to max+1 so we
-	// land above the existing creator (typically PL 100) and clear
-	// the room's events["m.room.power_levels"] threshold.
+	// Step 1a: join @engine to the room.  make_room_admin only
+	// sets the target user's PL — it does NOT join them.  Without
+	// this we end up at PL 100 but Synapse refuses our state
+	// event PUT because non-members can't write to a room they
+	// aren't in (M_FORBIDDEN: "user not in room").
+	//
+	// admin /join is idempotent: returns success when @engine is
+	// already a member.  We rely on that being the common case
+	// (the engine joins every room with timeline activity via
+	// joinRoomIfNeeded), so this admin call is mostly a no-op.
+	const join = await adminJoinUserToRoom(config.engineUserId, roomId);
+	if ("error" in join) {
+		return { error: "engine_join_failed", detail: join.detail ?? join.error };
+	}
+
+	// Step 1b: give @engine enough PL to write m.room.power_levels.
+	// make_room_admin sets PL to max+1 so we land above the existing
+	// creator (typically PL 100) and clear the room's
+	// events["m.room.power_levels"] threshold.
 	const elevate = await makeUserRoomAdmin(config.engineUserId, roomId);
 	if ("error" in elevate) {
 		return { error: "elevate_failed", detail: elevate.detail ?? elevate.error };
