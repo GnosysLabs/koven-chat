@@ -11,9 +11,45 @@
 // can't keep the bot pinned indefinitely (the matrix-js-sdk timeline
 // listener has no built-in concurrency cap).
 
+/** OpenAI-shaped chat message.  `tool` role messages carry the
+ * result of a tool invocation back into the conversation so the
+ * model can see what its own tool call returned. */
 export interface ChatMessage {
-	role: "system" | "user" | "assistant";
+	role: "system" | "user" | "assistant" | "tool";
 	content: string;
+	/** Present on assistant messages that requested tool invocations.
+	 * The runtime echoes them back into history when handing tool
+	 * results to the LLM (the SDK requires the assistant->tool pair
+	 * to be adjacent for the IDs to resolve). */
+	tool_calls?: AssistantToolCall[];
+	/** Present on `tool` role messages — matches the id of the
+	 * `tool_calls[i]` entry whose result this is. */
+	tool_call_id?: string;
+}
+
+/** OpenAI tool-call shape — single function-style call the model
+ * wants the runtime to execute. */
+export interface AssistantToolCall {
+	id: string;
+	type: "function";
+	function: {
+		name: string;
+		/** Stringified JSON of the arguments — OpenAI wraps it as
+		 * a string even when the schema is structured. */
+		arguments: string;
+	};
+}
+
+/** OpenAI tool definition.  Matches the shape we already produce
+ * in mcp/client.ts → listMcpTools, so MCP tool schemas pass
+ * straight through. */
+export interface ToolDefinition {
+	type: "function";
+	function: {
+		name: string;
+		description?: string;
+		parameters: Record<string, unknown>;
+	};
 }
 
 export interface ChatCompletionRequest {
@@ -21,6 +57,9 @@ export interface ChatCompletionRequest {
 	apiKey: string;           // bearer token (decrypted)
 	model: string;            // e.g. "~google/gemini-flash-latest"
 	messages: ChatMessage[];  // including system prompt as first entry, if any
+	/** Optional tool definitions the LLM may invoke.  When absent,
+	 * the call behaves exactly as the no-tools v1 path. */
+	tools?: ToolDefinition[];
 	maxTokens?: number;       // optional cap; provider-default if unset
 	timeoutMs?: number;       // default 60s
 	provider: "openrouter" | "openai_compatible";
@@ -34,7 +73,13 @@ export interface ChatCompletionRequest {
 
 export interface ChatCompletionSuccess {
 	ok: true;
+	/** May be empty string when the model only responded with
+	 * tool_calls and no user-facing text — the runtime treats that
+	 * as "execute the tools, then loop back for the next turn". */
 	content: string;
+	/** Tool-invocation requests from the model.  Empty when the
+	 * model produced a final text reply. */
+	tool_calls: AssistantToolCall[];
 	prompt_tokens: number;
 	completion_tokens: number;
 }
@@ -75,6 +120,14 @@ export async function chatCompletion(req: ChatCompletionRequest): Promise<ChatCo
 		stream: false,
 	};
 	if (req.maxTokens && req.maxTokens > 0) body.max_tokens = req.maxTokens;
+	if (req.tools && req.tools.length > 0) {
+		body.tools = req.tools;
+		// "auto" lets the model decide whether to invoke a tool or
+		// reply directly.  Default for OpenAI/OpenRouter when tools
+		// are present, but explicit is clearer and shields against
+		// future provider default-changes.
+		body.tool_choice = "auto";
+	}
 
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), req.timeoutMs ?? DEFAULT_TIMEOUT_MS);
@@ -111,7 +164,12 @@ export async function chatCompletion(req: ChatCompletionRequest): Promise<ChatCo
 	}
 
 	let parsed: {
-		choices?: Array<{ message?: { content?: string } }>;
+		choices?: Array<{
+			message?: {
+				content?: string | null;
+				tool_calls?: AssistantToolCall[];
+			};
+		}>;
 		usage?: { prompt_tokens?: number; completion_tokens?: number };
 	};
 	try {
@@ -120,14 +178,26 @@ export async function chatCompletion(req: ChatCompletionRequest): Promise<ChatCo
 		return { ok: false, error: "bad_response", detail: `invalid JSON: ${err instanceof Error ? err.message : String(err)}` };
 	}
 
-	const content = parsed.choices?.[0]?.message?.content;
-	if (typeof content !== "string" || content.length === 0) {
-		return { ok: false, error: "empty_response", detail: "no choices[0].message.content in upstream response" };
+	const message = parsed.choices?.[0]?.message;
+	if (!message) {
+		return { ok: false, error: "empty_response", detail: "no choices[0].message in upstream response" };
+	}
+	const content = typeof message.content === "string" ? message.content : "";
+	const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+
+	// A response with neither text nor tool calls is a real failure —
+	// either the provider returned an empty choice or stopped without
+	// a reason.  Earlier behaviour rejected on missing `content`; the
+	// new guard preserves that for the no-tools case while letting
+	// tool-only responses through.
+	if (content.length === 0 && toolCalls.length === 0) {
+		return { ok: false, error: "empty_response", detail: "no content and no tool_calls in upstream response" };
 	}
 
 	return {
 		ok: true,
 		content,
+		tool_calls: toolCalls,
 		prompt_tokens: parsed.usage?.prompt_tokens ?? 0,
 		completion_tokens: parsed.usage?.completion_tokens ?? 0,
 	};
