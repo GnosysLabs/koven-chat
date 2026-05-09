@@ -2538,12 +2538,22 @@ export class MatrixTransport {
 	}
 
 	/** Ask the engine to fix a room's m.room.power_levels so any
-	 * member can issue invites.  Used as a transparent retry inside
-	 * inviteUsers when Synapse rejects with M_FORBIDDEN — see the
-	 * engine's POST /api/rooms/:id/repair-permissions for the
-	 * implementation.  Returns true on a successful repair (or "no
-	 * repair needed"), false otherwise. */
-	private async repairRoomInvitePermissions(roomId: RoomId): Promise<boolean> {
+	 * member can issue invites.  See the engine's POST
+	 * /api/rooms/:id/repair-permissions for the implementation —
+	 * elevates the engine's appservice user via make_room_admin and
+	 * rewrites the PL with `invite: 0` (no-op when invite is
+	 * already 0).
+	 *
+	 * Two callers:
+	 *   1. inviteUsers' transparent retry on M_FORBIDDEN.
+	 *   2. InviteSheet / StartDmSheet's proactive call on open —
+	 *      cheap pre-flight so the room is in good shape by the
+	 *      time the user actually fires an invite.
+	 *
+	 * Returns true on success / no-op-needed, false otherwise.
+	 * Logs to the console with details so first-time-failure cases
+	 * are debuggable in DevTools. */
+	async repairRoomInvitePermissions(roomId: RoomId): Promise<boolean> {
 		const token = this.creds?.access_token;
 		if (!token) return false;
 		try {
@@ -2557,9 +2567,17 @@ export class MatrixTransport {
 					},
 				},
 			);
+			const text = await r.text().catch(() => "");
 			if (!r.ok) {
-				console.warn(`repairRoomInvitePermissions ${roomId} → ${r.status}`);
+				console.warn(
+					`repairRoomInvitePermissions ${roomId} → ${r.status}: ${text.slice(0, 200)}`,
+				);
 				return false;
+			}
+			let body: { repaired?: boolean } = {};
+			try { body = text ? JSON.parse(text) : {}; } catch { /* ignore */ }
+			if (body.repaired) {
+				console.log(`repairRoomInvitePermissions ${roomId} → repaired`);
 			}
 			return true;
 		} catch (err) {

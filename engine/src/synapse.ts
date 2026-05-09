@@ -440,8 +440,14 @@ export async function repairRoomInvitePL(
 		...(pl as Record<string, unknown> | null ?? {}),
 		invite: 0,
 	};
+	// State event PUT — when state_key is empty, the canonical form
+	// is `/state/{eventType}` with NO trailing slash.  An earlier
+	// version of this URL had a trailing slash that some Synapse
+	// versions interpret as a non-empty zero-length state key, 400ing
+	// the request before the auth check even runs.  Belt-and-
+	// suspenders: omit the trailing slash entirely.
 	const putPath =
-		`/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.power_levels/`;
+		`/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.power_levels`;
 	const r = await asFetch(putPath, {
 		method: "PUT",
 		body: JSON.stringify(newContent),

@@ -69,7 +69,15 @@ export function InviteSheet({ open, onOpenChange, transport, roomId, roomName, i
 		// fetch; failure leaves the roster empty (search falls back
 		// to directory only).
 		void fetchBotDirectory().then(setBotRoster);
-	}, [open, roomId]);
+		// Proactive permission repair: rooms created before the
+		// atomic-PL fix can carry a stranded invite>0 power level
+		// that 403s any non-creator's invite.  Fire-and-forget the
+		// repair endpoint on open so the PL is good by the time the
+		// user clicks Invite.  No-ops on already-correct rooms.
+		if (transport && roomId) {
+			void transport.repairRoomInvitePermissions(roomId);
+		}
+	}, [open, roomId, transport]);
 
 	// Debounced search on the homeserver's user directory.  Filters
 	// out the current user and anyone already staged in `selected`.
