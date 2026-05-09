@@ -82,7 +82,30 @@ export function GallerySheet({ open, onOpenChange, messages, roomName }: Gallery
 
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
-			<DialogContent className="sm:max-w-3xl max-h-[85vh] flex flex-col gap-0 p-0 overflow-hidden">
+			<DialogContent
+				className="sm:max-w-3xl max-h-[85vh] flex flex-col gap-0 p-0 overflow-hidden"
+				// Lightbox is portalled to document.body so it can
+				// escape the dialog's transformed containing block
+				// (necessary for the fixed-position overlay to fill
+				// the viewport instead of getting squished into the
+				// dialog's footprint).  Side-effect: clicks on
+				// lightbox chevrons / download / etc. look like
+				// outside-clicks to Radix Dialog, which by default
+				// closes on outside pointer-down — so the dialog
+				// (and the lightbox under it) tore down on the
+				// first chevron tap.  Block the close while the
+				// lightbox is open.  Same for Escape: it should
+				// close the LIGHTBOX first, dialog second.
+				onPointerDownOutside={(e) => {
+					if (lightboxIdx !== null) e.preventDefault();
+				}}
+				onEscapeKeyDown={(e) => {
+					if (lightboxIdx !== null) {
+						e.preventDefault();
+						setLightboxIdx(null);
+					}
+				}}
+			>
 				<DialogHeader className="px-5 pt-5 pb-3 border-b border-border/60">
 					<DialogTitle className="flex items-center gap-2 text-base">
 						<Images className="h-4 w-4 text-muted-foreground" />
