@@ -3,11 +3,19 @@
 // reply, and bump usage counters.  Called from bot_runtime's
 // timeline listener.
 //
-// Atomic by design: the bot stays silent (no typing indicator, no
-// "thinking…" placeholder) until the LLM has produced the full
-// response, then posts once.  Streaming is out of scope per the
-// platform decisions — too much state on the wire for E2EE rooms,
-// and the UX for typing indicators on Matrix is brittle.
+// Progressive UX: while the LLM is thinking and (especially) calling
+// MCP tools, the bot posts a single placeholder message ("🤔
+// Thinking…") and edits it via m.replace as work proceeds — first to
+// "🔧 calling <tool>…" entries as tools fire, finally to the answer
+// itself.  On the user's side this reads as one row in the timeline
+// that progressively updates, so they get tool-call breadcrumbs
+// without two separate messages or any custom event types the client
+// would have to render specially.  We also push a Matrix typing
+// indicator (m.typing) for the same window, refreshed every 20s so
+// it doesn't expire mid-call.  Streaming the actual response text is
+// still out of scope — too much state on the wire for E2EE rooms —
+// but progress breadcrumbs are cheap and load-bearing for tool-using
+// bots that may hold the floor for several seconds.
 //
 // One in-flight LLM call per (bot, room) pair: if a second mention
 // arrives while the first is still running, we drop the second
@@ -130,14 +138,23 @@ async function dispatch(deps: PipelineDeps): Promise<void> {
 		return;
 	}
 
+	// Surface progress to the room: typing indicator + a placeholder
+	// message we'll edit as work proceeds.  Both are best-effort — if
+	// the placeholder send fails we still continue and the eventual
+	// reply just lands as a fresh message (see BotProgress.finalise).
+	const stopTyping = startTypingHeartbeat(client, room.roomId);
+	const progress = new BotProgress(client, room.roomId);
+	await progress.start("🤔 Thinking…");
+
 	// Open MCP sessions up-front for every server attached to this
 	// bot.  Empty bundle (no key, no attachments, all opens failed)
 	// makes the call below behave exactly like the no-tools path.
 	const bundle = await openBotMcpBundle(bot);
 	try {
-		await runToolLoop(deps, messages, apiKey, bundle);
+		await runToolLoop(deps, messages, apiKey, bundle, progress);
 	} finally {
 		await closeBotMcpBundle(bundle);
+		stopTyping();
 	}
 }
 
@@ -157,8 +174,9 @@ async function runToolLoop(
 	initialMessages: ChatMessage[],
 	apiKey: string,
 	bundle: BotMcpBundle,
+	progress: BotProgress,
 ): Promise<void> {
-	const { bot, client, room } = deps;
+	const { bot } = deps;
 	const messages: ChatMessage[] = [...initialMessages];
 
 	let promptTokensTotal = 0;
@@ -189,9 +207,7 @@ async function runToolLoop(
 			if (promptTokensTotal > 0 || completionTokensTotal > 0) {
 				bumpBotUsage(bot.id, promptTokensTotal, completionTokensTotal);
 			}
-			await postPlain(
-				client,
-				room.roomId,
+			await progress.finalise(
 				`(bot error: ${result.error}${result.status ? ` [${result.status}]` : ""}: ${truncate(result.detail, 200)})`,
 			);
 			return;
@@ -211,9 +227,9 @@ async function runToolLoop(
 			bumpBotUsage(bot.id, promptTokensTotal, completionTokensTotal);
 			if (reply.length === 0) {
 				console.warn(`bot ${bot.mxid}: empty reply after tool loop, posting placeholder`);
-				await postPlain(client, room.roomId, "(bot returned no reply)");
+				await progress.finalise("(bot returned no reply)");
 			} else {
-				await postPlain(client, room.roomId, reply);
+				await progress.finalise(reply);
 			}
 			return;
 		}
@@ -228,7 +244,7 @@ async function runToolLoop(
 			);
 			bumpBotUsage(bot.id, promptTokensTotal, completionTokensTotal);
 			const reply = truncate(result.content.trimEnd(), MAX_REPLY_CHARS) || "(bot exceeded tool-use budget)";
-			await postPlain(client, room.roomId, reply);
+			await progress.finalise(reply);
 			return;
 		}
 
@@ -254,6 +270,13 @@ async function runToolLoop(
 			console.log(
 				`bot ${bot.mxid}:   tool ${call.function.name}(${truncate(call.function.arguments, 120)})`,
 			);
+			// Show the tool name (with our srvN__ namespace prefix
+			// stripped so the user sees "search_web" not
+			// "srv5__search_web") in the placeholder message.  Args
+			// are intentionally omitted from the user-visible status
+			// — they often contain raw URLs or full search queries
+			// that aren't useful breadcrumbs and clutter the bubble.
+			await progress.update(`🔧 calling ${prettyToolName(call.function.name)}…`);
 			const toolResult = await dispatchToolCall(bundle, call.function.name, args);
 			console.log(
 				`bot ${bot.mxid}:   ← ${call.function.name} ${toolResult.isError ? "ERROR" : "ok"}`
@@ -265,13 +288,25 @@ async function runToolLoop(
 				content: toolResult.text,
 			});
 		}
+		// Tools just finished; flip the placeholder back to a
+		// generic "thinking" while we wait on the next LLM round.
+		await progress.update("🤔 Thinking…");
 	}
 
 	// Loop fell through without returning — should be unreachable
 	// thanks to the isFinalIter branch, but be paranoid.
 	console.warn(`bot ${bot.mxid}: tool loop exhausted without final reply`);
 	bumpBotUsage(bot.id, promptTokensTotal, completionTokensTotal);
-	await postPlain(client, room.roomId, "(bot exceeded tool-use budget)");
+	await progress.finalise("(bot exceeded tool-use budget)");
+}
+
+/** Strip the `srvN__` namespace prefix our MCP wiring adds so the
+ * user sees the tool's real name in the progress placeholder.  Falls
+ * back to the raw name when there's no prefix (e.g. if a future
+ * non-MCP tool source ever flows through this path). */
+function prettyToolName(namespaced: string): string {
+	const m = /^srv\d+__(.+)$/.exec(namespaced);
+	return m ? m[1]! : namespaced;
 }
 
 /** Best-effort JSON parse of an LLM's tool-call arguments.  Providers
@@ -475,7 +510,7 @@ function buildContext(bot: BotRow, room: SdkRoom, _trigger: MatrixEvent): ChatMe
 	return out;
 }
 
-// ─── Posting ───────────────────────────────────────────────────────
+// ─── Posting + progress ────────────────────────────────────────────
 
 async function postPlain(client: MatrixClient, roomId: string, body: string): Promise<void> {
 	try {
@@ -490,4 +525,120 @@ async function postPlain(client: MatrixClient, roomId: string, body: string): Pr
 
 function truncate(s: string, n: number): string {
 	return s.length > n ? `${s.slice(0, n)}…` : s;
+}
+
+/**
+ * Push a typing indicator (m.typing) for the bot user and keep it
+ * alive with a periodic refresh.  Returns a stop function that
+ * cancels the refresh and clears the indicator.
+ *
+ * Synapse expires typing notifications after their `timeout` ms; if
+ * we set timeout=30s and never refresh, the indicator vanishes
+ * mid-call on slow tool chains.  Refreshing every 20s keeps it
+ * comfortably within that window.  Failures (rate-limit, transient
+ * 5xx) are best-effort and never bubble — losing the indicator is
+ * cosmetic.
+ */
+function startTypingHeartbeat(client: MatrixClient, roomId: string): () => void {
+	const TIMEOUT_MS = 30_000;
+	const REFRESH_MS = 20_000;
+	const send = (typing: boolean, timeoutMs: number) => {
+		// matrix-js-sdk's sendTyping returns a promise.  We deliberately
+		// don't await: typing notifications shouldn't gate the LLM
+		// call's start, and a slow homeserver here would just delay
+		// the actual reply.
+		void client.sendTyping(roomId, typing, timeoutMs).catch(() => { /* cosmetic, ignore */ });
+	};
+	send(true, TIMEOUT_MS);
+	const handle = setInterval(() => send(true, TIMEOUT_MS), REFRESH_MS);
+	return () => {
+		clearInterval(handle);
+		send(false, 0);
+	};
+}
+
+/**
+ * Single-message progress UI for the bot's reply.  Posts a
+ * placeholder message (`🤔 Thinking…`), captures its event id, and
+ * exposes `update()` / `finalise()` that send Matrix m.replace
+ * edits so the original row mutates in place rather than spawning
+ * new messages.  This is the canonical "progressively update" idiom
+ * Element / Cinny / Beeper all render correctly out of the box.
+ *
+ * If the initial send fails (network blip, rate limit), `eventId`
+ * stays null and `finalise()` falls back to sending a fresh
+ * message — the user still sees the answer.  `update()` no-ops in
+ * that case rather than spamming a stream of fresh placeholders.
+ */
+class BotProgress {
+	private eventId: string | null = null;
+	constructor(
+		private readonly client: MatrixClient,
+		private readonly roomId: string,
+	) {}
+
+	/** Send the initial placeholder.  Best-effort; failures are
+	 * logged and leave the progress object inert (subsequent
+	 * update() calls no-op, finalise() sends a fresh message). */
+	async start(body: string): Promise<void> {
+		try {
+			const r = await this.client.sendMessage(this.roomId, {
+				msgtype: MsgType.Text,
+				body,
+			});
+			this.eventId = r.event_id ?? null;
+		} catch (err) {
+			console.warn(`bot progress.start failed in ${this.roomId}`, err);
+		}
+	}
+
+	/** Edit the placeholder to a new body.  Used while tools fire
+	 * to surface "🔧 calling <tool>…" breadcrumbs.  No-op when the
+	 * initial send dropped (eventId never landed). */
+	async update(body: string): Promise<void> {
+		if (!this.eventId) return;
+		await this.sendEdit(body);
+	}
+
+	/** Edit the placeholder to the final reply text.  When the
+	 * placeholder never landed, send the body as a fresh message
+	 * instead so the user still sees the answer. */
+	async finalise(body: string): Promise<void> {
+		if (!this.eventId) {
+			await postPlain(this.client, this.roomId, body);
+			return;
+		}
+		await this.sendEdit(body);
+	}
+
+	/** Internal: emit an m.replace edit pointing at our placeholder.
+	 * The Matrix edit shape is two-bodied: the top-level `body` is a
+	 * fallback for clients that don't render edits (it carries a `*`
+	 * prefix per spec convention), and `m.new_content` is the
+	 * canonical replacement that edit-aware clients display. */
+	private async sendEdit(body: string): Promise<void> {
+		try {
+			// matrix-js-sdk's sendMessage type doesn't expose the
+			// `m.new_content` / `m.relates_to` fields the spec adds
+			// for edits, so we cast through `any` once at the call
+			// site.  The shape is documented in MSC2676 (in-room
+			// message edits) — server-side it's just an opaque
+			// content blob.
+			await this.client.sendMessage(this.roomId, {
+				msgtype: MsgType.Text,
+				body: `* ${body}`,
+				"m.new_content": {
+					msgtype: MsgType.Text,
+					body,
+				},
+				"m.relates_to": {
+					rel_type: "m.replace",
+					event_id: this.eventId!,
+				},
+				// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			} as any);
+		} catch (err) {
+			console.warn(`bot progress edit failed in ${this.roomId}`, err);
+		}
+	}
 }
