@@ -1335,24 +1335,19 @@ export class MatrixTransport {
 				content: { algorithm: "m.megolm.v1.aes-sha2" },
 			});
 		}
-		// Gather space-member invitees + restricted-join state when
-		// the room is being created inside a space.
-		const inviteList: UserId[] = [];
+		// Restricted-join state for private-in-space rooms.  Belt-and-
+		// suspenders alongside the engine's force-join cascade: the
+		// engine pulls every local member of the parent space into
+		// this new room when it sees the m.space.child event below
+		// (see engine/src/server.ts), but the restricted rule also
+		// lets anyone in the parent space join on their own from
+		// federated servers or from clients that connect later.
 		if (opts.parentSpaceId) {
-			// Canonical-parent pointer — paired with the m.space.child
-			// state on the space side, written below via linkRoomToSpace.
 			initialState.push({
 				type: "m.space.parent",
 				state_key: opts.parentSpaceId,
 				content: { canonical: true, via: [this.serverName()] },
 			});
-
-			// Restricted join rule for private-in-space rooms.  Layered
-			// over private_chat's default (join_rule: invite) so the
-			// rule becomes "anyone in the parent space can join, plus
-			// anyone explicitly invited."  Public rooms are already
-			// joinable by anyone on the homeserver, so restricted there
-			// would be a downgrade — skip.
 			if (opts.visibility === "private") {
 				initialState.push({
 					type: "m.room.join_rules",
@@ -1365,20 +1360,6 @@ export class MatrixTransport {
 						}],
 					},
 				});
-			}
-
-			// Pull joined members of the space and invite them (minus
-			// ourselves, who'll be in the room as the creator).  Also
-			// skip invites that the SDK doesn't have synced yet — those
-			// just won't get an explicit invite, but the restricted
-			// rule will still let them in.
-			const space = c.getRoom(opts.parentSpaceId);
-			if (space && myUserId) {
-				for (const member of space.getMembersWithMembership("join")) {
-					if (member.userId !== myUserId) {
-						inviteList.push(member.userId as UserId);
-					}
-				}
 			}
 		}
 		// IMPORTANT: don't pass the full inviteList as the `invite`
@@ -1461,52 +1442,20 @@ export class MatrixTransport {
 		this.emitRoomList();
 		this.emitSpaceList();
 
-		// Fire space-member invites in the background — see comment
-		// at the createRoom call above for why we can't pass the
-		// full list inline.  Don't await: the user has already been
-		// returned the new room id and can navigate into it; invites
-		// trickle out behind that.  Errors logged, never propagated.
-		if (inviteList.length > 0) {
-			void this.inviteUsersThrottled(newRoomId, inviteList);
-		}
+		// NOTE: no client-side fan-out of space-member invites.
+		// linkRoomToSpace (above) wrote an m.space.child state event
+		// on the parent space; the engine receives that via its
+		// appservice /transactions stream and force-joins every local
+		// member of the space to the new child room (see
+		// engine/src/server.ts: "Discord-style: when an admin links
+		// a room into a space, force-join every local member").
+		// That auto-join cascade is rate-limit-aware and works even
+		// if the client that created the room disconnects right
+		// after.  Trying to invite from here in addition would just
+		// race the engine's joins and produce a flurry of "user
+		// already in room" errors.
 
 		return newRoomId;
-	}
-
-	/** Background fan-out of invites that respects Synapse's
-	 * `rc_invites_per_room` rate limit (defaults: burst=10, sustained
-	 * 0.3/sec).  Fires up to `burstCount` invites in parallel to use
-	 * the burst quota, then paces the rest at one every `gapMs`.  No
-	 * await on individual invites — failures (rate-limited, target
-	 * left the homeserver, etc.) are logged but don't block subsequent
-	 * targets.  Used for createRoom's space-member invite fan-out
-	 * where we expect more than 10 recipients. */
-	private async inviteUsersThrottled(
-		roomId: RoomId,
-		userIds: UserId[],
-		opts: { burstCount?: number; gapMs?: number } = {},
-	): Promise<void> {
-		const c = this.requireClient();
-		const burstCount = opts.burstCount ?? 8; // leave a couple under Synapse's default 10
-		const gapMs = opts.gapMs ?? 350;          // ~3/sec, comfortably under sustained limit
-		const tryInvite = async (u: UserId) => {
-			try {
-				await c.invite(roomId, u);
-			} catch (err) {
-				console.warn(`inviteUsersThrottled: failed for ${u}`, err);
-			}
-		};
-		// First burst: fire in parallel.  Synapse counts these all at
-		// once but won't reject the burst as long as it's ≤ burstCount.
-		const burst = userIds.slice(0, burstCount);
-		const rest = userIds.slice(burstCount);
-		await Promise.all(burst.map(tryInvite));
-		// Remaining: serial with a gap so the sustained rate stays
-		// under 0.3/sec.
-		for (const u of rest) {
-			await new Promise(resolve => setTimeout(resolve, gapMs));
-			await tryInvite(u);
-		}
 	}
 
 	/** Create a Matrix space (a room with type m.space). */
