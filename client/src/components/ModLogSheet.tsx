@@ -25,14 +25,27 @@ import { fetchRoomModLog, type ModLogEntry } from "@/lib/instance";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { Ban, Flag, FlagOff, Hammer, ShieldAlert, Trash2, UserX } from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { MatrixTransport } from "@/lib/matrix";
+import { useResolvedUser } from "@/lib/useResolvedUser";
+import { createContext, useContext } from "react";
+
+// Threading the transport through every UserInline call site by hand
+// would be noisy.  Lifting it into a context lets every nested
+// `useResolvedUser` hook find it without prop drilling.  Set once at
+// the sheet root.
+const TransportContext = createContext<MatrixTransport | null>(null);
 
 export interface ModLogSheetProps {
 	open: boolean;
 	onOpenChange(open: boolean): void;
 	roomId: string;
+	/** Drives display-name + avatar resolution for every user
+	 * referenced in the log.  Optional — without it the sheet
+	 * still renders, just falls back to the bare localpart. */
+	transport?: MatrixTransport | null;
 }
 
-export function ModLogSheet({ open, onOpenChange, roomId }: ModLogSheetProps) {
+export function ModLogSheet({ open, onOpenChange, roomId, transport }: ModLogSheetProps) {
 	const [entries, setEntries] = useState<ModLogEntry[] | null>(null);
 
 	useEffect(() => {
@@ -55,19 +68,21 @@ export function ModLogSheet({ open, onOpenChange, roomId }: ModLogSheetProps) {
 					</DialogDescription>
 				</DialogHeader>
 
-				<div className="flex-1 overflow-y-auto -mx-6 px-6">
-					{entries === null ? (
-						<div className="text-sm text-muted-foreground py-6 text-center">Loading…</div>
-					) : entries.length === 0 ? (
-						<div className="text-sm text-muted-foreground italic py-6 text-center border border-dashed border-border rounded">
-							No moderation events recorded in this room yet.
-						</div>
-					) : (
-						<ol className="space-y-2">
-							{entries.map((e, i) => <Entry key={i} e={e} />)}
-						</ol>
-					)}
-				</div>
+				<TransportContext.Provider value={transport ?? null}>
+					<div className="flex-1 overflow-y-auto -mx-6 px-6">
+						{entries === null ? (
+							<div className="text-sm text-muted-foreground py-6 text-center">Loading…</div>
+						) : entries.length === 0 ? (
+							<div className="text-sm text-muted-foreground italic py-6 text-center border border-dashed border-border rounded">
+								No moderation events recorded in this room yet.
+							</div>
+						) : (
+							<ol className="space-y-2">
+								{entries.map((e, i) => <Entry key={i} e={e} />)}
+							</ol>
+						)}
+					</div>
+				</TransportContext.Provider>
 			</DialogContent>
 		</Dialog>
 	);
@@ -295,10 +310,30 @@ function Entry({ e }: { e: ModLogEntry }) {
 }
 
 function UserInline({ userId }: { userId: string }) {
+	const transport = useContext(TransportContext);
+	const resolved = useResolvedUser(transport, userId);
+	// Two display layers:
+	//   - Avatar: real mxc when we've resolved the profile, otherwise
+	//     MatrixAvatar's DiceBear fallback (deterministic per id, so
+	//     it doesn't flip during the resolution round-trip).
+	//   - Label: display name when known, localpart otherwise.  Drops
+	//     the `@user:server` mono-font handle entirely — it was visual
+	//     noise that didn't help the reader.
+	const localpart = userId.startsWith("@") && userId.includes(":")
+		? userId.slice(1, userId.indexOf(":"))
+		: userId;
+	const label = resolved?.displayName ?? localpart;
 	return (
-		<span className="inline-flex items-center gap-1 min-w-0">
-			<MatrixAvatar seed={userId} className="h-4 w-4" />
-			<span className="font-mono text-[10px] truncate">{userId}</span>
+		<span
+			className="inline-flex items-center gap-1 min-w-0"
+			title={userId}
+		>
+			<MatrixAvatar
+				mxc={resolved?.avatarMxc}
+				seed={userId}
+				className="h-4 w-4"
+			/>
+			<span className="text-[11px] font-medium truncate">{label}</span>
 		</span>
 	);
 }

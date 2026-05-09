@@ -1987,6 +1987,7 @@ export default function App() {
 					open
 					onOpenChange={(o) => { if (!o) setModLogRoomId(null); }}
 					roomId={modLogRoomId}
+					transport={transport}
 				/>
 			)}
 			{isAdmin && (

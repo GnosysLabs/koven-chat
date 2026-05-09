@@ -2956,6 +2956,17 @@ export class MatrixTransport {
 	 * is a follow-up (would need either a profile room or a custom
 	 * pubic profile field).
 	 */
+	/** Synchronous read of matrix-js-sdk's User cache.  Populated
+	 * for everyone we've seen via /sync; returns undefined for
+	 * unknown ids (use getUserProfile for the HTTP fetch path).
+	 * Used by hooks that want a free fast-path before falling
+	 * through to a profile request. */
+	getSdkUser(userId: string): { displayName?: string; avatarUrl?: string } | undefined {
+		const u = this.client?.getUser(userId);
+		if (!u) return undefined;
+		return { displayName: u.displayName, avatarUrl: u.avatarUrl ?? undefined };
+	}
+
 	async getUserProfile(userId: UserId): Promise<{
 		userId: UserId;
 		displayName: string;
