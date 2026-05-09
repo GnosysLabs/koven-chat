@@ -1405,25 +1405,31 @@ function MessageRow({
 	// Two-axis padding: pt controls how far this row starts below
 	// the previous row, pb controls the landing zone for THIS row's
 	// reaction pills (which are absolutely-positioned in the gutter
-	// below the bubble — see the `top-full mt-1` block further down).
+	// below the bubble — see the `top-full` block further down).
 	//
 	// Splitting them lets us tighten the Discord-style stack of
 	// consecutive non-reacted messages from the same sender to a
 	// near-flush layout (pt-1 + pb-0.5 = 6px between rows) while
-	// still reserving ~22px of clearance below any row that does
-	// have reactions, so pills never overlap the next bubble.
+	// still reserving enough clearance below any row that does have
+	// reactions for the pills to never overlap the next bubble.
+	//
+	// Pill stack height accounting (from bubble bottom):
+	//   - top-full anchor          0px
+	//   - ReactionPills' own mt-1  4px
+	//   - pill block height       ~24px (px-2 py-0.5 + 1px border)
+	//   total: ~28px
+	// We need pb + next-row pt ≥ 28px to keep the pill clear of the
+	// next bubble.  pb-7 (28px) covers it for both cases:
+	//   pb-7 + pt-1 (continuation) = 32px → 4px tolerance
+	//   pb-7 + pt-4 (new group)    = 44px → comfortable gap
 	//
 	//   - Continuation row pt: pt-1 (4px) — tight stack
 	//   - New-group row pt:    pt-4 (16px) — clear group separator
-	//   - Reacted row pb:      pb-5 (20px) + 4px mt on the pills =
-	//                          ~24px below the bubble; pills (≈22px)
-	//                          fit with 2px tolerance into the next
-	//                          row's pt without pushing flow
-	//   - Non-reacted row pb:  pb-0.5 (2px) — no pills to make room
-	//                          for, no wasted gutter
+	//   - Reacted row pb:      pb-7 (28px) — full pill clearance
+	//   - Non-reacted row pb:  pb-0.5 (2px) — no pills, no gutter
 	const rowPadding = cn(
 		continuesGroup ? "pt-1" : "pt-4",
-		reactions.length > 0 ? "pb-5" : "pb-0.5",
+		reactions.length > 0 ? "pb-7" : "pb-0.5",
 	);
 
 	// Discord-style mention highlight: left accent border + faint
@@ -1617,15 +1623,16 @@ function MessageRow({
 					    reaction never changes the row's flow height —
 					    the next message stays exactly where it was.
 					    The pills render INTO the row's bottom padding
-					    (rowPadding above provides ~12px gutter, enough
-					    for one row of standard pills; many-pill
-					    messages may extend slightly into the gap to
-					    the next row, which is acceptable and only
-					    visible on edge cases).  `top-full` anchors
-					    the pills to the bubble row's bottom edge;
-					    `mt-1` matches the original spacing. */}
+					    (pb-7 on reacted rows; see rowPadding above
+					    for the math).  `top-full` anchors the pills
+					    to the bubble row's bottom edge; the 4px gap
+					    between bubble and pill comes from
+					    ReactionPills' own internal `mt-1`, so we
+					    don't add another margin here — doubling them
+					    up was the cause of the inconsistent spacing
+					    where pills sometimes touched the next bubble. */}
 					{!isCollapsed && reactions.length > 0 && (
-						<div className="absolute left-0 top-full mt-1">
+						<div className="absolute left-0 top-full">
 							<ReactionPills reactions={reactions} onToggle={onToggleReactionPill} />
 						</div>
 					)}
