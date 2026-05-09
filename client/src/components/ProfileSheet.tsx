@@ -272,15 +272,25 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 
 	const hasRealAvatar = !!(pendingAvatarPreview || (!clearAvatar && profile?.avatarUrl));
 
-	// Defer mounting the dialog until the data is fully loaded.
-	// Showing a flash of "Loading…" + the bare mxid while the
-	// profile / bio / reputation fetches resolve was jarring; better
-	// to keep the trigger silent for the few hundred ms it takes the
-	// fetches to land and pop the dialog open with everything in
-	// place.  When `viewedUserId` is set but `loading` is still true,
-	// the dialog stays unmounted; flipping `loading` to false opens it
-	// with all data ready.
-	const dialogOpen = open && !loading;
+	// Defer mounting the dialog until the data is FULLY ready.
+	// `loading` going false isn't enough on its own — if any fetch
+	// in the Promise.all rejects, the .catch flips `loading` false
+	// but leaves `profile` null, which in turn keeps the body's
+	// "Loading…" branch active.  Net effect: dialog opens with a
+	// stuck "Loading…" forever.
+	//
+	// Gate on the same conditions the body's render branch checks,
+	// so the dialog mounts only when the body would render the
+	// real content.  When data is missing (still fetching, or
+	// fetch failed), the dialog stays closed — silent on success
+	// path, silent on error path.  Errors get surfaced via the
+	// parent's existing error banner rather than a stuck dialog.
+	const dialogOpen =
+		open
+		&& !loading
+		&& !!profile
+		&& profile.userId === viewedUserId
+		&& rep !== undefined;
 
 	return (
 		<Dialog open={dialogOpen} onOpenChange={(o) => { if (!o) onClose(); }}>
