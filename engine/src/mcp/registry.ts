@@ -41,6 +41,18 @@ export interface SmitheryServerSummary {
 export interface SmitheryServerDetail extends SmitheryServerSummary {
 	configSchema?: Record<string, unknown>;
 	hasHttpTransport: boolean;
+	/** True when Smithery hosts the server (vs. a local-stdio
+	 * server).  Remote servers with empty configSchema typically
+	 * use Smithery-side OAuth (Reddit, Notion, etc.) — the user
+	 * needs to authorize the integration on Smithery's web UI
+	 * before the connection will work, and there's no per-call
+	 * config we can collect to substitute. */
+	remote: boolean;
+	/** Public Smithery page for this server, used by the client's
+	 * config dialog as the "Configure on Smithery" link.  Always
+	 * derived from the qualified name (smithery.ai/server/<name>)
+	 * since the registry response doesn't directly include it. */
+	smitheryUrl: string;
 }
 
 export interface SmitherySearchResult {
@@ -106,10 +118,14 @@ export async function getSmitheryServer(
 		: ((json as { configSchema?: unknown }).configSchema && typeof (json as { configSchema?: unknown }).configSchema === "object")
 			? (json as { configSchema: Record<string, unknown> }).configSchema
 			: undefined;
+	const remote = (json as { remote?: unknown }).remote === true
+		|| typeof (json as { deploymentUrl?: unknown }).deploymentUrl === "string";
 	return {
 		...summary,
 		configSchema: schema,
 		hasHttpTransport: hasHttp,
+		remote,
+		smitheryUrl: `https://smithery.ai/server/${qualifiedName}`,
 	};
 }
 

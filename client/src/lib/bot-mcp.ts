@@ -39,6 +39,14 @@ export interface SmitheryServerSummary {
 export interface SmitheryServerDetail extends SmitheryServerSummary {
 	configSchema?: Record<string, unknown>;
 	hasHttpTransport: boolean;
+	/** Smithery hosts the server (remote: true).  Servers with
+	 * empty configSchema and remote: true typically use OAuth on
+	 * Smithery's side — the user needs to authorize the
+	 * integration there before the bot's connection works. */
+	remote?: boolean;
+	/** Public Smithery page for the server (smithery.ai/server/...).
+	 * Used by the config dialog's "Configure on Smithery" link. */
+	smitheryUrl?: string;
 }
 
 export interface SmitherySearchResult {

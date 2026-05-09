@@ -45,14 +45,24 @@ export interface McpConfigDialogProps {
 	/** Optional homepage / docs link surfaced as helper copy when the
 	 * server has required fields the user might need docs for. */
 	homepage?: string;
-	/** JSONSchema describing the per-server config.  May be undefined
-	 * for servers that don't need configuration; the dialog should
-	 * not be opened in that case. */
+	/** JSONSchema describing the per-server config.  Empty for
+	 * servers that don't need any per-call config — those usually
+	 * authorize via Smithery OAuth (Reddit, Notion, etc.) and
+	 * trigger the OAuth callout below instead of a form. */
 	configSchema: Record<string, unknown> | undefined;
+	/** True when Smithery hosts the server (vs. local-stdio).
+	 * Combined with empty configSchema, that's the heuristic for
+	 * "this server probably needs OAuth setup on smithery.ai". */
+	remote?: boolean;
+	/** smithery.ai page for the server.  When provided, the dialog
+	 * surfaces a "Configure on Smithery" link the user can follow
+	 * to authorize OAuth integrations.  Required for the OAuth
+	 * callout when configSchema is empty. */
+	smitheryUrl?: string;
 	/** Submit handler — fired with the assembled config object once
-	 * the user clicks "Attach with config".  The dialog stays open
-	 * (with a busy state) until this resolves so any backend error
-	 * can surface inline. */
+	 * the user clicks "Attach".  The dialog stays open (with a
+	 * busy state) until this resolves so any backend error can
+	 * surface inline. */
 	onSubmit(config: Record<string, unknown>): Promise<void>;
 }
 
@@ -136,6 +146,8 @@ export function McpConfigDialog({
 	qualifiedName,
 	homepage,
 	configSchema,
+	remote,
+	smitheryUrl,
 	onSubmit,
 }: McpConfigDialogProps) {
 	const { fields, hasUnsupported } = useMemo(() => fieldsFromSchema(configSchema), [configSchema]);
@@ -228,14 +240,40 @@ export function McpConfigDialog({
 				</DialogHeader>
 				<div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
 					{fields.length === 0 && !hasUnsupported ? (
-						// No declared fields and nothing unsupported.
-						// Shouldn't happen in practice (the parent only
-						// opens this when the schema has required props),
-						// but render a friendly fallback rather than
-						// crashing.
-						<p className="text-sm text-muted-foreground">
-							This server doesn't need any configuration. Click Attach to add it.
-						</p>
+						// No fields to render.  Two sub-cases:
+						//   - Remote (Smithery-hosted) server: most
+						//     likely uses OAuth on Smithery's side
+						//     (Reddit, Notion, GitHub-via-Composio, …).
+						//     There's nothing for us to collect — the
+						//     user authorizes the integration on
+						//     Smithery's web UI before the bot's
+						//     connection works.  Surface a deep link.
+						//   - Local / no-auth server: nothing to do.
+						remote && smitheryUrl ? (
+							<div className="space-y-3">
+								<div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-3 text-sm space-y-2">
+									<p className="font-medium">This server may need authorization on Smithery</p>
+									<p className="text-muted-foreground">
+										Smithery-hosted servers like {displayName} typically use OAuth — sign in once on the Smithery web UI to grant access, and Smithery will pass credentials through automatically when your bot connects.
+									</p>
+									<a
+										href={smitheryUrl}
+										target="_blank"
+										rel="noreferrer"
+										className="inline-block text-primary underline hover:no-underline"
+									>
+										Configure {displayName} on Smithery →
+									</a>
+								</div>
+								<p className="text-xs text-muted-foreground">
+									Click Attach below once you've authorized on Smithery (or attach now and authorize later — the bot will start working as soon as the OAuth grant is in place).
+								</p>
+							</div>
+						) : (
+							<p className="text-sm text-muted-foreground">
+								This server doesn't need any configuration. Click Attach to add it.
+							</p>
+						)
 					) : (
 						<>
 							{fields.length > 0 && (

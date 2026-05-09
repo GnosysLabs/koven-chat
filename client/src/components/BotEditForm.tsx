@@ -1305,7 +1305,7 @@ function ToolsTab({
 		try { detail = await getSmitheryServerDetail(accessToken, server.qualifiedName); } catch { /* fall through */ }
 		setBusyQualifiedName(null);
 
-		if (detail && hasRequiredConfig(detail.configSchema)) {
+		if (detail && needsConfigDialog(detail)) {
 			// Open the dialog and stop here — completion fires
 			// from finishAttach() once the user submits the form.
 			setConfigTarget({ summary: server, detail });
@@ -1552,6 +1552,8 @@ function ToolsTab({
 					qualifiedName={configTarget.summary.qualifiedName}
 					homepage={configTarget.summary.homepage}
 					configSchema={configTarget.detail.configSchema}
+					remote={configTarget.detail.remote}
+					smitheryUrl={configTarget.detail.smitheryUrl}
 					onSubmit={async (config) => {
 						await finishAttach(configTarget.summary, config);
 					}}
@@ -1562,10 +1564,33 @@ function ToolsTab({
 }
 
 /** True if the registry's config schema declares any required
- * fields.  We use this only as a UX warning — empty config is
- * always sent on attach; runtime failures surface in the bot logs. */
+ * fields.  Kept around for callers that want the strict-required
+ * heuristic; today only the broader `needsConfigDialog` is used. */
 function hasRequiredConfig(schema: Record<string, unknown> | undefined): boolean {
 	if (!schema) return false;
 	const required = (schema as { required?: unknown }).required;
 	return Array.isArray(required) && required.length > 0;
+}
+
+/** Should we open the config dialog before attaching this server?
+ *
+ * Three triggers:
+ *   1. Schema has required fields → user must fill them.
+ *   2. Schema has any properties at all (even all optional) → give
+ *      the user a chance to configure non-default values.
+ *   3. Remote (Smithery-hosted) server with empty schema → most
+ *      likely OAuth-based (Reddit, Notion, GitHub-via-Composio).
+ *      Dialog surfaces a "Configure on Smithery" link instead of
+ *      a form so the user can authorize the integration there.
+ *
+ * Servers that fall through (local-stdio with no schema) attach
+ * directly with empty config, no friction. */
+function needsConfigDialog(detail: SmitheryServerDetail): boolean {
+	const schema = detail.configSchema;
+	if (schema) {
+		const props = (schema as { properties?: unknown }).properties;
+		if (props && typeof props === "object" && Object.keys(props).length > 0) return true;
+	}
+	if (detail.remote && detail.smitheryUrl) return true;
+	return false;
 }
