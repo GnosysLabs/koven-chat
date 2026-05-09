@@ -3251,12 +3251,27 @@ export class MatrixTransport {
 			.filter(r => isLiveMembership(r.getMyMembership()))
 			.map(r => this.sdkRoomToRoom(r))
 			.sort((a, b) => {
-				// Sort by last-active so chatty rooms bubble up.
-				// Pin handling is space-scoped and applied in the UI
-				// layer (RoomList), since pins live on the space and
-				// only have meaning when filtering for that space.
-				const ta = this.client!.getRoom(a.id)?.getLastActiveTimestamp() ?? 0;
-				const tb = this.client!.getRoom(b.id)?.getLastActiveTimestamp() ?? 0;
+				// Sort by most-recent MESSAGE-shaped event so chatty
+				// rooms bubble up.  matrix-js-sdk's
+				// getLastActiveTimestamp() returns the latest event of
+				// ANY kind in the timeline, which means engine-driven
+				// state events (m.space.parent / m.space.child writes,
+				// member churn from @engine joining rooms, name + topic
+				// edits, pinned-room updates, etc.) bump quiet rooms to
+				// the top while a room with active conversation but
+				// stable state sinks below them.  That was the "sort
+				// order makes no logical sense" complaint — events
+				// users don't see were driving the order.
+				//
+				// lastMessageTs walks the live timeline from the tail
+				// and returns the ts of the first event whose type is
+				// in MESSAGE_LIKE_TYPES.  Cheap in the steady state
+				// (the latest event IS a message); only walks deeper on
+				// rooms whose tail is dominated by state events.  Pin
+				// handling stays space-scoped and applied in the UI
+				// layer (RoomList).
+				const ta = this.client ? lastMessageTs(this.client.getRoom(a.id)) : 0;
+				const tb = this.client ? lastMessageTs(this.client.getRoom(b.id)) : 0;
 				if (ta !== tb) return tb - ta;
 				return a.name.localeCompare(b.name);
 			});
@@ -4733,6 +4748,41 @@ function stripReplyFallback(body: string): string {
  * makes sure they don't render as ghost rooms with no members. */
 function isLiveMembership(m: string | null): boolean {
 	return m === "join" || m === "invite";
+}
+
+// Event types we treat as "the user said something" for room-list
+// sort-by-recency.  Anything outside this set (state events, receipts,
+// engine-driven membership churn, etc.) is excluded so quiet rooms
+// don't bubble to the top whenever the engine pokes at them.
+const MESSAGE_LIKE_TYPES = new Set([
+	"m.room.message",
+	"m.room.encrypted",
+	"m.sticker",
+	"m.poll.start",
+	"org.matrix.msc3381.poll.start",
+	"m.call.invite",
+]);
+
+/** Walk the live timeline from the tail and return the timestamp of
+ * the most recent message-shaped event, or 0 when none exist (room
+ * has only state activity, never a real message).
+ *
+ * Cheap in the steady state: the last event in an active conversation
+ * IS a message, so the loop exits on the first iteration.  Worst case
+ * is a chatty room whose tail has a long burst of state churn (e.g.
+ * an admin renaming + re-iconing in a row); we walk back through the
+ * burst and stop at the first real message.  Bounded above by the
+ * live timeline's natural length (matrix-js-sdk caps it; older
+ * messages live in paginated chunks not in scope here). */
+function lastMessageTs(r: SdkRoom | null | undefined): number {
+	if (!r) return 0;
+	const events = r.getLiveTimeline().getEvents();
+	for (let i = events.length - 1; i >= 0; i--) {
+		const ev = events[i];
+		if (!ev) continue;
+		if (MESSAGE_LIKE_TYPES.has(ev.getType())) return ev.getTs();
+	}
+	return 0;
 }
 
 function readKovenIconEmoji(r: SdkRoom): string | undefined {
