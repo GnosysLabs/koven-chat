@@ -23,8 +23,6 @@ import { BotBadge } from "@/components/BotBadge";
 import {
 	Camera,
 	ChevronDown,
-	ChevronLeft,
-	ChevronRight,
 	Eye,
 	EyeOff,
 	FileText,
@@ -470,21 +468,9 @@ export function BotEditForm({
 	const tabIndex = availableTabs.findIndex(t => t.key === activeTab);
 	const safeTabIndex = tabIndex < 0 ? 0 : tabIndex;
 	const currentTabKey = availableTabs[safeTabIndex]?.key ?? "identity";
-	const isFirstTab = safeTabIndex === 0;
-	const isLastTab = safeTabIndex === availableTabs.length - 1;
 
 	function goToTab(k: TabKey) {
 		setActiveTab(k);
-	}
-
-	function goNext() {
-		const next = availableTabs[safeTabIndex + 1];
-		if (next) setActiveTab(next.key);
-	}
-
-	function goBack() {
-		const prev = availableTabs[safeTabIndex - 1];
-		if (prev) setActiveTab(prev.key);
 	}
 
 	async function handleSubmit() {
@@ -893,19 +879,6 @@ export function BotEditForm({
 					)
 				)}
 				<div className="flex-1" />
-
-				{!isFirstTab && (
-					<Button type="button" variant="ghost" size="sm" onClick={goBack} className="gap-1">
-						<ChevronLeft className="h-4 w-4" />
-						Back
-					</Button>
-				)}
-				{!isLastTab && (
-					<Button type="button" variant="outline" size="sm" onClick={goNext} className="gap-1">
-						Next
-						<ChevronRight className="h-4 w-4" />
-					</Button>
-				)}
 
 				<Button type="button" variant="ghost" size="sm" onClick={onCancel}>
 					Cancel
