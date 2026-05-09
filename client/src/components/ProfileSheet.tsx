@@ -272,8 +272,18 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 
 	const hasRealAvatar = !!(pendingAvatarPreview || (!clearAvatar && profile?.avatarUrl));
 
+	// Defer mounting the dialog until the data is fully loaded.
+	// Showing a flash of "Loading…" + the bare mxid while the
+	// profile / bio / reputation fetches resolve was jarring; better
+	// to keep the trigger silent for the few hundred ms it takes the
+	// fetches to land and pop the dialog open with everything in
+	// place.  When `viewedUserId` is set but `loading` is still true,
+	// the dialog stays unmounted; flipping `loading` to false opens it
+	// with all data ready.
+	const dialogOpen = open && !loading;
+
 	return (
-		<Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+		<Dialog open={dialogOpen} onOpenChange={(o) => { if (!o) onClose(); }}>
 			<DialogContent className={isSelf ? "sm:max-w-lg" : "sm:max-w-md"}>
 				<DialogHeader>
 					<DialogTitle>{isSelf ? "Profile" : "Member"}</DialogTitle>
