@@ -49,6 +49,7 @@ export interface BotEditFormProps {
 interface FormState {
 	name: string;          // create-only
 	displayName: string;
+	bio: string;
 	provider: BotProvider;
 	apiBase: string;
 	apiKey: string;
@@ -63,6 +64,7 @@ function freshFormState(): FormState {
 	return {
 		name: "",
 		displayName: "",
+		bio: "",
 		provider: "openrouter",
 		apiBase: PROVIDER_DEFAULTS.openrouter.api_base,
 		apiKey: "",
@@ -78,6 +80,7 @@ function formStateFromBot(bot: BotSummary): FormState {
 	return {
 		name: bot.mxid.replace(/^@bot-/, "").replace(/:.*$/, ""),
 		displayName: bot.display_name,
+		bio: bot.bio ?? "",
 		provider: bot.provider,
 		apiBase: bot.api_base,
 		apiKey: "",                // empty by default; sent only if revealed/edited
@@ -260,6 +263,7 @@ export function BotEditForm({
 					system_prompt: form.systemPrompt,
 					context_window: form.contextWindow,
 					triggers: form.triggers,
+					bio: form.bio.trim(),
 				});
 			} else if (bot) {
 				const patch: Record<string, unknown> = {
@@ -270,6 +274,7 @@ export function BotEditForm({
 					system_prompt: form.systemPrompt,
 					context_window: form.contextWindow,
 					triggers: form.triggers,
+					bio: form.bio.trim(),
 				};
 				// Only send api_key if the user replaced it (mask was
 				// off and a non-empty value entered).
@@ -551,6 +556,33 @@ export function BotEditForm({
 									placeholder="GPT Coder"
 								/>
 							</div>
+						</div>
+
+						{/* Public bio — same field humans see on their
+						    profile sheet.  Caps at 300 chars to match
+						    the human ceiling enforced server-side. */}
+						<div className="space-y-1.5 max-w-2xl">
+							<Label htmlFor="bot-bio">
+								Bio <span className="text-muted-foreground font-normal">(optional)</span>
+							</Label>
+							<textarea
+								id="bot-bio"
+								value={form.bio}
+								onChange={e => update("bio", e.target.value)}
+								placeholder="A short description of what this bot does."
+								maxLength={300}
+								rows={2}
+								className={cn(
+									"flex w-full rounded-md border border-foreground/15 bg-transparent px-3 py-1.5 text-sm shadow-sm transition-colors",
+									"hover:border-foreground/25",
+									"placeholder:text-muted-foreground",
+									"focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:border-ring",
+									"resize-none leading-normal",
+								)}
+							/>
+							<p className="text-[10px] text-muted-foreground">
+								Shown on the bot's profile sheet alongside its display name and avatar. {form.bio.length}/300.
+							</p>
 						</div>
 					</section>
 

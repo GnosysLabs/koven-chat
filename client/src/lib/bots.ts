@@ -43,6 +43,10 @@ export interface BotSummary {
 	total_calls: number;
 	last_used_at: number | null;
 	has_api_key: boolean;
+	/** Public bio, the same field humans get on their profile.  Stored
+	 * in the engine's `user_profiles` table keyed by the bot's mxid;
+	 * displayed verbatim in the profile sheet other members see. */
+	bio: string;
 }
 
 export interface BotCreateRequest {
@@ -55,6 +59,9 @@ export interface BotCreateRequest {
 	system_prompt?: string;
 	context_window?: number;
 	triggers?: string[];
+	/** Optional public bio.  Capped at 300 chars server-side; empty
+	 * string skips the write. */
+	bio?: string;
 }
 
 export interface BotPatchRequest {
@@ -70,6 +77,9 @@ export interface BotPatchRequest {
 	enabled?: boolean;
 	/** Replaces the whole list atomically.  Send `[]` to clear. */
 	triggers?: string[];
+	/** Replace the public bio.  Empty string clears.  `undefined` (or
+	 * field omitted) leaves the existing bio alone. */
+	bio?: string;
 }
 
 export interface BotsListResponse {

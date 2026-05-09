@@ -365,6 +365,12 @@ function toBotSummary(row: import("./db").BotRow) {
 		// receiving the value itself.  The PATCH endpoint accepts an
 		// empty string (or omitted field) as "leave the key alone".
 		has_api_key: true,
+		// Public bio — same storage as a human user (user_profiles
+		// row keyed by the bot's mxid).  This is what other members
+		// see in the profile sheet when they tap the bot's avatar.
+		// Returned as "" when unset so the edit form doesn't have to
+		// case-split on null.
+		bio: readBio(row.mxid) ?? "",
 	};
 }
 
@@ -1124,6 +1130,10 @@ export function startServer(): void {
 					? Math.max(1, Math.min(100, Math.floor(body.context_window as number)))
 					: 20;
 				const triggers = sanitiseTriggers(body.triggers);
+				// Optional bio — stored in user_profiles keyed by mxid,
+				// same table that backs human bios.  Capped at 300 chars
+				// to match the human ceiling enforced on PUT /api/profile/me.
+				const bio = typeof body.bio === "string" ? body.bio.slice(0, 300).trim() : "";
 
 				if (!isValidBotName(name)) {
 					return json({ error: "invalid_name", detail: "Use lowercase a-z, 0-9, and -; up to 21 chars." }, { status: 400 });
@@ -1196,6 +1206,10 @@ export function startServer(): void {
 					device_id: token.device_id,
 					triggers,
 				});
+				// Persist the bio against the bot's mxid so other members
+				// see it in the profile sheet.  Empty string skips the
+				// write — readBio falls through to "no bio" naturally.
+				if (bio.length > 0) writeBio(mxid, bio);
 				// Boot the runtime in the background — sync + crypto
 				// init takes seconds; the API call returns immediately
 				// with the new bot's metadata.
@@ -1260,6 +1274,14 @@ export function startServer(): void {
 					}
 					if (Array.isArray(body.triggers)) {
 						patch.triggers = sanitiseTriggers(body.triggers);
+					}
+					// Bio update writes through to user_profiles, parallel
+					// path to PUT /api/profile/me.  Empty string clears.
+					// `bio` undefined = "leave existing bio alone."
+					if (typeof body.bio === "string") {
+						const trimmed = body.bio.slice(0, 300).trim();
+						if (trimmed.length === 0) deleteBio(existing.mxid);
+						else writeBio(existing.mxid, trimmed);
 					}
 
 					const updated = updateBot(id, patch);
