@@ -8,10 +8,13 @@
 // Bots don't emit Matrix presence reliably; the engine keeps them
 // connected so we treat them as a peer category to online humans.
 
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { RepBadge } from "@/components/RepBadge";
 import { BotBadge } from "@/components/BotBadge";
+import { Ban, UserX } from "lucide-react";
 import type { Member } from "@koven/shared";
 
 export interface MemberListProps {
@@ -28,6 +31,19 @@ export interface MemberListProps {
 	// override their presence to "online" (bots are always live as
 	// long as the engine is up).  Optional.
 	botMxids?: Set<string>;
+	// True when the viewer is the founder of the active room — gates
+	// the right-click "Kick / Ban bot" menu.  Mirrors the same gate
+	// that surfaces the founder-only kick/ban controls in
+	// ProfileSheet's "Room moderation" section.
+	canKickBanBots?: boolean;
+	// Invoked when the founder picks Kick or Ban from the right-click
+	// menu on a bot row.  Caller wires this to the same engine
+	// endpoint as ProfileSheet's bot moderation buttons.  Includes
+	// bots the viewer owns — Settings → Bots is for managing the
+	// bot's identity / config across rooms; the right-click menu is
+	// the per-room presence gesture, and "remove my bot from this
+	// room without deleting it globally" is a legitimate action.
+	onBotKickBan?(action: "kick" | "ban", botMxid: string): void | Promise<void>;
 }
 
 /** Effective presence for a member.  Bots always read as online;
@@ -45,7 +61,49 @@ function isInOnlineSection(p: ReturnType<typeof effectivePresence>): boolean {
 	return p === "online" || p === "unavailable";
 }
 
-export function MemberList({ members, currentUserId, onSelectMember, botMxids }: MemberListProps) {
+export function MemberList({
+	members,
+	currentUserId,
+	onSelectMember,
+	botMxids,
+	canKickBanBots,
+	onBotKickBan,
+}: MemberListProps) {
+	// Right-click menu state: { x, y, botMxid } when open, null when
+	// closed.  The menu is portalled to document.body so it can
+	// escape the right-sidebar's clipping bounds.  We position it at
+	// the cursor coordinates from the contextmenu event.
+	const [contextMenu, setContextMenu] = useState<{
+		x: number;
+		y: number;
+		botMxid: string;
+	} | null>(null);
+	const [busyAction, setBusyAction] = useState<"kick" | "ban" | null>(null);
+
+	function openContextMenu(e: React.MouseEvent, botMxid: string) {
+		// Only intercept right-clicks on actual bots when the viewer
+		// has the founder gate.  Anywhere else the browser's default
+		// context menu wins.
+		if (!canKickBanBots || !onBotKickBan) return;
+		e.preventDefault();
+		e.stopPropagation();
+		setContextMenu({ x: e.clientX, y: e.clientY, botMxid });
+	}
+
+	async function handleAction(action: "kick" | "ban") {
+		if (!contextMenu || !onBotKickBan || busyAction) return;
+		const target = contextMenu.botMxid;
+		setBusyAction(action);
+		try {
+			await onBotKickBan(action, target);
+			setContextMenu(null);
+		} catch {
+			// Caller surfaces the error; we just leave the menu open
+			// so the user can retry or dismiss.
+		} finally {
+			setBusyAction(null);
+		}
+	}
 	// Pre-load: render the chrome (header, scroll container) but
 	// nothing inside.  Avoids flashing "No members." or a header
 	// reading "Members · 0" while the fetch is still in flight.
@@ -115,6 +173,7 @@ export function MemberList({ members, currentUserId, onSelectMember, botMxids }:
 										isBot={d.isBot}
 										presence={d.presence}
 										onClick={() => onSelectMember(d.m.userId)}
+										onContextMenu={(e) => openContextMenu(e, d.m.userId)}
 									/>
 								))}
 							</Section>
@@ -136,7 +195,122 @@ export function MemberList({ members, currentUserId, onSelectMember, botMxids }:
 					</>
 				)}
 			</div>
+			{contextMenu && (
+				<BotContextMenu
+					x={contextMenu.x}
+					y={contextMenu.y}
+					busyAction={busyAction}
+					onAction={handleAction}
+					onClose={() => setContextMenu(null)}
+				/>
+			)}
 		</aside>
+	);
+}
+
+/** Floating two-item menu (Kick / Ban) anchored to the cursor's
+ * coordinates.  Portalled to document.body so it can render above
+ * the right sidebar's clipping bounds and over the chat pane.
+ *
+ * Dismissed by:
+ *   - Escape
+ *   - mousedown anywhere outside the menu (any button — left, right,
+ *     middle).  Right-click especially: if you right-click again on
+ *     a different row we want the menu to relocate, not stack.
+ *   - Successful action (handled by the parent via onAction →
+ *     onClose).
+ */
+function BotContextMenu({
+	x,
+	y,
+	busyAction,
+	onAction,
+	onClose,
+}: {
+	x: number;
+	y: number;
+	busyAction: "kick" | "ban" | null;
+	onAction(action: "kick" | "ban"): void;
+	onClose(): void;
+}) {
+	const ref = useRef<HTMLDivElement | null>(null);
+
+	// Outside-click + Escape dismissal.  We listen on `mousedown`
+	// rather than `click` so a fresh right-click on another row
+	// closes us before that row's onContextMenu handler fires —
+	// otherwise the second open would race the first close and the
+	// menu would flicker shut.
+	useEffect(() => {
+		const onDown = (e: MouseEvent) => {
+			if (!ref.current) return;
+			if (ref.current.contains(e.target as Node)) return;
+			onClose();
+		};
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key === "Escape") onClose();
+		};
+		document.addEventListener("mousedown", onDown);
+		document.addEventListener("keydown", onKey);
+		return () => {
+			document.removeEventListener("mousedown", onDown);
+			document.removeEventListener("keydown", onKey);
+		};
+	}, [onClose]);
+
+	if (typeof document === "undefined") return null;
+
+	// Clamp x/y so the menu doesn't escape the viewport on right-
+	// edge or bottom-edge clicks.  Approx menu size is 160x76; using
+	// generous slack so we don't have to measure.
+	const menuW = 168;
+	const menuH = 80;
+	const vw = typeof window !== "undefined" ? window.innerWidth : 1200;
+	const vh = typeof window !== "undefined" ? window.innerHeight : 800;
+	const left = Math.min(x, vw - menuW - 8);
+	const top = Math.min(y, vh - menuH - 8);
+
+	return createPortal(
+		<div
+			ref={ref}
+			role="menu"
+			style={{ position: "fixed", left, top, zIndex: 60 }}
+			className={cn(
+				"min-w-[10.5rem] rounded-md border border-border bg-popover text-popover-foreground shadow-md",
+				"py-1 text-sm",
+			)}
+			// Block the native context menu on the menu itself —
+			// otherwise a second right-click inside the menu would
+			// open a nested browser context menu over our menu.
+			onContextMenu={(e) => e.preventDefault()}
+		>
+			<button
+				type="button"
+				role="menuitem"
+				onClick={() => onAction("kick")}
+				disabled={!!busyAction}
+				className={cn(
+					"w-full px-3 py-1.5 text-left flex items-center gap-2",
+					"text-amber-500 hover:bg-amber-500/10 disabled:opacity-50",
+				)}
+			>
+				<UserX className="h-4 w-4" />
+				{busyAction === "kick" ? "Kicking…" : "Kick bot"}
+			</button>
+			<button
+				type="button"
+				role="menuitem"
+				onClick={() => onAction("ban")}
+				disabled={!!busyAction}
+				className={cn(
+					"w-full px-3 py-1.5 text-left flex items-center gap-2",
+					"text-destructive hover:bg-destructive/10 disabled:opacity-50",
+				)}
+			>
+				<Ban className="h-4 w-4" />
+				{busyAction === "ban" ? "Banning…" : "Ban bot"}
+			</button>
+		</div>,
+		document.body,
 	);
 }
 
@@ -159,19 +333,25 @@ function Section({
 }
 
 function MemberRow({
-	member, isSelf, isBot, presence, onClick,
+	member, isSelf, isBot, presence, onClick, onContextMenu,
 }: {
 	member: Member;
 	isSelf: boolean;
 	isBot: boolean;
 	presence: "online" | "unavailable" | "offline";
 	onClick(): void;
+	// Right-click handler.  Set on bot rows when the viewer is the
+	// room founder; opens the kick/ban menu (see openContextMenu in
+	// MemberList).  Undefined elsewhere — the browser's default
+	// context menu wins on those rows.
+	onContextMenu?(e: React.MouseEvent): void;
 }) {
 	return (
 		<li>
 			<button
 				type="button"
 				onClick={onClick}
+				onContextMenu={onContextMenu}
 				className={cn(
 					"w-full px-4 py-1 flex items-center gap-2 text-sm text-left hover:bg-accent transition-colors",
 					isSelf && "font-medium",

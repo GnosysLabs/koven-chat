@@ -1683,6 +1683,27 @@ export default function App() {
 							currentUserId={creds.user_id}
 							onSelectMember={(userId) => setViewedUserId(userId as UserId)}
 							botMxids={botMxids}
+							// Right-click bot moderation menu — same gate
+							// + handler that ProfileSheet's "Room
+							// moderation" buttons use.  Founder of the
+							// active room gets the kick/ban affordance;
+							// bots they own are excluded (manage from
+							// Settings → Bots instead).
+							canKickBanBots={!!(activeRoom?.creatorId && creds.user_id && activeRoom.creatorId === creds.user_id)}
+							onBotKickBan={async (action, botMxid) => {
+								if (!creds?.access_token || !state.activeRoomId) return;
+								try {
+									await botKickBan(
+										creds.access_token,
+										state.activeRoomId,
+										botMxid as UserId,
+										action,
+									);
+								} catch (e) {
+									dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+									throw e;
+								}
+							}}
 						/>
 					)
 				)}
