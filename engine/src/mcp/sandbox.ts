@@ -37,7 +37,7 @@
 // fallback only triggers in developer environments.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, chownSync } from "node:fs";
+import { existsSync, mkdirSync, chownSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 const SCRATCH_ROOT = "/var/lib/koven-mcp";
@@ -88,25 +88,50 @@ function probeBins(): { bwrap: string | null; prlimit: string | null } {
 
 /** Per-bot scratch directory.  Created on demand; persists across
  * spawns so npm/uv caches the package after the first cold-start.
- * GC'd by the disk janitor after N days of inactivity. */
+ * GC'd by the disk janitor after N days of inactivity.
+ *
+ * Self-heals ownership.  If a previous (broken-UID) run wrote
+ * root-owned files into the scratch dir, the next sandboxed spawn
+ * (running as nobody) can't read/write them and npm dies with
+ * EACCES.  Recursive chown on every call is cheap (small trees,
+ * a no-op stat for already-correct files) and cleanest fix. */
 export function ensureBotScratchDir(botId: number): string {
 	const dir = join(SCRATCH_ROOT, String(botId));
 	if (!existsSync(dir)) {
 		try {
 			mkdirSync(dir, { recursive: true, mode: 0o755 });
-			// chown to nobody so the sandboxed subprocess can write.
-			// Failure is non-fatal — caller may end up running as a
-			// different UID (e.g. dev box without root).
-			try {
-				chownSync(dir, DEFAULT_NOBODY_UID, DEFAULT_NOBODY_GID);
-			} catch (err) {
-				console.warn(`mcp/sandbox: chown ${dir} to nobody failed (non-fatal):`, err);
-			}
 		} catch (err) {
 			console.warn(`mcp/sandbox: mkdir ${dir} failed:`, err);
+			return dir;
 		}
 	}
+	// chown -R nobody:nogroup, but only entries currently owned by
+	// the engine's UID (root in production, possibly different in
+	// dev).  Skipping already-correct entries makes this fast on
+	// warm caches.  Failure is non-fatal — dev environments without
+	// root caps just see the warning + may have permission issues.
+	try {
+		chownRecursiveIfNeeded(dir, DEFAULT_NOBODY_UID, DEFAULT_NOBODY_GID);
+	} catch (err) {
+		console.warn(`mcp/sandbox: chown ${dir} (recursive) failed:`, err);
+	}
 	return dir;
+}
+
+function chownRecursiveIfNeeded(path: string, uid: number, gid: number): void {
+	let st;
+	try { st = statSync(path); } catch { return; }
+	if (st.uid !== uid || st.gid !== gid) {
+		try { chownSync(path, uid, gid); } catch { /* ignore */ }
+	}
+	if (st.isDirectory()) {
+		// Use spawnSync chown -R for speed — Node's recursive
+		// directory walks are slow at scale and chown/chmod aren't
+		// in node:fs/promises with proper recursion until 22+.
+		try {
+			spawnSync("chown", ["-R", `${uid}:${gid}`, path], { stdio: "ignore" });
+		} catch { /* ignore */ }
+	}
 }
 
 export interface SandboxInvocation {
