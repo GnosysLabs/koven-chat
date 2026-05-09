@@ -93,16 +93,19 @@ services:
       # MCP subprocess inside the sandbox does NOT inherit caps.
       - SYS_ADMIN
     security_opt:
-      # Docker's default AppArmor profile blocks the `mount` syscall
-      # even with CAP_SYS_ADMIN — bwrap dies with "Failed to make /
-      # slave: Permission denied" trying to set up its mount
-      # namespace.  apparmor=unconfined unblocks bwrap inside the
-      # engine container WITHOUT removing apparmor protection from
-      # the inner sandbox: bwrap drops all capabilities + sets a
-      # fresh apparmor profile for the subprocess via
-      # --unshare-user-try, so the MCP package the user attached
-      # gets normal apparmor + no caps.  Net trust boundary unchanged.
+      # Docker's default AppArmor + seccomp profiles block syscalls
+      # bwrap needs to set up its mount namespace, even with
+      # CAP_SYS_ADMIN.  Two errors we hit in sequence:
+      #   apparmor blocks mount() → "Failed to make / slave"
+      #   seccomp blocks pivot_root() → "Operation not permitted"
+      # Both unconfined-ed.  Trust boundary unchanged: bwrap drops
+      # all capabilities + sets a fresh, restrictive view for the
+      # inner subprocess via --unshare-user-try, so the MCP package
+      # the user attached runs WITHOUT mount/pivot_root powers.  The
+      # relaxation only applies to the engine process itself, which
+      # is already root-in-container and runs only our trusted code.
       - apparmor:unconfined
+      - seccomp:unconfined
     environment:
       HOMESERVER_URL: http://synapse:8008
       HOMESERVER_NAME: ${SERVER_NAME}
