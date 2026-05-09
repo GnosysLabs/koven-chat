@@ -210,23 +210,23 @@ export async function fanOutMessage(ev: MatrixEvent): Promise<void> {
 	console.log(`[fanout] ev=${ev.event_id} room=${ev.room_id} sender=${ev.sender} type=${ev.type} encrypted=${isEncrypted}`);
 
 	let members = listJoinedRoomMembers(ev.room_id);
-	console.log(`[fanout] cached members for ${ev.room_id}: ${members.length}`);
-	if (members.length === 0) {
-		// Lazy backfill: the engine's `room_members` table is
-		// populated from m.room.member events in the appservice
-		// transaction stream, but those only fire when membership
-		// CHANGES.  Existing memberships from before the
-		// `room_members` schema migration (or from before the
-		// engine was running, or for any room the engine joins
-		// after some membership churn) never appear in the local
-		// table.  When fan-out hits an unknown room, we fetch the
-		// live joined-members list from Synapse once and cache it
-		// going forward.  Subsequent events on the same room hit
-		// the local table without round-trip.  Each room pays the
-		// cost exactly once.
+	// Self-healing backfill: triggers when the cache is empty (no
+	// m.room.member events seen yet for this room) OR when it's
+	// clearly stale (the message sender isn't in it, but they must
+	// be in the room to have just sent a message there).  The stale
+	// case used to slip through silently — once `room_members` had
+	// even one row for a room, the empty-cache check stopped firing
+	// even though the row count was way below the actual member
+	// count, leading to "DM-flavoured" notifications being written
+	// to wrong recipients in actually-large rooms.  Refresh against
+	// Synapse's admin /members and upsert the live list whenever
+	// either condition is true.
+	const cacheLooksStale = !members.includes(ev.sender);
+	console.log(`[fanout] cached members for ${ev.room_id}: ${members.length} stale=${cacheLooksStale}`);
+	if (members.length === 0 || cacheLooksStale) {
 		try {
 			const live = await getJoinedMembers(ev.room_id);
-			console.log(`[fanout] backfill via admin API for ${ev.room_id} → ${live.length} members: ${JSON.stringify(live)}`);
+			console.log(`[fanout] backfill via admin API for ${ev.room_id} → ${live.length} members`);
 			if (live.length > 0) {
 				const ts = ev.origin_server_ts;
 				for (const u of live) {
