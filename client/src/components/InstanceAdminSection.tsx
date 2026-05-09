@@ -88,12 +88,24 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 		setError(null);
 		setInfo(null);
 		try {
-			const next = await updateInstanceConfig(accessToken, {
+			const patch: Record<string, string | null> = {
 				name: name.trim() || null,
 				login_tagline: tagline.trim() || null,
 				default_space_id: defaultSpaceId || null,
-			});
+			};
+			// Only write the Giphy key when the admin has typed
+			// something — never overwrite an existing key with empty
+			// (Clear is the explicit way to remove it).
+			if (giphyKeyDraft.trim()) patch.giphy_api_key = giphyKeyDraft.trim();
+			const next = await updateInstanceConfig(accessToken, patch);
 			setConfig(next);
+			if (giphyKeyDraft.trim()) {
+				// Re-fetch integrations to flip the badge to "configured"
+				// and clear the draft so the input goes back to placeholder.
+				const integ = await fetchIntegrationsStatus(accessToken);
+				setIntegrations(integ);
+				setGiphyKeyDraft("");
+			}
 			setInfo("Saved.");
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
@@ -147,26 +159,6 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 		}
 	}
 
-	async function saveGiphyKey() {
-		if (!giphyKeyDraft.trim()) return;
-		setPending(true);
-		setError(null);
-		setInfo(null);
-		try {
-			await updateInstanceConfig(accessToken, { giphy_api_key: giphyKeyDraft.trim() });
-			// Re-fetch integrations to flip the badge to "configured"
-			// without exposing the value we just wrote.
-			const next = await fetchIntegrationsStatus(accessToken);
-			setIntegrations(next);
-			setGiphyKeyDraft("");
-			setInfo("Giphy API key saved.");
-		} catch (err) {
-			setError(err instanceof Error ? err.message : String(err));
-		} finally {
-			setPending(false);
-		}
-	}
-
 	async function clearGiphyKey() {
 		setPending(true);
 		setError(null);
@@ -204,7 +196,8 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 	const dirty =
 		name.trim() !== (config.name ?? "") ||
 		tagline.trim() !== (config.login_tagline ?? "") ||
-		defaultSpaceId !== (config.default_space_id ?? "");
+		defaultSpaceId !== (config.default_space_id ?? "") ||
+		giphyKeyDraft.trim() !== "";
 
 	return (
 		<section>
@@ -403,15 +396,6 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 								placeholder={integrations?.giphy.configured ? "•••••••• (paste a new key to replace)" : "Paste your Giphy API key"}
 								disabled={pending}
 							/>
-							<Button
-								type="button"
-								variant="outline"
-								size="sm"
-								onClick={saveGiphyKey}
-								disabled={pending || !giphyKeyDraft.trim()}
-							>
-								Save
-							</Button>
 							{integrations?.giphy.configured && (
 								<Button
 									type="button"
