@@ -1,6 +1,6 @@
 [package]
 name = "koven-desktop"
-version = "0.10.0"
+version = "0.10.1"
 description = "Koven desktop shell — Tauri WebView wrapping client.koven.chat with native window chrome, OS-routed external links, and a minisign-signed in-app updater."
 authors = ["Gnosys Labs"]
 edition = "2021"
