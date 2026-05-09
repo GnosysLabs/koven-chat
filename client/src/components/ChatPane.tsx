@@ -236,6 +236,11 @@ export interface ChatPaneProps {
 // rapid-fire bursts, shorter than separate sessions.
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
 
+// Cap for the multi-attachment composer.  10 mirrors Discord's
+// per-message attachment limit and stops a "select all 250 files in
+// this folder" mistake from spamming the room with 250 events.
+const MAX_PENDING_ATTACHMENTS = 10;
+
 export function ChatPane({
 	room, messages, memberAvatars, reactionsByMessage, flagsByMessage, collapsesByMessage,
 	onSendMessage, onSendAttachment, onReact, onUnreact, onFlag, onUnflag, onAcceptInvite, onDeclineInvite, onInvite, onEditRoom,
@@ -277,10 +282,14 @@ export function ChatPane({
 	const [galleryOpen, setGalleryOpen] = useState(false);
 	const [draft, setDraft] = useState("");
 	const [replyTarget, setReplyTarget] = useState<Message | null>(null);
-	// Pending attachment: the user picked a file but hasn't hit send yet.
-	// We don't auto-send on pick so they can pair the attachment with a
-	// caption, change their mind, or attach a different file.
-	const [pendingAttachment, setPendingAttachment] = useState<File | null>(null);
+	// Pending attachments: the user picked one or more files but hasn't
+	// hit send yet.  Up to MAX_PENDING_ATTACHMENTS at once; each file
+	// posts as its OWN m.room.message event in pick order — no album
+	// grouping, no metadata UI, just a row of thumbnails the user can
+	// remove individually before sending.  Optional caption in the
+	// composer goes out as a separate text message AFTER the media so
+	// the timeline reads attachments-then-comment.
+	const [pendingAttachments, setPendingAttachments] = useState<File[]>([]);
 	const [uploading, setUploading] = useState(false);
 	// Modal state for the create-poll dialog.  Triggered from the
 	// composer button; close on submit (the dialog handles the close
@@ -477,11 +486,11 @@ export function ChatPane({
 		};
 	}, []);
 
-	// Clear the reply target + any pending attachment when the user
+	// Clear the reply target + any pending attachments when the user
 	// switches rooms — those are scoped to the previous conversation.
 	useEffect(() => {
 		setReplyTarget(null);
-		setPendingAttachment(null);
+		setPendingAttachments([]);
 		setUploading(false);
 	}, [room?.id]);
 
@@ -582,23 +591,41 @@ export function ChatPane({
 	};
 
 	function send() {
-		// Attachment send: any text in the composer travels as a
-		// caption on the same event (MSC2530 — body becomes the
-		// caption, filename carries the real filename).  Receivers
-		// that know MSC2530 render caption under the media; older
-		// clients fall back to showing body as the message text.
-		if (pendingAttachment && onSendAttachment) {
-			const file = pendingAttachment;
+		// Attachment send: each pending file posts as its OWN
+		// m.room.message event in pick order.  No album grouping —
+		// the user said "post them to the chat normally," so each
+		// file is a standalone media event the room treats like any
+		// other.  Reply-to attaches only to the FIRST event so a
+		// thread reply still threads (the rest are loose siblings),
+		// and any composer text is sent as a separate trailing text
+		// message after every upload resolves so the timeline reads
+		// thumbnails-then-comment.
+		if (pendingAttachments.length > 0 && onSendAttachment) {
+			const files = pendingAttachments;
 			const replyToId = replyTarget?.id ?? null;
 			const captionText = draft.trim();
 			setUploading(true);
-			onSendAttachment(file, replyToId, captionText || null)
-				.then(() => {
-					setPendingAttachment(null);
+			void (async () => {
+				try {
+					for (let i = 0; i < files.length; i++) {
+						const file = files[i]!;
+						// Reply-to only on the first event — see above.
+						await onSendAttachment(file, i === 0 ? replyToId : null, null);
+					}
+					if (captionText) {
+						// Send the caption as a normal text message after
+						// the media.  No reply-to on the caption since
+						// reply-to is already carried by the first media
+						// event; double-threading would be confusing.
+						onSendMessage(captionText, null);
+					}
+					setPendingAttachments([]);
 					setReplyTarget(null);
 					setDraft("");
-				})
-				.finally(() => setUploading(false));
+				} finally {
+					setUploading(false);
+				}
+			})();
 			return;
 		}
 		const text = draft.trim();
@@ -608,8 +635,19 @@ export function ChatPane({
 		setReplyTarget(null);
 	}
 
-	function pickAttachment(file: File) {
-		setPendingAttachment(file);
+	function pickAttachments(files: File[]) {
+		// Append (don't replace) so picking files in two separate
+		// gestures stacks instead of overwriting.  Capped at
+		// MAX_PENDING_ATTACHMENTS — the slice is silent when the
+		// user picks more than the cap; the file picker doesn't have
+		// a clean way to surface "you picked too many" mid-flow, so
+		// we just take the first N and rely on the visible chip count
+		// to communicate the cap.
+		setPendingAttachments(prev => {
+			const room = MAX_PENDING_ATTACHMENTS - prev.length;
+			if (room <= 0) return prev;
+			return [...prev, ...files.slice(0, room)];
+		});
 	}
 
 	// GIFs from the Giphy picker bypass the preview/caption flow:
@@ -981,11 +1019,11 @@ export function ChatPane({
 						</button>
 					</div>
 				)}
-				{pendingAttachment && (
-					<PendingAttachmentChip
-						file={pendingAttachment}
+				{pendingAttachments.length > 0 && (
+					<PendingAttachmentsRow
+						files={pendingAttachments}
 						uploading={uploading}
-						onRemove={() => setPendingAttachment(null)}
+						onRemove={(idx) => setPendingAttachments(prev => prev.filter((_, i) => i !== idx))}
 					/>
 				)}
 				<form
@@ -997,12 +1035,15 @@ export function ChatPane({
 							<input
 								ref={fileInputRef}
 								type="file"
+								multiple
 								className="hidden"
 								onChange={e => {
-									const file = e.target.files?.[0];
-									if (file) pickAttachment(file);
-									// Reset so the same file can be re-picked
-									// after a remove + re-attach.
+									const list = e.target.files;
+									if (list && list.length > 0) {
+										pickAttachments(Array.from(list));
+									}
+									// Reset so the same file(s) can be re-
+									// picked after a remove + re-attach.
 									e.target.value = "";
 								}}
 								disabled={isSuspended || uploading}
@@ -1010,10 +1051,14 @@ export function ChatPane({
 							<button
 								type="button"
 								onClick={() => fileInputRef.current?.click()}
-								disabled={isSuspended || uploading || !!pendingAttachment}
+								disabled={isSuspended || uploading || pendingAttachments.length >= MAX_PENDING_ATTACHMENTS}
 								className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-								title="Attach a file"
-								aria-label="Attach a file"
+								title={
+									pendingAttachments.length >= MAX_PENDING_ATTACHMENTS
+										? `Up to ${MAX_PENDING_ATTACHMENTS} files per message`
+										: "Attach files"
+								}
+								aria-label="Attach files"
 							>
 								<Paperclip className="h-4 w-4" />
 							</button>
@@ -1026,7 +1071,7 @@ export function ChatPane({
 						<button
 							type="button"
 							onClick={() => setPollDialogOpen(true)}
-							disabled={isSuspended || uploading || !!pendingAttachment}
+							disabled={isSuspended || uploading || pendingAttachments.length > 0}
 							className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
 							title="Create a poll"
 							aria-label="Create a poll"
@@ -1042,12 +1087,12 @@ export function ChatPane({
 						// the bottom of the multi-line composer.
 						<GifPicker
 							accessToken={accessToken}
-							disabled={isSuspended || uploading || !!pendingAttachment}
+							disabled={isSuspended || uploading || pendingAttachments.length > 0}
 							onPick={sendGif}
 						>
 							<button
 								type="button"
-								disabled={isSuspended || uploading || !!pendingAttachment}
+								disabled={isSuspended || uploading || pendingAttachments.length > 0}
 								className={cn(
 									"h-8 px-2 rounded-md inline-flex items-center justify-center",
 									"text-[10px] font-bold tracking-wide",
@@ -1127,7 +1172,7 @@ export function ChatPane({
 									? "Posting paused while your account is under review"
 									: uploading
 										? "Sending…"
-										: pendingAttachment
+										: pendingAttachments.length > 0
 											? "Add a caption…"
 											: replyTarget
 												? `Reply to ${replyTarget.senderDisplayName}`
@@ -2054,11 +2099,40 @@ function AttachmentFileCard({ message }: { message: Message }) {
 	);
 }
 
-// Compose-row preview for a file the user has selected but hasn't
-// sent yet.  Image files render as a small square thumbnail (object-
-// URL preview); everything else gets a file glyph + extension badge
-// in the same square footprint.  Filename + size live to the right.
-function PendingAttachmentChip({
+// Compose-row preview for one or more files the user has selected but
+// hasn't sent yet.  Renders as a horizontal row of thumbnail squares
+// — image/video files show their own bytes via an object URL, anything
+// else falls back to a file glyph + extension badge.  No filename, no
+// byte count, no MIME chip: the user said "just thumbnails," and a
+// grid of names + sizes was reading as a directory listing instead of
+// "here's what I'm about to send."
+//
+// Each thumbnail has a hover-revealed X overlay that removes that file
+// from the pending list.  The X stays visible while uploading is true
+// so the user can still cancel mid-send if it's stuck — but disabled
+// so it can't fire while the underlying array is being drained.
+function PendingAttachmentsRow({
+	files, uploading, onRemove,
+}: {
+	files: File[];
+	uploading: boolean;
+	onRemove(index: number): void;
+}) {
+	return (
+		<div className="mb-2 flex flex-wrap gap-2 px-1">
+			{files.map((file, idx) => (
+				<PendingAttachmentThumb
+					key={`${file.name}-${file.size}-${idx}`}
+					file={file}
+					uploading={uploading}
+					onRemove={() => onRemove(idx)}
+				/>
+			))}
+		</div>
+	);
+}
+
+function PendingAttachmentThumb({
 	file, uploading, onRemove,
 }: {
 	file: File;
@@ -2066,19 +2140,56 @@ function PendingAttachmentChip({
 	onRemove(): void;
 }) {
 	const isImage = file.type.startsWith("image/");
+	const isVideo = file.type.startsWith("video/");
+	// HEIC needs special handling: Chrome and Firefox can't decode it
+	// natively, so a plain object URL points at bytes the <img> tag
+	// renders as a broken icon.  We run the same heic-to conversion
+	// the upload pipeline uses to get a previewable PNG blob, then
+	// substitute its object URL for the thumbnail.  Safari (which
+	// CAN decode HEIC) still goes through this path — the conversion
+	// is fast and the trade-off (consistent preview across browsers)
+	// is worth the extra ms.
+	const isHeic = file.type === "image/heic"
+		|| file.type === "image/heif"
+		|| /\.(heic|heif)$/i.test(file.name);
 	// Object URL is created once per file and revoked when the chip
-	// unmounts (or the file changes).  Skipped for non-images to avoid
-	// pinning the bytes for nothing.
+	// unmounts (or the file changes).  Skipped for non-image/video
+	// files to avoid pinning the bytes for nothing.
 	const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 	useEffect(() => {
-		if (!isImage) {
+		if (!isImage && !isVideo) {
 			setPreviewUrl(null);
 			return;
 		}
-		const url = URL.createObjectURL(file);
-		setPreviewUrl(url);
-		return () => URL.revokeObjectURL(url);
-	}, [file, isImage]);
+		let cancelled = false;
+		let revokeUrl: string | null = null;
+		const setUp = async () => {
+			let blob: Blob = file;
+			if (isHeic) {
+				try {
+					const { heicTo } = await import("heic-to");
+					blob = await heicTo({ blob: file, type: "image/png" });
+				} catch (err) {
+					// Conversion failed (corrupt file, OOM, etc.) — fall
+					// through to a generic file glyph by clearing the
+					// preview URL.  Upload still proceeds; only the
+					// thumbnail is degraded.
+					console.warn("PendingAttachmentThumb: HEIC preview decode failed", err);
+					if (!cancelled) setPreviewUrl(null);
+					return;
+				}
+			}
+			if (cancelled) return;
+			const url = URL.createObjectURL(blob);
+			revokeUrl = url;
+			setPreviewUrl(url);
+		};
+		void setUp();
+		return () => {
+			cancelled = true;
+			if (revokeUrl) URL.revokeObjectURL(revokeUrl);
+		};
+	}, [file, isImage, isVideo, isHeic]);
 
 	const ext =
 		(file.name.match(/\.([A-Za-z0-9]{1,5})$/)?.[1] ??
@@ -2088,41 +2199,50 @@ function PendingAttachmentChip({
 			.slice(0, 4);
 
 	return (
-		<div className="mb-2 flex items-center gap-3 px-2 py-2 rounded-md bg-muted/60 border border-border text-xs">
-			<div className="relative h-12 w-12 shrink-0 rounded-md overflow-hidden bg-muted-foreground/10 flex items-center justify-center">
-				{previewUrl ? (
-					<img
-						src={previewUrl}
-						alt=""
-						className="h-full w-full object-cover"
-					/>
-				) : (
-					<>
-						<FileIcon className="h-5 w-5 text-muted-foreground" />
-						<span className="absolute bottom-0.5 right-0.5 text-[8px] font-semibold tracking-wider px-1 py-px rounded bg-card/90 text-foreground border border-border leading-none">
-							{ext}
-						</span>
-					</>
-				)}
-			</div>
-			<div className="flex-1 min-w-0">
-				<div className="text-foreground font-medium truncate">
-					{file.name}
-				</div>
-				<div className="text-muted-foreground tabular-nums">
-					{formatBytes(file.size)}
-					{file.type ? ` · ${file.type}` : ""}
-				</div>
-			</div>
+		<div className="relative group h-20 w-20 shrink-0 rounded-md overflow-hidden bg-muted/60 border border-border flex items-center justify-center">
+			{previewUrl && isImage && (
+				<img
+					src={previewUrl}
+					alt=""
+					className="h-full w-full object-cover"
+				/>
+			)}
+			{previewUrl && isVideo && (
+				<video
+					src={previewUrl}
+					className="h-full w-full object-cover"
+					muted
+					playsInline
+					// Autoplay paused — the first frame paints as the
+					// thumbnail without burning CPU on continuous
+					// playback.  Browsers without preload="metadata"
+					// support fall through to a black square, which
+					// is fine.
+					preload="metadata"
+				/>
+			)}
+			{!previewUrl && (
+				<>
+					<FileIcon className="h-6 w-6 text-muted-foreground" />
+					<span className="absolute bottom-1 right-1 text-[8px] font-semibold tracking-wider px-1 py-px rounded bg-card/90 text-foreground border border-border leading-none">
+						{ext}
+					</span>
+				</>
+			)}
 			<button
 				type="button"
 				onClick={onRemove}
 				disabled={uploading}
-				className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent shrink-0 disabled:opacity-50"
+				className={cn(
+					"absolute top-0.5 right-0.5 p-1 rounded-full bg-background/80 backdrop-blur-sm",
+					"text-foreground hover:bg-destructive hover:text-destructive-foreground transition-colors",
+					"opacity-0 group-hover:opacity-100 focus:opacity-100",
+					"disabled:opacity-40 disabled:cursor-not-allowed",
+				)}
 				aria-label="Remove attachment"
 				title="Remove attachment"
 			>
-				<X className="h-4 w-4" />
+				<X className="h-3 w-3" />
 			</button>
 		</div>
 	);

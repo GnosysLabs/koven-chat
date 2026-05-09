@@ -174,8 +174,14 @@ export async function uploadBotAvatar(
 	id: number,
 	file: File,
 ): Promise<BotSummary> {
+	// Same image-sanitiser the chat-attachment + room/space avatar
+	// paths run: HEIC inputs come out as PNG, EXIF-bearing JPEG/PNG
+	// come out re-encoded.  Lazy-imported so the heic-to bundle only
+	// downloads when someone actually picks a HEIC.
+	const { sanitizeImageForUpload } = await import("@/lib/imageSanitize");
+	const sanitized = await sanitizeImageForUpload(file);
 	const form = new FormData();
-	form.append("file", file);
+	form.append("file", sanitized);
 	const r = await fetch(`${ENGINE_URL}/api/bots/${id}/avatar`, {
 		method: "POST",
 		headers: {

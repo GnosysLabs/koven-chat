@@ -540,8 +540,16 @@ async function uploadInstanceImage(
 	file: File,
 	endpoint: "login-bg" | "logo",
 ): Promise<InstanceConfig> {
+	// Sanitise images before sending: HEIC → PNG conversion + EXIF
+	// strip on JPEG/PNG.  Same lazy-loaded helper the chat-attachment
+	// + bot/avatar paths use.  Branding images on a public login page
+	// are an especially sharp privacy edge — admins routinely use
+	// phone photos as login backgrounds, and those carry GPS by
+	// default — so keep this consistent with the rest of the surface.
+	const { sanitizeImageForUpload } = await import("@/lib/imageSanitize");
+	const sanitized = await sanitizeImageForUpload(file);
 	const form = new FormData();
-	form.append("file", file);
+	form.append("file", sanitized);
 	const r = await fetch(`${ENGINE_URL}/api/instance/${endpoint}`, {
 		method: "POST",
 		headers: { Authorization: `Bearer ${accessToken}` },

@@ -1388,14 +1388,44 @@ export class MatrixTransport {
 	 * client-side, and routes through the encrypted-attachment path
 	 * when the target room is end-to-end encrypted.
 	 */
+	/**
+	 * Upload an image File and return its mxc:// URI.  Pipes through
+	 * the same sanitiser the chat-attachment path uses, so HEIC
+	 * inputs come out as PNG and JPEG/PNG come out EXIF-stripped.
+	 *
+	 * Centralised so every avatar-upload site (room create/update,
+	 * space create/update, user profile, bot edit) gets the policy
+	 * for free without each one importing imageSanitize directly.
+	 */
+	async uploadAvatarImage(file: File): Promise<string> {
+		const c = this.requireClient();
+		const { sanitizeImageForUpload } = await import("@/lib/imageSanitize");
+		const sanitized = await sanitizeImageForUpload(file);
+		const upload = await c.uploadContent(sanitized, {
+			name: sanitized.name,
+			type: sanitized.type,
+		} as Parameters<typeof c.uploadContent>[1]);
+		return upload.content_uri as string;
+	}
+
 	async uploadAndSendAttachment(
 		roomId: RoomId,
-		file: File,
+		fileIn: File,
 		caption?: string,
 	): Promise<EventId> {
 		const c = this.requireClient();
 		const room = c.getRoom(roomId);
 		const isEncrypted = !!room && (room as any).hasEncryptionStateEvent?.() === true;
+
+		// Sanitise images BEFORE we read the rest of the metadata so
+		// every downstream computation (msgtype, mimetype, byte size,
+		// dimensions, encrypted-attachment ciphertext) reflects the
+		// version that will actually hit the wire.  HEIC inputs come
+		// out as PNG; static JPEG/PNG come out re-encoded with EXIF
+		// stripped; everything else passes through unchanged.  See
+		// imageSanitize.ts for the full policy + skip list.
+		const { sanitizeImageForUpload } = await import("@/lib/imageSanitize");
+		const file = await sanitizeImageForUpload(fileIn);
 
 		const msgtype =
 			file.type.startsWith("image/") ? "m.image" :
@@ -1749,12 +1779,9 @@ export class MatrixTransport {
 			// without an avatar (the founder can re-upload from
 			// RoomEditSheet).  Don't fail the create over it.
 			try {
-				const upload = await c.uploadContent(opts.avatarFile, {
-					name: opts.avatarFile.name,
-					type: opts.avatarFile.type,
-				} as Parameters<typeof c.uploadContent>[1]);
+				const mxc = await this.uploadAvatarImage(opts.avatarFile);
 				await c.sendStateEvent(newRoomId, "m.room.avatar" as Parameters<typeof c.sendStateEvent>[1], {
-					url: upload.content_uri as string,
+					url: mxc,
 				}, "");
 			} catch (err) {
 				console.warn("createRoom: avatar upload failed", err);
@@ -1864,12 +1891,9 @@ export class MatrixTransport {
 		const spaceId = res.room_id as SpaceId;
 		if (opts.avatarFile) {
 			try {
-				const upload = await c.uploadContent(opts.avatarFile, {
-					name: opts.avatarFile.name,
-					type: opts.avatarFile.type,
-				} as any);
+				const mxc = await this.uploadAvatarImage(opts.avatarFile);
 				await c.sendStateEvent(spaceId, "m.room.avatar" as any, {
-					url: upload.content_uri as string,
+					url: mxc,
 				}, "");
 			} catch (err) {
 				// Avatar set is best-effort — we don't want to fail the
@@ -2292,12 +2316,9 @@ export class MatrixTransport {
 			await c.sendStateEvent(opts.spaceId, "m.room.topic" as any, { topic: opts.topic }, "");
 		}
 		if (opts.avatarFile) {
-			const upload = await c.uploadContent(opts.avatarFile, {
-				name: opts.avatarFile.name,
-				type: opts.avatarFile.type,
-			} as any);
+			const mxc = await this.uploadAvatarImage(opts.avatarFile);
 			await c.sendStateEvent(opts.spaceId, "m.room.avatar" as any, {
-				url: upload.content_uri as string,
+				url: mxc,
 			}, "");
 		} else if (opts.clearAvatar) {
 			await c.sendStateEvent(opts.spaceId, "m.room.avatar" as any, {}, "");
@@ -2387,12 +2408,9 @@ export class MatrixTransport {
 			await c.sendStateEvent(opts.roomId, "m.room.topic" as any, { topic: opts.topic }, "");
 		}
 		if (opts.avatarFile) {
-			const upload = await c.uploadContent(opts.avatarFile, {
-				name: opts.avatarFile.name,
-				type: opts.avatarFile.type,
-			} as any);
+			const mxc = await this.uploadAvatarImage(opts.avatarFile);
 			await c.sendStateEvent(opts.roomId, "m.room.avatar" as any, {
-				url: upload.content_uri as string,
+				url: mxc,
 			}, "");
 		} else if (opts.clearAvatar) {
 			await c.sendStateEvent(opts.roomId, "m.room.avatar" as any, {}, "");
@@ -3382,11 +3400,7 @@ export class MatrixTransport {
 		}
 		let avatarUrl: string | null | undefined;
 		if (opts.avatarFile) {
-			const upload = await c.uploadContent(opts.avatarFile, {
-				name: opts.avatarFile.name,
-				type: opts.avatarFile.type,
-			} as any);
-			avatarUrl = upload.content_uri as string;
+			avatarUrl = await this.uploadAvatarImage(opts.avatarFile);
 			await c.setAvatarUrl(avatarUrl);
 		} else if (opts.clearAvatar) {
 			avatarUrl = null;
