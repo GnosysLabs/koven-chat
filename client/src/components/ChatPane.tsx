@@ -1445,65 +1445,72 @@ function MessageRow({
 					</div>
 				)}
 				{message.replyTo && <ReplyQuote replyTo={message.replyTo} />}
-				{/* Bubble + actions sit on a single line — actions appear
-				    just to the right of the bubble on hover, vertically
-				    centered against it. */}
-				<div className="flex items-center gap-2">
+				{/* Bubble on the left, sidecar (seen-by + flag pill +
+				    hover actions) stacked in a thin column on the
+				    right.  Stacking keeps the sidecar's footprint
+				    constant whether or not the action toolbar is
+				    showing — without it, the toolbar appearing on
+				    hover would force the bubble to shrink to make
+				    room (very visible on full-width content like
+				    polls). */}
+				<div className="flex items-start gap-2">
 					{isCollapsed ? (
 						<CollapsedBubble collapse={collapse!} onExpand={() => setExpanded(true)} />
 					) : (
 						<MessageBubble
-						message={message}
-						memberNames={memberNames}
-						onMentionClick={onMentionClick}
-						pollAggregate={pollAggregate}
-						viewerUserId={viewerUserId}
-						onPollVote={onPollVote}
-						onPollEnd={onPollEnd}
-					/>
-					)}
-					{/* Seen-by indicator on YOUR sent messages.  In a
-					    DM, renders a small "Read · time" line; in a
-					    room, renders an avatar stack + count that
-					    opens a modal listing every reader. */}
-					{message.isSelf && !message.pending && !isCollapsed && (
-						<SeenIndicator
-							roomId={message.roomId}
-							eventId={message.id}
-							isDm={isDm}
-							receiptsVersion={receiptsVersion}
-							memberAvatars={memberAvatars}
+							message={message}
 							memberNames={memberNames}
+							onMentionClick={onMentionClick}
+							pollAggregate={pollAggregate}
+							viewerUserId={viewerUserId}
+							onPollVote={onPollVote}
+							onPollEnd={onPollEnd}
 						/>
 					)}
-					{flaggable && flags && flags.count > 0 && (
-						<FlagPill
-							count={flags.count}
-							hasFlagged={!!myFlagId}
-							onClick={handlePillClick}
-						/>
-					)}
-					{collapse && expanded && (
-						<button
-							type="button"
-							onClick={() => setExpanded(false)}
-							className="text-[10px] text-muted-foreground hover:text-foreground underline"
-						>
-							hide
-						</button>
-					)}
-					{showActions && (
-						<MessageActions
-							onReact={onReact}
-							onReply={onReply}
-							onFlagClick={() => setFlagDialogOpen(true)}
-							showFlag={canFlag}
-							onDelete={handleDelete}
-							reactOpen={reactOpen}
-							onReactOpenChange={setReactOpen}
-							className="shrink-0"
-						/>
-					)}
+					<div className="flex flex-col items-start gap-1 shrink-0">
+						{/* Seen-by indicator on YOUR sent messages.
+						    DM rooms get a "Read · time" line; group
+						    rooms get an avatar stack + count that
+						    opens a modal listing every reader. */}
+						{message.isSelf && !message.pending && !isCollapsed && (
+							<SeenIndicator
+								roomId={message.roomId}
+								eventId={message.id}
+								isDm={isDm}
+								receiptsVersion={receiptsVersion}
+								memberAvatars={memberAvatars}
+								memberNames={memberNames}
+							/>
+						)}
+						{flaggable && flags && flags.count > 0 && (
+							<FlagPill
+								count={flags.count}
+								hasFlagged={!!myFlagId}
+								onClick={handlePillClick}
+							/>
+						)}
+						{collapse && expanded && (
+							<button
+								type="button"
+								onClick={() => setExpanded(false)}
+								className="text-[10px] text-muted-foreground hover:text-foreground underline"
+							>
+								hide
+							</button>
+						)}
+						{showActions && (
+							<MessageActions
+								onReact={onReact}
+								onReply={onReply}
+								onFlagClick={() => setFlagDialogOpen(true)}
+								showFlag={canFlag}
+								onDelete={handleDelete}
+								reactOpen={reactOpen}
+								onReactOpenChange={setReactOpen}
+								className="shrink-0"
+							/>
+						)}
+					</div>
 				</div>
 				{!isCollapsed && message.kind === "text" && !roomEncrypted && (
 					// Link preview rides under the bubble for plain text
