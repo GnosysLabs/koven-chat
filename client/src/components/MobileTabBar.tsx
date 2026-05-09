@@ -1,8 +1,13 @@
-// MobileTabBar — floating glassmorphic pill anchored above the home
-// indicator.  Replaces the edge-to-edge docked tab bar with an
-// isolated capsule that hovers over content; reads as iOS 26 / modern
-// app design (Apple Music, recent Telegram updates) rather than the
-// utilitarian dock pattern.
+// MobileTabBar — solid tab bar that leans into the iOS home-
+// indicator strip rather than fighting it.  The bar's bg-card extends
+// through the safe-area zone at the bottom, and each tab button
+// shares the same colour with rounded top corners — so each tab
+// reads as a piece of the bar that pokes up into the content.
+//
+// Replaces an earlier floating-glass pill design.  The pill always
+// fought the persistent home-indicator strip iOS / the Tauri mobile
+// shell paints below it; this version embraces the strip and treats
+// it as the bar's foundation.
 //
 // Four tabs:
 //
@@ -12,16 +17,10 @@
 //   • Explore — discover new public rooms / spaces
 //   • Me      — profile + settings + sign out
 //
-// 5-tab is iOS's hard ceiling; 4 keeps the targets a comfortable
-// thumb-width apart on every iPhone screen size.  Bots is
-// desktop-only by design (gatekept earlier) so it doesn't need
-// a tab here.
-//
 // Layout note: the outer <nav> still occupies vertical space so the
 // `bottom: calc(env(safe-area-inset-bottom) + 56px)` in App.tsx's
 // content overlays continues to work — the parent doesn't have to
-// know we changed style.  Inside the nav we just paint a centered
-// pill on a transparent background.
+// know we changed style.
 
 import type { ReactNode } from "react";
 import { MessageSquare, Compass, LayoutGrid, User } from "lucide-react";
@@ -54,38 +53,20 @@ export function MobileTabBar({ active, onChange, unreadByTab }: MobileTabBarProp
 	return (
 		<nav
 			aria-label="Primary"
-			// Outer wrapper is transparent + non-blocking padding so
-			// the parent layout (App.tsx reserves 56px for this) still
-			// works.  The pill itself is the visual element.
 			className={cn(
-				"shrink-0 flex items-end justify-center",
-				"px-3 pt-1 pb-1",
-				// Safe-area-bottom margin pushes the pill above the
-				// home indicator.  Margin (not padding) so the
-				// transparent gap below the pill is just blurred
-				// content, not a coloured strip.
-				"mb-[env(safe-area-inset-bottom)]",
+				"shrink-0 w-full",
+				// Solid bar surface that extends through the safe-area
+				// zone at the bottom — `pb-[env(...)]` keeps the
+				// home-indicator strip painted in the same colour as
+				// the bar so they read as one piece.
+				"bg-card",
+				"pb-[env(safe-area-inset-bottom)]",
+				// Top hairline separates the bar from chat content
+				// scrolling above it without painting a heavy line.
+				"border-t border-border",
 			)}
 		>
-			<div
-				className={cn(
-					// Pill geometry.  Full-width within the side
-					// padding, capped so it doesn't stretch on iPad-
-					// width screens.
-					"relative w-full max-w-md",
-					"flex items-stretch gap-0.5",
-					"rounded-full p-1",
-					// Glassmorphism: translucent bg + blur + a hairline
-					// border.  Saturate boost makes blurred content
-					// underneath read as colour rather than mud.
-					"bg-white/[0.07] dark:bg-white/[0.06]",
-					"backdrop-blur-2xl backdrop-saturate-150",
-					"border border-white/10",
-					// Subtle drop-shadow grounds the floating element
-					// without competing with the active-tab highlight.
-					"shadow-[0_8px_28px_rgba(0,0,0,0.45),inset_0_1px_0_rgba(255,255,255,0.08)]",
-				)}
-			>
+			<div className="flex items-stretch gap-1 px-1 pt-1">
 				{TABS.map(t => {
 					const isActive = active === t.key;
 					const unread = unreadByTab?.[t.key] ?? 0;
@@ -97,20 +78,25 @@ export function MobileTabBar({ active, onChange, unreadByTab }: MobileTabBarProp
 							aria-current={isActive ? "page" : undefined}
 							aria-label={t.label}
 							className={cn(
-								"flex-1 flex flex-col items-center justify-center gap-0.5",
-								// 40px tap target — combined with the
-								// pill's p-1 and the nav's pt-1/pb-1 the
-								// total nav height matches the 56px slot
-								// the parent layout reserves in App.tsx.
-								"min-h-[40px] py-1 px-1",
-								// Per-tab active chip: filled bg behind
-								// active, transparent on the rest.
-								// rounded-full so it nests inside the pill.
-								"rounded-full transition-all duration-150",
+								"flex-1 flex flex-col items-center justify-center gap-1",
+								// Total tab height ~52px, paired with
+								// the nav's pt-1 + the safe-area pb so
+								// the parent's 56px reserve still
+								// clears the bar.
+								"min-h-[52px] py-1.5 px-1",
+								// Rounded top corners only — flat at
+								// the bottom so the tab merges into
+								// the bar without a visible seam.
+								"rounded-t-2xl transition-colors duration-150",
 								"select-none",
 								isActive
-									? "bg-white/[0.12] text-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]"
-									: "text-muted-foreground active:bg-white/[0.04]",
+									// Active tab: tinted accent fill so
+									// the rounded shape pops out of
+									// the bar AND the colour distin-
+									// guishes it from the inactive
+									// tabs that share the bar's bg.
+									? "bg-accent text-foreground"
+									: "text-muted-foreground active:bg-accent/50",
 							)}
 						>
 							<div className="relative">
@@ -123,10 +109,10 @@ export function MobileTabBar({ active, onChange, unreadByTab }: MobileTabBarProp
 											"rounded-full bg-destructive text-destructive-foreground",
 											"text-[9px] font-bold leading-none",
 											"flex items-center justify-center",
-											// Ring matches the pill's bg so
-											// the dot reads as floating
-											// above icon, not glued to it.
-											"ring-2 ring-[#1a1a1d]",
+											// Ring matches the bar's bg
+											// so the dot reads as
+											// floating above the icon.
+											"ring-2 ring-card",
 										)}
 									>
 										{unread > 99 ? "99+" : unread}
