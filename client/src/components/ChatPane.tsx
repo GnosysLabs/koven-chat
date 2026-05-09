@@ -27,6 +27,7 @@ import { renderWithMentions } from "@/lib/mentionRender";
 import { GifPicker } from "@/components/GifPicker";
 import { PollCard } from "@/components/PollCard";
 import { CreatePollDialog } from "@/components/CreatePollDialog";
+import { GallerySheet } from "@/components/GallerySheet";
 import { MarkdownContent } from "@/components/MarkdownContent";
 
 // Heuristic: does this body have any markdown shape?  Cheap regex
@@ -89,7 +90,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import { AlertTriangle, BarChart3, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Lock, Network, Paperclip, Phone, Scale, Settings, UserPlus, Video, X } from "lucide-react";
+import { AlertTriangle, BarChart3, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Images, Lock, Network, Paperclip, Phone, Scale, Settings, UserPlus, Video, X } from "lucide-react";
 
 export interface ChatPaneProps {
 	room: Room | null;
@@ -269,6 +270,9 @@ export function ChatPane({
 	// users into thinking they took action.
 	const flaggable = !!room && room.kind !== "dm" && !room.isFederated && !room.encrypted;
 	const [roomFlagOpen, setRoomFlagOpen] = useState(false);
+	// Gallery sheet — opens from the header's Images icon, shows every
+	// image/video shared in the room as a grid + lightbox.
+	const [galleryOpen, setGalleryOpen] = useState(false);
 	const [draft, setDraft] = useState("");
 	const [replyTarget, setReplyTarget] = useState<Message | null>(null);
 	// Pending attachment: the user picked a file but hasn't hit send yet.
@@ -748,6 +752,21 @@ export function ChatPane({
 							<UserPlus className="h-4 w-4" />
 						</button>
 					)}
+					{!room.isInvite && (
+						// Media gallery — DM-friendly + encrypted-friendly
+						// (unlike mod log + flag, which need the engine
+						// to see content).  Lightbox-fronted grid of
+						// every image/video already loaded in the room.
+						<button
+							type="button"
+							onClick={() => setGalleryOpen(true)}
+							className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+							title="Shared media"
+							aria-label="Shared media"
+						>
+							<Images className="h-4 w-4" />
+						</button>
+					)}
 					{room.kind !== "dm" && !room.isInvite && !room.encrypted && (
 						// Mod log is public — anyone in the room can audit.
 						// Hidden in encrypted rooms because the engine
@@ -1181,6 +1200,13 @@ export function ChatPane({
 					}}
 				/>
 			)}
+
+			<GallerySheet
+				open={galleryOpen}
+				onOpenChange={setGalleryOpen}
+				messages={messages}
+				roomName={room.name}
+			/>
 		</div>
 	);
 }
