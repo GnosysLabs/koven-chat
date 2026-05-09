@@ -10,6 +10,7 @@
 // auto-update).
 
 use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri::webview::DownloadEvent;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 
@@ -503,6 +504,54 @@ pub fn run() {
 						log::warn!("opener failed for {url}: {err}");
 					}
 					false
+				})
+				// Allow `<a download>` clicks to actually save files.
+				// Tauri's three WebView backends (WKWebView on macOS,
+				// WebView2 on Windows, WebKitGTK on Linux) all default
+				// to BLOCKING download events when no on_download
+				// handler is registered — the click registers, the
+				// event fires, but no file lands.  The recovery-key
+				// "Download" button on encryption setup is the
+				// user-visible casualty: signing up + clicking
+				// Download appears to do nothing, leaving the user
+				// with no way to save the only key that gets them
+				// back into encrypted history.
+				//
+				// Default destination: the OS's Downloads folder +
+				// the suggested filename from the anchor's `download`
+				// attribute (Tauri pre-populates `destination` with
+				// it).  When `download` was empty (or the WebView
+				// didn't carry the filename through, which WKWebView
+				// occasionally drops), fall back to a timestamped
+				// generic name so the file at least lands somewhere
+				// findable rather than being silently dropped.
+				.on_download(|webview, mut event| {
+					if let DownloadEvent::Requested { url, destination } = &mut event {
+						// Resolve the OS Downloads folder via Tauri's
+						// PathResolver — works cross-platform without
+						// needing the dirs/dirs-next crate as a
+						// dependency.  Falls back to "." (CWD) on the
+						// extremely unlikely failure path so we never
+						// drop the file silently.
+						let dl_dir = webview
+							.path()
+							.download_dir()
+							.unwrap_or_else(|_| std::path::PathBuf::from("."));
+						let mut filename = destination
+							.file_name()
+							.map(|n| n.to_string_lossy().into_owned())
+							.unwrap_or_default();
+						if filename.is_empty() {
+							let ts = std::time::SystemTime::now()
+								.duration_since(std::time::UNIX_EPOCH)
+								.map(|d| d.as_secs())
+								.unwrap_or(0);
+							filename = format!("koven-download-{ts}.txt");
+						}
+						**destination = dl_dir.join(&filename);
+						log::info!("download: {} -> {}", url, destination.display());
+					}
+					true
 				});
 
 			let win = builder_final.build()?;

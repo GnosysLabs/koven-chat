@@ -88,15 +88,21 @@ export function EncryptionSetupSheet({ open, onSetup, onComplete, onSignOut }: E
 
 	function downloadRecoveryKey() {
 		if (!recoveryKey) return;
-		const blob = new Blob([recoveryKey + "\n"], { type: "text/plain" });
-		const url = URL.createObjectURL(blob);
+		// Use a data: URL rather than a blob: URL.  Tauri's WKWebView
+		// (macOS) silently drops anchor downloads pointed at blob:
+		// URLs — the click registers, no file lands.  Same anchor with
+		// a data: URL works in all three WebView backends Tauri uses
+		// (WKWebView / WebView2 / WebKitGTK) AND in the regular
+		// browser path.  Recovery keys are short (~50 chars) so the
+		// data-URL size limit isn't a concern.
+		const text = recoveryKey + "\n";
+		const dataUrl = "data:text/plain;charset=utf-8," + encodeURIComponent(text);
 		const a = document.createElement("a");
-		a.href = url;
+		a.href = dataUrl;
 		a.download = "koven-recovery-key.txt";
 		document.body.appendChild(a);
 		a.click();
 		a.remove();
-		URL.revokeObjectURL(url);
 	}
 
 	return (
