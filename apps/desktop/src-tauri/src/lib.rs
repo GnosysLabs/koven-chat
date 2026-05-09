@@ -33,6 +33,77 @@ use plugins::mac_rounded_corners;
 /// painting the real UI, so swapping the splash for it is a single
 /// invisible transition rather than the white-flash → square-dark
 /// → rounded-dark sequence we saw with an in-window splash.
+/// Write `bytes` to the OS Downloads folder under `filename`, returning
+/// the absolute destination path on success.
+///
+/// Why this exists despite the on_download WebView hook:
+///   - WKWebView (macOS) and WebKitGTK (Linux) silently drop anchor
+///     downloads pointed at `blob:` URLs — the on_download hook never
+///     fires.
+///   - data: URL anchor downloads in WKWebView usually navigate the
+///     WebView to the data URL instead of triggering a download
+///     event, so on_download doesn't fire there either.
+///   - WebView2 (Windows) is more permissive but inconsistent across
+///     versions.
+///
+/// The IPC route bypasses the WebView download machinery entirely:
+/// the SPA fetches the bytes (which it already has via blob: URL),
+/// hands them to Rust, and Rust writes the file with std::fs.  No
+/// WebView interpretation, no platform-specific download policy.
+///
+/// Filename is sanitised against path-traversal attempts (no `..`,
+/// no separators) so a malicious or buggy caller can't escape the
+/// Downloads folder.  If the chosen filename collides with an
+/// existing file, we suffix `-1`, `-2`, … until we find a free name —
+/// matches the OS's "untitled (1).png" pattern users expect from
+/// browser downloads.
+#[tauri::command]
+fn save_download(
+	app: tauri::AppHandle,
+	filename: String,
+	bytes: Vec<u8>,
+) -> Result<String, String> {
+	use std::path::PathBuf;
+	let dl_dir: PathBuf = app
+		.path()
+		.download_dir()
+		.map_err(|e| format!("download_dir: {e}"))?;
+	// Strip any path components — caller-supplied filename only,
+	// never a path.  Also drop empty/dot filenames as a belt-and-
+	// braces measure.
+	let safe = std::path::Path::new(&filename)
+		.file_name()
+		.map(|n| n.to_string_lossy().into_owned())
+		.unwrap_or_default();
+	let safe = if safe.is_empty() || safe == "." || safe == ".." {
+		"download".to_string()
+	} else {
+		safe
+	};
+	// Create the Downloads directory if it doesn't exist.  On a
+	// fresh Linux user this can happen — XDG dirs aren't
+	// auto-created until something writes to them.
+	std::fs::create_dir_all(&dl_dir).map_err(|e| format!("create_dir_all: {e}"))?;
+	// Resolve a non-colliding final path.  Linear probe is fine —
+	// users rarely have hundreds of same-named downloads.
+	let (stem, ext) = match safe.rfind('.') {
+		Some(i) if i > 0 => (&safe[..i], &safe[i..]),
+		_ => (safe.as_str(), ""),
+	};
+	let mut dest = dl_dir.join(&safe);
+	let mut n = 1u32;
+	while dest.exists() {
+		dest = dl_dir.join(format!("{stem} ({n}){ext}"));
+		n += 1;
+		if n > 9999 {
+			return Err("too many name collisions in Downloads/".to_string());
+		}
+	}
+	std::fs::write(&dest, &bytes).map_err(|e| format!("write: {e}"))?;
+	log::info!("save_download: wrote {} bytes to {}", bytes.len(), dest.display());
+	Ok(dest.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 fn reveal_app(app: tauri::AppHandle) -> Result<(), String> {
 	if let Some(splash) = app.get_webview_window("splash") {
@@ -251,11 +322,12 @@ pub fn run() {
 					mac_rounded_corners::reposition_traffic_lights,
 					mac_rounded_corners::hide_traffic_lights,
 					reveal_app,
+					save_download,
 				]
 			}
 			#[cfg(not(target_os = "macos"))]
 			{
-				tauri::generate_handler![reveal_app]
+				tauri::generate_handler![reveal_app, save_download]
 			}
 		})
 		.setup(|app| {
