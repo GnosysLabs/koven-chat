@@ -241,32 +241,43 @@ export function McpConfigDialog({
 				<div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
 					{fields.length === 0 && !hasUnsupported ? (
 						// No fields to render.  Two sub-cases:
-						//   - Remote (Smithery-hosted) server: most
-						//     likely uses OAuth on Smithery's side
-						//     (Reddit, Notion, GitHub-via-Composio, …).
-						//     There's nothing for us to collect — the
-						//     user authorizes the integration on
-						//     Smithery's web UI before the bot's
-						//     connection works.  Surface a deep link.
+						//   - Remote (Smithery-hosted) server with no
+						//     declared config schema: very likely
+						//     OAuth-protected (Reddit, Notion, GitHub
+						//     via Composio, …).  The MCP-spec OAuth
+						//     handshake (Dynamic Client Registration +
+						//     authorize-redirect + token exchange) has
+						//     to happen in the BOT's MCP client at
+						//     connect time — and Koven hasn't
+						//     implemented that yet.  Tokens minted in
+						//     Smithery's own playground don't carry
+						//     over to our connection, so claiming
+						//     "configure on Smithery" was misleading.
+						//     Be honest: tell the user it likely won't
+						//     work and link to Smithery for further
+						//     reading rather than as a "fix this here"
+						//     CTA.
 						//   - Local / no-auth server: nothing to do.
-						remote && smitheryUrl ? (
+						remote ? (
 							<div className="space-y-3">
 								<div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-3 text-sm space-y-2">
-									<p className="font-medium">This server may need authorization on Smithery</p>
+									<p className="font-medium">{displayName} may not work yet</p>
 									<p className="text-muted-foreground">
-										Smithery-hosted servers like {displayName} typically use OAuth — sign in once on the Smithery web UI to grant access, and Smithery will pass credentials through automatically when your bot connects.
+										Servers like this one usually require OAuth authentication that runs in the MCP client at connect time. Koven's bot runtime doesn't yet support that flow — if the bot can't list this server's tools after attaching, that's why.
 									</p>
-									<a
-										href={smitheryUrl}
-										target="_blank"
-										rel="noreferrer"
-										className="inline-block text-primary underline hover:no-underline"
-									>
-										Configure {displayName} on Smithery →
-									</a>
+									{smitheryUrl && (
+										<a
+											href={smitheryUrl}
+											target="_blank"
+											rel="noreferrer"
+											className="inline-block text-primary underline hover:no-underline"
+										>
+											View on Smithery →
+										</a>
+									)}
 								</div>
 								<p className="text-xs text-muted-foreground">
-									Click Attach below once you've authorized on Smithery (or attach now and authorize later — the bot will start working as soon as the OAuth grant is in place).
+									You can still attach the server — the bot will silently skip tools it can't authenticate against. Removing it later is a one-click action in the Tools list.
 								</p>
 							</div>
 						) : (
