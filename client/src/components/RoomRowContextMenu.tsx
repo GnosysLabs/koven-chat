@@ -85,17 +85,49 @@ export function RoomRowContextMenu({
 			});
 		}
 
-		// Notification level — submenu of three radio items.  Setting
-		// to the same value as currently selected is a no-op (engine's
-		// PUT is idempotent), so the click never breaks anything.
+		// Notification level — submenu of radio items.
+		//
+		// DMs get a two-way pick: All messages / Mute.  "Only
+		// mentions" is meaningless in a 2-person conversation
+		// (there's only one other person; every message they send is
+		// implicitly for you), and the engine's fanout already
+		// hard-codes kind=dm on every DM message regardless of stored
+		// level — so showing the user a "Mentions only" option that
+		// did nothing was confusing and wrong.  All-messages is the
+		// effective default for DMs whether the stored level is
+		// "all" or "mentions" (engine treats both the same here),
+		// so we render the radio as "All messages" checked when
+		// either is set, and only flip the check off when the room
+		// is muted.
+		//
+		// Regular rooms still get the three-way pick.
 		const setLevel = async (level: RoomNotifyLevel) => {
 			await setCachedNotifyLevel(accessToken, room.id, level);
 		};
-		out.push({
-			kind: "submenu",
-			label: "Notifications",
-			icon: notifyIconFor(currentLevel),
-			items: [
+		const dmAllChecked = currentLevel === "all" || currentLevel === "mentions";
+		const notifyItems: ContextMenuItem[] = isDm
+			? [
+				{
+					label: "All messages",
+					icon: <Bell className="h-4 w-4" />,
+					checked: dmAllChecked,
+					// Setting "all" instead of clearing to default
+					// ("mentions") keeps the explicit-opt-in shape:
+					// the user picked it, the row exists, the engine
+					// honours it.  Functionally identical for DMs
+					// either way, but the explicit row makes the
+					// "yes I deliberately want all messages here"
+					// intent legible if we ever change DM defaults.
+					onClick: () => setLevel("all"),
+				},
+				{
+					label: "Mute",
+					icon: <BellOff className="h-4 w-4" />,
+					checked: currentLevel === "muted",
+					onClick: () => setLevel("muted"),
+				},
+			]
+			: [
 				{
 					label: "All messages",
 					icon: <Bell className="h-4 w-4" />,
@@ -114,7 +146,12 @@ export function RoomRowContextMenu({
 					checked: currentLevel === "muted",
 					onClick: () => setLevel("muted"),
 				},
-			],
+			];
+		out.push({
+			kind: "submenu",
+			label: "Notifications",
+			icon: notifyIconFor(currentLevel),
+			items: notifyItems,
 		});
 
 		out.push({ kind: "divider" });
