@@ -854,26 +854,50 @@ export async function kickOrBanAs(opts: {
  * Returns false on any error or missing/malformed state event;
  * defaulting to "not NSFW" is the safer fallback.
  */
-export async function getRoomNsfw(roomId: string): Promise<boolean> {
-	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/chat.koven.nsfw/`;
+/** One admin /state fetch, both Koven custom state events extracted.
+ * Used by /api/explore-meta where each room needs both `chat.koven.
+ * nsfw` and `chat.koven.room_icon` — pulling them in a single
+ * request halves the round-trips vs. calling getRoomNsfw + the icon
+ * fn separately.  Same admin-endpoint fix as getJoinedMembers /
+ * getSpaceChildRoomIds: client API `/rooms/{id}/state/<type>` 403s
+ * when the engine's admin user isn't in the room, which after the
+ * @koven-admin → @koven-svc migration is most rooms — Explore
+ * tiles silently fell back to DiceBear because both reads returned
+ * null/false. */
+export async function getRoomKovenMeta(roomId: string): Promise<{
+	iconEmoji: string | null;
+	nsfw: boolean;
+}> {
+	const path = `/_synapse/admin/v1/rooms/${encodeURIComponent(roomId)}/state`;
 	const r = await adminFetch(path);
-	if (!r.ok) return false;
-	const body = (await r.json().catch(() => null)) as { enabled?: unknown } | null;
-	return body?.enabled === true;
+	if (!r.ok) return { iconEmoji: null, nsfw: false };
+	const body = (await r.json().catch(() => null)) as
+		| { state?: Array<{ type?: string; state_key?: string; content?: Record<string, unknown> }> }
+		| null;
+	const events = body?.state;
+	if (!Array.isArray(events)) return { iconEmoji: null, nsfw: false };
+	let iconEmoji: string | null = null;
+	let nsfw = false;
+	for (const ev of events) {
+		if (ev.type === "chat.koven.room_icon" && ev.state_key === "") {
+			const e = ev.content?.emoji;
+			if (typeof e === "string") {
+				const trimmed = e.trim();
+				if (trimmed && trimmed.length <= 16) iconEmoji = trimmed;
+			}
+		} else if (ev.type === "chat.koven.nsfw" && ev.state_key === "") {
+			if (ev.content?.enabled === true) nsfw = true;
+		}
+	}
+	return { iconEmoji, nsfw };
+}
+
+export async function getRoomNsfw(roomId: string): Promise<boolean> {
+	return (await getRoomKovenMeta(roomId)).nsfw;
 }
 
 export async function getRoomIconEmoji(roomId: string): Promise<string | null> {
-	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/chat.koven.room_icon/`;
-	const r = await adminFetch(path);
-	if (!r.ok) return null;
-	const body = (await r.json().catch(() => null)) as { emoji?: unknown } | null;
-	if (!body || typeof body.emoji !== "string") return null;
-	const trimmed = body.emoji.trim();
-	if (!trimmed) return null;
-	// Mirror the client-side cap in `readKovenIconEmoji` so a malformed
-	// state event with a 10kB string doesn't make it onto the wire.
-	if (trimmed.length > 16) return null;
-	return trimmed;
+	return (await getRoomKovenMeta(roomId)).iconEmoji;
 }
 
 /**

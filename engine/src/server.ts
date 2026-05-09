@@ -96,6 +96,7 @@ import {
 	getJoinedMembers,
 	getRoomIconEmoji,
 	getRoomJoinRule,
+	getRoomKovenMeta,
 	getRoomNsfw,
 	getRoomNameAndCreator,
 	getSpaceChildRoomIds,
@@ -1794,19 +1795,19 @@ export function startServer(): void {
 				// remaining tiles.  Bundling them into one batched
 				// call keeps the wire round-trips down vs. spinning
 				// up a separate /api/rooms/nsfw endpoint.
+				// Single admin /state fetch per room returns both
+				// chat.koven.room_icon and chat.koven.nsfw in one
+				// shot — see getRoomKovenMeta in synapse.ts.
 				const results = await Promise.all(
 					roomIds.map(async (id) => {
-						const [emoji, nsfw] = await Promise.all([
-							getRoomIconEmoji(id),
-							getRoomNsfw(id),
-						]);
-						return [id, { emoji, nsfw }] as const;
+						const meta = await getRoomKovenMeta(id);
+						return [id, meta] as const;
 					}),
 				);
 				const icons: Record<string, string> = {};
 				const nsfw: string[] = [];
 				for (const [id, meta] of results) {
-					if (meta.emoji) icons[id] = meta.emoji;
+					if (meta.iconEmoji) icons[id] = meta.iconEmoji;
 					if (meta.nsfw) nsfw.push(id);
 				}
 				return json({ icons, nsfw });
