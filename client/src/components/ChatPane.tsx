@@ -24,6 +24,7 @@ import { serverOf } from "@/lib/mxid";
 import { FlagDialog } from "@/components/FlagDialog";
 import { DeleteMessageDialog } from "@/components/DeleteMessageDialog";
 import { firstLink, linkify } from "@/lib/linkify";
+import { renderWithMentions } from "@/lib/mentionRender";
 import { MarkdownContent } from "@/components/MarkdownContent";
 
 // Heuristic: does this body have any markdown shape?  Cheap regex
@@ -149,6 +150,11 @@ export interface ChatPaneProps {
 	// pings the viewer, including reply-to-me).  Optional; falls
 	// back to no highlighting when omitted.
 	viewerUserId?: UserId;
+	// Click handler for the mention pills rendered inline in
+	// message bodies — should open the targeted user's profile
+	// sheet.  Optional; without it the pills still render but
+	// clicks are no-ops.
+	onOpenProfile?(userId: UserId): void;
 }
 
 // Threshold for "this message is part of the same group as the
@@ -170,6 +176,7 @@ export function ChatPane({
 	onLoadMoreHistory,
 	receiptsVersion,
 	viewerUserId,
+	onOpenProfile,
 }: ChatPaneProps) {
 	// Consensus flagging only works where the local engine can act:
 	//   - DMs are 1-on-1 — no quorum to gather, no consensus to reach.
@@ -723,6 +730,7 @@ export function ChatPane({
 								mentionsViewer={
 									!m.isSelf && !!viewerUserId && messageMentionsUser(m, viewerUserId)
 								}
+								onMentionClick={(userId) => onOpenProfile?.(userId)}
 								onReact={(emoji) => toggleReaction(m, emoji)}
 								onReply={() => setReplyTarget(m)}
 								onFlag={(category, rationale) => onFlag(m.id, category, rationale)}
@@ -972,7 +980,7 @@ function MessageRow({
 	message, avatarMxc, continuesGroup, isFirst, flaggable, roomEncrypted,
 	reactions, flags, collapse, onReact, onReply, onFlag, onTogglePillFlag, onToggleReactionPill, isBot,
 	isOwnedBot, isHovered, onDelete,
-	isDm, receiptsVersion, memberAvatars, memberNames, mentionsViewer,
+	isDm, receiptsVersion, memberAvatars, memberNames, mentionsViewer, onMentionClick,
 }: {
 	message: Message;
 	avatarMxc: string | undefined;
@@ -1036,6 +1044,9 @@ function MessageRow({
 	// reply to a message the viewer authored.  Drives the Discord-
 	// style left-border accent + faint background tint on the row.
 	mentionsViewer: boolean;
+	// Click handler for inline mention pills in this row's bubble.
+	// Routes to App.tsx's profile sheet via ChatPane's onOpenProfile.
+	onMentionClick(userId: string): void;
 }) {
 	const [flagDialogOpen, setFlagDialogOpen] = useState(false);
 	const [expanded, setExpanded] = useState(false);
@@ -1191,7 +1202,11 @@ function MessageRow({
 					{isCollapsed ? (
 						<CollapsedBubble collapse={collapse!} onExpand={() => setExpanded(true)} />
 					) : (
-						<MessageBubble message={message} />
+						<MessageBubble
+						message={message}
+						memberNames={memberNames}
+						onMentionClick={onMentionClick}
+					/>
 					)}
 					{/* Seen-by indicator on YOUR sent messages.  In a
 					    DM, renders a small "Read · time" line; in a
@@ -1369,7 +1384,15 @@ function RoomBadge({ icon, label, tone, title }: {
 	);
 }
 
-function MessageBubble({ message }: { message: Message }) {
+function MessageBubble({
+	message,
+	memberNames,
+	onMentionClick,
+}: {
+	message: Message;
+	memberNames: Map<string, string>;
+	onMentionClick(userId: string): void;
+}) {
 	// `whitespace-pre-wrap` only applied to the plain-text path —
 	// markdown paragraphs/lists handle their own whitespace, and
 	// keeping pre-wrap on top of them would re-introduce the literal
@@ -1440,7 +1463,12 @@ function MessageBubble({ message }: { message: Message }) {
 			{isMarkdown ? (
 				<MarkdownContent text={message.text} tone={message.isSelf ? "self" : "other"} />
 			) : (
-				linkify(message.text)
+				renderWithMentions({
+					text: message.text,
+					members: memberNames,
+					onMentionClick,
+					tone: message.isSelf ? "self" : "other",
+				})
 			)}
 			{message.edited && (
 				<span className={cn(

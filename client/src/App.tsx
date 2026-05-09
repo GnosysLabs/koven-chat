@@ -1461,6 +1461,7 @@ export default function App() {
 					callInProgress={!!activeCall || !!incomingCall}
 					isSuspended={!!suspension}
 					onOpenModLog={(roomId) => setModLogRoomId(roomId as RoomId)}
+					onOpenProfile={(userId) => setViewedUserId(userId as UserId)}
 				/>
 				)}
 				</div>
