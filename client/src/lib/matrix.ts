@@ -3259,7 +3259,7 @@ export class MatrixTransport {
 		const c = this.requireClient();
 		const deviceId = c.getDeviceId();
 		if (!deviceId) return;
-		const desired = computeDeviceLabel();
+		const desired = await computeDeviceLabel();
 		// Read the current label first — Synapse caches device info
 		// in its own DB; matrix-js-sdk's User cache might not have
 		// it.  We use getDevice() to read current state.
@@ -4195,7 +4195,7 @@ export class MatrixTransport {
  *     init script before any SPA JS runs)
  *   - Falls back to "Koven Web" with a small browser hint so two
  *     browser sessions on the same OS read distinguishably. */
-function computeDeviceLabel(): string {
+async function computeDeviceLabel(): Promise<string> {
 	if (typeof window !== "undefined"
 		&& (window as { __KOVEN_DESKTOP__?: boolean }).__KOVEN_DESKTOP__ === true
 	) {
@@ -4206,7 +4206,7 @@ function computeDeviceLabel(): string {
 	) {
 		return `Koven Mobile${osHint()}`;
 	}
-	return `Koven Web${browserHint()}`;
+	return `Koven Web${await browserHint()}`;
 }
 
 function osHint(): string {
@@ -4219,12 +4219,26 @@ function osHint(): string {
 	return "";
 }
 
-function browserHint(): string {
-	const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
-	// Brand sniffing keeps Chromium derivatives (Brave / Edge / Arc)
-	// distinct from vanilla Chrome where possible.  Order matters —
-	// many of these include the upstream brand string further along.
-	if (/Brave/i.test(ua)) return " (Brave)";
+async function browserHint(): Promise<string> {
+	// Brave actively strips itself from navigator.userAgent — UA
+	// sniffing always reports Chrome.  Their feature-detection API
+	// `navigator.brave.isBrave()` is the only reliable signal,
+	// asynchronous, and present only on Brave.  Probe it first; fall
+	// through to UA-based brand sniffing for everything else.
+	const nav = typeof navigator !== "undefined"
+		? (navigator as Navigator & { brave?: { isBrave?(): Promise<boolean> } })
+		: undefined;
+	if (nav?.brave?.isBrave) {
+		try {
+			if (await nav.brave.isBrave()) return " (Brave)";
+		} catch {
+			// Treat probe failure as "not Brave" — UA sniff below.
+		}
+	}
+	const ua = nav?.userAgent ?? "";
+	// Order matters — many of these include the upstream brand
+	// string further along.  Edg / Arc are checked before Chrome
+	// because their UA includes the Chrome brand too.
 	if (/Edg\//.test(ua)) return " (Edge)";
 	if (/Arc\//i.test(ua)) return " (Arc)";
 	if (/Firefox/.test(ua)) return " (Firefox)";
