@@ -17,20 +17,24 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { buildSandboxedInvocation, ensureBotScratchDir } from "./sandbox.js";
 
 const KOVEN_CLIENT_INFO = {
 	name: "koven-engine",
 	version: "0.0.1",
 };
 
-/** Opaque handle returned from openMcpSession.  Holds both the
- * connected SDK client and the transport, so closeMcpSession can
- * tear both down cleanly. */
+/** Opaque handle returned from openMcpSession / openStdioMcpSession.
+ * Holds both the connected SDK client and the transport, so
+ * closeMcpSession can tear both down cleanly.  Transport is one of
+ * the two MCP SDK transports — they share the same close() interface
+ * so callers don't have to discriminate. */
 export interface McpSession {
 	client: Client;
-	transport: StreamableHTTPClientTransport;
-	/** The URL we connected to.  Useful for log messages and for
-	 * diagnostics when a tool call fails. */
+	transport: StreamableHTTPClientTransport | StdioClientTransport;
+	/** The URL or "stdio: <command>" identifier we connected to.
+	 * Useful for log messages and diagnostics when a tool call fails. */
 	url: string;
 }
 
@@ -69,6 +73,67 @@ export async function openMcpSession(
 	const client = new Client(KOVEN_CLIENT_INFO, { capabilities: {} });
 	await client.connect(transport);
 	return { client, transport, url: urlStr };
+}
+
+/** Open a stdio MCP session for an attached subprocess command.
+ *
+ * The MCP SDK's StdioClientTransport spawns the process internally
+ * given { command, args, env, stderr }.  We hand it the sandboxed
+ * invocation built by buildSandboxedInvocation — the command becomes
+ * "prlimit" (which exec's bwrap, which exec's the user's command),
+ * the env is stripped to only what the user supplied + a minimal
+ * PATH/HOME, and stderr is piped so we can promote subprocess errors
+ * into engine logs for debugging.
+ *
+ * Caller is responsible for closing the session when done.  Closing
+ * the transport flushes the JSON-RPC channel and SIGTERMs the
+ * subprocess tree (the --die-with-parent flag in bwrap also kills
+ * the inner user-command if our outer process goes away first). */
+export async function openStdioMcpSession(opts: {
+	botId: number;
+	command: string;
+	args: string[];
+	env: Record<string, string>;
+	/** Display name for logs / error messages.  Doesn't affect protocol. */
+	label: string;
+}): Promise<McpSession> {
+	const scratchDir = ensureBotScratchDir(opts.botId);
+	const inv = buildSandboxedInvocation({
+		command: opts.command,
+		args: opts.args,
+		env: opts.env,
+		scratchDir,
+	});
+	const transport = new StdioClientTransport({
+		command: inv.command,
+		args: inv.args,
+		env: inv.env,
+		// Pipe stderr so we can promote it to engine logs below.
+		stderr: "pipe",
+	});
+	const client = new Client(KOVEN_CLIENT_INFO, { capabilities: {} });
+	try {
+		await client.connect(transport);
+	} catch (err) {
+		// connect() can fail if the subprocess crashes during init
+		// (missing API key, network issue, package not found).  The
+		// transport's close() handles tearing down the partial spawn.
+		try { await transport.close(); } catch { /* already gone */ }
+		throw err;
+	}
+	// Promote stderr to engine logs so users debugging an attachment
+	// can see what their server is complaining about.  After connect()
+	// the transport has spawned and exposes the stderr stream.
+	if (transport.stderr) {
+		transport.stderr.on("data", (chunk: Buffer) => {
+			console.warn(`mcp/stdio[${opts.label}]: ${chunk.toString().trimEnd()}`);
+		});
+	}
+	return {
+		client,
+		transport,
+		url: `stdio: ${opts.command} ${opts.args.join(" ")}`,
+	};
 }
 
 /** List the server's available tools, translated into the OpenAI

@@ -6,6 +6,7 @@ import { config } from "./config";
 import "./db";
 import { startServer } from "./server";
 import { tick } from "./weight";
+import { gcMcpScratchDirs } from "./mcp/janitor";
 import { evaluateCollapses } from "./collapse";
 import { bootstrapAdminIfNeeded } from "./admins";
 import { startAllBots, stopAllBots } from "./bot_manager";
@@ -63,6 +64,9 @@ for (const sig of shutdownSignals) {
 	});
 }
 
+let mcpJanitorTickCount = 0;
+const MCP_JANITOR_INTERVAL_TICKS = 60; // run roughly every hour at default 1-min tick
+
 async function fullTick(): Promise<void> {
 	// Weights first so freshly-arrived flaggers have a current weight
 	// when the collapse evaluator reads from the weights table.
@@ -76,6 +80,17 @@ async function fullTick(): Promise<void> {
 	});
 	if (users > 0 || collapses > 0) {
 		console.log(`engine: tick — ${users} users, ${collapses} new collapses`);
+	}
+	// MCP scratch-dir janitor.  Cheap (just stat + readdir) but no
+	// reason to run every minute — once an hour is plenty for a
+	// 30-day idle window.
+	if (++mcpJanitorTickCount >= MCP_JANITOR_INTERVAL_TICKS) {
+		mcpJanitorTickCount = 0;
+		try {
+			gcMcpScratchDirs();
+		} catch (err) {
+			console.error("engine: mcp scratch-dir GC failed", err);
+		}
 	}
 }
 

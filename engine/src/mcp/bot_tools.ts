@@ -24,6 +24,7 @@
 
 import {
 	openMcpSession,
+	openStdioMcpSession,
 	listMcpTools,
 	callMcpTool,
 	closeMcpSession,
@@ -76,14 +77,30 @@ export async function openBotMcpBundle(bot: BotRow): Promise<BotMcpBundle> {
 	// also keeps log output sane.  In practice bots will have ≤3
 	// servers attached so the latency cost is fine.
 	for (const att of attachments) {
-		const labelOrUrl = att.label || att.url;
+		// Identifier for log messages — for HTTP attachments it's
+		// the URL, for stdio it's "command args…".  Keeps the
+		// stdio path's logs readable without leaking env vars.
+		const labelOrId = att.label || (att.kind === "stdio"
+			? `${att.command} ${att.args.join(" ")}`.trim()
+			: att.url);
 		try {
-			const session = await openMcpSession(att.url, att.headers);
+			// Dispatch on transport kind.  Both functions return the
+			// same McpSession shape so downstream code (tools list,
+			// tool-call routing) doesn't need to discriminate.
+			const session = att.kind === "stdio"
+				? await openStdioMcpSession({
+					botId: bot.id,
+					command: att.command ?? "",
+					args: att.args,
+					env: att.env,
+					label: att.label || labelOrId,
+				})
+				: await openMcpSession(att.url, att.headers);
 			const serverTools = await listMcpTools(session);
 			routes.set(att.id, {
 				rowId: att.id,
 				label: att.label,
-				url: att.url,
+				url: att.kind === "stdio" ? `stdio: ${att.command ?? ""}` : att.url,
 				session,
 			});
 			for (const t of serverTools) {
@@ -91,17 +108,17 @@ export async function openBotMcpBundle(bot: BotRow): Promise<BotMcpBundle> {
 					type: "function",
 					function: {
 						name: namespaceToolName(att.id, t.function.name),
-						description: prefixDescription(att.label || att.url, t.function.description),
+						description: prefixDescription(att.label || labelOrId, t.function.description),
 						parameters: t.function.parameters,
 					},
 				});
 			}
 			console.log(
-				`bot ${bot.mxid}: MCP ${labelOrUrl} ready (${serverTools.length} tools)`,
+				`bot ${bot.mxid}: MCP ${labelOrId} ready (${serverTools.length} tools)`,
 			);
 		} catch (err) {
 			console.warn(
-				`bot ${bot.mxid}: MCP ${labelOrUrl} failed to open — skipping`,
+				`bot ${bot.mxid}: MCP ${labelOrId} failed to open — skipping`,
 				err,
 			);
 		}

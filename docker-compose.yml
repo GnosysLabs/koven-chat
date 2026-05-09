@@ -78,6 +78,20 @@ services:
       # The engine reads the appservice token out of the same YAML
       # Synapse loads, so we mount the synapse-data dir read-only.
       - ./synapse-data:/synapse-data:ro
+      # Per-bot scratch dirs for stdio MCP servers.  Each bot gets
+      # /var/lib/koven-mcp/<bot_id>/ inside the container, bind-
+      # mounted as /home/sandbox into the bwrap-isolated subprocess.
+      # Persisting on the host means npm/uv caches survive container
+      # rebuilds — bots stay fast across deploys.
+      - ./data/koven-mcp:/var/lib/koven-mcp
+    cap_add:
+      # bwrap needs SYS_ADMIN to set up the user namespace it uses
+      # for the subprocess sandbox.  Without it, bwrap falls back to
+      # unprivileged-user-namespace mode which Debian disables by
+      # default in containers, and the subprocess fails to spawn.
+      # Scope is contained: only the engine container needs it; the
+      # MCP subprocess inside the sandbox does NOT inherit caps.
+      - SYS_ADMIN
     environment:
       HOMESERVER_URL: http://synapse:8008
       HOMESERVER_NAME: ${SERVER_NAME}

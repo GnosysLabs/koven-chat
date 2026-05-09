@@ -192,6 +192,9 @@ db.exec(`
 		created_at   INTEGER NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_bot_mcp_servers_bot ON bot_mcp_servers(bot_id);
+	-- Note: stdio columns (kind, command, args_json, env_json,
+	-- locked_version) are added below via ensureColumns so existing
+	-- HTTP-only rows migrate cleanly without a schema rewrite.
 
 	-- Per-user third-party integration secrets — currently just the
 	-- Smithery API key (used to query Smithery's MCP server registry
@@ -583,6 +586,24 @@ ensureColumns("room_creations", [
 	// from before this migration are treated as rooms (which they
 	// mostly were; the few miscategorized space rows age out in 24h).
 	{ name: "kind", ddl: "kind TEXT NOT NULL DEFAULT 'room'" },
+]);
+ensureColumns("bot_mcp_servers", [
+	// Stdio-transport support.  Each MCP attachment is either:
+	//   kind='http'  → uses url + headers_json (existing behaviour)
+	//   kind='stdio' → uses command + args_json + env_json
+	// command + args_json hold the npx/uvx invocation the user pasted
+	// from the standard `mcpServers` config block.  env_json is the
+	// per-attachment environment passed into the spawned subprocess
+	// (PERPLEXITY_API_KEY etc.) — engine's own env vars are stripped
+	// before spawn so the subprocess only sees what the user supplied.
+	// locked_version pins the npm package version at attach time so a
+	// silent supply-chain compromise via auto-update can't compromise
+	// the bot retroactively.
+	{ name: "kind",           ddl: "kind TEXT NOT NULL DEFAULT 'http'" },
+	{ name: "command",        ddl: "command TEXT" },
+	{ name: "args_json",      ddl: "args_json TEXT NOT NULL DEFAULT '[]'" },
+	{ name: "env_json",       ddl: "env_json TEXT NOT NULL DEFAULT '{}'" },
+	{ name: "locked_version", ddl: "locked_version TEXT" },
 ]);
 
 export type PostRow = {
@@ -1326,47 +1347,75 @@ export function hasUserIntegration(userId: string, integration: string): boolean
 // runtime opens each server with `new StreamableHTTPClientTransport(
 // url, { requestInit: { headers } })` — see engine/src/mcp/bot_tools.ts.
 
+export type BotMcpServerKind = "http" | "stdio";
+
+/** An MCP server attached to a bot.  Two transport flavours, dispatched
+ * on `kind`.  HTTP attachments are hosted endpoints; stdio attachments
+ * are subprocess invocations (sandboxed via bwrap, see
+ * engine/src/mcp/sandbox.ts). */
 export interface BotMcpServer {
 	id: number;
 	bot_id: number;
 	label: string;
+	kind: BotMcpServerKind;
+	created_at: number;
+	/** kind='http' fields. */
 	url: string;
 	/** HTTP headers added to every MCP request.  Typical use:
 	 * `{ "Authorization": "Bearer <pat>" }`.  Empty when the server
 	 * is anonymously accessible. */
 	headers: Record<string, string>;
-	created_at: number;
+	/** kind='stdio' fields. */
+	command: string | null;
+	args: string[];
+	env: Record<string, string>;
+	/** Pinned npm package version (e.g. "1.2.3") if we resolved one
+	 * at attach time — protects against silent supply-chain compromise
+	 * via auto-update.  Null when we couldn't resolve (non-npm package,
+	 * private registry, network blip at attach). */
+	locked_version: string | null;
 }
 
 interface RawBotMcpServerRow {
 	id: number;
 	bot_id: number;
 	label: string;
+	kind: string;
 	url: string;
 	headers_json: string;
+	command: string | null;
+	args_json: string;
+	env_json: string;
+	locked_version: string | null;
 	created_at: number;
 }
 
+const MCP_ROW_COLS = "id, bot_id, label, kind, url, headers_json, command, args_json, env_json, locked_version, created_at";
+
 const insertBotMcpServerStmt = db.prepare(`
-	INSERT INTO bot_mcp_servers (bot_id, label, url, headers_json, created_at)
-	VALUES (?, ?, ?, ?, ?)
+	INSERT INTO bot_mcp_servers (bot_id, label, kind, url, headers_json, command, args_json, env_json, locked_version, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	RETURNING id
 `);
 const updateBotMcpServerStmt = db.prepare(`
 	UPDATE bot_mcp_servers SET
-		label        = COALESCE(?, label),
-		url          = COALESCE(?, url),
-		headers_json = COALESCE(?, headers_json)
+		label          = COALESCE(?, label),
+		url            = COALESCE(?, url),
+		headers_json   = COALESCE(?, headers_json),
+		command        = COALESCE(?, command),
+		args_json      = COALESCE(?, args_json),
+		env_json       = COALESCE(?, env_json),
+		locked_version = COALESCE(?, locked_version)
 	WHERE id = ?
 `);
 const listBotMcpServersStmt = db.prepare(`
-	SELECT id, bot_id, label, url, headers_json, created_at
+	SELECT ${MCP_ROW_COLS}
 	FROM bot_mcp_servers
 	WHERE bot_id = ?
 	ORDER BY created_at ASC
 `);
 const getBotMcpServerStmt = db.prepare(`
-	SELECT id, bot_id, label, url, headers_json, created_at
+	SELECT ${MCP_ROW_COLS}
 	FROM bot_mcp_servers
 	WHERE id = ?
 `);
@@ -1374,44 +1423,77 @@ const deleteBotMcpServerStmt = db.prepare(
 	`DELETE FROM bot_mcp_servers WHERE id = ?`,
 );
 
-function mapMcpRow(raw: RawBotMcpServerRow | undefined): BotMcpServer | null {
-	if (!raw) return null;
-	let headers: Record<string, string> = {};
+function safeJsonObject(raw: string | null | undefined, label: string): Record<string, string> {
+	if (!raw) return {};
 	try {
-		const parsed = JSON.parse(raw.headers_json ?? "{}");
+		const parsed = JSON.parse(raw);
 		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-			// Coerce non-string values to strings; anything stored
-			// here came from the API and should already be a
-			// string-map, but be defensive.
+			const out: Record<string, string> = {};
 			for (const [k, v] of Object.entries(parsed)) {
-				if (typeof v === "string") headers[k] = v;
+				if (typeof v === "string") out[k] = v;
 			}
+			return out;
 		}
 	} catch {
-		console.warn(`db: bot_mcp_servers ${raw.id} has malformed headers_json`);
+		console.warn(`db: ${label} malformed JSON object, ignoring`);
 	}
+	return {};
+}
+
+function safeJsonStringArray(raw: string | null | undefined, label: string): string[] {
+	if (!raw) return [];
+	try {
+		const parsed = JSON.parse(raw);
+		if (Array.isArray(parsed)) return parsed.filter((s): s is string => typeof s === "string");
+	} catch {
+		console.warn(`db: ${label} malformed JSON array, ignoring`);
+	}
+	return [];
+}
+
+function mapMcpRow(raw: RawBotMcpServerRow | undefined): BotMcpServer | null {
+	if (!raw) return null;
+	const kind: BotMcpServerKind = raw.kind === "stdio" ? "stdio" : "http";
 	return {
 		id: raw.id,
 		bot_id: raw.bot_id,
 		label: raw.label,
+		kind,
 		url: raw.url,
-		headers,
+		headers: safeJsonObject(raw.headers_json, `bot_mcp_servers ${raw.id} headers_json`),
+		command: raw.command,
+		args: safeJsonStringArray(raw.args_json, `bot_mcp_servers ${raw.id} args_json`),
+		env: safeJsonObject(raw.env_json, `bot_mcp_servers ${raw.id} env_json`),
+		locked_version: raw.locked_version,
 		created_at: raw.created_at,
 	};
 }
 
-/** Attach an MCP server to a bot.  Returns the row's id. */
+/** Attach an MCP server to a bot.  Returns the row's id.  Caller picks
+ * the kind: 'http' for hosted Streamable-HTTP endpoints, 'stdio' for
+ * subprocess invocations (npx / uvx / etc.).  Unused fields for the
+ * chosen kind should be left empty. */
 export function addBotMcpServer(opts: {
 	bot_id: number;
 	label: string;
-	url: string;
+	kind: BotMcpServerKind;
+	url?: string;
 	headers?: Record<string, string>;
+	command?: string;
+	args?: string[];
+	env?: Record<string, string>;
+	locked_version?: string;
 }): number {
 	const r = insertBotMcpServerStmt.get(
 		opts.bot_id,
 		opts.label,
-		opts.url,
+		opts.kind,
+		opts.url ?? "",
 		JSON.stringify(opts.headers ?? {}),
+		opts.command ?? null,
+		JSON.stringify(opts.args ?? []),
+		JSON.stringify(opts.env ?? {}),
+		opts.locked_version ?? null,
 		Date.now(),
 	) as { id: number };
 	return r.id;
@@ -1425,11 +1507,19 @@ export function updateBotMcpServer(id: number, patch: {
 	label?: string;
 	url?: string;
 	headers?: Record<string, string>;
+	command?: string;
+	args?: string[];
+	env?: Record<string, string>;
+	locked_version?: string;
 }): BotMcpServer | null {
 	updateBotMcpServerStmt.run(
 		patch.label ?? null,
 		patch.url ?? null,
 		patch.headers === undefined ? null : JSON.stringify(patch.headers),
+		patch.command ?? null,
+		patch.args === undefined ? null : JSON.stringify(patch.args),
+		patch.env === undefined ? null : JSON.stringify(patch.env),
+		patch.locked_version ?? null,
 		id,
 	);
 	return getBotMcpServerById(id);

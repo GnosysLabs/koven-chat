@@ -48,6 +48,7 @@ import {
 import {
 	listBotMcpServers as fetchBotMcpServers,
 	attachBotMcpServer,
+	importBotMcpServers,
 	patchBotMcpServer,
 	detachBotMcpServer,
 	type BotMcpAttachment,
@@ -1414,6 +1415,16 @@ function ToolsTab({
 	const [submitting, setSubmitting] = useState(false);
 	const [editingId, setEditingId] = useState<number | null>(null);
 
+	// Form mode toggle.  "url" = the existing single-server form for
+	// hosted Streamable-HTTP endpoints.  "paste" = a JSON textarea
+	// where users dump the canonical Claude Desktop / Cursor / Cline
+	// `mcpServers` config block (one or more servers at once,
+	// stdio or http).  paste mode goes through the bulk-import
+	// engine endpoint which parses the config tolerantly.
+	const [addMode, setAddMode] = useState<"url" | "paste">("url");
+	const [pasteJson, setPasteJson] = useState("");
+	const [pasteWarnings, setPasteWarnings] = useState<string[]>([]);
+
 	// Initial fetch of the bot's attached servers (edit mode only).
 	useEffect(() => {
 		if (!accessToken || !bot) {
@@ -1559,6 +1570,48 @@ function ToolsTab({
 		if (editingId === idx) resetForm();
 	}
 
+	/** Bulk-import the pasted JSON config.  Edit-mode only — paste
+	 * mode is hidden during create because the bulk-import endpoint
+	 * is per-bot-id and the bot doesn't exist yet.  Users on create
+	 * get the URL form (or paste later in edit mode after the bot's
+	 * created — chosen this UX because adding stdio attachments
+	 * during create would mean queuing the JSON until create
+	 * resolves, then bulk-importing, with no atomicity guarantees
+	 * for the user's mental model). */
+	async function submitPaste() {
+		if (!accessToken || !bot) return;
+		setActionError(null);
+		setPasteWarnings([]);
+		const trimmed = pasteJson.trim();
+		if (!trimmed) {
+			setActionError("paste a config first");
+			return;
+		}
+		setSubmitting(true);
+		try {
+			const result = await importBotMcpServers(accessToken, bot.id, trimmed);
+			setAttached(prev => [...prev, ...result.servers]);
+			setPasteWarnings([
+				...result.warnings,
+				...result.skipped.map(s => `Skipped: ${s}`),
+			]);
+			if (result.servers.length > 0) {
+				setPasteJson("");
+			}
+			if (result.servers.length === 0) {
+				setActionError(
+					result.skipped.length > 0
+						? "every server in the paste was skipped — see warnings below"
+						: "no servers found in the paste",
+				);
+			}
+		} catch (err) {
+			setActionError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setSubmitting(false);
+		}
+	}
+
 	const editing = editingId !== null;
 
 	return (
@@ -1619,26 +1672,141 @@ function ToolsTab({
 					<EmptyServersState createMode={false} />
 				) : (
 					<ul className="rounded-md border border-border divide-y divide-border bg-card/30">
-						{attached.map(row => (
-							<AttachmentRow
-								key={row.id}
-								label={row.label || hostnameFromUrl(row.url)}
-								url={row.url}
-								hasAuth={!!row.headers["Authorization"]}
-								onEdit={() => startEdit(row)}
-								onRemove={() => detach(row)}
-							/>
-						))}
+						{attached.map(row => {
+							// For stdio attachments, the URL field is empty
+							// — show the command + args as the subtitle so
+							// the row is identifiable.  Hide the Edit
+							// button: stdio attachments are atomic,
+							// re-paste to change them.
+							const isStdio = row.kind === "stdio";
+							const subtitle = isStdio
+								? `${row.command ?? ""} ${row.args.join(" ")}`.trim()
+								: row.url;
+							const labelText = row.label
+								|| (isStdio ? (row.command ?? "stdio server") : hostnameFromUrl(row.url));
+							return (
+								<AttachmentRow
+									key={row.id}
+									label={labelText}
+									url={subtitle}
+									hasAuth={isStdio
+										? Object.keys(row.env).length > 0
+										: !!row.headers["Authorization"]}
+									kind={row.kind}
+									onEdit={isStdio ? undefined : () => startEdit(row)}
+									onRemove={() => detach(row)}
+								/>
+							);
+						})}
 					</ul>
 				)}
 			</div>
 
 			{/* Add / Edit form */}
 			<div className="space-y-3 rounded-md border border-border bg-card/20 px-4 py-4">
-				<div className="text-xs font-medium uppercase text-muted-foreground tracking-wide">
-					{editing ? "Edit server" : "Add server"}
+				<div className="flex items-center justify-between">
+					<div className="text-xs font-medium uppercase text-muted-foreground tracking-wide">
+						{editing ? "Edit server" : "Add server"}
+					</div>
+					{!editing && !isCreateMode && (
+						/* Mode toggle — hidden in edit mode (you can't
+						   re-paste an existing row) and in create mode
+						   (paste-import requires a real bot id; users
+						   add stdio after the bot's created). */
+						<div className="inline-flex rounded-md border border-border overflow-hidden text-[11px]">
+							<button
+								type="button"
+								onClick={() => { setAddMode("url"); setActionError(null); setPasteWarnings([]); }}
+								className={cn(
+									"px-2.5 py-1 transition-colors",
+									addMode === "url" ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground",
+								)}
+							>
+								Hosted URL
+							</button>
+							<button
+								type="button"
+								onClick={() => { setAddMode("paste"); setActionError(null); }}
+								className={cn(
+									"px-2.5 py-1 transition-colors border-l border-border",
+									addMode === "paste" ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground",
+								)}
+							>
+								Paste config
+							</button>
+						</div>
+					)}
 				</div>
 
+				{addMode === "paste" && !editing && !isCreateMode ? (
+					/* JSON-paste mode: tolerant import.  Shows warnings
+					   from the engine after submit so the user knows
+					   what was attached, what was skipped, and any
+					   per-server caveats (couldn't pin npm version,
+					   unknown fields ignored, etc.). */
+					<>
+						<div className="space-y-1.5">
+							<Label htmlFor="mcp-paste">Server config JSON</Label>
+							<textarea
+								id="mcp-paste"
+								value={pasteJson}
+								onChange={e => setPasteJson(e.target.value)}
+								placeholder={`{
+  "mcpServers": {
+    "perplexity-ask": {
+      "command": "npx",
+      "args": ["-y", "@chatmcp/server-perplexity-ask"],
+      "env": { "PERPLEXITY_API_KEY": "..." }
+    }
+  }
+}`}
+								rows={12}
+								className="w-full font-mono text-xs rounded-md border border-foreground/15 bg-background px-3 py-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-y"
+							/>
+							<p className="text-[11px] text-muted-foreground leading-snug">
+								Paste an <code className="font-mono">mcpServers</code> block from any MCP client config (Claude Desktop, Cursor, Cline, Windsurf). Multiple servers in one paste are all attached. Both <code className="font-mono">command</code>-based stdio servers and <code className="font-mono">url</code>-based HTTP servers are supported.
+							</p>
+						</div>
+						<div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-400 leading-snug">
+							<strong className="font-semibold">Stdio MCP servers run on the engine host.</strong> The package you attach gets a sandboxed filesystem (no view of engine secrets), only the env vars you specify, and per-spawn memory + CPU limits. Treat the env vars you paste here as exposed to anyone in any room your bot is in — bot tools are invocable by mention.
+						</div>
+						<div className="flex items-center gap-2">
+							<Button
+								type="button"
+								onClick={submitPaste}
+								disabled={submitting || !pasteJson.trim()}
+							>
+								{submitting ? "Importing…" : "Import"}
+							</Button>
+							{pasteJson && (
+								<Button
+									type="button"
+									variant="ghost"
+									onClick={() => { setPasteJson(""); setPasteWarnings([]); setActionError(null); }}
+									disabled={submitting}
+								>
+									Clear
+								</Button>
+							)}
+						</div>
+						{pasteWarnings.length > 0 && (
+							<div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-400 space-y-1">
+								<div className="font-semibold">Notes:</div>
+								<ul className="list-disc list-inside space-y-0.5">
+									{pasteWarnings.map((w, i) => (
+										<li key={i}>{w}</li>
+									))}
+								</ul>
+							</div>
+						)}
+						{actionError && (
+							<div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+								{actionError}
+							</div>
+						)}
+					</>
+				) : (
+				<>
 				<div className="space-y-1.5">
 					<Label htmlFor="mcp-url">MCP server URL</Label>
 					<Input
@@ -1771,37 +1939,56 @@ function ToolsTab({
 				<p className="text-[11px] text-muted-foreground leading-snug border-t border-border/50 pt-3">
 					⚠️ Anyone who can mention the bot — i.e. anyone in any room the bot's joined to — can invoke its tools. The token you paste here grants that audience whatever access it authorises. Don't attach personal-account tokens to bots in shared rooms.
 				</p>
+				</>
+				)}
 			</div>
 		</section>
 	);
 }
 
 function AttachmentRow({
-	label, url, hasAuth, suffix, onEdit, onRemove,
+	label, url, hasAuth, suffix, kind = "http", onEdit, onRemove,
 }: {
 	label: string;
 	url: string;
 	hasAuth: boolean;
 	suffix?: string;
-	onEdit(): void;
+	/** Drives the badge + edit-button visibility.  stdio attachments
+	 * aren't editable in-place (they're a single command + env block,
+	 * usually pasted from a Claude Desktop config — re-pasting is the
+	 * edit flow). */
+	kind?: "http" | "stdio";
+	onEdit?(): void;
 	onRemove(): void;
 }) {
 	return (
 		<li className="px-3 py-2.5 flex items-center gap-3">
 			<Plug className="h-4 w-4 shrink-0 text-muted-foreground" />
 			<div className="flex-1 min-w-0">
-				<div className="text-sm font-medium truncate">{label}</div>
+				<div className="text-sm font-medium truncate flex items-center gap-1.5">
+					<span className="truncate">{label}</span>
+					<span className={cn(
+						"shrink-0 text-[9px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded border",
+						kind === "stdio"
+							? "bg-amber-500/10 text-amber-600 border-amber-500/30"
+							: "bg-primary/10 text-primary border-primary/20",
+					)}>
+						{kind === "stdio" ? "stdio" : "http"}
+					</span>
+				</div>
 				<div className="text-[11px] text-muted-foreground truncate">
 					{url}{hasAuth ? " · authed" : ""}{suffix ?? ""}
 				</div>
 			</div>
-			<button
-				type="button"
-				onClick={onEdit}
-				className="text-xs text-muted-foreground hover:text-foreground"
-			>
-				Edit
-			</button>
+			{onEdit && (
+				<button
+					type="button"
+					onClick={onEdit}
+					className="text-xs text-muted-foreground hover:text-foreground"
+				>
+					Edit
+				</button>
+			)}
 			<button
 				type="button"
 				onClick={onRemove}

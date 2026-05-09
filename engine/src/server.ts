@@ -128,6 +128,8 @@ import { extractToken, whoami } from "./auth";
 import { extractKnowledgeText } from "./knowledge_extract";
 import { reconcileOne, startOne, stopOne } from "./bot_manager";
 import { WEIGHT_FLOOR } from "./weight";
+import { parseMcpConfig } from "./mcp/parse_config";
+import { pinStdioPackageVersion } from "./mcp/version_pin";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 // Auto-suspend the flagger if they've had this many floor flags
@@ -1741,6 +1743,7 @@ export function startServer(): void {
 						const newId = addBotMcpServer({
 							bot_id: id,
 							label: parsed.label ?? "",
+							kind: "http",
 							url: parsed.url ?? "",
 							headers: parsed.headers,
 						});
@@ -1780,6 +1783,85 @@ export function startServer(): void {
 						deleteBotMcpServer(mcpId);
 						return json({ ok: true });
 					}
+				}
+			}
+
+			// POST /api/bots/:id/mcp/import { config }
+			//
+			// Tolerant JSON-paste endpoint.  Accepts the standard
+			// Claude-Desktop / Cursor / Cline `mcpServers` config
+			// block (or several common variants — see
+			// engine/src/mcp/parse_config.ts), normalises every
+			// server it finds, and creates one bot_mcp_servers row
+			// per server.  Stdio-kind attachments get version-pinned
+			// at attach time when they're npx-style invocations.
+			//
+			// Returns { servers: [BotMcpServer], warnings: [string],
+			// skipped: [string] } so the UI can show what was added,
+			// what was unrecognised, and any per-server caveats
+			// (couldn't pin version, unknown fields ignored, etc.).
+			{
+				const m = path.match(/^\/api\/bots\/(\d+)\/mcp\/import$/);
+				if (req.method === "POST" && m) {
+					const userId = await whoami(extractToken(req));
+					if (!userId) return json({ errcode: "M_FORBIDDEN" }, { status: 401 });
+					const id = Number(m[1]);
+					const existing = getBotById(id);
+					if (!existing) return json({ errcode: "M_NOT_FOUND" }, { status: 404 });
+					if (existing.owner_id !== userId) {
+						return json({ errcode: "M_FORBIDDEN", error: "not your bot" }, { status: 403 });
+					}
+					const body = (await req.json().catch(() => null)) as { config?: unknown } | null;
+					const cfg = body?.config;
+					if (cfg === undefined || cfg === null) {
+						return json({ errcode: "M_INVALID_PARAM", error: "config required" }, { status: 400 });
+					}
+					let parseResult;
+					try {
+						parseResult = parseMcpConfig(cfg);
+					} catch (err) {
+						return json({
+							errcode: "M_INVALID_PARAM",
+							error: err instanceof Error ? err.message : String(err),
+						}, { status: 400 });
+					}
+					const created: ReturnType<typeof getBotMcpServerById>[] = [];
+					const skipped: string[] = [];
+					for (const att of parseResult.attachments) {
+						try {
+							let pinnedVersion: string | null = null;
+							let finalArgs = att.args ?? [];
+							if (att.kind === "stdio" && att.command) {
+								const r = await pinStdioPackageVersion(att.command, finalArgs);
+								finalArgs = r.args;
+								pinnedVersion = r.version;
+								if (!pinnedVersion) {
+									parseResult.warnings.push(
+										`${att.label}: couldn't pin npm version (private package or network blip) — will use whatever's latest at run time`,
+									);
+								}
+							}
+							const newId = addBotMcpServer({
+								bot_id: id,
+								label: att.label,
+								kind: att.kind,
+								url: att.url,
+								headers: att.headers,
+								command: att.command,
+								args: finalArgs,
+								env: att.env,
+								locked_version: pinnedVersion ?? undefined,
+							});
+							created.push(getBotMcpServerById(newId));
+						} catch (err) {
+							skipped.push(`${att.label}: ${err instanceof Error ? err.message : String(err)}`);
+						}
+					}
+					return json({
+						servers: created.filter(s => s !== null),
+						warnings: parseResult.warnings,
+						skipped,
+					});
 				}
 			}
 
