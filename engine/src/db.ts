@@ -159,6 +159,25 @@ db.exec(`
 		updated_at INTEGER NOT NULL
 	);
 
+	-- MCP servers attached to each bot.  Owners pick servers from
+	-- Smithery catalog (Layer 6 UI) and the engine exposes their
+	-- tools to the bot LLM at runtime.  qualified_name is
+	-- Smithery package id (e.g. "@modelcontextprotocol/server-
+	-- github" or "exa").  config_json is an opaque per-server
+	-- config blob — JSONSchema is server-defined, validation
+	-- happens at MCP-connect time, we just round-trip the JSON.
+	-- Cascade-delete on bot deletion so a removed bot does not
+	-- leave orphan rows behind.
+	CREATE TABLE IF NOT EXISTS bot_mcp_servers (
+		id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+		bot_id                  INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+		smithery_qualified_name TEXT NOT NULL,
+		config_json             TEXT NOT NULL DEFAULT '{}',
+		created_at              INTEGER NOT NULL,
+		UNIQUE(bot_id, smithery_qualified_name)
+	);
+	CREATE INDEX IF NOT EXISTS idx_bot_mcp_servers_bot ON bot_mcp_servers(bot_id);
+
 	-- Per-user third-party integration secrets — currently just the
 	-- Smithery API key (used to query Smithery's MCP server registry
 	-- + invoke hosted MCP servers on the user's behalf).  Composite
@@ -1132,6 +1151,105 @@ export function clearUserIntegrationSecret(userId: string, integration: string):
  * the value. */
 export function hasUserIntegration(userId: string, integration: string): boolean {
 	return !!hasUserIntegrationStmt.get(userId, integration);
+}
+
+// ─── Per-bot MCP servers ────────────────────────────────────────────
+//
+// Each bot has zero or more MCP servers attached (from Smithery's
+// catalog).  Stored as (bot_id, qualified_name, config) triples;
+// the config blob is opaque JSON whose shape is dictated by the
+// individual server's published JSONSchema (Layer 6 surfaces the
+// form in the bot edit UI).
+
+export interface BotMcpServer {
+	id: number;
+	bot_id: number;
+	smithery_qualified_name: string;
+	config: Record<string, unknown>;
+	created_at: number;
+}
+
+interface RawBotMcpServerRow {
+	id: number;
+	bot_id: number;
+	smithery_qualified_name: string;
+	config_json: string;
+	created_at: number;
+}
+
+const insertBotMcpServerStmt = db.prepare(`
+	INSERT INTO bot_mcp_servers (bot_id, smithery_qualified_name, config_json, created_at)
+	VALUES (?, ?, ?, ?)
+	ON CONFLICT(bot_id, smithery_qualified_name) DO UPDATE SET
+		config_json = excluded.config_json
+	RETURNING id
+`);
+const listBotMcpServersStmt = db.prepare(`
+	SELECT id, bot_id, smithery_qualified_name, config_json, created_at
+	FROM bot_mcp_servers
+	WHERE bot_id = ?
+	ORDER BY created_at ASC
+`);
+const getBotMcpServerStmt = db.prepare(`
+	SELECT id, bot_id, smithery_qualified_name, config_json, created_at
+	FROM bot_mcp_servers
+	WHERE id = ?
+`);
+const deleteBotMcpServerStmt = db.prepare(
+	`DELETE FROM bot_mcp_servers WHERE id = ?`,
+);
+
+function mapMcpRow(raw: RawBotMcpServerRow | undefined): BotMcpServer | null {
+	if (!raw) return null;
+	let config: Record<string, unknown> = {};
+	try {
+		const parsed = JSON.parse(raw.config_json ?? "{}");
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+			config = parsed as Record<string, unknown>;
+		}
+	} catch {
+		// Malformed JSON → treat as empty.  The API caller stored it
+		// originally so this shouldn't happen, but defensive.
+		console.warn(`db: bot_mcp_servers ${raw.id} has malformed config_json`);
+	}
+	return {
+		id: raw.id,
+		bot_id: raw.bot_id,
+		smithery_qualified_name: raw.smithery_qualified_name,
+		config,
+		created_at: raw.created_at,
+	};
+}
+
+/** Attach an MCP server to a bot.  Idempotent on (bot_id,
+ * qualified_name) — a second add for the same server replaces the
+ * stored config.  Returns the row's id. */
+export function addBotMcpServer(opts: {
+	bot_id: number;
+	qualified_name: string;
+	config?: Record<string, unknown>;
+}): number {
+	const r = insertBotMcpServerStmt.get(
+		opts.bot_id,
+		opts.qualified_name,
+		JSON.stringify(opts.config ?? {}),
+		Date.now(),
+	) as { id: number };
+	return r.id;
+}
+
+export function listBotMcpServers(botId: number): BotMcpServer[] {
+	return (listBotMcpServersStmt.all(botId) as RawBotMcpServerRow[])
+		.map(mapMcpRow)
+		.filter((r): r is BotMcpServer => r !== null);
+}
+
+export function getBotMcpServerById(id: number): BotMcpServer | null {
+	return mapMcpRow(getBotMcpServerStmt.get(id) as RawBotMcpServerRow | undefined);
+}
+
+export function deleteBotMcpServer(id: number): void {
+	deleteBotMcpServerStmt.run(id);
 }
 
 // ─── Suspensions ────────────────────────────────────────────────────

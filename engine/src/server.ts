@@ -70,6 +70,10 @@ import {
 	hasUserIntegration,
 	setUserIntegrationSecret,
 	clearUserIntegrationSecret,
+	addBotMcpServer,
+	listBotMcpServers,
+	getBotMcpServerById,
+	deleteBotMcpServer,
 	readBio,
 	readInstanceConfig,
 	readWeight,
@@ -1624,6 +1628,83 @@ export function startServer(): void {
 					if (req.method === "DELETE" && fileId !== null) {
 						const ok = deleteBotKnowledge(fileId, id);
 						if (!ok) return json({ errcode: "M_NOT_FOUND" }, { status: 404 });
+						return json({ ok: true });
+					}
+				}
+			}
+
+			// GET    /api/bots/:id/mcp           — list attached MCP servers
+			// POST   /api/bots/:id/mcp           — attach a Smithery server
+			// DELETE /api/bots/:id/mcp/:mcpId    — detach
+			//
+			// MCP servers (from Smithery's catalog) the bot's owner has
+			// attached.  At runtime, the bot's tool-use loop fetches
+			// `tools/list` from each enabled server and exposes them to
+			// the LLM.  See engine/src/mcp/* for the runtime client.
+			// `config` is server-specific JSON; we round-trip it
+			// opaquely (validation happens when the bot actually
+			// connects to the server).
+			{
+				const m = path.match(/^\/api\/bots\/(\d+)\/mcp(?:\/(\d+))?$/);
+				if (m) {
+					const userId = await whoami(extractToken(req));
+					if (!userId) return json({ errcode: "M_FORBIDDEN" }, { status: 401 });
+					const id = Number(m[1]);
+					const mcpId = m[2] ? Number(m[2]) : null;
+					const existing = getBotById(id);
+					if (!existing) return json({ errcode: "M_NOT_FOUND" }, { status: 404 });
+					if (existing.owner_id !== userId) {
+						return json({ errcode: "M_FORBIDDEN", error: "not your bot" }, { status: 403 });
+					}
+
+					if (req.method === "GET" && mcpId === null) {
+						return json({ servers: listBotMcpServers(id) });
+					}
+
+					if (req.method === "POST" && mcpId === null) {
+						const body = (await req.json().catch(() => ({}))) as {
+							qualified_name?: unknown;
+							config?: unknown;
+						};
+						const qualifiedName = typeof body.qualified_name === "string"
+							? body.qualified_name.trim()
+							: "";
+						if (!qualifiedName) {
+							return json({ errcode: "M_INVALID_PARAM", error: "qualified_name required" }, { status: 400 });
+						}
+						// Sanity-cap on the qualified name.  Smithery's
+						// longest published names are well under 100 chars;
+						// a much longer string is almost certainly malformed
+						// or a probing attempt.
+						if (qualifiedName.length > 200) {
+							return json({ errcode: "M_INVALID_PARAM", error: "qualified_name too long" }, { status: 400 });
+						}
+						// Per-server config: opaque JSON object.  Reject
+						// non-object shapes (arrays, strings, numbers) so
+						// we don't store something the runtime can't pass
+						// through to MCP later.
+						const config = body.config;
+						if (config !== undefined
+							&& (typeof config !== "object" || config === null || Array.isArray(config))) {
+							return json({ errcode: "M_INVALID_PARAM", error: "config must be a JSON object" }, { status: 400 });
+						}
+						const newId = addBotMcpServer({
+							bot_id: id,
+							qualified_name: qualifiedName,
+							config: (config as Record<string, unknown> | undefined) ?? {},
+						});
+						const row = getBotMcpServerById(newId);
+						return json({ server: row });
+					}
+
+					if (req.method === "DELETE" && mcpId !== null) {
+						// Make sure the row actually belongs to this
+						// bot — rejects "DELETE /api/bots/<my-bot>/mcp/<some-other-bot's-row>".
+						const row = getBotMcpServerById(mcpId);
+						if (!row || row.bot_id !== id) {
+							return json({ errcode: "M_NOT_FOUND" }, { status: 404 });
+						}
+						deleteBotMcpServer(mcpId);
 						return json({ ok: true });
 					}
 				}
