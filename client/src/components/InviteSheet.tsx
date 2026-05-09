@@ -18,7 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { cn } from "@/lib/utils";
-import { Check, X } from "lucide-react";
+import { X } from "lucide-react";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { RoomId, UserId } from "@koven/shared";
 import { fetchBotDirectory, type PublicBotEntry } from "@/lib/bots-cache";
@@ -45,9 +45,11 @@ export function InviteSheet({ open, onOpenChange, transport, roomId, roomName, i
 	const [results, setResults] = useState<DirectoryResult[]>([]);
 	const [selected, setSelected] = useState<DirectoryResult[]>([]);
 	const [searching, setSearching] = useState(false);
-	const [pending, setPending] = useState(false);
+	// Inline validation for the empty-selection case.  We no longer
+	// surface invite-progress / success here because send() closes the
+	// modal immediately and fires invites in the background — see the
+	// long comment in send() for the rationale.
 	const [error, setError] = useState<string | null>(null);
-	const [info, setInfo] = useState<string | null>(null);
 	const queryDebounceRef = useRef<number | null>(null);
 	// Snapshot of the local bot roster, fetched on open.  We merge
 	// matching bots into the directory results so freshly-created
@@ -62,8 +64,6 @@ export function InviteSheet({ open, onOpenChange, transport, roomId, roomName, i
 		setResults([]);
 		setSelected([]);
 		setError(null);
-		setInfo(null);
-		setPending(false);
 		// Refresh the bot roster on every open so bots created after
 		// the page loaded still show up.  Cheap unauthenticated
 		// fetch; failure leaves the roster empty (search falls back
@@ -147,7 +147,7 @@ export function InviteSheet({ open, onOpenChange, transport, roomId, roomName, i
 		addUser({ userId: trimmed as UserId });
 	}
 
-	async function send() {
+	function send() {
 		if (!transport || !roomId) return;
 		const targets: UserId[] = [...selected.map(s => s.userId)];
 		// Allow firing without clicking a search result if the user
@@ -161,27 +161,37 @@ export function InviteSheet({ open, onOpenChange, transport, roomId, roomName, i
 			setError("Pick someone to invite first.");
 			return;
 		}
-		setPending(true);
-		setError(null);
-		setInfo(null);
-		try {
-			const res = await transport.inviteUsers(roomId, targets);
-			if (res.failed.length === 0) {
-				setInfo(`Invited ${res.invited.length} ${res.invited.length === 1 ? "person" : "people"}.`);
-				// Close after a beat so the user sees the confirmation.
-				setTimeout(() => onOpenChange(false), 700);
-			} else if (res.invited.length === 0) {
-				const first = res.failed[0]!;
-				setError(first.error);
-			} else {
-				setInfo(`Invited ${res.invited.length}; ${res.failed.length} failed.`);
-				setSelected(s => s.filter(u => res.failed.some(f => f.userId === u.userId)));
+		// Close immediately and fan out invites in the background.
+		// Reasoning: inviteUsers is rate-limit-aware (a burst of N
+		// parallel /invite calls then a serial path with sleep gaps),
+		// so for a 30-person invite it can take 10+ seconds.  Holding
+		// the modal open the whole time felt frozen.  The recipient-
+		// side experience is identical either way (invites land via
+		// /sync as soon as Synapse processes them); the local user
+		// just doesn't have to stare at a spinner.
+		//
+		// Per-invitee failures are surfaced as errors in the engine
+		// + browser console.  If the whole batch fails (e.g. lost
+		// network, room deleted), nothing visible happens — that's
+		// the cost of fire-and-forget; we'd need a global toast
+		// system to do better.  For now this matches Discord's
+		// behaviour, which also closes the invite picker on send
+		// and just trusts it.
+		const t = transport;
+		void (async () => {
+			try {
+				const res = await t.inviteUsers(roomId, targets);
+				if (res.failed.length > 0) {
+					console.warn(
+						`InviteSheet: ${res.failed.length}/${targets.length} invites failed`,
+						res.failed,
+					);
+				}
+			} catch (err) {
+				console.warn("InviteSheet: invite batch threw", err);
 			}
-		} catch (err) {
-			setError(err instanceof Error ? err.message : String(err));
-		} finally {
-			setPending(false);
-		}
+		})();
+		onOpenChange(false);
 	}
 
 	const targetWord = isSpace ? "space" : "room";
@@ -286,27 +296,20 @@ export function InviteSheet({ open, onOpenChange, transport, roomId, roomName, i
 							{error}
 						</div>
 					)}
-					{info && !error && (
-						<div className="text-xs text-emerald-500/90 border border-emerald-500/30 bg-emerald-500/5 rounded px-3 py-2 inline-flex items-center gap-1.5">
-							<Check className="h-3.5 w-3.5" /> {info}
-						</div>
-					)}
 				</div>
 
 				<DialogFooter>
-					<Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={pending}>
+					<Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
 						Cancel
 					</Button>
 					<Button
 						type="button"
 						onClick={send}
-						disabled={pending || (selected.length === 0 && !query.trim().startsWith("@"))}
+						disabled={selected.length === 0 && !query.trim().startsWith("@")}
 					>
-						{pending
-							? "Inviting…"
-							: selected.length === 0
-								? `Invite to ${targetWord}`
-								: `Invite ${selected.length} to ${targetWord}`}
+						{selected.length === 0
+							? `Invite to ${targetWord}`
+							: `Invite ${selected.length} to ${targetWord}`}
 					</Button>
 				</DialogFooter>
 			</DialogContent>

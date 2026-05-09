@@ -94,6 +94,11 @@ interface FormState {
 	maxTokensPerReply: string;
 	dailyTokenLimit: string;
 	dailyCallLimit: string;
+	// Privacy gate.  When false, non-owners can't DM this bot.
+	// Default true so the bot is open to anyone in the absence of
+	// explicit opt-out — matches the platform's existing behaviour
+	// for already-deployed bots after the column migration.
+	acceptDms: boolean;
 }
 
 function freshFormState(): FormState {
@@ -111,6 +116,7 @@ function freshFormState(): FormState {
 		maxTokensPerReply: "",
 		dailyTokenLimit: "",
 		dailyCallLimit: "",
+		acceptDms: true,
 	};
 }
 
@@ -131,6 +137,7 @@ function formStateFromBot(bot: BotSummary): FormState {
 		maxTokensPerReply: bot.max_tokens_per_reply > 0 ? String(bot.max_tokens_per_reply) : "",
 		dailyTokenLimit: bot.daily_token_limit > 0 ? String(bot.daily_token_limit) : "",
 		dailyCallLimit: bot.daily_call_limit > 0 ? String(bot.daily_call_limit) : "",
+		acceptDms: bot.accept_dms,
 	};
 }
 
@@ -520,6 +527,19 @@ export function BotEditForm({
 					daily_token_limit: parseLimit(form.dailyTokenLimit),
 					daily_call_limit: parseLimit(form.dailyCallLimit),
 				});
+				// Newly-created bots inherit the engine default (open
+				// to DMs from anyone).  If the form's flipped to
+				// closed before submit, write that through as a
+				// follow-up patch — keeps the create payload narrow
+				// and avoids a server-side schema change just for
+				// the rare opt-out-at-create flow.
+				if (!form.acceptDms) {
+					try {
+						saved = await patchBot(accessToken, saved.id, { accept_dms: false });
+					} catch (err) {
+						console.warn("BotEditForm: failed to apply accept_dms=false on create", err);
+					}
+				}
 			} else if (bot) {
 				const patch: Record<string, unknown> = {
 					display_name: form.displayName.trim(),
@@ -532,6 +552,7 @@ export function BotEditForm({
 					max_tokens_per_reply: parseLimit(form.maxTokensPerReply),
 					daily_token_limit: parseLimit(form.dailyTokenLimit),
 					daily_call_limit: parseLimit(form.dailyCallLimit),
+					accept_dms: form.acceptDms,
 				};
 				// Only send api_key if the user replaced it (mask was
 				// off and a non-empty value entered).
@@ -1021,6 +1042,44 @@ export function BotEditForm({
 					<p className="text-[10px] text-muted-foreground">
 						Shown on the bot's profile sheet alongside its display name and avatar. {form.bio.length}/300.
 					</p>
+				</div>
+
+				{/* Privacy gate.  Default-on (open to anyone) so
+				    existing bots and freshly-created bots both
+				    behave the same way unless the owner explicitly
+				    flips it.  Group-room invites are always owner-
+				    only — no UI for that since it's not a setting,
+				    it's a hard rule enforced engine-side. */}
+				<div className="space-y-2 max-w-2xl pt-2 border-t border-border">
+					<div className="flex items-start gap-3">
+						<button
+							type="button"
+							role="switch"
+							aria-checked={form.acceptDms}
+							onClick={() => update("acceptDms", !form.acceptDms)}
+							className={cn(
+								"shrink-0 relative inline-flex h-5 w-9 items-center rounded-full transition-colors",
+								form.acceptDms ? "bg-primary" : "bg-muted",
+							)}
+						>
+							<span
+								className={cn(
+									"inline-block h-4 w-4 transform rounded-full bg-background transition-transform",
+									form.acceptDms ? "translate-x-[18px]" : "translate-x-0.5",
+								)}
+							/>
+						</button>
+						<div className="space-y-1">
+							<Label className="cursor-pointer" onClick={() => update("acceptDms", !form.acceptDms)}>
+								Accept DMs from other users
+							</Label>
+							<p className="text-[11px] text-muted-foreground leading-snug">
+								When off, only you can DM this bot. {form.acceptDms
+									? "Anyone on the instance can start a DM with it."
+									: "DM invites from other users are silently declined."} Group-room invites are always owner-only regardless of this setting.
+							</p>
+						</div>
+					</div>
 				</div>
 			</section>
 		);

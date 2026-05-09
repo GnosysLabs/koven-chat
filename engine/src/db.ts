@@ -527,6 +527,13 @@ ensureColumns("bots", [
 	{ name: "max_tokens_per_reply", ddl: "max_tokens_per_reply INTEGER NOT NULL DEFAULT 0" },
 	{ name: "daily_token_limit",   ddl: "daily_token_limit INTEGER NOT NULL DEFAULT 0" },
 	{ name: "daily_call_limit",    ddl: "daily_call_limit INTEGER NOT NULL DEFAULT 0" },
+	// Bot privacy gate: when 0, the bot leaves any DM-shaped invite
+	// it receives from anyone other than its owner.  Default 1 (open
+	// to everyone) so existing bots behave unchanged after the
+	// migration; owners opt out from the bot edit form.  Group-room
+	// invites are gated separately — only the owner can pull a bot
+	// into a group room, regardless of this flag.
+	{ name: "accept_dms",          ddl: "accept_dms INTEGER NOT NULL DEFAULT 1" },
 ]);
 
 // Schema rewrite: bot_mcp_servers used to be Smithery-specific
@@ -2024,6 +2031,12 @@ export interface BotRow {
 	max_tokens_per_reply: number;
 	daily_token_limit: number;
 	daily_call_limit: number;
+	/** Whether this bot accepts DM-shaped invites from non-owners.
+	 * 1 = open to anyone (default, matches pre-migration behaviour),
+	 * 0 = bot leaves any DM invite from a user other than its owner.
+	 * Group-room invites have a separate, stricter rule: only the
+	 * owner can pull a bot into a group room, regardless of this flag. */
+	accept_dms: number;
 	access_token_enc: string;
 	device_id: string;
 	enabled: number;
@@ -2096,7 +2109,8 @@ const updateBotStmt = db.prepare(`
 		triggers             = COALESCE(?, triggers),
 		max_tokens_per_reply = COALESCE(?, max_tokens_per_reply),
 		daily_token_limit    = COALESCE(?, daily_token_limit),
-		daily_call_limit     = COALESCE(?, daily_call_limit)
+		daily_call_limit     = COALESCE(?, daily_call_limit),
+		accept_dms           = COALESCE(?, accept_dms)
 	WHERE id = ?
 `);
 const deleteBotStmt = db.prepare(`DELETE FROM bots WHERE id = ?`);
@@ -2223,6 +2237,7 @@ export function updateBot(id: number, patch: {
 	max_tokens_per_reply?: number;
 	daily_token_limit?: number;
 	daily_call_limit?: number;
+	accept_dms?: 0 | 1;
 }): BotRow | null {
 	updateBotStmt.run(
 		patch.display_name ?? null,
@@ -2238,6 +2253,7 @@ export function updateBot(id: number, patch: {
 		patch.max_tokens_per_reply ?? null,
 		patch.daily_token_limit ?? null,
 		patch.daily_call_limit ?? null,
+		patch.accept_dms ?? null,
 		id,
 	);
 	return getBotById(id);

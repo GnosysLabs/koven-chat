@@ -139,14 +139,67 @@ export async function startBot(bot: BotRow): Promise<RunningBot> {
 	// Don't keep the process alive just for this timer.
 	if (typeof snapshotTimer.unref === "function") snapshotTimer.unref();
 
-	// Auto-accept invites.  Anyone on the instance can invite a bot
-	// to a room they're in; the bot just joins.
-	client.on(RoomMemberEvent.Membership, (_event: MatrixEvent, member) => {
+	// Invite handler.  Two gates, both bot-owner controlled:
+	//
+	//   (a) Group-room invites — only the bot's owner can pull a bot
+	//       into a group room.  Random users dragging someone else's
+	//       bot into their channel was a recurring abuse vector
+	//       (cost-griefing the owner's LLM bill, spamming bot tools
+	//       in unrelated rooms).  No setting; this rule is absolute.
+	//
+	//   (b) DM invites — gated by the bot's `accept_dms` flag.
+	//       Default true (open to anyone), owner can flip it off in
+	//       the bot edit form.  When off, the bot leaves any DM
+	//       invite from a non-owner.  When on, anyone can DM the bot.
+	//       The owner can always DM their own bot regardless.
+	//
+	// "Is this a DM invite?" comes from the m.room.member event's
+	// `is_direct: true` content flag — the spec way for an inviter to
+	// tell receivers "this room is a 1:1 DM."  Matrix clients
+	// (Element, Cinny, our own SPA) all set this when they create a
+	// DM via the standard flow.  Group-room invites omit it (or set
+	// false).  Slightly fuzzy on edge cases (manual /invite without
+	// is_direct, federated quirks), but the policy still leans safe:
+	// ambiguous → treated as group → owner-only.
+	client.on(RoomMemberEvent.Membership, (event: MatrixEvent, member) => {
 		if (member.userId !== bot.mxid) return;
 		if (member.membership !== "invite") return;
 		const roomId = member.roomId;
+		const inviter = event.getSender();
+		const inviteContent = event.getContent() as { is_direct?: boolean };
+		const isDm = inviteContent.is_direct === true;
+		const fromOwner = inviter === bot.owner_id;
+
+		// Decision matrix.  rejectReason is non-null iff we should
+		// leave the room instead of joining.
+		let rejectReason: string | null = null;
+		if (isDm) {
+			if (!fromOwner && bot.accept_dms === 0) {
+				rejectReason = "DM-from-non-owner with accept_dms=off";
+			}
+		} else {
+			// Group room.  Owner-only, period.
+			if (!fromOwner) {
+				rejectReason = "group-room invite from non-owner";
+			}
+		}
+
+		if (rejectReason) {
+			console.log(
+				`bot ${bot.mxid}: declining invite to ${roomId} from ${inviter} (${rejectReason})`,
+			);
+			// Leave the invite-state room.  The Matrix spec models
+			// "decline an invite" as a transition from invite →
+			// leave on your own membership; client.leave() does that
+			// without ever joining.
+			client.leave(roomId).catch((err) => {
+				console.warn(`bot ${bot.mxid}: failed to decline invite to ${roomId}`, err);
+			});
+			return;
+		}
+
 		client.joinRoom(roomId)
-			.then(() => console.log(`bot ${bot.mxid}: joined ${roomId}`))
+			.then(() => console.log(`bot ${bot.mxid}: joined ${roomId} (invited by ${inviter}${isDm ? ", DM" : ""})`))
 			.catch((err) => console.warn(`bot ${bot.mxid}: failed to join ${roomId}`, err));
 	});
 

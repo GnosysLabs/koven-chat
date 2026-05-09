@@ -492,6 +492,11 @@ function toBotSummary(row: import("./db").BotRow) {
 		// Returned as "" when unset so the edit form doesn't have to
 		// case-split on null.
 		bio: readBio(row.mxid) ?? "",
+		// Privacy gate — exposed as a boolean to the client even
+		// though it lives as 0/1 on disk.  Default-true semantics so
+		// pre-migration bots stay open to everyone unless the owner
+		// flips it off in the edit form.
+		accept_dms: row.accept_dms !== 0,
 	};
 }
 
@@ -1475,6 +1480,13 @@ export function startServer(): void {
 					}
 					if (Number.isFinite(body.daily_call_limit)) {
 						patch.daily_call_limit = clampNonNegInt(body.daily_call_limit, 1_000_000);
+					}
+					// accept_dms toggle — boolean from the client maps to
+					// 0/1 on disk.  Default-true stays true unless the
+					// client explicitly sends `false`; sending the field
+					// at all (true or false) is what triggers the write.
+					if (typeof body.accept_dms === "boolean") {
+						patch.accept_dms = body.accept_dms ? 1 : 0;
 					}
 					// Bio update writes through to user_profiles, parallel
 					// path to PUT /api/profile/me.  Empty string clears.

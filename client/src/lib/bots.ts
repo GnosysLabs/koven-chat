@@ -46,6 +46,11 @@ export interface BotSummary {
 	 * in the engine's `user_profiles` table keyed by the bot's mxid;
 	 * displayed verbatim in the profile sheet other members see. */
 	bio: string;
+	/** Privacy gate.  When false, the bot leaves any DM-shaped invite
+	 * it receives from anyone other than its owner.  Group-room
+	 * invites are gated separately at the engine — only the owner
+	 * can pull a bot into a group room, regardless of this flag. */
+	accept_dms: boolean;
 }
 
 export interface BotCreateRequest {
@@ -84,6 +89,10 @@ export interface BotPatchRequest {
 	max_tokens_per_reply?: number;
 	daily_token_limit?: number;
 	daily_call_limit?: number;
+	/** Toggle for the DM privacy gate.  Sending the field at all
+	 * (true OR false) writes through; omitting it leaves the
+	 * existing value alone. */
+	accept_dms?: boolean;
 }
 
 export interface BotsListResponse {

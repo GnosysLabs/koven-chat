@@ -2674,37 +2674,24 @@ export class MatrixTransport {
 			}
 		}
 
-		// 3. Invite the space's current members to the room.  Skip
-		//    self, skip anyone already in the room (joined or invited),
-		//    skip the engine appservice's bot service users (the
-		//    @bot-* namespace) so we don't spam them with invites to
-		//    every room they're already participating in via the
-		//    engine.
-		const space = c.getRoom(spaceId);
-		const myUserId = this.creds?.user_id;
-		if (space && myUserId) {
-			const inviteTargets: string[] = [];
-			for (const member of space.getMembersWithMembership("join")) {
-				const uid = member.userId;
-				if (uid === myUserId) continue;
-				if (/^@bot-/.test(uid)) continue;
-				const existing = room?.getMember(uid);
-				const m = existing?.membership;
-				if (m === "join" || m === "invite") continue;
-				inviteTargets.push(uid);
-			}
-			// Sequential — Synapse rate-limits /invite per-user and a
-			// thundering herd on a 50-member space eats 429s.  Each
-			// failure is per-user and shouldn't abort the rest.
-			for (const uid of inviteTargets) {
-				try {
-					await c.invite(roomId, uid);
-				} catch (err) {
-					console.warn(`linkRoomToSpace: invite ${uid} failed`, err);
-				}
-			}
-		}
-
+		// 3. Space-member auto-join is handled engine-side.  When the
+		//    m.space.child event we just wrote lands in the engine's
+		//    appservice transaction stream, it force-joins every
+		//    LOCAL member of the parent space to this new child room
+		//    (see engine/src/server.ts: "Discord-style: when an admin
+		//    links a room into a space").  Federated members get the
+		//    same treatment from their own homeserver's engine
+		//    processing the same event.
+		//
+		//    Doing it engine-side beats client-side for two reasons:
+		//      (a) it works even if the linker disconnects right
+		//          after the create (the previous client-side loop
+		//          held the create-room modal open while serially
+		//          inviting dozens of members, which felt broken)
+		//      (b) it works for federated members too — the linker's
+		//          client can only send /invite for local users, but
+		//          each homeserver's engine independently pulls its
+		//          own locals in.
 		this.emitSpaceList();
 		this.emitRoomList();
 	}
