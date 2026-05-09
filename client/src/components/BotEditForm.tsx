@@ -1614,14 +1614,27 @@ function ToolsTab({
 						Auth token <span className="text-muted-foreground font-normal">(optional)</span>
 					</Label>
 					<div className="flex items-center gap-2">
-						<select
-							value={formAuthScheme}
-							onChange={e => setFormAuthScheme(e.target.value as "bearer" | "raw")}
-							className="h-9 rounded-md border border-foreground/15 bg-background px-2 text-sm shrink-0"
-						>
-							<option value="bearer">Bearer</option>
-							<option value="raw">Raw</option>
-						</select>
+						{/* Hide the native select chevron with
+						    appearance-none and stack our own
+						    ChevronDown icon — the OS-rendered arrow
+						    sits flush against the border, which
+						    looks crowded next to the input field
+						    that follows.  Same pattern the Provider
+						    dropdown above uses. */}
+						<div className="relative shrink-0">
+							<select
+								value={formAuthScheme}
+								onChange={e => setFormAuthScheme(e.target.value as "bearer" | "raw")}
+								className="h-9 appearance-none rounded-md border border-foreground/15 bg-background pl-3 pr-8 text-sm"
+							>
+								<option value="bearer">Bearer</option>
+								<option value="raw">Raw</option>
+							</select>
+							<ChevronDown
+								className="absolute right-2 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none"
+								aria-hidden
+							/>
+						</div>
 						<div className="relative flex-1">
 							<Input
 								id="mcp-auth"

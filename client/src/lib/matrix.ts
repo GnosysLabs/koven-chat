@@ -518,6 +518,17 @@ export class MatrixTransport {
 		this.client.on(MatrixEventEvent.Decrypted, (event: MatrixEvent) => {
 			const room = this.client?.getRoom(event.getRoomId() ?? "");
 			if (!room) return;
+			// On UTD ("Unable To Decrypt"): actively request the
+			// megolm session key from the sender's other devices.
+			// rust-crypto handles re-decryption automatically once a
+			// matching key arrives — the Decrypted event will re-fire
+			// for the same MatrixEvent, this time with the real
+			// content, and routeDecryptedEvent below renders it like
+			// any other message.  We dedupe per event-id so a stuck
+			// session doesn't spam outbound /sendToDevice traffic.
+			if (typeof event.isDecryptionFailure === "function" && event.isDecryptionFailure()) {
+				void this.requestKeyForUndecryptable(event);
+			}
 			this.routeDecryptedEvent(event, room, false);
 		});
 
@@ -3993,6 +4004,52 @@ export class MatrixTransport {
 	 * path as their cleartext counterparts — no double-listing of
 	 * type checks, no encrypted-only paths going stale.
 	 */
+	/** Per-event id dedupe so we don't re-fire room-key requests on
+	 * every Decrypted event for the same stuck megolm session.  The
+	 * SDK retries decryption automatically when keys arrive, which
+	 * fires Decrypted again — without this, a busted session would
+	 * spam outbound /sendToDevice requests on every retry tick. */
+	private requestedKeysFor = new Set<string>();
+
+	/** Ask the sender's other devices to re-share the room key for
+	 * an event we couldn't decrypt.  Uses matrix-js-sdk's
+	 * `cancelAndResendEventRoomKeyRequest` which:
+	 *   1. Cancels any in-flight key request for this session.
+	 *   2. Sends a fresh `m.room_key_request` to-device event to
+	 *      the sender.
+	 *   3. Returns; rust-crypto handles re-decryption automatically
+	 *      when the key arrives, re-firing the Decrypted event with
+	 *      the real content this time.
+	 *
+	 * Best-effort and idempotent — failures (sender offline,
+	 * network) are logged and forgotten. */
+	private async requestKeyForUndecryptable(event: MatrixEvent): Promise<void> {
+		const id = event.getId();
+		if (!id || this.requestedKeysFor.has(id)) return;
+		this.requestedKeysFor.add(id);
+		// Cap the dedupe set so a long-running session with lots of
+		// UTDs doesn't grow it unbounded.  Drop oldest when over.
+		if (this.requestedKeysFor.size > 500) {
+			const first = this.requestedKeysFor.values().next().value;
+			if (first) this.requestedKeysFor.delete(first);
+		}
+		try {
+			const c = this.client;
+			if (!c) return;
+			// matrix-js-sdk exposes this off MatrixClient; signature
+			// hasn't been on the public .d.ts in some versions, so
+			// access via the indexed form to keep the typecheck
+			// quiet without committing to a SDK-internal type.
+			const fn = (c as unknown as {
+				cancelAndResendEventRoomKeyRequest?: (e: MatrixEvent) => Promise<void>;
+			}).cancelAndResendEventRoomKeyRequest;
+			if (typeof fn !== "function") return;
+			await fn.call(c, event);
+		} catch (err) {
+			console.warn(`matrix: room-key request for ${event.getId()} failed`, err);
+		}
+	}
+
 	private routeDecryptedEvent(event: MatrixEvent, room: SdkRoom, live: boolean): void {
 		const type = event.getType();
 
