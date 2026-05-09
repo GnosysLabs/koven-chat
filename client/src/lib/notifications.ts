@@ -100,10 +100,67 @@ export interface NotifyOptions {
 	// rather than stacking — useful for "10 messages in #general"
 	// not turning into a tower of alerts.
 	tag?: string;
+	// Cross-launch dedupe key.  When set and we've already fired a
+	// notification for this key, notify() drops silently.  Persisted
+	// in localStorage so the dedupe survives app restarts — fixes
+	// "I get the same OS notifications every time I launch the app"
+	// when matrix-js-sdk replays catch-up events as live on every
+	// boot.  Typical caller: pass `eventId` for chat-message
+	// notifications.
+	dedupeKey?: string;
 	// Click handler for the web Notification API.  Tauri's plugin
 	// can't currently route click events back to the SPA, so this
 	// only matters in browser mode.
 	onClick?(): void;
+}
+
+// Persistent ring buffer of dedupe keys.  Capped at NOTIFY_DEDUPE_CAP
+// to bound localStorage usage; oldest entries fall off when over.
+// Stored as a JSON array of strings under NOTIFY_DEDUPE_KEY.  Read
+// once into a Set on first access for O(1) membership checks; writes
+// update both the in-memory Set and localStorage.
+const NOTIFY_DEDUPE_KEY = "koven_notify_dedupe_v1";
+const NOTIFY_DEDUPE_CAP = 1_000;
+let dedupeMemo: { set: Set<string>; order: string[] } | null = null;
+
+function loadDedupe(): { set: Set<string>; order: string[] } {
+	if (dedupeMemo) return dedupeMemo;
+	let order: string[] = [];
+	try {
+		const raw = localStorage.getItem(NOTIFY_DEDUPE_KEY);
+		if (raw) {
+			const parsed = JSON.parse(raw);
+			if (Array.isArray(parsed)) {
+				order = parsed.filter((s): s is string => typeof s === "string");
+			}
+		}
+	} catch {
+		// Corrupt JSON — start fresh.  The next save rewrites it.
+	}
+	dedupeMemo = { set: new Set(order), order };
+	return dedupeMemo;
+}
+
+function rememberNotified(key: string): void {
+	const cache = loadDedupe();
+	if (cache.set.has(key)) return;
+	cache.set.add(key);
+	cache.order.push(key);
+	while (cache.order.length > NOTIFY_DEDUPE_CAP) {
+		const dropped = cache.order.shift();
+		if (dropped !== undefined) cache.set.delete(dropped);
+	}
+	try {
+		localStorage.setItem(NOTIFY_DEDUPE_KEY, JSON.stringify(cache.order));
+	} catch {
+		// localStorage full or disabled — in-memory cache still
+		// dedupes within the session, which is the common case
+		// matrix-js-sdk would re-emit during a single sync.
+	}
+}
+
+function alreadyNotified(key: string): boolean {
+	return loadDedupe().set.has(key);
 }
 
 /**
@@ -162,6 +219,15 @@ async function showViaServiceWorker(opts: NotifyOptions): Promise<boolean> {
  * a desktop notification for a message you're already looking at.
  */
 export async function notify(opts: NotifyOptions): Promise<void> {
+	// Cross-launch dedupe.  matrix-js-sdk re-emits any events that
+	// arrived since the last sync token as `liveEvent: true` during
+	// initial sync after a cold boot, which fires the upstream
+	// notification path again for messages the user already saw on
+	// a previous run.  We catch them here by remembering every key
+	// we've notified for in localStorage; subsequent calls with
+	// the same key drop silently.
+	if (opts.dedupeKey && alreadyNotified(opts.dedupeKey)) return;
+
 	// Read the live OS permission — don't cache.  See currentPermission
 	// above for why; tl;dr the user can flip the setting at any time
 	// via browser site-info / Brave shields / OS notification center,
@@ -169,6 +235,12 @@ export async function notify(opts: NotifyOptions): Promise<void> {
 	// though we'd otherwise be allowed to fire.
 	const perm = await currentPermission();
 	if (perm !== "granted") return;
+
+	// Mark dedupe BEFORE the actual fire so a transient error in
+	// the dispatch path (Tauri IPC failure, browser permission
+	// flipped mid-call) doesn't cause a re-fire on retry.  Better
+	// to drop one notification than to spam the user.
+	if (opts.dedupeKey) rememberNotified(opts.dedupeKey);
 
 	if (isDesktop) {
 		try {

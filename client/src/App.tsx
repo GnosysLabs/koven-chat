@@ -567,6 +567,12 @@ export default function App() {
 					title,
 					body,
 					tag: message.roomId, // collapse-stack per-room
+					// Per-event dedupe persists in localStorage so a
+					// matrix-js-sdk replay on the next launch (initial
+					// sync delivers events as `liveEvent: true` even
+					// after the user has already seen them) doesn't
+					// re-fire the OS notification.
+					dedupeKey: message.id,
 					roomId: message.roomId,
 					onClick: () => {
 						dispatch({ type: "set_active_room", roomId: message.roomId });
