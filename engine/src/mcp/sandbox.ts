@@ -41,7 +41,19 @@ import { existsSync, mkdirSync, chownSync } from "node:fs";
 import { join } from "node:path";
 
 const SCRATCH_ROOT = "/var/lib/koven-mcp";
-const RLIMIT_RSS_BYTES = 256 * 1024 * 1024;
+// `--as` caps VIRTUAL memory (address space), not resident memory.
+// V8 reserves a multi-GB virtual CodeRange on startup that's mostly
+// uncommitted physical pages — set the cap below it and the
+// subprocess OOMs immediately on `node` startup with
+// "Failed to reserve virtual memory for CodeRange".  2 GiB is
+// generous enough for V8 + a small MCP server's working set.
+//
+// The actual physical-memory cap should come from cgroups
+// (Docker --memory or systemd-run MemoryMax=) — RLIMIT_AS is a
+// safety net for runaway leaks, not a hard ceiling.  RLIMIT_RSS
+// is a no-op on Linux since 2.4.30 (kernel doesn't enforce it),
+// which is why we don't bother setting it.
+const RLIMIT_AS_BYTES = 2 * 1024 * 1024 * 1024;
 const RLIMIT_CPU_SECONDS = 60;
 const RLIMIT_NPROC = 64;
 const RLIMIT_NOFILE = 256;
@@ -135,7 +147,7 @@ export function buildSandboxedInvocation(opts: SandboxOptions): SandboxInvocatio
 	};
 
 	const prlimitArgs = prlimit ? [
-		`--as=${RLIMIT_RSS_BYTES}`,
+		`--as=${RLIMIT_AS_BYTES}`,
 		`--cpu=${RLIMIT_CPU_SECONDS}`,
 		`--nproc=${RLIMIT_NPROC}`,
 		`--nofile=${RLIMIT_NOFILE}`,
