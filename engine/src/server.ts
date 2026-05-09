@@ -112,6 +112,7 @@ import {
 	getSpaceChildRoomIds,
 	isSpaceRoom,
 	kickOrBanAs,
+	joinRoomIfNeeded,
 	loginAsUser,
 	registerAppserviceUser,
 	repairRoomInvitePL,
@@ -2829,10 +2830,21 @@ export function startServer(): void {
 				const events = body.events ?? [];
 				let sawFlag = false;
 				const newSpaceChildren: { spaceId: string; childId: string; sender: string }[] = [];
+				// Rooms we just learned about and haven't joined yet.
+				// Eager-join @engine to every room with timeline
+				// activity so it's present whenever we later need to
+				// write into the room (collapses, censures, repair-
+				// permissions, etc.).  joinRoomIfNeeded is idempotent
+				// and DB-cached, so this is a no-op past the first
+				// event per room.  We collect the unique room ids
+				// here and fire the joins async after responding to
+				// Synapse so /transactions stays snappy.
+				const roomsToJoin = new Set<string>();
 				for (const ev of events) {
 					try {
 						applyEvent(ev);
 						if (ev.type === "chat.koven.flag.v1") sawFlag = true;
+						if (ev.room_id) roomsToJoin.add(ev.room_id);
 						// Capture m.space.child events with non-empty `via` for
 						// the post-loop auto-join cascade.  We do the actual
 						// joining outside the loop so the transaction response
@@ -2864,6 +2876,23 @@ export function startServer(): void {
 					evaluateCollapses().catch(err => {
 						console.error("engine: post-transaction evaluateCollapses failed", err);
 					});
+				}
+				// Eager engine-bot joins.  Fire-and-forget so the
+				// transaction response goes back to Synapse without
+				// waiting on the join round-trips.  Public rooms
+				// succeed; private rooms 403 (no invite) and the
+				// helper marks them as "tried" in the joined_rooms
+				// cache so we don't retry on every subsequent event.
+				if (roomsToJoin.size > 0) {
+					void (async () => {
+						for (const rid of roomsToJoin) {
+							try {
+								await joinRoomIfNeeded(rid);
+							} catch (err) {
+								console.warn(`engine: eager-join ${rid} threw`, err);
+							}
+						}
+					})();
 				}
 				// Discord-style: when an admin links a room into a space
 				// (whether by creating-in-space or by adding an existing
