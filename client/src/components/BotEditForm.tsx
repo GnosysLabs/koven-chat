@@ -3,6 +3,12 @@
 // space or room in the rest of the app: the list lives in the left
 // sidebar, the configuration takes the main pane.
 //
+// Tabbed wizard: each section (Identity, Connection, Behavior,
+// Knowledge, Tools) is one step.  Users can either walk it
+// linearly with the Next button or jump to any tab from the strip.
+// Save / Create is always available in the footer when the form is
+// valid — the tabs are organisation, not a gate.
+//
 // Validation is deliberately permissive: the engine does the
 // authoritative check (lowercase a-z 0-9 -, length 1-21, uniqueness)
 // and we only fence off obvious mistakes here so the user gets
@@ -14,7 +20,20 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { BotBadge } from "@/components/BotBadge";
-import { Camera, ChevronDown, Eye, EyeOff, FileText, Trash2, Upload, X } from "lucide-react";
+import {
+	Camera,
+	ChevronDown,
+	ChevronLeft,
+	ChevronRight,
+	Eye,
+	EyeOff,
+	FileText,
+	Plug,
+	Search,
+	Trash2,
+	Upload,
+	X,
+} from "lucide-react";
 import {
 	createBot,
 	patchBot,
@@ -28,6 +47,18 @@ import {
 	type BotProvider,
 	type BotSummary,
 } from "@/lib/bots";
+import {
+	listBotMcpServers as fetchBotMcpServers,
+	attachBotMcpServer,
+	detachBotMcpServer,
+	searchSmitheryCatalog,
+	getSmitheryServerDetail,
+	SmitheryKeyMissingError,
+	type BotMcpAttachment,
+	type SmitheryServerSummary,
+	type SmitheryServerDetail,
+} from "@/lib/bot-mcp";
+import { claimBellOffset, releaseBellOffset } from "@/state/bell-offset";
 import { cn } from "@/lib/utils";
 
 export interface BotEditFormProps {
@@ -91,6 +122,24 @@ function formStateFromBot(bot: BotSummary): FormState {
 
 const NAME_PATTERN = /^[a-z0-9-]{1,21}$/;
 
+/** Tabs are ordered by the typical create flow.  "tools" is gated
+ * behind edit mode in create flows (the bot needs to exist before we
+ * can attach a server to it) — see the `availableTabs` memo below. */
+type TabKey = "identity" | "connection" | "behavior" | "knowledge" | "tools";
+
+interface TabDef {
+	key: TabKey;
+	label: string;
+}
+
+const ALL_TABS: TabDef[] = [
+	{ key: "identity",   label: "Identity"   },
+	{ key: "connection", label: "Connection" },
+	{ key: "behavior",   label: "Behavior"   },
+	{ key: "knowledge",  label: "Knowledge"  },
+	{ key: "tools",      label: "Tools"      },
+];
+
 export function BotEditForm({
 	mode,
 	bot,
@@ -106,6 +155,7 @@ export function BotEditForm({
 	const [error, setError] = useState<string | null>(null);
 	const [showKey, setShowKey] = useState(false);
 	const [confirmingDelete, setConfirmingDelete] = useState(false);
+	const [activeTab, setActiveTab] = useState<TabKey>("identity");
 	// Auto-grow handle for the system prompt textarea — see useEffect
 	// below.  Resetting height to "auto" first lets the browser
 	// re-measure the natural content height before we pin it.
@@ -135,6 +185,17 @@ export function BotEditForm({
 	const [knowledgeBusy, setKnowledgeBusy] = useState(false);
 	const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
 
+	// Push the floating notification bell up by the footer height
+	// while this form is mounted — without this, the FAB sits on top
+	// of the Cancel / Save buttons in the bottom-right corner.
+	useEffect(() => {
+		const id = `bot-edit-form-${mode}-${bot?.id ?? "new"}`;
+		// Footer is ~56px tall (px-6 py-3 + button row).  Add a
+		// 12px gap so the bell visibly clears the footer's top edge.
+		claimBellOffset(id, 56 + 12);
+		return () => releaseBellOffset(id);
+	}, [mode, bot?.id]);
+
 	// Reset whenever the target bot or mode changes — switching from
 	// edit-bot-A to edit-bot-B (or to "create") shouldn't keep stale
 	// form values around.
@@ -143,6 +204,7 @@ export function BotEditForm({
 		setShowKey(false);
 		setSubmitting(false);
 		setConfirmingDelete(false);
+		setActiveTab("identity");
 		setPendingAvatarFile(null);
 		setPendingAvatarPreview(prev => {
 			// Revoke the previous object URL so we don't leak browser
@@ -189,13 +251,14 @@ export function BotEditForm({
 	// the bot-load reset above (longer prompts grow the box, deletions
 	// shrink it).  Setting height to "auto" first lets the browser
 	// measure natural content height; scrollHeight then becomes the
-	// new pinned height.
+	// new pinned height.  Also runs on tab change so switching to
+	// Behavior re-measures (the textarea was display:none until now).
 	useEffect(() => {
 		const el = systemPromptRef.current;
 		if (!el) return;
 		el.style.height = "auto";
 		el.style.height = `${el.scrollHeight}px`;
-	}, [form.systemPrompt]);
+	}, [form.systemPrompt, activeTab]);
 
 	const update = <K extends keyof FormState>(k: K, v: FormState[K]) => {
 		setForm(prev => ({ ...prev, [k]: v }));
@@ -242,6 +305,38 @@ export function BotEditForm({
 		form.apiBase.trim().length > 0 &&
 		form.model.trim().length > 0 &&
 		(mode === "edit" || (form.name.length > 0 && !nameError && form.apiKey.length > 0));
+
+	// Tools tab needs a bot id to attach servers to, so it only
+	// appears in edit mode.  In create mode we tell the user to save
+	// the bot first (a small banner inside the tab if they somehow
+	// navigate there is friendlier than hiding it entirely — but
+	// we hide it for now to keep the strip clean).
+	const availableTabs = useMemo(() => {
+		if (mode === "create") {
+			return ALL_TABS.filter(t => t.key !== "tools");
+		}
+		return ALL_TABS;
+	}, [mode]);
+
+	const tabIndex = availableTabs.findIndex(t => t.key === activeTab);
+	const safeTabIndex = tabIndex < 0 ? 0 : tabIndex;
+	const currentTabKey = availableTabs[safeTabIndex]?.key ?? "identity";
+	const isFirstTab = safeTabIndex === 0;
+	const isLastTab = safeTabIndex === availableTabs.length - 1;
+
+	function goToTab(k: TabKey) {
+		setActiveTab(k);
+	}
+
+	function goNext() {
+		const next = availableTabs[safeTabIndex + 1];
+		if (next) setActiveTab(next.key);
+	}
+
+	function goBack() {
+		const prev = availableTabs[safeTabIndex - 1];
+		if (prev) setActiveTab(prev.key);
+	}
 
 	async function handleSubmit() {
 		if (!accessToken) return;
@@ -503,291 +598,56 @@ export function BotEditForm({
 				</div>
 			</div>
 
-			{/* Body — scrollable form, organised into three sections
-			    (Identity, Connection, Behavior) each prefaced with a
-			    short header.  Field widths are deliberate: short
-			    fields like Provider and Context window are sized to
-			    their content; URLs and prompts get full width within a
-			    768px reading column.  Avoids the dead-grid-cell look
-			    of a rigid column layout. */}
-			<div className="flex-1 overflow-y-auto px-6 py-6">
-				<div className="space-y-8 max-w-3xl">
-					{/* ─── Identity ─────────────────────────────────── */}
-					<section className="space-y-4">
-						<SectionHeader
-							title="Identity"
-							subtitle="What this bot looks like to people in the room."
-						/>
-						<div className="flex flex-wrap gap-4">
-							{mode === "create" && (
-								<div className="space-y-1.5 w-56">
-									<Label htmlFor="bot-name">Name</Label>
-									<div className="flex items-center gap-2">
-										<span className="text-sm text-muted-foreground">@bot-</span>
-										<Input
-											id="bot-name"
-											value={form.name}
-											onChange={e => update("name", e.target.value)}
-											placeholder="gptcoder"
-											autoComplete="off"
-											autoCorrect="off"
-											autoCapitalize="off"
-										/>
-									</div>
-									<p className={cn(
-										"text-xs",
-										nameError ? "text-destructive" : "text-muted-foreground",
-									)}>
-										{nameError ?? "Becomes the bot's username on this server."}
-									</p>
-								</div>
-							)}
-							<div className="space-y-1.5 w-72">
-								<Label htmlFor="bot-display">Display name</Label>
-								<Input
-									id="bot-display"
-									value={form.displayName}
-									onChange={e => update("displayName", e.target.value)}
-									placeholder="GPT Coder"
-								/>
-							</div>
-						</div>
-
-						{/* Public bio — same field humans see on their
-						    profile sheet.  Caps at 300 chars to match
-						    the human ceiling enforced server-side. */}
-						<div className="space-y-1.5 max-w-2xl">
-							<Label htmlFor="bot-bio">
-								Bio <span className="text-muted-foreground font-normal">(optional)</span>
-							</Label>
-							<textarea
-								id="bot-bio"
-								value={form.bio}
-								onChange={e => update("bio", e.target.value)}
-								placeholder="A short description of what this bot does."
-								maxLength={300}
-								rows={2}
-								className={cn(
-									"flex w-full rounded-md border border-foreground/15 bg-transparent px-3 py-1.5 text-sm shadow-sm transition-colors",
-									"hover:border-foreground/25",
-									"placeholder:text-muted-foreground",
-									"focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:border-ring",
-									"resize-none leading-normal",
-								)}
-							/>
-							<p className="text-[10px] text-muted-foreground">
-								Shown on the bot's profile sheet alongside its display name and avatar. {form.bio.length}/300.
-							</p>
-						</div>
-					</section>
-
-					<Divider />
-
-					{/* ─── Connection ───────────────────────────────── */}
-					<section className="space-y-4">
-						<SectionHeader
-							title="Connection"
-							subtitle="Where to send chat completion requests, and which model to ask."
-						/>
-
-						{/* Provider + Model on one row — provider is a
-						    fixed-list dropdown so it gets a tight width;
-						    model identifiers can be long, so it grows. */}
-						<div className="flex flex-wrap gap-4">
-							<div className="space-y-1.5 w-56">
-								<Label htmlFor="bot-provider">Provider</Label>
-								<div className="relative">
-									<select
-										id="bot-provider"
-										value={form.provider}
-										onChange={e => onProviderChange(e.target.value as BotProvider)}
-										className="h-9 w-full appearance-none rounded-md border border-foreground/15 bg-background pl-3 pr-9 text-sm shadow-sm transition-colors hover:border-foreground/25 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:border-ring"
-									>
-										<option value="openrouter">OpenRouter</option>
-										<option value="openai_compatible">OpenAI-compatible</option>
-									</select>
-									<ChevronDown
-										className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none"
-										aria-hidden
-									/>
-								</div>
-							</div>
-							<div className="space-y-1.5 flex-1 min-w-[16rem]">
-								<Label htmlFor="bot-model">Model</Label>
-								<Input
-									id="bot-model"
-									value={form.model}
-									onChange={e => update("model", e.target.value)}
-									placeholder="~google/gemini-flash-latest"
-								/>
-							</div>
-						</div>
-
-						{/* OpenRouter has exactly one valid base URL —
-						    locking the field stops the user from typing
-						    something the engine can't reach.  Switching
-						    to "openai_compatible" via Provider clears
-						    the field (see onProviderChange). */}
-						<div className="space-y-1.5">
-							<Label htmlFor="bot-api-base">API base URL</Label>
-							<Input
-								id="bot-api-base"
-								value={form.apiBase}
-								onChange={e => update("apiBase", e.target.value)}
-								placeholder={form.provider === "openrouter" ? "" : "https://api.example.com/v1"}
-								disabled={form.provider === "openrouter"}
-							/>
-							{form.provider === "openrouter" && (
-								<p className="text-xs text-muted-foreground">
-									Locked to OpenRouter's endpoint. Switch the Provider to "OpenAI-compatible" to use a custom URL.
-								</p>
-							)}
-						</div>
-
-						<div className="space-y-1.5">
-							<Label htmlFor="bot-api-key">API key</Label>
-							{form.apiKeyMasked ? (
-								<div className="flex items-center gap-2">
-									<div className="flex-1 h-9 px-3 rounded-md border border-foreground/15 bg-muted text-sm flex items-center text-muted-foreground tracking-widest">
-										••••••••
-									</div>
-									<Button
-										type="button"
-										variant="ghost"
-										size="sm"
-										onClick={() => {
-											setForm(prev => ({ ...prev, apiKeyMasked: false, apiKey: "" }));
-											setShowKey(true);
-										}}
-									>
-										Replace
-									</Button>
-								</div>
-							) : (
-								<div className="relative">
-									<Input
-										id="bot-api-key"
-										type={showKey ? "text" : "password"}
-										value={form.apiKey}
-										onChange={e => update("apiKey", e.target.value)}
-										placeholder={mode === "create" ? "sk-or-..." : "New key — leave blank to cancel replace"}
-										autoComplete="off"
-										className="pr-9"
-									/>
-									<button
-										type="button"
-										aria-label={showKey ? "Hide API key" : "Show API key"}
-										onClick={() => setShowKey(s => !s)}
-										className="absolute inset-y-0 right-0 px-2 flex items-center text-muted-foreground hover:text-foreground"
-									>
-										{showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-									</button>
-								</div>
-							)}
-							<p className="text-xs text-muted-foreground">
-								Stored encrypted (AES-256-GCM) on the server. The plaintext never returns to your client.
-							</p>
-						</div>
-					</section>
-
-					<Divider />
-
-					{/* ─── Behavior ─────────────────────────────────── */}
-					<section className="space-y-4">
-						<SectionHeader
-							title="Behavior"
-							subtitle="How the bot responds when someone @mentions it."
-						/>
-
-						<div className="space-y-1.5 w-32">
-							<Label htmlFor="bot-context">Context window</Label>
-							<Input
-								id="bot-context"
-								type="number"
-								min={1}
-								max={100}
-								value={form.contextWindow}
-								onChange={e => update("contextWindow", Math.max(1, Math.min(100, Number(e.target.value) || 1)))}
-							/>
-						</div>
-						<p className="text-xs text-muted-foreground -mt-2">
-							Number of recent messages from the room to include in each prompt. Higher = more context for the model, more tokens billed per reply.
-						</p>
-
-						<div className="space-y-1.5">
-							<Label htmlFor="bot-system-prompt">System prompt <span className="text-muted-foreground font-normal">(optional)</span></Label>
-							<textarea
-								ref={systemPromptRef}
-								id="bot-system-prompt"
-								value={form.systemPrompt}
-								onChange={e => update("systemPrompt", e.target.value)}
-								rows={3}
-								placeholder="Leave blank for vanilla model behaviour."
-								// resize-none kills the native drag handle
-								// in the bottom-right corner; overflow-
-								// hidden prevents the scrollbar from
-								// flickering during the auto-grow recalc.
-								// The effect above pins height to
-								// scrollHeight on every value change.
-								className="w-full rounded-md border border-foreground/15 bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-none overflow-hidden"
-							/>
-						</div>
-					</section>
-
-					<Divider />
-
-					{/* ─── Knowledge ────────────────────────────────── */}
-					<section className="space-y-4">
-						<SectionHeader
-							title="Knowledge"
-							subtitle="Reference material the bot can quote from. Each file's full text is included in every prompt — keep them concise, since longer files mean more tokens billed per reply."
-						/>
-
-						<KnowledgeList
-							knowledge={knowledge}
-							pendingKnowledge={pendingKnowledge}
-							busy={knowledgeBusy}
-							onRemoveExisting={removeKnowledgeFile}
-							onRemovePending={removePendingKnowledge}
-						/>
-
-						<div>
-							<input
-								ref={knowledgeFileInputRef}
-								type="file"
-								accept=".txt,.md,.markdown,.csv,.tsv,.log,.json,.yaml,.yml,.xml,.html,.htm,.docx,.rtf"
-								multiple
-								className="hidden"
-								onChange={e => {
-									if (e.target.files) pickKnowledgeFiles(e.target.files);
-									e.target.value = "";
-								}}
-							/>
-							<Button
+			{/* Tab strip.  Sticky under the header so it stays visible
+			    while the body scrolls.  Each tab is a button that flips
+			    activeTab; the body below renders only the active tab's
+			    section.  Visual treatment: underline indicator on the
+			    active tab, hover lifts the muted-foreground tabs to
+			    foreground.  We don't gate clicks on validation — users
+			    can jump freely; canSubmit decides whether Save fires.  */}
+			<div className="px-6 border-b border-border bg-card/30 sticky top-0 z-10">
+				<div className="flex items-center gap-1 overflow-x-auto -mb-px">
+					{availableTabs.map(t => {
+						const isActive = t.key === currentTabKey;
+						return (
+							<button
+								key={t.key}
 								type="button"
-								variant="ghost"
-								size="sm"
-								onClick={() => knowledgeFileInputRef.current?.click()}
-								disabled={knowledgeBusy}
-								className="gap-1.5"
+								onClick={() => goToTab(t.key)}
+								className={cn(
+									"relative px-3 py-2.5 text-sm whitespace-nowrap transition-colors",
+									"border-b-2",
+									isActive
+										? "text-foreground border-primary font-medium"
+										: "text-muted-foreground border-transparent hover:text-foreground hover:border-border",
+								)}
 							>
-								<Upload className="h-4 w-4" />
-								{knowledgeBusy ? "Uploading…" : "Upload files"}
-							</Button>
-							<p className="text-xs text-muted-foreground mt-1.5">
-								Plain text (.txt, .md), Word (.docx), or Apple/RTF (.rtf). Up to 10&nbsp;MB per file, 50&nbsp;MB total per bot.
-							</p>
-						</div>
+								{t.label}
+							</button>
+						);
+					})}
+				</div>
+			</div>
 
-						{knowledgeError && (
-							<div className="text-sm text-destructive border border-destructive/40 bg-destructive/5 rounded-md px-3 py-2">
-								{knowledgeError}
-							</div>
-						)}
-					</section>
+			{/* Body — renders the active tab's content.  `key` on the
+			    inner div would reset scroll on every tab change; we
+			    leave it untyped so each tab's scroll position is
+			    independent (the outer container handles overflow). */}
+			<div className="flex-1 overflow-y-auto px-6 py-6">
+				<div className="max-w-3xl">
+					{currentTabKey === "identity"   && renderIdentityTab()}
+					{currentTabKey === "connection" && renderConnectionTab()}
+					{currentTabKey === "behavior"   && renderBehaviorTab()}
+					{currentTabKey === "knowledge"  && renderKnowledgeTab()}
+					{currentTabKey === "tools"      && (
+						<ToolsTab
+							bot={bot}
+							accessToken={accessToken}
+						/>
+					)}
 
 					{error && (
-						<div className="text-sm text-destructive border border-destructive/40 bg-destructive/5 rounded-md px-3 py-2">
+						<div className="mt-6 text-sm text-destructive border border-destructive/40 bg-destructive/5 rounded-md px-3 py-2">
 							{error}
 						</div>
 					)}
@@ -797,7 +657,9 @@ export function BotEditForm({
 			{/* Sticky footer with primary actions and (in edit mode)
 			    the destructive delete affordance.  The two-step delete
 			    happens inline rather than as a modal so the user stays
-			    in the same view. */}
+			    in the same view.  Back/Next live alongside Save so
+			    sequential walkers and free-jumpers both have the
+			    controls they need without burying anything in a menu. */}
 			<div className="px-6 py-3 border-t border-border bg-card/50 flex items-center gap-2">
 				{mode === "edit" && bot && onDelete && (
 					!confirmingDelete ? (
@@ -837,6 +699,20 @@ export function BotEditForm({
 					)
 				)}
 				<div className="flex-1" />
+
+				{!isFirstTab && (
+					<Button type="button" variant="ghost" size="sm" onClick={goBack} className="gap-1">
+						<ChevronLeft className="h-4 w-4" />
+						Back
+					</Button>
+				)}
+				{!isLastTab && (
+					<Button type="button" variant="outline" size="sm" onClick={goNext} className="gap-1">
+						Next
+						<ChevronRight className="h-4 w-4" />
+					</Button>
+				)}
+
 				<Button type="button" variant="ghost" size="sm" onClick={onCancel}>
 					Cancel
 				</Button>
@@ -851,6 +727,293 @@ export function BotEditForm({
 			</div>
 		</div>
 	);
+
+	// ─── Tab body renderers ────────────────────────────────────────
+	// Inlined as nested functions so they close over the form state
+	// without a prop-drilling layer.  The Tools tab is a real
+	// sub-component because it owns its own catalog/search state and
+	// would otherwise force the whole form to re-render on every
+	// keystroke in the search box.
+
+	function renderIdentityTab() {
+		return (
+			<section className="space-y-4">
+				<SectionHeader
+					title="Identity"
+					subtitle="What this bot looks like to people in the room."
+				/>
+				<div className="flex flex-wrap gap-4">
+					{mode === "create" && (
+						<div className="space-y-1.5 w-56">
+							<Label htmlFor="bot-name">Name</Label>
+							<div className="flex items-center gap-2">
+								<span className="text-sm text-muted-foreground">@bot-</span>
+								<Input
+									id="bot-name"
+									value={form.name}
+									onChange={e => update("name", e.target.value)}
+									placeholder="gptcoder"
+									autoComplete="off"
+									autoCorrect="off"
+									autoCapitalize="off"
+								/>
+							</div>
+							<p className={cn(
+								"text-xs",
+								nameError ? "text-destructive" : "text-muted-foreground",
+							)}>
+								{nameError ?? "Becomes the bot's username on this server."}
+							</p>
+						</div>
+					)}
+					<div className="space-y-1.5 w-72">
+						<Label htmlFor="bot-display">Display name</Label>
+						<Input
+							id="bot-display"
+							value={form.displayName}
+							onChange={e => update("displayName", e.target.value)}
+							placeholder="GPT Coder"
+						/>
+					</div>
+				</div>
+
+				{/* Public bio — same field humans see on their
+				    profile sheet.  Caps at 300 chars to match
+				    the human ceiling enforced server-side. */}
+				<div className="space-y-1.5 max-w-2xl">
+					<Label htmlFor="bot-bio">
+						Bio <span className="text-muted-foreground font-normal">(optional)</span>
+					</Label>
+					<textarea
+						id="bot-bio"
+						value={form.bio}
+						onChange={e => update("bio", e.target.value)}
+						placeholder="A short description of what this bot does."
+						maxLength={300}
+						rows={2}
+						className={cn(
+							"flex w-full rounded-md border border-foreground/15 bg-transparent px-3 py-1.5 text-sm shadow-sm transition-colors",
+							"hover:border-foreground/25",
+							"placeholder:text-muted-foreground",
+							"focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:border-ring",
+							"resize-none leading-normal",
+						)}
+					/>
+					<p className="text-[10px] text-muted-foreground">
+						Shown on the bot's profile sheet alongside its display name and avatar. {form.bio.length}/300.
+					</p>
+				</div>
+			</section>
+		);
+	}
+
+	function renderConnectionTab() {
+		return (
+			<section className="space-y-4">
+				<SectionHeader
+					title="Connection"
+					subtitle="Where to send chat completion requests, and which model to ask."
+				/>
+
+				{/* Provider + Model on one row — provider is a
+				    fixed-list dropdown so it gets a tight width;
+				    model identifiers can be long, so it grows. */}
+				<div className="flex flex-wrap gap-4">
+					<div className="space-y-1.5 w-56">
+						<Label htmlFor="bot-provider">Provider</Label>
+						<div className="relative">
+							<select
+								id="bot-provider"
+								value={form.provider}
+								onChange={e => onProviderChange(e.target.value as BotProvider)}
+								className="h-9 w-full appearance-none rounded-md border border-foreground/15 bg-background pl-3 pr-9 text-sm shadow-sm transition-colors hover:border-foreground/25 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:border-ring"
+							>
+								<option value="openrouter">OpenRouter</option>
+								<option value="openai_compatible">OpenAI-compatible</option>
+							</select>
+							<ChevronDown
+								className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none"
+								aria-hidden
+							/>
+						</div>
+					</div>
+					<div className="space-y-1.5 flex-1 min-w-[16rem]">
+						<Label htmlFor="bot-model">Model</Label>
+						<Input
+							id="bot-model"
+							value={form.model}
+							onChange={e => update("model", e.target.value)}
+							placeholder="~google/gemini-flash-latest"
+						/>
+					</div>
+				</div>
+
+				{/* OpenRouter has exactly one valid base URL —
+				    locking the field stops the user from typing
+				    something the engine can't reach.  Switching
+				    to "openai_compatible" via Provider clears
+				    the field (see onProviderChange). */}
+				<div className="space-y-1.5">
+					<Label htmlFor="bot-api-base">API base URL</Label>
+					<Input
+						id="bot-api-base"
+						value={form.apiBase}
+						onChange={e => update("apiBase", e.target.value)}
+						placeholder={form.provider === "openrouter" ? "" : "https://api.example.com/v1"}
+						disabled={form.provider === "openrouter"}
+					/>
+					{form.provider === "openrouter" && (
+						<p className="text-xs text-muted-foreground">
+							Locked to OpenRouter's endpoint. Switch the Provider to "OpenAI-compatible" to use a custom URL.
+						</p>
+					)}
+				</div>
+
+				<div className="space-y-1.5">
+					<Label htmlFor="bot-api-key">API key</Label>
+					{form.apiKeyMasked ? (
+						<div className="flex items-center gap-2">
+							<div className="flex-1 h-9 px-3 rounded-md border border-foreground/15 bg-muted text-sm flex items-center text-muted-foreground tracking-widest">
+								••••••••
+							</div>
+							<Button
+								type="button"
+								variant="ghost"
+								size="sm"
+								onClick={() => {
+									setForm(prev => ({ ...prev, apiKeyMasked: false, apiKey: "" }));
+									setShowKey(true);
+								}}
+							>
+								Replace
+							</Button>
+						</div>
+					) : (
+						<div className="relative">
+							<Input
+								id="bot-api-key"
+								type={showKey ? "text" : "password"}
+								value={form.apiKey}
+								onChange={e => update("apiKey", e.target.value)}
+								placeholder={mode === "create" ? "sk-or-..." : "New key — leave blank to cancel replace"}
+								autoComplete="off"
+								className="pr-9"
+							/>
+							<button
+								type="button"
+								aria-label={showKey ? "Hide API key" : "Show API key"}
+								onClick={() => setShowKey(s => !s)}
+								className="absolute inset-y-0 right-0 px-2 flex items-center text-muted-foreground hover:text-foreground"
+							>
+								{showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+							</button>
+						</div>
+					)}
+					<p className="text-xs text-muted-foreground">
+						Stored encrypted (AES-256-GCM) on the server. The plaintext never returns to your client.
+					</p>
+				</div>
+			</section>
+		);
+	}
+
+	function renderBehaviorTab() {
+		return (
+			<section className="space-y-4">
+				<SectionHeader
+					title="Behavior"
+					subtitle="How the bot responds when someone @mentions it."
+				/>
+
+				<div className="space-y-1.5 w-32">
+					<Label htmlFor="bot-context">Context window</Label>
+					<Input
+						id="bot-context"
+						type="number"
+						min={1}
+						max={100}
+						value={form.contextWindow}
+						onChange={e => update("contextWindow", Math.max(1, Math.min(100, Number(e.target.value) || 1)))}
+					/>
+				</div>
+				<p className="text-xs text-muted-foreground -mt-2">
+					Number of recent messages from the room to include in each prompt. Higher = more context for the model, more tokens billed per reply.
+				</p>
+
+				<div className="space-y-1.5">
+					<Label htmlFor="bot-system-prompt">System prompt <span className="text-muted-foreground font-normal">(optional)</span></Label>
+					<textarea
+						ref={systemPromptRef}
+						id="bot-system-prompt"
+						value={form.systemPrompt}
+						onChange={e => update("systemPrompt", e.target.value)}
+						rows={3}
+						placeholder="Leave blank for vanilla model behaviour."
+						// resize-none kills the native drag handle
+						// in the bottom-right corner; overflow-
+						// hidden prevents the scrollbar from
+						// flickering during the auto-grow recalc.
+						// The effect above pins height to
+						// scrollHeight on every value change.
+						className="w-full rounded-md border border-foreground/15 bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-none overflow-hidden"
+					/>
+				</div>
+			</section>
+		);
+	}
+
+	function renderKnowledgeTab() {
+		return (
+			<section className="space-y-4">
+				<SectionHeader
+					title="Knowledge"
+					subtitle="Reference material the bot can quote from. Each file's full text is included in every prompt — keep them concise, since longer files mean more tokens billed per reply."
+				/>
+
+				<KnowledgeList
+					knowledge={knowledge}
+					pendingKnowledge={pendingKnowledge}
+					busy={knowledgeBusy}
+					onRemoveExisting={removeKnowledgeFile}
+					onRemovePending={removePendingKnowledge}
+				/>
+
+				<div>
+					<input
+						ref={knowledgeFileInputRef}
+						type="file"
+						accept=".txt,.md,.markdown,.csv,.tsv,.log,.json,.yaml,.yml,.xml,.html,.htm,.docx,.rtf"
+						multiple
+						className="hidden"
+						onChange={e => {
+							if (e.target.files) pickKnowledgeFiles(e.target.files);
+							e.target.value = "";
+						}}
+					/>
+					<Button
+						type="button"
+						variant="ghost"
+						size="sm"
+						onClick={() => knowledgeFileInputRef.current?.click()}
+						disabled={knowledgeBusy}
+						className="gap-1.5"
+					>
+						<Upload className="h-4 w-4" />
+						{knowledgeBusy ? "Uploading…" : "Upload files"}
+					</Button>
+					<p className="text-xs text-muted-foreground mt-1.5">
+						Plain text (.txt, .md), Word (.docx), or Apple/RTF (.rtf). Up to 10&nbsp;MB per file, 50&nbsp;MB total per bot.
+					</p>
+				</div>
+
+				{knowledgeError && (
+					<div className="text-sm text-destructive border border-destructive/40 bg-destructive/5 rounded-md px-3 py-2">
+						{knowledgeError}
+					</div>
+				)}
+			</section>
+		);
+	}
 }
 
 // Small section heading + supporting line.  Kept inline in the same
@@ -858,18 +1021,11 @@ export function BotEditForm({
 // adopt this pattern we'll lift it into a shared primitive.
 function SectionHeader({ title, subtitle }: { title: string; subtitle: string }) {
 	return (
-		<div className="space-y-0.5">
+		<div className="space-y-0.5 mb-4">
 			<h3 className="text-sm font-semibold leading-none">{title}</h3>
 			<p className="text-xs text-muted-foreground">{subtitle}</p>
 		</div>
 	);
-}
-
-// Hairline divider between sections.  A 1px border doesn't read
-// against the dark background; bg-border with explicit height
-// renders crisply on every theme.
-function Divider() {
-	return <div className="h-px bg-border" aria-hidden />;
 }
 
 // Render the bot's existing knowledge files plus any pending picks
@@ -944,4 +1100,285 @@ function formatBytes(n: number): string {
 	if (n < 1024) return `${n} B`;
 	if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
 	return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+// ─── Tools (MCP) tab ───────────────────────────────────────────────
+//
+// Two sections:
+//   - Attached servers: GET /api/bots/:id/mcp + per-row detach
+//   - Catalog browse: search field hits /api/smithery/search,
+//     click a result to attach.  Shows a "configure your Smithery
+//     key first" nudge when the engine reports the key is missing.
+//
+// Servers with required config (the registry's JSONSchema marks
+// fields as `required`) are surfaced with a hint — for now the
+// attach flow uses an empty config object.  A first-class config
+// form generator is future work.
+
+function ToolsTab({
+	bot,
+	accessToken,
+}: {
+	bot: BotSummary | undefined | null;
+	accessToken: string | null;
+}) {
+	const [attached, setAttached] = useState<BotMcpAttachment[]>([]);
+	const [loading, setLoading] = useState(true);
+	const [listError, setListError] = useState<string | null>(null);
+
+	const [query, setQuery] = useState("");
+	const [searchResults, setSearchResults] = useState<SmitheryServerSummary[]>([]);
+	const [searching, setSearching] = useState(false);
+	const [searchError, setSearchError] = useState<string | null>(null);
+	const [keyMissing, setKeyMissing] = useState(false);
+
+	const [busyQualifiedName, setBusyQualifiedName] = useState<string | null>(null);
+	const [actionError, setActionError] = useState<string | null>(null);
+
+	// Initial fetch of the bot's existing attachments.  Re-runs when
+	// the bot id changes (parent flips between bots).
+	useEffect(() => {
+		if (!accessToken || !bot) {
+			setLoading(false);
+			return;
+		}
+		let cancelled = false;
+		setLoading(true);
+		setListError(null);
+		fetchBotMcpServers(accessToken, bot.id)
+			.then(rows => { if (!cancelled) setAttached(rows); })
+			.catch(err => { if (!cancelled) setListError(err instanceof Error ? err.message : String(err)); })
+			.finally(() => { if (!cancelled) setLoading(false); });
+		return () => { cancelled = true; };
+	}, [accessToken, bot?.id]);
+
+	// Debounced catalog search.  Empty query returns top servers; the
+	// 250ms wait is enough to avoid hammering the proxy on every
+	// keystroke without making the UI feel sluggish.
+	useEffect(() => {
+		if (!accessToken) return;
+		let cancelled = false;
+		setSearchError(null);
+		setKeyMissing(false);
+		const handle = window.setTimeout(async () => {
+			setSearching(true);
+			try {
+				const r = await searchSmitheryCatalog(accessToken, query);
+				if (!cancelled) setSearchResults(r.servers);
+			} catch (err) {
+				if (cancelled) return;
+				if (err instanceof SmitheryKeyMissingError) {
+					setKeyMissing(true);
+					setSearchResults([]);
+				} else {
+					setSearchError(err instanceof Error ? err.message : String(err));
+				}
+			} finally {
+				if (!cancelled) setSearching(false);
+			}
+		}, 250);
+		return () => { cancelled = true; window.clearTimeout(handle); };
+	}, [accessToken, query]);
+
+	async function attach(server: SmitheryServerSummary) {
+		if (!accessToken || !bot) return;
+		setActionError(null);
+		setBusyQualifiedName(server.qualifiedName);
+		try {
+			// Fetch the detail so we can warn early when the server
+			// requires config we're not collecting yet.  If detail
+			// fetch fails we still try to attach with empty config —
+			// the server will simply fail at runtime with a helpful
+			// error visible in the bot's logs.
+			let detail: SmitheryServerDetail | null = null;
+			try { detail = await getSmitheryServerDetail(accessToken, server.qualifiedName); } catch { /* fall through */ }
+			if (detail && hasRequiredConfig(detail.configSchema)) {
+				setActionError(`${server.displayName} requires configuration we don't collect from the UI yet — attached with empty config; tools that need credentials will fail at runtime.`);
+			}
+			const row = await attachBotMcpServer(accessToken, bot.id, server.qualifiedName);
+			setAttached(prev => {
+				// Replace any existing row for the same server (the
+				// engine treats this as upsert) so the list doesn't
+				// duplicate after a re-attach.
+				const filtered = prev.filter(p => p.smithery_qualified_name !== row.smithery_qualified_name);
+				return [...filtered, row];
+			});
+		} catch (err) {
+			setActionError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setBusyQualifiedName(null);
+		}
+	}
+
+	async function detach(row: BotMcpAttachment) {
+		if (!accessToken || !bot) return;
+		setActionError(null);
+		setBusyQualifiedName(row.smithery_qualified_name);
+		try {
+			await detachBotMcpServer(accessToken, bot.id, row.id);
+			setAttached(prev => prev.filter(p => p.id !== row.id));
+		} catch (err) {
+			setActionError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setBusyQualifiedName(null);
+		}
+	}
+
+	// Defensive — the parent hides the Tools tab in create mode, but
+	// if someone navigates here without a saved bot the message is
+	// kinder than a crash on `bot.id` access.
+	if (!bot) {
+		return (
+			<section>
+				<SectionHeader
+					title="Tools"
+					subtitle="Connect Smithery-hosted MCP servers to give this bot extra capabilities."
+				/>
+				<div className="rounded-md border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+					Save the bot first, then come back here to attach tools.
+				</div>
+			</section>
+		);
+	}
+
+	const attachedQualifiedNames = new Set(attached.map(a => a.smithery_qualified_name));
+
+	return (
+		<section className="space-y-6">
+			<SectionHeader
+				title="Tools"
+				subtitle="Smithery-hosted MCP servers this bot can call.  Tools listed by each server become available to the model on every reply."
+			/>
+
+			{/* Attached list */}
+			<div className="space-y-2">
+				<div className="text-xs font-medium uppercase text-muted-foreground tracking-wide">Attached</div>
+				{loading ? (
+					<div className="text-sm text-muted-foreground">Loading…</div>
+				) : listError ? (
+					<div className="text-sm text-destructive border border-destructive/40 bg-destructive/5 rounded-md px-3 py-2">
+						{listError}
+					</div>
+				) : attached.length === 0 ? (
+					<div className="rounded-md border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+						No tools attached. Search the catalog below to add one.
+					</div>
+				) : (
+					<ul className="rounded-md border border-border divide-y divide-border bg-card/30">
+						{attached.map(row => (
+							<li key={row.id} className="px-3 py-2.5 flex items-center gap-3">
+								<Plug className="h-4 w-4 shrink-0 text-muted-foreground" />
+								<div className="flex-1 min-w-0">
+									<div className="text-sm font-medium truncate">{row.smithery_qualified_name}</div>
+									{Object.keys(row.config).length > 0 && (
+										<div className="text-[11px] text-muted-foreground">configured</div>
+									)}
+								</div>
+								<button
+									type="button"
+									onClick={() => detach(row)}
+									disabled={busyQualifiedName === row.smithery_qualified_name}
+									title="Remove tool"
+									aria-label="Remove tool"
+									className="text-muted-foreground hover:text-destructive disabled:opacity-40"
+								>
+									<X className="h-4 w-4" />
+								</button>
+							</li>
+						))}
+					</ul>
+				)}
+			</div>
+
+			{/* Catalog search */}
+			<div className="space-y-2">
+				<div className="text-xs font-medium uppercase text-muted-foreground tracking-wide">Browse Smithery catalog</div>
+
+				{keyMissing ? (
+					<div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-3 text-sm">
+						<p className="font-medium">Connect your Smithery account first</p>
+						<p className="text-muted-foreground mt-0.5">
+							Add your Smithery API key in Account → Integrations to browse and attach tools.
+						</p>
+					</div>
+				) : (
+					<>
+						<div className="relative max-w-md">
+							<Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
+							<Input
+								value={query}
+								onChange={e => setQuery(e.target.value)}
+								placeholder="Search GitHub, search the web, fetch URLs…"
+								className="pl-9"
+								autoComplete="off"
+							/>
+						</div>
+
+						{searchError && (
+							<div className="text-sm text-destructive border border-destructive/40 bg-destructive/5 rounded-md px-3 py-2">
+								{searchError}
+							</div>
+						)}
+
+						{searching && searchResults.length === 0 ? (
+							<div className="text-sm text-muted-foreground">Searching…</div>
+						) : searchResults.length === 0 ? (
+							<div className="rounded-md border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+								No matches.
+							</div>
+						) : (
+							<ul className="rounded-md border border-border divide-y divide-border">
+								{searchResults.map(s => {
+									const isAttached = attachedQualifiedNames.has(s.qualifiedName);
+									const isBusy = busyQualifiedName === s.qualifiedName;
+									return (
+										<li key={s.qualifiedName} className="px-3 py-2.5 flex items-start gap-3">
+											<div className="flex-1 min-w-0">
+												<div className="flex items-center gap-2">
+													<span className="text-sm font-medium truncate">{s.displayName}</span>
+													{s.isDeployed === false && (
+														<span className="text-[10px] px-1.5 py-0.5 rounded-full border border-border text-muted-foreground">
+															not deployed
+														</span>
+													)}
+												</div>
+												<div className="text-[11px] text-muted-foreground truncate">{s.qualifiedName}</div>
+												{s.description && (
+													<p className="text-xs text-muted-foreground mt-1 line-clamp-2">{s.description}</p>
+												)}
+											</div>
+											<Button
+												type="button"
+												size="sm"
+												variant={isAttached ? "ghost" : "outline"}
+												disabled={isAttached || isBusy || s.isDeployed === false}
+												onClick={() => attach(s)}
+											>
+												{isAttached ? "Attached" : isBusy ? "Attaching…" : "Attach"}
+											</Button>
+										</li>
+									);
+								})}
+							</ul>
+						)}
+					</>
+				)}
+
+				{actionError && (
+					<div className="text-sm text-destructive border border-destructive/40 bg-destructive/5 rounded-md px-3 py-2">
+						{actionError}
+					</div>
+				)}
+			</div>
+		</section>
+	);
+}
+
+/** True if the registry's config schema declares any required
+ * fields.  We use this only as a UX warning — empty config is
+ * always sent on attach; runtime failures surface in the bot logs. */
+function hasRequiredConfig(schema: Record<string, unknown> | undefined): boolean {
+	if (!schema) return false;
+	const required = (schema as { required?: unknown }).required;
+	return Array.isArray(required) && required.length > 0;
 }
