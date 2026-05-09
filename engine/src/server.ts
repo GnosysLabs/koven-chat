@@ -2290,14 +2290,19 @@ export function startServer(): void {
 				}
 			}
 
-			// Admin-only: report which integrations are configured (by
+			// Auth-only: report which integrations are configured (by
 			// presence of their credential, not its value).  The value
 			// itself is never returned over the wire; the admin form
 			// uses this to render "Configured / Not configured" badges
-			// next to a write-only input.
+			// next to a write-only input, AND every member's client
+			// uses it to gate composer affordances (the GIF picker
+			// only renders when Giphy is configured).  Any logged-in
+			// member is allowed since they need the answer to render
+			// their own UI; the key remains write-only via the admin
+			// PUT endpoint.
 			if (req.method === "GET" && path === "/api/instance/integrations") {
-				const auth = await requireAdmin(req);
-				if (auth instanceof Response) return auth;
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
 				const cfg = readInstanceConfig();
 				return json({
 					integrations: {
