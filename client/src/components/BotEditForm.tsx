@@ -172,6 +172,12 @@ export function BotEditForm({
 	const [showKey, setShowKey] = useState(false);
 	const [confirmingDelete, setConfirmingDelete] = useState(false);
 	const [activeTab, setActiveTab] = useState<TabKey>("identity");
+	// True between a successful save and the next time the user
+	// edits anything — drives the primary button to read "Saved"
+	// (greyed, disabled) so it's obvious the click took effect
+	// instead of just flashing back to "Save changes".  Cleared by
+	// the update() helper on any field change.
+	const [justSaved, setJustSaved] = useState(false);
 	// Auto-grow handle for the system prompt textarea — see useEffect
 	// below.  Resetting height to "auto" first lets the browser
 	// re-measure the natural content height before we pin it.
@@ -232,6 +238,7 @@ export function BotEditForm({
 		setSubmitting(false);
 		setConfirmingDelete(false);
 		setActiveTab("identity");
+		setJustSaved(false);
 		setPendingAvatarFile(null);
 		setPendingAvatarPreview(prev => {
 			// Revoke the previous object URL so we don't leak browser
@@ -290,9 +297,18 @@ export function BotEditForm({
 
 	const update = <K extends keyof FormState>(k: K, v: FormState[K]) => {
 		setForm(prev => ({ ...prev, [k]: v }));
+		// Any field edit invalidates the "just saved" state so the
+		// primary button switches back to "Save changes".
+		if (justSaved) setJustSaved(false);
 	};
 
+	// Mark the form dirty whenever a non-text mutator fires (provider
+	// switch, avatar pick / clear).  Text-input edits go through
+	// update() above which handles the same flag itself.
+	const markDirty = () => { if (justSaved) setJustSaved(false); };
+
 	const onProviderChange = (p: BotProvider) => {
+		markDirty();
 		// `apiBase` is provider-bound: OpenRouter has exactly one
 		// canonical URL and the field is locked in the form when
 		// that provider is picked, so switching providers must
@@ -465,6 +481,13 @@ export function BotEditForm({
 			}
 
 			await onSaved(saved);
+			// Flip into the "Saved" affordance after a clean save —
+			// the button stays greyed and disabled until the user
+			// edits something, which markDirty() / update() reset.
+			// Edit mode only: in create mode the form is unmounting
+			// (selection flips to the new bot), so the indicator
+			// would be invisible anyway.
+			if (mode === "edit") setJustSaved(true);
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
 		} finally {
@@ -519,6 +542,7 @@ export function BotEditForm({
 		// Replace the existing pending pick (revoke its blob URL so
 		// we don't leak), wire up the new one.  No upload yet — that
 		// fires from handleSubmit.
+		markDirty();
 		setPendingAvatarPreview(prev => {
 			if (prev) URL.revokeObjectURL(prev);
 			return URL.createObjectURL(file);
@@ -528,6 +552,7 @@ export function BotEditForm({
 	}
 
 	function clearAvatar() {
+		markDirty();
 		setPendingAvatarFile(null);
 		setPendingAvatarPreview(prev => {
 			if (prev) URL.revokeObjectURL(prev);
@@ -768,9 +793,25 @@ export function BotEditForm({
 					type="button"
 					size="sm"
 					onClick={handleSubmit}
-					disabled={!canSubmit}
+					// Disabled while submitting OR after a clean save
+					// until the user edits again — the button labels
+					// reflect each state in turn ("Saving…" → "Saved"
+					// → "Save changes" the moment a field changes).
+					disabled={!canSubmit || justSaved}
+					// `variant=secondary` for the saved state so the
+					// button visibly recedes (greyed out instead of
+					// the primary accent), reinforcing the "no work
+					// queued" read.  Active button keeps the default
+					// primary variant.
+					variant={justSaved ? "secondary" : "default"}
 				>
-					{submitting ? "Saving…" : mode === "create" ? "Create bot" : "Save changes"}
+					{submitting
+						? "Saving…"
+						: justSaved
+							? "Saved"
+							: mode === "create"
+								? "Create bot"
+								: "Save changes"}
 				</Button>
 			</div>
 		</div>
@@ -891,7 +932,7 @@ export function BotEditForm({
 							id="bot-model"
 							value={form.model}
 							onChange={e => update("model", e.target.value)}
-							placeholder="~google/gemini-flash-latest"
+							placeholder="google/gemini-3.1-flash-lite"
 						/>
 					</div>
 				</div>

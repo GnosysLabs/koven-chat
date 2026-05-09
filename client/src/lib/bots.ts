@@ -262,11 +262,7 @@ export async function deleteBotKnowledge(
 export const PROVIDER_DEFAULTS: Record<BotProvider, { api_base: string; model: string }> = {
 	openrouter: {
 		api_base: "https://openrouter.ai/api/v1",
-		// Leading "~" is OpenRouter's auto-route prefix — picks the
-		// best available endpoint for this model alias.  Required
-		// verbatim; without the tilde OpenRouter rejects with
-		// "is not a valid model ID".
-		model: "~google/gemini-flash-latest",
+		model: "google/gemini-3.1-flash-lite",
 	},
 	openai_compatible: {
 		api_base: "",
