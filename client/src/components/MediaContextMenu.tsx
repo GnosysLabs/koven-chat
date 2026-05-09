@@ -14,7 +14,7 @@
 import { createPortal } from "react-dom";
 import { useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
-import { Download, ExternalLink, Copy } from "lucide-react";
+import { Download, Copy } from "lucide-react";
 import { downloadMediaUrl } from "@/lib/downloadMedia";
 
 export interface MediaContextMenuProps {
@@ -49,7 +49,7 @@ export function MediaContextMenu({ x, y, url, filename, onClose }: MediaContextM
 
 	// Cursor clamp so the menu never renders past the viewport edge.
 	const menuW = 200;
-	const menuH = 140;
+	const menuH = 96;
 	const vw = typeof window !== "undefined" ? window.innerWidth : 1200;
 	const vh = typeof window !== "undefined" ? window.innerHeight : 800;
 	const left = Math.min(x, vw - menuW - 8);
@@ -71,14 +71,6 @@ export function MediaContextMenu({ x, y, url, filename, onClose }: MediaContextM
 				label="Download"
 				onClick={async () => {
 					await downloadMediaUrl(url, filename);
-					onClose();
-				}}
-			/>
-			<MenuItem
-				icon={<ExternalLink className="h-4 w-4" />}
-				label="Open in new tab"
-				onClick={() => {
-					window.open(url, "_blank", "noopener,noreferrer");
 					onClose();
 				}}
 			/>
