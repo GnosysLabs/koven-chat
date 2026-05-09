@@ -74,7 +74,7 @@ export function MobileTabBar({ active, onChange, unreadByTab }: MobileTabBarProp
 				"border-t border-border",
 			)}
 		>
-			<div className="flex items-stretch px-1 pt-1.5">
+			<div className="flex items-stretch px-1">
 				{TABS.map(t => {
 					const isActive = active === t.key;
 					const unread = unreadByTab?.[t.key] ?? 0;
@@ -86,12 +86,16 @@ export function MobileTabBar({ active, onChange, unreadByTab }: MobileTabBarProp
 							aria-current={isActive ? "page" : undefined}
 							aria-label={t.label}
 							className={cn(
-								"flex-1 flex flex-col items-center justify-center gap-1",
-								// Total tab height ~52px, paired with
-								// the nav's pt-1.5 + the safe-area pb
-								// so the parent's 56px reserve still
-								// clears the bar.
-								"min-h-[52px] py-1.5 px-1",
+								"flex-1 flex flex-col items-center justify-center gap-0.5",
+								// Tight padding so the icon + label
+								// stack sits as close to the safe-area
+								// strip as possible.  Total intrinsic
+								// height ~36 px; the parent's 56 px
+								// reservation still clears the bar
+								// because the unused space above just
+								// shows bg-background (same colour as
+								// the bar itself — invisible seam).
+								"py-1 px-1",
 								"transition-colors duration-150",
 								"select-none",
 								// No per-button bg fill — only the
