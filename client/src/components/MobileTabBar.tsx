@@ -85,10 +85,12 @@ export function MobileTabBar({ active, onChange, unreadByTab }: MobileTabBarProp
 							aria-label={t.label}
 							className={cn(
 								"flex-1 flex flex-col items-center justify-center gap-0.5",
-								// Tight padding all around — bar
-								// height is just icon + label + small
-								// breathing room.
-								"py-1.5 px-1",
+								// Generous top padding gives the icons
+								// room to breathe under the bar's
+								// rounded top edge; bottom stays tight
+								// so labels sit close to the safe-area
+								// strip below.
+								"pt-3 pb-1.5 px-1",
 								"transition-colors duration-150",
 								"select-none",
 								// No per-button bg fill — only the
