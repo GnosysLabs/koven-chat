@@ -158,7 +158,11 @@ function MentionPill({
 				// self bubble (dark accent over primary bg) and the
 				// other bubble (primary tint over muted bg).
 				tone === "self"
-					? "bg-primary-foreground/15 text-primary-foreground hover:bg-primary-foreground/25"
+					// On dark, the self bubble switches to a dim primary tint
+					// with `text-foreground`, so a primary-foreground (dark)
+					// pill no longer reads.  Match the bubble: pill text +
+					// background derive from `--foreground` on dark.
+					? "bg-primary-foreground/15 text-primary-foreground hover:bg-primary-foreground/25 dark:bg-foreground/15 dark:text-foreground dark:hover:bg-foreground/25"
 					: "bg-primary/15 text-primary hover:bg-primary/25",
 				"transition-colors",
 			)}

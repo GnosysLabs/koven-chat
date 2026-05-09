@@ -977,7 +977,13 @@ export function ChatPane({
 								"flex w-full rounded-md border border-foreground/15 bg-transparent px-3 py-1.5 text-base shadow-sm transition-colors",
 								"hover:border-foreground/25",
 								"placeholder:text-muted-foreground",
-								"focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:border-ring",
+								// Tone down the focus accent on dark themes — `--ring`
+							// resolves to the bright theme primary, which next
+							// to the muted bubble row felt over-saturated.  Plain
+							// `ring-1` plus a 50%-alpha primary border is enough
+							// affordance without lighting up the whole composer.
+							"focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:border-ring",
+							"dark:focus-visible:ring-primary/40 dark:focus-visible:border-primary/40",
 								"disabled:cursor-not-allowed disabled:opacity-50",
 								"md:text-sm",
 								// Disable the manual resize handle — auto-grow
@@ -1445,7 +1451,14 @@ function MessageBubble({
 	// keeping pre-wrap on top of them would re-introduce the literal
 	// blank lines between blocks.
 	const baseBubble = "inline-block max-w-[60ch] px-3 py-2 rounded-xl text-sm leading-snug break-words";
-	const selfBubble = "bg-primary text-primary-foreground";
+	// On light themes `--primary` is already a dark surface, so the
+	// bubble reads fine.  On dark themes `--primary` is the bright
+	// theme-accent (e.g. neon pink, vivid cyan) which washes out
+	// emoji and overwhelms the eye on a long thread.  Drop the bg to
+	// 50% alpha and switch text to plain foreground on dark — alpha-
+	// composites against the chat background to a muted theme tint
+	// while staying recognisable as "your colour."
+	const selfBubble = "bg-primary text-primary-foreground dark:bg-primary/50 dark:text-foreground";
 	const otherBubble = "bg-muted text-foreground";
 
 	// Image + video render flush — no surrounding bubble.  The
