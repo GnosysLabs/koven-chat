@@ -52,7 +52,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import { AlertTriangle, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Lock, Network, Paperclip, Phone, Scale, Settings, UserPlus, Video, X } from "lucide-react";
+import { AlertTriangle, CornerDownRight, Download, EyeOff, File as FileIcon, Film, Flag, Globe, Lock, Network, Paperclip, Phone, Scale, Settings, UserPlus, Video, X } from "lucide-react";
 
 export interface ChatPaneProps {
 	room: Room | null;
@@ -926,9 +926,10 @@ export function ChatPane({
 						// GIF picker — only renders when the instance admin
 						// has set a Giphy API key (giphyEnabled).  Click
 						// drops the popover, pick auto-sends through the
-						// attachment pipeline.  No "GIF" SVG in lucide so
-						// we use a tight text pill, the same convention
-						// Discord uses on web.
+						// attachment pipeline.  Uses Lucide's Film icon
+						// (universal "moving image" glyph — same one
+						// Slack and Telegram use for their GIF buttons)
+						// to match the paperclip's visual weight.
 						<GifPicker
 							accessToken={accessToken}
 							disabled={isSuspended || uploading || !!pendingAttachment}
@@ -937,11 +938,11 @@ export function ChatPane({
 							<button
 								type="button"
 								disabled={isSuspended || uploading || !!pendingAttachment}
-								className="px-1.5 py-1 rounded-md text-[10px] font-bold tracking-wide text-muted-foreground hover:text-foreground hover:bg-accent border border-current transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+								className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
 								title="Send a GIF"
 								aria-label="Send a GIF"
 							>
-								GIF
+								<Film className="h-4 w-4" />
 							</button>
 						</GifPicker>
 					)}

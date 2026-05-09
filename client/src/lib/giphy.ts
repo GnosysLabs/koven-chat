@@ -27,6 +27,10 @@ interface GiphyResponse {
 interface GiphyError {
 	errcode?: string;
 	error?: string;
+	/** Forwarded body from Giphy's response when the upstream call
+	 * fails — usually a one-liner like "Invalid authentication
+	 * credentials." that points the admin at the real issue. */
+	detail?: string;
 }
 
 /** True when the engine reports Giphy is configured for this instance.
@@ -72,7 +76,8 @@ async function giphyFetch(
 	});
 	if (!r.ok) {
 		const body = (await r.json().catch(() => ({}))) as GiphyError;
-		throw new Error(body.error ?? `giphy_${endpoint}_${r.status}`);
+		const base = body.error ?? `giphy_${endpoint}_${r.status}`;
+		throw new Error(body.detail ? `${base}: ${body.detail}` : base);
 	}
 	const body = (await r.json()) as GiphyResponse;
 	return body.results;

@@ -2262,7 +2262,7 @@ export function startServer(): void {
 			if (req.method === "GET" && (path === "/api/giphy/search" || path === "/api/giphy/trending")) {
 				const userId = await whoami(extractToken(req));
 				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
-				const apiKey = readInstanceConfig()["giphy_api_key"];
+				const apiKey = readInstanceConfig()["giphy_api_key"]?.trim();
 				if (!apiKey) return json({ errcode: "M_NOT_FOUND", error: "giphy_not_configured" }, { status: 503 });
 				const params = new URL(req.url).searchParams;
 				// Clamp limit to Giphy's accepted range to keep
@@ -2289,8 +2289,19 @@ export function startServer(): void {
 				try {
 					const r = await fetch(upstream);
 					if (!r.ok) {
+						// Forward Giphy's own message verbatim — when the
+						// admin's seeing 401 it's almost always "wrong
+						// key" or "SDK key in API slot," and Giphy's
+						// reply spells that out.  Rendered in the
+						// picker's error toast so the admin can act
+						// without checking server logs.
+						const detail = await r.text().catch(() => "");
 						return json(
-							{ errcode: "M_UNKNOWN", error: `giphy_upstream_${r.status}` },
+							{
+								errcode: "M_UNKNOWN",
+								error: `giphy_upstream_${r.status}`,
+								detail: detail.slice(0, 500),
+							},
 							{ status: 502 },
 						);
 					}
