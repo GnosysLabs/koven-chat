@@ -29,7 +29,9 @@ import {
 	joinedMemberCount,
 	listJoinedRoomMembers,
 	lookupPostUser,
+	upsertRoomMember,
 } from "./db";
+import { getJoinedMembers } from "./synapse";
 
 // Snippet character cap.  200 keeps the bell list compact while
 // still showing enough preview to recognize the conversation.
@@ -193,8 +195,14 @@ function buildSnippet(ev: MatrixEvent): string | null {
 }
 
 /** Compute notifications for an m.room.message (or m.room.encrypted)
- * event and write rows for every recipient that should see it. */
-export function fanOutMessage(ev: MatrixEvent): void {
+ * event and write rows for every recipient that should see it.
+ *
+ * `async` because we may need to lazily backfill room_members from
+ * Synapse on first contact with a room — see comment around the
+ * empty-list branch below.  Caller in aggregate.ts is fire-and-
+ * forget (`void fanOutMessage(ev)`) so the appservice transaction
+ * response isn't held up by member-list round-trips. */
+export async function fanOutMessage(ev: MatrixEvent): Promise<void> {
 	// State events shouldn't reach here, but defend anyway.
 	if (ev.state_key !== undefined) return;
 	if (isBotOrEngineUser(ev.sender)) {
@@ -205,8 +213,34 @@ export function fanOutMessage(ev: MatrixEvent): void {
 	}
 
 	const isEncrypted = ev.type === "m.room.encrypted";
-	const members = listJoinedRoomMembers(ev.room_id);
-	if (members.length === 0) return; // no joined members ⇒ nothing to notify
+	let members = listJoinedRoomMembers(ev.room_id);
+	if (members.length === 0) {
+		// Lazy backfill: the engine's `room_members` table is
+		// populated from m.room.member events in the appservice
+		// transaction stream, but those only fire when membership
+		// CHANGES.  Existing memberships from before the
+		// `room_members` schema migration (or from before the
+		// engine was running, or for any room the engine joins
+		// after some membership churn) never appear in the local
+		// table.  When fan-out hits an unknown room, we fetch the
+		// live joined-members list from Synapse once and cache it
+		// going forward.  Subsequent events on the same room hit
+		// the local table without round-trip.  Each room pays the
+		// cost exactly once.
+		try {
+			const live = await getJoinedMembers(ev.room_id);
+			if (live.length > 0) {
+				const ts = ev.origin_server_ts;
+				for (const u of live) {
+					upsertRoomMember({ roomId: ev.room_id, userId: u, membership: "join", ts });
+				}
+				members = live;
+			}
+		} catch (err) {
+			console.warn(`fan-out: backfill of ${ev.room_id} members failed`, err);
+		}
+		if (members.length === 0) return; // really empty / unreachable; nothing to notify
+	}
 
 	const memberCount = members.length;
 	const isDm = memberCount === 2; // 2 joined members → treat as DM

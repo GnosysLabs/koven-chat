@@ -77,7 +77,15 @@ export function applyEvent(ev: MatrixEvent): void {
 			// fanOutMessage handles those silently.  No insertPost
 			// because the engine has no plaintext body to index for
 			// reply-target lookup later.
-			fanOutMessage(ev);
+			//
+			// Fire-and-forget — fanOutMessage is async (may lazy-
+			// backfill room_members from Synapse on first contact
+			// with a room), but we don't want to hold up the
+			// appservice transaction response on a member-list
+			// round-trip.
+			void fanOutMessage(ev).catch(err => {
+				console.warn("fan-out (encrypted): failed", err);
+			});
 			return;
 		case "m.reaction":
 			handleReaction(ev);
@@ -196,7 +204,13 @@ function handleMessage(ev: MatrixEvent): void {
 	// notification-fanout.ts for the kind-priority logic + encrypted-
 	// room handling.  Idempotent at the DB layer (UNIQUE on
 	// user_id+event_id) so re-delivery doesn't double-emit.
-	fanOutMessage(ev);
+	//
+	// Fire-and-forget — fanOutMessage may lazy-backfill room_members
+	// from Synapse on first contact with a room, and we don't want
+	// the appservice transaction response held up on that round-trip.
+	void fanOutMessage(ev).catch(err => {
+		console.warn("fan-out: failed", err);
+	});
 }
 
 function handleReaction(ev: MatrixEvent): void {
