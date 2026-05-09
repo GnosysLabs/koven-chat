@@ -74,14 +74,17 @@ export function NotificationBell({
 		}
 	}
 
-	async function handleEntryClick(entry: NotificationEntry) {
-		if (entry.read_at === null) {
-			// Mark read but don't await — navigation shouldn't block
-			// on the network round-trip, optimistic update flipped
-			// the local state already.
-			void markRead(entry.id);
+	async function handleGroupClick(group: NotificationGroup) {
+		// Mark every unread entry in the group as read.  Fire-and-
+		// forget — navigation shouldn't block on the round-trip, the
+		// optimistic local updates have already flipped the state.
+		for (const e of group.entries) {
+			if (e.read_at === null) void markRead(e.id);
 		}
-		onOpenRoom(entry.room_id, entry.event_id);
+		// Open the latest event in the room — that's the one the user
+		// most likely wants to land on, and the older grouped events
+		// are usually still visible just above it in the timeline.
+		onOpenRoom(group.room_id, group.latest.event_id);
 		setOpen(false);
 	}
 
@@ -245,16 +248,16 @@ export function NotificationBell({
 				</div>
 			) : (
 				<div className="flex-1 overflow-y-auto">
-					{entries.map(entry => (
+					{groupNotifications(entries).map(group => (
 						<NotificationRow
-							key={entry.id}
-							entry={entry}
-							onClick={() => handleEntryClick(entry)}
+							key={group.key}
+							group={group}
+							onClick={() => handleGroupClick(group)}
 							senderName={
-								resolveDisplayName?.(entry.sender) ??
-								localpartOf(entry.sender)
+								resolveDisplayName?.(group.sender) ??
+								localpartOf(group.sender)
 							}
-							roomName={resolveRoomName?.(entry.room_id) ?? null}
+							roomName={resolveRoomName?.(group.room_id) ?? null}
 						/>
 					))}
 				</div>
@@ -435,19 +438,78 @@ function ChatbotPanel({
 	);
 }
 
+/** Bucket of notifications that share (sender, kind, room).  We
+ * collapse runs of similar pings into one row so a burst of DMs
+ * from the same person reads as "Alice sent you 4 DMs" instead of
+ * four near-identical rows in the bell list. */
+interface NotificationGroup {
+	key: string;
+	sender: string;
+	kind: NotificationKind;
+	room_id: string;
+	/** Always non-empty; sorted newest-first. */
+	entries: NotificationEntry[];
+	count: number;
+	/** The newest entry — drives the snippet, timestamp, and event_id
+	 * we navigate to on click. */
+	latest: NotificationEntry;
+	/** True when AT LEAST ONE entry in the group is unread.  The
+	 * row's accent + dot mirror this so a partially-read group still
+	 * reads as "needs attention." */
+	hasUnread: boolean;
+}
+
+/** Group flat notification entries by (sender, kind, room).  Each
+ * group's entries are sorted newest-first; the resulting list of
+ * groups is sorted by the latest entry's timestamp so the row order
+ * still tracks "most recent ping at the top." */
+function groupNotifications(entries: NotificationEntry[]): NotificationGroup[] {
+	const buckets = new Map<string, NotificationGroup>();
+	for (const e of entries) {
+		// Invites are inherently single-event (one m.room.member per
+		// invite), so they don't really benefit from grouping; keep
+		// them in their own bucket per entry id to avoid stomping
+		// invites from the same sender into one row.
+		const key = e.kind === "invite"
+			? `invite|${e.id}`
+			: `${e.sender}|${e.kind}|${e.room_id}`;
+		let g = buckets.get(key);
+		if (!g) {
+			g = {
+				key,
+				sender: e.sender,
+				kind: e.kind,
+				room_id: e.room_id,
+				entries: [],
+				count: 0,
+				latest: e,
+				hasUnread: false,
+			};
+			buckets.set(key, g);
+		}
+		g.entries.push(e);
+		if (e.read_at === null) g.hasUnread = true;
+	}
+	for (const g of buckets.values()) {
+		g.entries.sort((a, b) => b.created_at - a.created_at);
+		g.count = g.entries.length;
+		g.latest = g.entries[0]!;
+	}
+	return [...buckets.values()].sort((a, b) => b.latest.created_at - a.latest.created_at);
+}
+
 function NotificationRow({
-	entry,
+	group,
 	onClick,
 	senderName,
 	roomName,
 }: {
-	entry: NotificationEntry;
+	group: NotificationGroup;
 	onClick(): void;
 	senderName: string;
 	roomName: string | null;
 }) {
-	const { Icon, label } = kindRendering(entry.kind);
-	const isUnread = entry.read_at === null;
+	const { Icon, label } = kindRendering(group.kind, group.count);
 
 	return (
 		<button
@@ -458,15 +520,30 @@ function NotificationRow({
 				"border-b border-border/30 last:border-b-0",
 				"hover:bg-accent/40 active:bg-accent/60",
 				"transition-colors",
-				isUnread && "bg-primary/[0.04]",
+				group.hasUnread && "bg-primary/[0.04]",
 			)}
 		>
 			{/* Kind icon column */}
 			<div className={cn(
-				"shrink-0 mt-0.5 h-7 w-7 rounded-full flex items-center justify-center",
-				isUnread ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground",
+				"shrink-0 mt-0.5 h-7 w-7 rounded-full flex items-center justify-center relative",
+				group.hasUnread ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground",
 			)}>
 				<Icon className="h-3.5 w-3.5" />
+				{group.count > 1 && (
+					// Tiny badge over the icon when the bucket has more
+					// than one entry — at-a-glance signal "this is more
+					// than one ping" before the eye even reaches the label.
+					<span
+						className={cn(
+							"absolute -top-1 -right-1 min-w-[1rem] h-4 px-1 rounded-full",
+							"text-[9px] font-semibold leading-none flex items-center justify-center",
+							"bg-primary text-primary-foreground",
+						)}
+						aria-hidden
+					>
+						{group.count > 99 ? "99+" : group.count}
+					</span>
+				)}
 			</div>
 
 			{/* Message column */}
@@ -484,28 +561,40 @@ function NotificationRow({
 						    / replies / invites: append room name
 						    when we have one (the room is the
 						    relevant context, not the sender). */}
-						{entry.kind !== "dm" && roomName ? ` in ${roomName}` : ""}
+						{group.kind !== "dm" && roomName ? ` in ${roomName}` : ""}
 					</span>
 				</div>
-				{entry.snippet ? (
+				{group.latest.snippet ? (
 					<div className="mt-0.5 text-sm text-foreground/90 line-clamp-2 break-words">
-						{entry.snippet}
+						{group.latest.snippet}
 					</div>
 				) : null}
 				<div className="mt-1 text-[10px] text-muted-foreground">
-					{formatRelativeTime(entry.created_at)}
+					{formatRelativeTime(group.latest.created_at)}
 				</div>
 			</div>
 
 			{/* Unread dot */}
-			{isUnread ? (
+			{group.hasUnread ? (
 				<div className="shrink-0 mt-2 h-2 w-2 rounded-full bg-primary" aria-hidden />
 			) : null}
 		</button>
 	);
 }
 
-function kindRendering(kind: NotificationKind): { Icon: typeof Bell; label: string } {
+function kindRendering(kind: NotificationKind, count: number = 1): { Icon: typeof Bell; label: string } {
+	// Singular vs grouped phrasing.  Reads naturally as "Poptart sent
+	// you 4 DMs" / "Alice mentioned you 3 times" / "Bob replied to
+	// you 2 times" rather than the awkward "Alice mentioned you (4)".
+	if (count > 1) {
+		switch (kind) {
+			case "mention": return { Icon: AtSign,        label: `mentioned you ${count} times` };
+			case "reply":   return { Icon: Reply,         label: `replied to you ${count} times` };
+			case "dm":      return { Icon: MessageSquare, label: `sent you ${count} DMs` };
+			case "invite":  return { Icon: Mail,          label: "invited you" };
+			case "system":  return { Icon: SystemIcon,    label: "system" };
+		}
+	}
 	switch (kind) {
 		case "mention": return { Icon: AtSign,         label: "mentioned you" };
 		case "reply":   return { Icon: Reply,          label: "replied to you" };
