@@ -1683,12 +1683,26 @@ export default function App() {
 							currentUserId={creds.user_id}
 							onSelectMember={(userId) => setViewedUserId(userId as UserId)}
 							botMxids={botMxids}
-							// Right-click bot moderation menu — same gate
-							// + handler that ProfileSheet's "Room
-							// moderation" buttons use.  Founder of the
-							// active room gets the kick/ban affordance;
-							// bots they own are excluded (manage from
-							// Settings → Bots instead).
+							// Hide the appservice's @engine bot from the
+							// member list.  It joins every room with
+							// activity so it can write moderation events
+							// (collapses, censures), but it's a platform
+							// identity not a participant — surfacing it
+							// next to humans is confusing and clutters
+							// the count.  The mxid pattern is
+							// `@engine:<homeserver>` (per the appservice
+							// yaml's sender_localpart) so we derive it
+							// from the user's own mxid suffix.
+							hiddenUserIds={(() => {
+								const me = creds.user_id;
+								const colon = me.indexOf(":");
+								if (colon <= 0) return undefined;
+								return new Set([`@engine${me.slice(colon)}`]);
+							})()}
+							// Right-click member menu.  Surfaces View
+							// profile / Send DM / Copy user ID for
+							// everyone, plus founder-only Kick / Ban
+							// for bot rows.
 							canKickBanBots={!!(activeRoom?.creatorId && creds.user_id && activeRoom.creatorId === creds.user_id)}
 							onBotKickBan={async (action, botMxid) => {
 								if (!creds?.access_token || !state.activeRoomId) return;
@@ -1702,6 +1716,16 @@ export default function App() {
 								} catch (e) {
 									dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
 									throw e;
+								}
+							}}
+							onStartDm={async (userId) => {
+								if (!transport) return;
+								try {
+									const roomId = await transport.startDm(userId as UserId);
+									dispatch({ type: "set_active_space", space: { kind: "dms" } });
+									dispatch({ type: "set_active_room", roomId });
+								} catch (e) {
+									dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
 								}
 							}}
 						/>

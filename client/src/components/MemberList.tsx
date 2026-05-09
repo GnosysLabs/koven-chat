@@ -14,7 +14,7 @@ import { cn } from "@/lib/utils";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { RepBadge } from "@/components/RepBadge";
 import { BotBadge } from "@/components/BotBadge";
-import { Ban, UserX } from "lucide-react";
+import { Ban, Copy, MessageSquare, User, UserX } from "lucide-react";
 import type { Member } from "@koven/shared";
 
 export interface MemberListProps {
@@ -31,6 +31,12 @@ export interface MemberListProps {
 	// override their presence to "online" (bots are always live as
 	// long as the engine is up).  Optional.
 	botMxids?: Set<string>;
+	// mxids to omit from the rendered list entirely.  Used to hide
+	// system identities like the appservice's @engine bot — it's
+	// joined to every room so it can write moderation events, but
+	// it's a platform identity not a participant and shouldn't show
+	// up next to humans.
+	hiddenUserIds?: Set<string>;
 	// True when the viewer is the founder of the active room — gates
 	// the right-click "Kick / Ban bot" menu.  Mirrors the same gate
 	// that surfaces the founder-only kick/ban controls in
@@ -44,6 +50,10 @@ export interface MemberListProps {
 	// the per-room presence gesture, and "remove my bot from this
 	// room without deleting it globally" is a legitimate action.
 	onBotKickBan?(action: "kick" | "ban", botMxid: string): void | Promise<void>;
+	// Invoked when the user picks "Send DM" from the right-click
+	// menu.  Caller routes to the existing transport.startDm /
+	// active-room flow.
+	onStartDm?(userId: string): void | Promise<void>;
 }
 
 /** Effective presence for a member.  Bots always read as online;
@@ -66,36 +76,47 @@ export function MemberList({
 	currentUserId,
 	onSelectMember,
 	botMxids,
+	hiddenUserIds,
 	canKickBanBots,
 	onBotKickBan,
+	onStartDm,
 }: MemberListProps) {
-	// Right-click menu state: { x, y, botMxid } when open, null when
-	// closed.  The menu is portalled to document.body so it can
-	// escape the right-sidebar's clipping bounds.  We position it at
-	// the cursor coordinates from the contextmenu event.
+	// Right-click menu state.  Stored as the targeted member +
+	// cursor coords; null when the menu is closed.  We portal the
+	// menu to document.body so it can escape the right-sidebar's
+	// clipping bounds and overflow over the chat pane.
 	const [contextMenu, setContextMenu] = useState<{
 		x: number;
 		y: number;
-		botMxid: string;
+		userId: string;
+		isBot: boolean;
+		isSelf: boolean;
 	} | null>(null);
-	const [busyAction, setBusyAction] = useState<"kick" | "ban" | null>(null);
+	const [busyAction, setBusyAction] = useState<string | null>(null);
 
-	function openContextMenu(e: React.MouseEvent, botMxid: string) {
-		// Only intercept right-clicks on actual bots when the viewer
-		// has the founder gate.  Anywhere else the browser's default
-		// context menu wins.
-		if (!canKickBanBots || !onBotKickBan) return;
+	function openContextMenu(
+		e: React.MouseEvent,
+		row: { userId: string; isBot: boolean; isSelf: boolean },
+	) {
 		e.preventDefault();
 		e.stopPropagation();
-		setContextMenu({ x: e.clientX, y: e.clientY, botMxid });
+		setContextMenu({ x: e.clientX, y: e.clientY, ...row });
 	}
 
-	async function handleAction(action: "kick" | "ban") {
-		if (!contextMenu || !onBotKickBan || busyAction) return;
-		const target = contextMenu.botMxid;
+	async function handleAction(action: MemberAction) {
+		if (!contextMenu || busyAction) return;
+		const target = contextMenu.userId;
 		setBusyAction(action);
 		try {
-			await onBotKickBan(action, target);
+			if (action === "dm" && onStartDm) {
+				await onStartDm(target);
+			} else if (action === "profile") {
+				onSelectMember(target);
+			} else if (action === "copy") {
+				try { await navigator.clipboard.writeText(target); } catch { /* no-op */ }
+			} else if ((action === "kick" || action === "ban") && onBotKickBan) {
+				await onBotKickBan(action, target);
+			}
 			setContextMenu(null);
 		} catch {
 			// Caller surfaces the error; we just leave the menu open
@@ -120,7 +141,16 @@ export function MemberList({
 		);
 	}
 
-	const decorated = members.map(m => {
+	// Drop hidden mxids before any sorting / sectioning so the
+	// "Members · N" header count and the section counts match
+	// what's actually rendered.  Used today for the appservice's
+	// @engine bot which is joined to every room but shouldn't show
+	// up next to humans — it's a platform identity, not a peer.
+	const visibleMembers = hiddenUserIds && hiddenUserIds.size > 0
+		? members.filter(m => !hiddenUserIds.has(m.userId))
+		: members;
+
+	const decorated = visibleMembers.map(m => {
 		const isBot = !!botMxids?.has(m.userId);
 		return { m, isBot, presence: effectivePresence(m, isBot) };
 	});
@@ -141,64 +171,79 @@ export function MemberList({
 		<aside className="w-56 border-l border-border bg-card flex flex-col">
 			<div className="px-4 h-12 flex items-center border-b border-border">
 				<span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-					Members &middot; {members.length}
+					Members &middot; {visibleMembers.length}
 				</span>
 			</div>
 			<div className="flex-1 overflow-y-auto py-2">
-				{members.length === 0 ? (
+				{visibleMembers.length === 0 ? (
 					<div className="text-xs text-muted-foreground px-4 py-3">No members.</div>
 				) : (
 					<>
 						{online.length > 0 && (
 							<Section label="Online" count={online.length}>
-								{online.map(d => (
-									<MemberRow
-										key={d.m.userId}
-										member={d.m}
-										isSelf={d.m.userId === currentUserId}
-										isBot={d.isBot}
-										presence={d.presence}
-										onClick={() => onSelectMember(d.m.userId)}
-									/>
-								))}
+								{online.map(d => {
+									const isSelf = d.m.userId === currentUserId;
+									return (
+										<MemberRow
+											key={d.m.userId}
+											member={d.m}
+											isSelf={isSelf}
+											isBot={d.isBot}
+											presence={d.presence}
+											onClick={() => onSelectMember(d.m.userId)}
+											onContextMenu={(e) => openContextMenu(e, { userId: d.m.userId, isBot: d.isBot, isSelf })}
+										/>
+									);
+								})}
 							</Section>
 						)}
 						{bots.length > 0 && (
 							<Section label="Bots" count={bots.length}>
-								{bots.map(d => (
-									<MemberRow
-										key={d.m.userId}
-										member={d.m}
-										isSelf={d.m.userId === currentUserId}
-										isBot={d.isBot}
-										presence={d.presence}
-										onClick={() => onSelectMember(d.m.userId)}
-										onContextMenu={(e) => openContextMenu(e, d.m.userId)}
-									/>
-								))}
+								{bots.map(d => {
+									const isSelf = d.m.userId === currentUserId;
+									return (
+										<MemberRow
+											key={d.m.userId}
+											member={d.m}
+											isSelf={isSelf}
+											isBot={d.isBot}
+											presence={d.presence}
+											onClick={() => onSelectMember(d.m.userId)}
+											onContextMenu={(e) => openContextMenu(e, { userId: d.m.userId, isBot: d.isBot, isSelf })}
+										/>
+									);
+								})}
 							</Section>
 						)}
 						{offline.length > 0 && (
 							<Section label="Offline" count={offline.length} muted>
-								{offline.map(d => (
-									<MemberRow
-										key={d.m.userId}
-										member={d.m}
-										isSelf={d.m.userId === currentUserId}
-										isBot={d.isBot}
-										presence={d.presence}
-										onClick={() => onSelectMember(d.m.userId)}
-									/>
-								))}
+								{offline.map(d => {
+									const isSelf = d.m.userId === currentUserId;
+									return (
+										<MemberRow
+											key={d.m.userId}
+											member={d.m}
+											isSelf={isSelf}
+											isBot={d.isBot}
+											presence={d.presence}
+											onClick={() => onSelectMember(d.m.userId)}
+											onContextMenu={(e) => openContextMenu(e, { userId: d.m.userId, isBot: d.isBot, isSelf })}
+										/>
+									);
+								})}
 							</Section>
 						)}
 					</>
 				)}
 			</div>
 			{contextMenu && (
-				<BotContextMenu
+				<MemberContextMenu
 					x={contextMenu.x}
 					y={contextMenu.y}
+					isBot={contextMenu.isBot}
+					isSelf={contextMenu.isSelf}
+					canKickBan={!!canKickBanBots && !!onBotKickBan}
+					canDm={!!onStartDm}
 					busyAction={busyAction}
 					onAction={handleAction}
 					onClose={() => setContextMenu(null)}
@@ -208,29 +253,41 @@ export function MemberList({
 	);
 }
 
-/** Floating two-item menu (Kick / Ban) anchored to the cursor's
- * coordinates.  Portalled to document.body so it can render above
- * the right sidebar's clipping bounds and over the chat pane.
+type MemberAction = "dm" | "profile" | "copy" | "kick" | "ban";
+
+/** Floating context menu for member rows.  Items vary by target:
  *
- * Dismissed by:
- *   - Escape
- *   - mousedown anywhere outside the menu (any button — left, right,
- *     middle).  Right-click especially: if you right-click again on
- *     a different row we want the menu to relocate, not stack.
- *   - Successful action (handled by the parent via onAction →
- *     onClose).
+ *   - Anyone (non-self): View profile, Send DM (when canDm),
+ *     Copy user ID
+ *   - Self: View profile, Copy user ID (no DM-yourself)
+ *   - Bot + viewer is room founder: extra Kick / Ban moderation
+ *     items separated by a divider
+ *
+ * Portalled to document.body so it can render above the right
+ * sidebar's clipping bounds and over the chat pane.  Dismissed by
+ * Escape, outside mousedown (any button — right-click again on a
+ * different row relocates the menu rather than stacking), or a
+ * successful action.
  */
-function BotContextMenu({
+function MemberContextMenu({
 	x,
 	y,
+	isBot,
+	isSelf,
+	canKickBan,
+	canDm,
 	busyAction,
 	onAction,
 	onClose,
 }: {
 	x: number;
 	y: number;
-	busyAction: "kick" | "ban" | null;
-	onAction(action: "kick" | "ban"): void;
+	isBot: boolean;
+	isSelf: boolean;
+	canKickBan: boolean;
+	canDm: boolean;
+	busyAction: string | null;
+	onAction(action: MemberAction): void;
 	onClose(): void;
 }) {
 	const ref = useRef<HTMLDivElement | null>(null);
@@ -259,15 +316,18 @@ function BotContextMenu({
 
 	if (typeof document === "undefined") return null;
 
-	// Clamp x/y so the menu doesn't escape the viewport on right-
-	// edge or bottom-edge clicks.  Approx menu size is 160x76; using
-	// generous slack so we don't have to measure.
-	const menuW = 168;
-	const menuH = 80;
+	// Cursor clamp.  Menu is roughly 180x{40 per item}; assume up
+	// to 6 items (~240px) and clamp generously so it never escapes
+	// the viewport.
+	const menuW = 200;
+	const menuH = 240;
 	const vw = typeof window !== "undefined" ? window.innerWidth : 1200;
 	const vh = typeof window !== "undefined" ? window.innerHeight : 800;
 	const left = Math.min(x, vw - menuW - 8);
 	const top = Math.min(y, vh - menuH - 8);
+
+	const showDm = !isSelf && canDm;
+	const showKickBan = isBot && !isSelf && canKickBan;
 
 	return createPortal(
 		<div
@@ -275,7 +335,7 @@ function BotContextMenu({
 			role="menu"
 			style={{ position: "fixed", left, top, zIndex: 60 }}
 			className={cn(
-				"min-w-[10.5rem] rounded-md border border-border bg-popover text-popover-foreground shadow-md",
+				"min-w-[12rem] rounded-md border border-border bg-popover text-popover-foreground shadow-md",
 				"py-1 text-sm",
 			)}
 			// Block the native context menu on the menu itself —
@@ -283,34 +343,80 @@ function BotContextMenu({
 			// open a nested browser context menu over our menu.
 			onContextMenu={(e) => e.preventDefault()}
 		>
-			<button
-				type="button"
-				role="menuitem"
-				onClick={() => onAction("kick")}
+			<MenuItem
+				icon={<User className="h-4 w-4" />}
+				label="View profile"
+				onClick={() => onAction("profile")}
 				disabled={!!busyAction}
-				className={cn(
-					"w-full px-3 py-1.5 text-left flex items-center gap-2",
-					"text-amber-500 hover:bg-amber-500/10 disabled:opacity-50",
-				)}
-			>
-				<UserX className="h-4 w-4" />
-				{busyAction === "kick" ? "Kicking…" : "Kick bot"}
-			</button>
-			<button
-				type="button"
-				role="menuitem"
-				onClick={() => onAction("ban")}
+			/>
+			{showDm && (
+				<MenuItem
+					icon={<MessageSquare className="h-4 w-4" />}
+					label={busyAction === "dm" ? "Opening…" : "Send direct message"}
+					onClick={() => onAction("dm")}
+					disabled={!!busyAction}
+				/>
+			)}
+			<MenuItem
+				icon={<Copy className="h-4 w-4" />}
+				label={busyAction === "copy" ? "Copied" : "Copy user ID"}
+				onClick={() => onAction("copy")}
 				disabled={!!busyAction}
-				className={cn(
-					"w-full px-3 py-1.5 text-left flex items-center gap-2",
-					"text-destructive hover:bg-destructive/10 disabled:opacity-50",
-				)}
-			>
-				<Ban className="h-4 w-4" />
-				{busyAction === "ban" ? "Banning…" : "Ban bot"}
-			</button>
+			/>
+			{showKickBan && (
+				<>
+					<div className="my-1 h-px bg-border" aria-hidden />
+					<MenuItem
+						icon={<UserX className="h-4 w-4" />}
+						label={busyAction === "kick" ? "Kicking…" : "Kick bot from room"}
+						onClick={() => onAction("kick")}
+						disabled={!!busyAction}
+						tone="warn"
+					/>
+					<MenuItem
+						icon={<Ban className="h-4 w-4" />}
+						label={busyAction === "ban" ? "Banning…" : "Ban bot from room"}
+						onClick={() => onAction("ban")}
+						disabled={!!busyAction}
+						tone="danger"
+					/>
+				</>
+			)}
 		</div>,
 		document.body,
+	);
+}
+
+/** Single context-menu row.  Tone drives the colour: default for
+ * neutral actions (View profile, DM, Copy), warn for kick (recoverable),
+ * danger for ban (destructive). */
+function MenuItem({
+	icon, label, onClick, disabled, tone = "default",
+}: {
+	icon: React.ReactNode;
+	label: string;
+	onClick(): void;
+	disabled: boolean;
+	tone?: "default" | "warn" | "danger";
+}) {
+	const toneClass =
+		tone === "warn" ? "text-amber-500 hover:bg-amber-500/10"
+		: tone === "danger" ? "text-destructive hover:bg-destructive/10"
+		: "hover:bg-accent";
+	return (
+		<button
+			type="button"
+			role="menuitem"
+			onClick={onClick}
+			disabled={disabled}
+			className={cn(
+				"w-full px-3 py-1.5 text-left flex items-center gap-2 disabled:opacity-50",
+				toneClass,
+			)}
+		>
+			{icon}
+			{label}
+		</button>
 	);
 }
 
