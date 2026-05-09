@@ -33,6 +33,15 @@ import type { UserId } from "@koven/shared";
 import type { Settings } from "@/state/settings";
 import { fetchAdminStatus, purgeMyEngineState } from "@/lib/instance";
 import { fetchUiaPassword } from "@/lib/auth";
+import {
+	clearSmitheryApiKey,
+	fetchUserIntegrationsStatus,
+	setSmitheryApiKey,
+	type UserIntegrationsStatus,
+} from "@/lib/userIntegrations";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Check } from "lucide-react";
 
 export interface AccountSectionProps {
 	accessToken: string;
@@ -67,6 +76,16 @@ export function AccountSection({ accessToken, transport, ignoredUsers, onSignedO
 	// first" message instead of the delete button.
 	const [isOnlyAdmin, setIsOnlyAdmin] = useState<boolean | null>(null);
 
+	// Per-user integration credentials (currently just the Smithery
+	// API key — used to discover MCP servers in the bot edit form
+	// and to invoke them at bot runtime).  The value is write-only;
+	// `integrations` carries presence-only state for the badges.
+	const [integrations, setIntegrations] = useState<UserIntegrationsStatus | null>(null);
+	const [smitheryDraft, setSmitheryDraft] = useState("");
+	const [integrationPending, setIntegrationPending] = useState(false);
+	const [integrationError, setIntegrationError] = useState<string | null>(null);
+	const [integrationInfo, setIntegrationInfo] = useState<string | null>(null);
+
 	useEffect(() => {
 		let cancelled = false;
 		fetchAdminStatus(accessToken)
@@ -74,6 +93,54 @@ export function AccountSection({ accessToken, transport, ignoredUsers, onSignedO
 			.catch(() => { if (!cancelled) setIsOnlyAdmin(false); });
 		return () => { cancelled = true; };
 	}, [accessToken]);
+
+	useEffect(() => {
+		let cancelled = false;
+		fetchUserIntegrationsStatus(accessToken)
+			.then(s => { if (!cancelled) setIntegrations(s); })
+			.catch(() => {
+				// Engine on an older version that doesn't expose the
+				// endpoint?  Treat as "nothing configured" so the
+				// section still renders rather than disappearing.
+				if (!cancelled) setIntegrations({ smithery: { configured: false } });
+			});
+		return () => { cancelled = true; };
+	}, [accessToken]);
+
+	async function saveSmitheryKey() {
+		if (!smitheryDraft.trim()) return;
+		setIntegrationPending(true);
+		setIntegrationError(null);
+		setIntegrationInfo(null);
+		try {
+			await setSmitheryApiKey(accessToken, smitheryDraft.trim());
+			const next = await fetchUserIntegrationsStatus(accessToken);
+			setIntegrations(next);
+			setSmitheryDraft("");
+			setIntegrationInfo("Smithery API key saved.");
+		} catch (err) {
+			setIntegrationError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setIntegrationPending(false);
+		}
+	}
+
+	async function clearSmitheryKey() {
+		setIntegrationPending(true);
+		setIntegrationError(null);
+		setIntegrationInfo(null);
+		try {
+			await clearSmitheryApiKey(accessToken);
+			const next = await fetchUserIntegrationsStatus(accessToken);
+			setIntegrations(next);
+			setSmitheryDraft("");
+			setIntegrationInfo("Smithery disconnected.");
+		} catch (err) {
+			setIntegrationError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setIntegrationPending(false);
+		}
+	}
 
 	async function unblock(userId: UserId) {
 		if (!transport) return;
@@ -146,6 +213,80 @@ export function AccountSection({ accessToken, transport, ignoredUsers, onSignedO
 						checked={!!settings.showNsfw}
 						onCheckedChange={(checked) => onSettingsChange({ ...settings, showNsfw: checked })}
 					/>
+				</div>
+			</section>
+
+			{/* ─── Integrations ─────────────────────────────────────
+			    Per-user credentials for third-party services.  The
+			    value is write-only — once saved, the engine never
+			    returns it.  "Connected" badge is the only signal
+			    that a key is set; an admin re-visiting the form
+			    knows they don't need to paste it again. */}
+			<section className="space-y-3">
+				<div>
+					<div className="text-sm font-medium">Integrations</div>
+					<p className="text-xs text-muted-foreground leading-snug mt-0.5">
+						Connect third-party services to your bots. Keys are stored encrypted on this server only and never sent back to clients.
+					</p>
+				</div>
+
+				<div className="space-y-1.5 px-3 py-3 rounded-md border border-border bg-muted/30">
+					<div className="flex items-center justify-between">
+						<Label htmlFor="smithery-api-key" className="text-sm font-medium">Smithery</Label>
+						{integrations?.smithery.configured ? (
+							<span className="inline-flex items-center gap-1 text-[10px] text-emerald-500/90">
+								<Check className="h-3 w-3" />
+								Connected
+							</span>
+						) : (
+							<span className="text-[10px] text-muted-foreground">Not connected</span>
+						)}
+					</div>
+					<div className="flex gap-2">
+						<Input
+							id="smithery-api-key"
+							type="password"
+							autoComplete="off"
+							value={smitheryDraft}
+							onChange={(e) => setSmitheryDraft(e.target.value)}
+							placeholder={integrations?.smithery.configured ? "•••••••• (paste a new key to replace)" : "Paste your Smithery API key"}
+							disabled={integrationPending}
+						/>
+						<Button
+							type="button"
+							variant="outline"
+							size="sm"
+							onClick={saveSmitheryKey}
+							disabled={integrationPending || !smitheryDraft.trim()}
+						>
+							Save
+						</Button>
+						{integrations?.smithery.configured && (
+							<Button
+								type="button"
+								variant="ghost"
+								size="sm"
+								onClick={clearSmitheryKey}
+								disabled={integrationPending}
+								className="text-muted-foreground hover:text-destructive"
+							>
+								Clear
+							</Button>
+						)}
+					</div>
+					<p className="text-[10px] text-muted-foreground leading-snug">
+						Get an API key at <a href="https://smithery.ai/account/api-keys" target="_blank" rel="noreferrer" className="underline">smithery.ai/account/api-keys</a>. Connecting Smithery lets you attach <strong className="text-foreground">MCP servers</strong> to your bots — pre-built tool collections (search, GitHub, filesystem, …) that bots can call mid-conversation.
+					</p>
+					{integrationError && (
+						<p className="text-xs text-destructive border border-destructive/40 bg-destructive/10 rounded px-3 py-1.5">
+							{integrationError}
+						</p>
+					)}
+					{integrationInfo && !integrationError && (
+						<p className="text-xs text-emerald-500/90 border border-emerald-500/30 bg-emerald-500/5 rounded px-3 py-1.5">
+							{integrationInfo}
+						</p>
+					)}
 				</div>
 			</section>
 
