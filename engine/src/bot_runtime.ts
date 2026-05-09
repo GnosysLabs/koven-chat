@@ -29,7 +29,7 @@ import "./dom_shim";
 import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import * as sdk from "matrix-js-sdk";
-import { ClientEvent, RoomEvent, RoomMemberEvent } from "matrix-js-sdk";
+import { ClientEvent, MatrixEventEvent, RoomEvent, RoomMemberEvent } from "matrix-js-sdk";
 import type { MatrixEvent, Room as SdkRoom } from "matrix-js-sdk";
 import { config } from "./config";
 import { type BotRow } from "./db";
@@ -150,20 +150,73 @@ export async function startBot(bot: BotRow): Promise<RunningBot> {
 			.catch((err) => console.warn(`bot ${bot.mxid}: failed to join ${roomId}`, err));
 	});
 
-	// Trigger pipeline: every live message event runs through the
-	// mention detector.  If the bot is named, we gather context and
-	// fire the LLM call.  Otherwise we just log and move on.
-	client.on(RoomEvent.Timeline, (event: MatrixEvent, room: SdkRoom | undefined, toStartOfTimeline: boolean | undefined, _removed: boolean, data: { liveEvent?: boolean }) => {
-		if (!room || toStartOfTimeline || !data?.liveEvent) return;
+	// Per-event dedupe so a message that arrives encrypted via
+	// Timeline (skipped, then later decrypts and re-emerges via the
+	// Decrypted listener below) doesn't fire the mention pipeline
+	// twice.  bot_pipeline has its own per-(bot, eventId) guard
+	// already, but checking here too saves a routine event-id lookup.
+	const seenEventIds = new Set<string>();
+	function rememberSeen(eventId: string): void {
+		seenEventIds.add(eventId);
+		// Cap memory.  500 is generous: most bots see far fewer
+		// messages per session, and a slightly busy room churns
+		// through this set within an hour.
+		if (seenEventIds.size > 500) {
+			const oldest = seenEventIds.values().next().value;
+			if (oldest) seenEventIds.delete(oldest);
+		}
+	}
+
+	function routeMessage(event: MatrixEvent, room: SdkRoom): void {
 		if (event.getType() !== "m.room.message") return;
 		if (event.getSender() === bot.mxid) return;
-		if (event.isEncrypted() && !event.getClearContent()) return; // not yet decrypted
+		const eventId = event.getId();
+		if (eventId && seenEventIds.has(eventId)) return;
+		if (eventId) rememberSeen(eventId);
 
 		const body = ((event.getContent().body as string | undefined) ?? "(non-text)").slice(0, 80);
 		console.log(`bot ${bot.mxid} <- [${room.roomId}] ${event.getSender()}: ${body}`);
 
-		// Fire-and-forget; the pipeline catches its own errors.
 		void maybeHandleMention({ bot, client, event, room });
+	}
+
+	// Trigger pipeline: every live message event runs through the
+	// mention detector.  Encrypted events that haven't decrypted
+	// yet are skipped here — they re-enter via the Decrypted
+	// listener below once rust-crypto cracks them open.
+	client.on(RoomEvent.Timeline, (event: MatrixEvent, room: SdkRoom | undefined, toStartOfTimeline: boolean | undefined, _removed: boolean, data: { liveEvent?: boolean }) => {
+		if (!room || toStartOfTimeline || !data?.liveEvent) return;
+		if (event.isEncrypted() && !event.getClearContent()) return; // not yet decrypted, wait for Decrypted
+		routeMessage(event, room);
+	});
+
+	// Encrypted events arrive via Timeline as `m.room.encrypted`;
+	// rust-crypto fires Decrypted on each one once the megolm key
+	// is available.  Without this listener, DM messages and any
+	// other E2EE traffic would silently get dropped — exactly the
+	// bug we hit when the bot stopped replying in DMs.
+	client.on(MatrixEventEvent.Decrypted, (event: MatrixEvent) => {
+		const room = client.getRoom(event.getRoomId() ?? "");
+		if (!room) return;
+		// On UTD ("Unable To Decrypt") — keys haven't arrived yet —
+		// actively request the missing megolm session from the
+		// sender's other devices.  rust-crypto retries decryption
+		// automatically when the key lands and re-fires Decrypted,
+		// at which point the routeMessage call below picks it up
+		// for the mention pipeline.  Mirrors the human-side fix in
+		// client/src/lib/matrix.ts; same SDK API.
+		if (typeof event.isDecryptionFailure === "function" && event.isDecryptionFailure()) {
+			const fn = (client as unknown as {
+				cancelAndResendEventRoomKeyRequest?: (e: MatrixEvent) => Promise<void>;
+			}).cancelAndResendEventRoomKeyRequest;
+			if (typeof fn === "function") {
+				void fn.call(client, event).catch(err => {
+					console.warn(`bot ${bot.mxid}: room-key request for ${event.getId()} failed`, err);
+				});
+			}
+			return;
+		}
+		routeMessage(event, room);
 	});
 
 	// Sync state heartbeat — useful for spotting bots that are stuck.
