@@ -38,9 +38,17 @@ export interface YouTubeMatch {
 const HOST_RE =
 	/(?:^|[\s(])(?:https?:\/\/)?((?:(?:www|m|music)\.)?(?:youtube\.com|youtu\.be))(\/[^\s)]*)?/gi;
 
+/** Hard cap on inline embeds.  Past this, surviving YouTube URLs
+ * stay in the message text as regular linkified anchors — the user
+ * still sees them, but the chat doesn't turn into a 12-iframe wall.
+ * Four covers the realistic "I'm sharing a few things" case without
+ * tipping into "I pasted a playlist." */
+export const MAX_INLINE_EMBEDS = 4;
+
 export function findYouTubeMatches(text: string): YouTubeMatch[] {
 	if (!text) return [];
 	const out: YouTubeMatch[] = [];
+	const seenIds = new Set<string>();
 	HOST_RE.lastIndex = 0;
 	let m: RegExpExecArray | null;
 	while ((m = HOST_RE.exec(text)) !== null) {
@@ -55,6 +63,15 @@ export function findYouTubeMatches(text: string): YouTubeMatch[] {
 		const urlText = text.slice(urlStart, m.index + fullMatch.length);
 		const id = extractIdFromUrl(host, path);
 		if (!id) continue;
+		// Dedupe by video id — pasting the same video twice doesn't
+		// mean "show two players".  First occurrence wins (its
+		// startSeconds carries through).
+		if (seenIds.has(id)) continue;
+		// Stop matching once we've hit the embed cap.  Surviving
+		// YouTube URLs further down the body stay in the text as
+		// regular links rather than producing more embeds.
+		if (out.length >= MAX_INLINE_EMBEDS) break;
+		seenIds.add(id);
 		const startSeconds = extractStartSeconds(path);
 		out.push({
 			videoId: id,
