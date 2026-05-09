@@ -29,6 +29,7 @@ import { MemberList } from "@/components/MemberList";
 import { DmProfilePanel } from "@/components/DmProfilePanel";
 import { CreateRoomSheet } from "@/components/CreateRoomSheet";
 import { CreateSpaceSheet } from "@/components/CreateSpaceSheet";
+import { MobileBlockScreen } from "@/components/MobileBlockScreen";
 import { StartDmSheet } from "@/components/StartDmSheet";
 import { SpaceEditSheet } from "@/components/SpaceEditSheet";
 import { RoomEditSheet } from "@/components/RoomEditSheet";
@@ -1042,6 +1043,18 @@ export default function App() {
 		}
 		return m;
 	}, [state.activeRoomId, state.membersByRoom]);
+
+	// Hard mobile block.  When the viewport / pointer detection in
+	// lib/mobile.ts reports a mobile context AND we're not running
+	// inside the Tauri desktop shell (which can be resized small but
+	// IS still the desktop app), render a takeover that points users
+	// to the desktop installer.  Mobile UX is in development; better
+	// to be honest than ship a half-broken first impression.
+	const isTauriDesktop = typeof window !== "undefined"
+		&& (window as { __KOVEN_DESKTOP__?: boolean }).__KOVEN_DESKTOP__ === true;
+	if (isMobileShell && !isTauriDesktop) {
+		return <MobileBlockScreen />;
+	}
 
 	if (!creds) {
 		return <Login onLoggedIn={handleLogin} />;
