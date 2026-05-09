@@ -548,23 +548,22 @@ export default function App() {
 				const isDm = room?.kind === "dm";
 				if (!isDm && !mentionsMe && !repliesToMe) return;
 
-				// Skip if the user is already looking at this room AND
-				// the tab is visible.  We deliberately do NOT also gate
-				// on `document.hasFocus()` — that flag returns false in
-				// plenty of legitimate "user is reading this tab" cases:
-				// DevTools is focused, the URL bar is focused, another
-				// app has window focus, the user just clicked a link in
-				// another window — across browsers AND embedded
-				// webviews.  The bug it caused: "I'm in the DM with my
-				// bot, the bot replies, and I still get an OS
-				// notification."  Visibility + activeRoomId is the
-				// correct signal for "is this room on the user's screen
-				// right now?"
-				const looking =
-					activeRoomIdRef.current === message.roomId &&
-					typeof document !== "undefined" &&
-					document.visibilityState === "visible";
-				if (looking) return;
+				// Skip if the message is in the room the user has open
+				// as their active room — full stop, regardless of tab
+				// visibility / focus state.
+				//
+				// Earlier this also gated on document.visibilityState
+				// being "visible" (and originally hasFocus()), but
+				// both flags have edge cases that fire false negatives
+				// — leaving the user with "I'm staring at this DM and
+				// got a notification for a message I just watched
+				// arrive."  The simpler rule is: if you've explicitly
+				// opened a room, anything that lands in it is by
+				// definition not noise-worthy; the unread dot is the
+				// signal if you wandered off.  Any room you didn't
+				// open is treated as "behind your back" and gets an
+				// OS notification through the rest of the gate below.
+				if (activeRoomIdRef.current === message.roomId) return;
 
 				const senderName = message.senderDisplayName || message.sender;
 				const title = isDm
