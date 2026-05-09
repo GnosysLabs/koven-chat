@@ -5,8 +5,8 @@
 // chronological.  Membership of the active room is tracked separately
 // so the UI can render a member list without re-querying the SDK.
 
-import type { CollapseAggregate, EventId, FlagAggregate, Member, Message, ReactionAggregate, Room, RoomId, Space, SpaceId, UserId } from "@koven/shared";
-import type { CollapseEventLite, FlagEventLite, ReactionEvent, SyncState } from "@/lib/matrix";
+import type { CollapseAggregate, EventId, FlagAggregate, Member, Message, PollAggregate, ReactionAggregate, Room, RoomId, Space, SpaceId, UserId } from "@koven/shared";
+import type { CollapseEventLite, FlagEventLite, PollEndEvent, PollResponseEvent, ReactionEvent, SyncState } from "@/lib/matrix";
 
 // Per-message reactions, keyed by message event id.
 export type ReactionsByMessage = Map<EventId, ReactionAggregate[]>;
@@ -14,6 +14,13 @@ export type ReactionsByMessage = Map<EventId, ReactionAggregate[]>;
 export type FlagsByMessage = Map<EventId, FlagAggregate>;
 // Per-message collapse markers (one per target — engine emits once).
 export type CollapsesByMessage = Map<EventId, CollapseAggregate>;
+// Per-message poll aggregates, keyed by the poll's start event id.
+export type PollsByMessage = Map<EventId, PollAggregate>;
+/** Reverse index for last-vote-per-voter: poll id → voter mxid →
+ * answer ids.  Each new response from a voter supersedes their
+ * previous one per spec; this map lets us back out the previous
+ * vote's contribution when re-aggregating counts. */
+export type PollVotesIndex = Map<EventId, Map<UserId, string[]>>;
 
 // Reverse index: reaction-event-id → { what it reacted to, what key,
 // who sent it }.  Used for removal when a redaction comes in — we
@@ -84,6 +91,11 @@ export interface AppState {
 	flagsByMessage: FlagsByMessage;
 	flagRefs: Map<EventId, FlagRef>;
 	collapsesByMessage: CollapsesByMessage;
+	pollsByMessage: PollsByMessage;
+	// Reverse index for "last vote per voter" — see PollVotesIndex.
+	// Internal-only; PollCard reads pollsByMessage and never touches
+	// this directly.
+	pollVotesIndex: PollVotesIndex;
 	// Per-room counter incremented every time matrix-js-sdk fires
 	// Room.Receipt.  ChatPane / SeenIndicator components read the
 	// counter for the active room to know they need to re-query
@@ -109,6 +121,8 @@ export const initialState: AppState = {
 	flagsByMessage: new Map(),
 	flagRefs: new Map(),
 	collapsesByMessage: new Map(),
+	pollsByMessage: new Map(),
+	pollVotesIndex: new Map(),
 	receiptsVersionByRoom: new Map(),
 	activeRoomId: null,
 	activeSpace: { kind: "rooms" },
@@ -131,6 +145,8 @@ export type Action =
 	| { type: "flag_redacted"; flagEventId: EventId }
 	| { type: "collapses_loaded"; collapses: CollapseEventLite[] }
 	| { type: "collapse_arrived"; collapse: CollapseEventLite }
+	| { type: "poll_response_arrived"; response: PollResponseEvent; myUserId: UserId }
+	| { type: "poll_end_arrived"; end: PollEndEvent }
 	| { type: "set_active_room"; roomId: RoomId | null }
 	| { type: "set_active_space"; space: ActiveSpace }
 	| { type: "receipts_updated"; roomId: RoomId }
@@ -258,6 +274,12 @@ export function reduce(state: AppState, action: Action): AppState {
 
 		case "collapse_arrived":
 			return applyCollapse(state, action.collapse);
+
+		case "poll_response_arrived":
+			return applyPollResponse(state, action.response, action.myUserId);
+
+		case "poll_end_arrived":
+			return applyPollEnd(state, action.end);
 
 		case "set_active_room":
 			return { ...state, activeRoomId: action.roomId };
@@ -401,6 +423,103 @@ function applyCollapse(state: AppState, c: CollapseEventLite): AppState {
 		fastTrack: c.fastTrack,
 	});
 	return { ...state, collapsesByMessage };
+}
+
+/** Recompute a poll's counts from scratch given its voter→answers
+ * map.  Cheap (votes are bounded by member count) and avoids subtle
+ * desync bugs from incremental count adjustments. */
+function recomputeCounts(votes: Map<UserId, string[]>): Record<string, number> {
+	const counts: Record<string, number> = {};
+	for (const answers of votes.values()) {
+		for (const a of answers) counts[a] = (counts[a] ?? 0) + 1;
+	}
+	return counts;
+}
+
+function applyPollResponse(
+	state: AppState,
+	r: PollResponseEvent,
+	myUserId: UserId,
+): AppState {
+	const pollVotesIndex = new Map(state.pollVotesIndex);
+	const pollsByMessage = new Map(state.pollsByMessage);
+	const existing = pollsByMessage.get(r.pollId) ?? {
+		pollId: r.pollId,
+		counts: {},
+		myAnswers: [],
+		myResponseEventId: undefined,
+	} as PollAggregate;
+
+	// Late responses after the poll's been ended are ignored per spec.
+	if (existing.endedAt && r.timestamp > existing.endedAt) return state;
+
+	const voters = new Map(pollVotesIndex.get(r.pollId) ?? new Map<UserId, string[]>());
+	// "Last response per voter wins."  Only adopt this response if its
+	// timestamp is newer than the voter's previous one — out-of-order
+	// delivery (federation backfill) shouldn't clobber a fresher vote.
+	const prevVote = voters.get(r.voter);
+	const prevTimestamp = (existing as any)._lastVoteTs?.[r.voter] as number | undefined;
+	if (prevTimestamp !== undefined && r.timestamp < prevTimestamp) return state;
+
+	// Empty answer set means "withdraw vote" per spec.  Treat the same.
+	if (r.answerIds.length === 0) {
+		voters.delete(r.voter);
+	} else {
+		voters.set(r.voter, r.answerIds);
+	}
+	pollVotesIndex.set(r.pollId, voters);
+
+	const counts = recomputeCounts(voters);
+	const myAnswers = r.voter === myUserId
+		? r.answerIds
+		: existing.myAnswers;
+	const myResponseEventId = r.voter === myUserId
+		? r.eventId
+		: existing.myResponseEventId;
+	pollsByMessage.set(r.pollId, {
+		...existing,
+		counts,
+		myAnswers,
+		myResponseEventId,
+	});
+	// Track per-voter latest timestamp via a private field so we can
+	// reject older deliveries above.  Stays in the aggregate so it
+	// survives reducer pure-function semantics.
+	const aggWithTs = pollsByMessage.get(r.pollId) as PollAggregate & {
+		_lastVoteTs?: Record<UserId, number>;
+	};
+	aggWithTs._lastVoteTs = {
+		...(aggWithTs._lastVoteTs ?? {}),
+		[r.voter]: r.timestamp,
+	};
+	// noop reference so prevVote isn't unused; readability above
+	void prevVote;
+
+	return { ...state, pollsByMessage, pollVotesIndex };
+}
+
+function applyPollEnd(state: AppState, e: PollEndEvent): AppState {
+	const pollsByMessage = new Map(state.pollsByMessage);
+	const existing = pollsByMessage.get(e.pollId) ?? {
+		pollId: e.pollId,
+		counts: {},
+		myAnswers: [],
+	} as PollAggregate;
+
+	// First-end wins.  A later end event from the same creator is a
+	// no-op (the spec doesn't define re-opening polls).
+	if (existing.endedAt) return state;
+
+	pollsByMessage.set(e.pollId, {
+		...existing,
+		endedAt: e.timestamp,
+		endedBy: e.endedBy,
+		// finalCounts: prefer the sender-provided snapshot for
+		// undisclosed polls; fall back to live counts (the only
+		// authoritative number we have for disclosed).
+		finalCounts: e.finalCounts ?? existing.counts,
+	});
+	return { ...state, pollsByMessage };
 }
 
 function applyFlagRedaction(state: AppState, flagEventId: EventId): AppState {

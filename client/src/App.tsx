@@ -558,6 +558,15 @@ export default function App() {
 				type: "collapse_arrived",
 				collapse,
 			}),
+			onPollResponse: (ev) => dispatch({
+				type: "poll_response_arrived",
+				response: ev,
+				myUserId: creds.user_id as UserId,
+			}),
+			onPollEnd: (ev) => dispatch({
+				type: "poll_end_arrived",
+				end: ev,
+			}),
 			onMembersUpdated: roomId => {
 				const members = t.getRoomMembers(roomId);
 				dispatch({ type: "members_loaded", roomId, members });
@@ -1490,6 +1499,32 @@ export default function App() {
 					onOpenProfile={(userId) => setViewedUserId(userId as UserId)}
 					accessToken={creds.access_token}
 					giphyEnabled={giphyEnabled}
+					pollsByMessage={state.pollsByMessage}
+					onCreatePoll={async (opts) => {
+						if (!transport || !state.activeRoomId) return;
+						try {
+							await transport.sendPoll(state.activeRoomId, opts);
+						} catch (e) {
+							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+							throw e;
+						}
+					}}
+					onVoteOnPoll={async (pollId, answerIds) => {
+						if (!transport || !state.activeRoomId) return;
+						try {
+							await transport.voteOnPoll(state.activeRoomId, pollId, answerIds);
+						} catch (e) {
+							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+						}
+					}}
+					onEndPoll={async (pollId) => {
+						if (!transport || !state.activeRoomId) return;
+						try {
+							await transport.endPoll(state.activeRoomId, pollId);
+						} catch (e) {
+							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+						}
+					}}
 				/>
 				)}
 				</div>

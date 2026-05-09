@@ -144,7 +144,19 @@ export type MessageKind =
 	| "video"
 	| "audio"
 	| "file"
+	| "poll"                // MSC3381 m.poll.start
 	| "system";
+
+/** Poll question + answer set, lifted out of an m.poll.start event.
+ * `kind=disclosed` reveals running counts to all voters; `undisclosed`
+ * hides them until the poll ends. */
+export interface PollDescriptor {
+	question: string;
+	answers: Array<{ id: string; text: string }>;
+	kind: "disclosed" | "undisclosed";
+	/** Default 1.  Multiple-choice polls allow up to this many picks. */
+	maxSelections: number;
+}
 
 export interface Message {
 	id: EventId;
@@ -208,6 +220,37 @@ export interface Message {
 	// will 404 until the real event id arrives via /sync.  UI components
 	// that expose those actions should suppress them while pending.
 	pending?: boolean;
+	/** Filled when `kind === "poll"`.  Carries the question + answer
+	 * set from the m.poll.start content; vote counts and end-state
+	 * live in PollAggregate (keyed by event id) so they update without
+	 * mutating the timeline message. */
+	poll?: PollDescriptor;
+}
+
+/** Per-poll aggregate of responses + end-state, keyed by the poll's
+ * start event id.  Computed client-side from the timeline (responses
+ * carry an m.reference to the start, ends carry the same), the same
+ * shape we use for reactions and flags. */
+export interface PollAggregate {
+	pollId: EventId;
+	/** Vote counts by answer id.  For disclosed polls this updates
+	 * live; for undisclosed it stays at zero until `endedAt` lands. */
+	counts: Record<string, number>;
+	/** Answer ids the viewer has voted for (empty when not voted). */
+	myAnswers: string[];
+	/** Event id of the viewer's most recent m.poll.response — used to
+	 * change vote (each new response supersedes the previous one
+	 * automatically per spec; we keep the id so we could redact if
+	 * the server-side aggregation gets out of sync). */
+	myResponseEventId?: EventId;
+	/** Server time of the m.poll.end event, when one has arrived. */
+	endedAt?: number;
+	/** Final tallies as snapshotted at end time, lifted from
+	 * m.poll.end content.  Falls back to `counts` if the end event
+	 * didn't ship explicit results. */
+	finalCounts?: Record<string, number>;
+	/** User who ended the poll (creator-only per spec). */
+	endedBy?: UserId;
 }
 
 // Per-message reaction aggregate.  One entry per distinct emoji key.

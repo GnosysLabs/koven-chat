@@ -5,7 +5,7 @@
 // bubble color; everyone else uses the muted card color.
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CollapseAggregate, EventId, FlagAggregate, FlagCategory, Member, Message, ReactionAggregate, Room, RoomId, UserId } from "@koven/shared";
+import type { CollapseAggregate, EventId, FlagAggregate, FlagCategory, Member, Message, PollAggregate, ReactionAggregate, Room, RoomId, UserId } from "@koven/shared";
 import { cn } from "@/lib/utils";
 import { COLLAPSED_NAME } from "@/lib/collapsedRooms";
 import { Button } from "@/components/ui/button";
@@ -25,6 +25,8 @@ import { DeleteMessageDialog } from "@/components/DeleteMessageDialog";
 import { firstLink, linkify } from "@/lib/linkify";
 import { renderWithMentions } from "@/lib/mentionRender";
 import { GifPicker } from "@/components/GifPicker";
+import { PollCard } from "@/components/PollCard";
+import { CreatePollDialog } from "@/components/CreatePollDialog";
 import { MarkdownContent } from "@/components/MarkdownContent";
 
 // Heuristic: does this body have any markdown shape?  Cheap regex
@@ -87,7 +89,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import { AlertTriangle, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Lock, Network, Paperclip, Phone, Scale, Settings, UserPlus, Video, X } from "lucide-react";
+import { AlertTriangle, BarChart3, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Lock, Network, Paperclip, Phone, Scale, Settings, UserPlus, Video, X } from "lucide-react";
 
 export interface ChatPaneProps {
 	room: Room | null;
@@ -200,6 +202,26 @@ export interface ChatPaneProps {
 	// defaults to "off" so instances without Giphy don't see the
 	// button at all.
 	giphyEnabled?: boolean;
+	// Per-message poll aggregates, keyed by the poll's start event id.
+	// Drives the live vote counts + viewer-selected-answers state on
+	// PollCard.  Mirror of the App reducer's `pollsByMessage` map.
+	pollsByMessage?: Map<EventId, PollAggregate>;
+	// Send a new poll into this room.  Receives the question / answer
+	// list / disclosure flag / max-selection from the create dialog;
+	// resolves once the m.poll.start event has been dispatched.
+	// Optional — when omitted, the composer's poll button hides.
+	onCreatePoll?(opts: {
+		question: string;
+		answers: string[];
+		kind: "disclosed" | "undisclosed";
+		maxSelections: number;
+	}): Promise<void> | void;
+	// Cast / change a vote on a poll.  Empty `answerIds` withdraws
+	// the vote.  Receives the poll start event id (== the message id).
+	onVoteOnPoll?(pollId: EventId, answerIds: string[]): Promise<void> | void;
+	// End a poll.  Creator-only by spec; the receiving end ignores
+	// end-events from anyone except the start sender.
+	onEndPoll?(pollId: EventId): Promise<void> | void;
 }
 
 // Threshold for "this message is part of the same group as the
@@ -224,6 +246,10 @@ export function ChatPane({
 	onOpenProfile,
 	accessToken,
 	giphyEnabled,
+	pollsByMessage,
+	onCreatePoll,
+	onVoteOnPoll,
+	onEndPoll,
 }: ChatPaneProps) {
 	// Consensus flagging only works where the local engine can act:
 	//   - DMs are 1-on-1 — no quorum to gather, no consensus to reach.
@@ -247,6 +273,10 @@ export function ChatPane({
 	// caption, change their mind, or attach a different file.
 	const [pendingAttachment, setPendingAttachment] = useState<File | null>(null);
 	const [uploading, setUploading] = useState(false);
+	// Modal state for the create-poll dialog.  Triggered from the
+	// composer button; close on submit (the dialog handles the close
+	// itself once the m.poll.start send resolves).
+	const [pollDialogOpen, setPollDialogOpen] = useState(false);
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
 	const composeInputRef = useRef<HTMLTextAreaElement | null>(null);
 	// Auto-grow the composer to fit its content (Discord-style).  Runs
@@ -809,6 +839,10 @@ export function ChatPane({
 									!m.isSelf && !!viewerUserId && messageMentionsUser(m, viewerUserId)
 								}
 								onMentionClick={(userId) => onOpenProfile?.(userId)}
+								pollAggregate={pollsByMessage?.get(m.id)}
+								viewerUserId={viewerUserId}
+								onPollVote={onVoteOnPoll}
+								onPollEnd={onEndPoll}
 								onReact={(emoji) => toggleReaction(m, emoji)}
 								onReply={() => setReplyTarget(m)}
 								onFlag={(category, rationale) => onFlag(m.id, category, rationale)}
@@ -957,6 +991,21 @@ export function ChatPane({
 							</button>
 						</>
 					)}
+					{onCreatePoll && (
+						// Poll button — opens the create-poll modal.  Sits
+						// between the paperclip and the GIF pill so the
+						// "media-ish actions" cluster reads as one group.
+						<button
+							type="button"
+							onClick={() => setPollDialogOpen(true)}
+							disabled={isSuspended || uploading || !!pendingAttachment}
+							className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+							title="Create a poll"
+							aria-label="Create a poll"
+						>
+							<BarChart3 className="h-4 w-4" />
+						</button>
+					)}
 					{onSendAttachment && giphyEnabled && accessToken && (
 						// GIF picker — Discord-style "GIF" text pill.  Sized
 						// to h-8 so it shares a baseline with the paperclip
@@ -1104,6 +1153,17 @@ export function ChatPane({
 			</div>
 			)}
 
+			{/* Create-poll modal.  Lives outside the form so its dialog
+			    portal isn't trapped under the composer's tab order;
+			    only renders when the parent provided onCreatePoll. */}
+			{onCreatePoll && (
+				<CreatePollDialog
+					open={pollDialogOpen}
+					onOpenChange={setPollDialogOpen}
+					onSubmit={async (opts) => { await onCreatePoll(opts); }}
+				/>
+			)}
+
 			{/* Flag-this-room dialog.  Opens from the Flag icon in the
 			    header (right of the mod log Scale icon).  Same shared
 			    FlagDialog as the per-message version with target="room"
@@ -1127,6 +1187,7 @@ function MessageRow({
 	reactions, flags, collapse, onReact, onReply, onFlag, onTogglePillFlag, onToggleReactionPill, isBot,
 	isOwnedBot, isHovered, onDelete,
 	isDm, receiptsVersion, memberAvatars, memberNames, mentionsViewer, onMentionClick,
+	pollAggregate, viewerUserId, onPollVote, onPollEnd,
 }: {
 	message: Message;
 	avatarMxc: string | undefined;
@@ -1193,6 +1254,15 @@ function MessageRow({
 	// Click handler for inline mention pills in this row's bubble.
 	// Routes to App.tsx's profile sheet via ChatPane's onOpenProfile.
 	onMentionClick(userId: string): void;
+	// Live poll aggregate for this row, when message.kind === "poll".
+	// Drives the bars + per-answer counts + viewer's selected answers.
+	pollAggregate?: PollAggregate;
+	// Viewer's user id — PollCard uses it to gate the creator-only
+	// "End poll" affordance.
+	viewerUserId?: UserId;
+	// Cast / change a vote on this row's poll (when applicable).
+	onPollVote?(pollId: EventId, answerIds: string[]): void | Promise<void>;
+	onPollEnd?(pollId: EventId): void | Promise<void>;
 }) {
 	const [flagDialogOpen, setFlagDialogOpen] = useState(false);
 	const [expanded, setExpanded] = useState(false);
@@ -1352,6 +1422,10 @@ function MessageRow({
 						message={message}
 						memberNames={memberNames}
 						onMentionClick={onMentionClick}
+						pollAggregate={pollAggregate}
+						viewerUserId={viewerUserId}
+						onPollVote={onPollVote}
+						onPollEnd={onPollEnd}
 					/>
 					)}
 					{/* Seen-by indicator on YOUR sent messages.  In a
@@ -1534,11 +1608,30 @@ function MessageBubble({
 	message,
 	memberNames,
 	onMentionClick,
+	pollAggregate,
+	viewerUserId,
+	onPollVote,
+	onPollEnd,
 }: {
 	message: Message;
 	memberNames: Map<string, string>;
 	onMentionClick(userId: string): void;
+	pollAggregate?: PollAggregate;
+	viewerUserId?: UserId;
+	onPollVote?(pollId: EventId, answerIds: string[]): void | Promise<void>;
+	onPollEnd?(pollId: EventId): void | Promise<void>;
 }) {
+	if (message.kind === "poll" && message.poll) {
+		return (
+			<PollCard
+				message={message}
+				aggregate={pollAggregate}
+				viewerUserId={viewerUserId}
+				onVote={(answerIds) => onPollVote?.(message.id, answerIds)}
+				onEnd={() => onPollEnd?.(message.id)}
+			/>
+		);
+	}
 	// `whitespace-pre-wrap` only applied to the plain-text path —
 	// markdown paragraphs/lists handle their own whitespace, and
 	// keeping pre-wrap on top of them would re-introduce the literal

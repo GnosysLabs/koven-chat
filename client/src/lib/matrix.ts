@@ -53,6 +53,31 @@ export interface ReactionEvent {
 	sender: UserId;
 }
 
+/** Lifted from an m.poll.response event.  `pollId` is the start
+ * event id (target of the m.reference relation); `answerIds` is the
+ * ordered list of answer ids the voter selected (single-element for
+ * single-choice polls). */
+export interface PollResponseEvent {
+	eventId: EventId;
+	roomId: RoomId;
+	pollId: EventId;
+	voter: UserId;
+	answerIds: string[];
+	timestamp: number;
+}
+
+/** Lifted from an m.poll.end event.  Spec allows shipping final
+ * results in `org.matrix.msc3381.poll.results` for the
+ * undisclosed case; we forward whatever the sender included. */
+export interface PollEndEvent {
+	eventId: EventId;
+	roomId: RoomId;
+	pollId: EventId;
+	endedBy: UserId;
+	timestamp: number;
+	finalCounts?: Record<string, number>;
+}
+
 // Flag events.  Same shape philosophy as reactions: one row per flag
 // event the timeline carries, store aggregates by target_event_id.
 export interface FlagEventLite {
@@ -205,6 +230,16 @@ export interface MatrixHandlers {
 	onFlag(flag: FlagEventLite, options: { live: boolean }): void;
 	onFlagRedacted(roomId: RoomId, flagEventId: EventId): void;
 	onCollapse(collapse: CollapseEventLite, options: { live: boolean }): void;
+	/// Fires for every m.poll.response event on the timeline — one per
+	/// vote, including changes (each new response from the same voter
+	/// supersedes their previous answer per MSC3381).  Consumer
+	/// aggregates by `pollId` and applies "last response per voter
+	/// wins" on its side.
+	onPollResponse(ev: PollResponseEvent, options: { live: boolean }): void;
+	/// Fires when a poll's creator emits m.poll.end.  Final results
+	/// freeze; the consumer stops accepting new responses for the poll
+	/// at this timestamp.
+	onPollEnd(ev: PollEndEvent, options: { live: boolean }): void;
 	onMembersUpdated(roomId: RoomId): void;
 	/// Fires when m.read receipts change in a room — drives the
 	/// "seen by" indicators on chat messages.  Coarse: just the room
@@ -1287,6 +1322,93 @@ export class MatrixTransport {
 			"m.relates_to": {
 				"m.in_reply_to": { event_id: targetEventId },
 			},
+		} as any);
+		return res.event_id as EventId;
+	}
+
+	/** Send a new poll into a room.  Writes the stable MSC3381
+	 * `m.poll.start` payload at the top level so spec-aware clients
+	 * (Element, SchildiChat, Cinny) render it natively, and mirrors
+	 * the same content under the unstable prefix for older clients
+	 * that haven't migrated. */
+	async sendPoll(
+		roomId: RoomId,
+		opts: {
+			question: string;
+			answers: string[];
+			kind: "disclosed" | "undisclosed";
+			maxSelections: number;
+		},
+	): Promise<EventId> {
+		const c = this.requireClient();
+		// Stable IDs for answer ids — Matrix recommends "ascii printable
+		// without spaces."  Crypto-random keeps them collision-free
+		// across federated participants.
+		const answers = opts.answers
+			.map((text) => text.trim())
+			.filter((text) => text.length > 0)
+			.map((text) => ({
+				id: cryptoRandomId(),
+				"m.text": text,
+				"org.matrix.msc1767.text": text, // legacy fallback
+			}));
+		const pollContent: any = {
+			question: {
+				"m.text": opts.question,
+				"org.matrix.msc1767.text": opts.question,
+			},
+			kind: opts.kind === "undisclosed" ? "m.poll.undisclosed" : "m.poll.disclosed",
+			max_selections: Math.max(1, Math.min(answers.length, opts.maxSelections)),
+			answers,
+		};
+		// Body fallback for clients that don't render polls — they see
+		// the question as a plain text message.  Element does this too.
+		const fallbackBody = `${opts.question}\n${opts.answers.map((a, i) => `${i + 1}. ${a}`).join("\n")}`;
+		const res = await c.sendEvent(roomId, "m.poll.start" as any, {
+			"m.poll.start": pollContent,
+			"org.matrix.msc3381.poll.start": pollContent,
+			body: fallbackBody,
+			"m.text": fallbackBody,
+		} as any);
+		return res.event_id as EventId;
+	}
+
+	/** Cast or change a vote.  Sending a fresh response from the same
+	 * voter automatically supersedes the previous one per spec; we
+	 * don't redact the old response. */
+	async voteOnPoll(
+		roomId: RoomId,
+		pollEventId: EventId,
+		answerIds: string[],
+	): Promise<EventId> {
+		const c = this.requireClient();
+		const responseContent = { answers: answerIds };
+		const res = await c.sendEvent(roomId, "m.poll.response" as any, {
+			"m.relates_to": {
+				rel_type: "m.reference",
+				event_id: pollEventId,
+			},
+			"m.poll.response": responseContent,
+			"org.matrix.msc3381.poll.response": responseContent,
+		} as any);
+		return res.event_id as EventId;
+	}
+
+	/** Close a poll (creator-only by spec; we don't enforce that
+	 * client-side, the receiver checks the sender against the poll
+	 * start's sender). */
+	async endPoll(roomId: RoomId, pollEventId: EventId): Promise<EventId> {
+		const c = this.requireClient();
+		const endText = "The poll has ended.";
+		const res = await c.sendEvent(roomId, "m.poll.end" as any, {
+			"m.relates_to": {
+				rel_type: "m.reference",
+				event_id: pollEventId,
+			},
+			"m.poll.end": {},
+			"org.matrix.msc3381.poll.end": {},
+			body: endText,
+			"m.text": endText,
 		} as any);
 		return res.event_id as EventId;
 	}
@@ -3556,6 +3678,123 @@ export class MatrixTransport {
 		};
 	}
 
+	// MSC3381 has both stable + unstable namespaces.  The content lives
+	// under one of two top-level keys depending on whether the sender
+	// is on the stable spec; we accept either.  Same trick the Element
+	// codebase uses.
+	private pollContent(content: any): any {
+		return content?.["m.poll.start"]
+			?? content?.["org.matrix.msc3381.poll.start"]
+			?? content?.["m.poll.response"]
+			?? content?.["org.matrix.msc3381.poll.response"]
+			?? content?.["m.poll.end"]
+			?? content?.["org.matrix.msc3381.poll.end"]
+			// Some senders inline the spec fields at the top level.
+			?? content;
+	}
+
+	private eventToPollMessage(event: MatrixEvent, room: SdkRoom): Message | null {
+		if (event.isRedacted()) return null;
+		const content = event.getContent() as any;
+		const pollBody = this.pollContent(content);
+		const question = pollBody?.question?.["m.text"]
+			?? pollBody?.question?.body
+			?? "";
+		const answersRaw = pollBody?.answers;
+		if (!Array.isArray(answersRaw) || answersRaw.length < 2) return null;
+		const answers = answersRaw
+			.map((a: any) => ({
+				id: typeof a?.id === "string" ? a.id : "",
+				text: a?.["m.text"] ?? a?.text ?? a?.body ?? "",
+			}))
+			.filter((a: { id: string; text: string }) => a.id && a.text);
+		if (answers.length < 2) return null;
+		const sender = event.getSender();
+		const eventId = event.getId();
+		const ts = event.getTs();
+		if (!sender || !eventId) return null;
+		const member = room.getMember(sender);
+		const myUserId = this.client?.getUserId() ?? null;
+		const pollKind: "disclosed" | "undisclosed" =
+			(pollBody?.kind === "m.poll.undisclosed"
+				|| pollBody?.kind === "org.matrix.msc3381.poll.undisclosed")
+				? "undisclosed"
+				: "disclosed";
+		const maxSelections = Math.max(1, Math.min(answers.length,
+			parseInt(String(pollBody?.max_selections ?? "1"), 10) || 1));
+		return {
+			id: eventId as EventId,
+			roomId: room.roomId as RoomId,
+			sender: sender as UserId,
+			senderDisplayName: member?.name ?? sender,
+			timestamp: ts,
+			text: question,
+			kind: "poll",
+			isSelf: !!myUserId && myUserId === sender,
+			poll: {
+				question,
+				answers,
+				kind: pollKind,
+				maxSelections,
+			},
+		};
+	}
+
+	private eventToPollResponse(event: MatrixEvent, room: SdkRoom): PollResponseEvent | null {
+		if (event.isRedacted()) return null;
+		const content = event.getContent() as any;
+		const relatesTo = content?.["m.relates_to"];
+		const pollId = relatesTo?.event_id as string | undefined;
+		if (!pollId) return null;
+		const body = this.pollContent(content);
+		const answers = Array.isArray(body?.answers) ? body.answers : [];
+		const answerIds = answers
+			.filter((id: any) => typeof id === "string")
+			.map((id: string) => id);
+		const sender = event.getSender();
+		const eventId = event.getId();
+		if (!sender || !eventId) return null;
+		return {
+			eventId: eventId as EventId,
+			roomId: room.roomId as RoomId,
+			pollId: pollId as EventId,
+			voter: sender as UserId,
+			answerIds,
+			timestamp: event.getTs(),
+		};
+	}
+
+	private eventToPollEnd(event: MatrixEvent, room: SdkRoom): PollEndEvent | null {
+		if (event.isRedacted()) return null;
+		const content = event.getContent() as any;
+		const relatesTo = content?.["m.relates_to"];
+		const pollId = relatesTo?.event_id as string | undefined;
+		if (!pollId) return null;
+		const sender = event.getSender();
+		const eventId = event.getId();
+		if (!sender || !eventId) return null;
+		// Some senders ship final tallies in the end event itself
+		// (especially for undisclosed polls).  Forward them when
+		// present; otherwise the consumer falls back to live counts.
+		const results = content?.["org.matrix.msc3381.poll.results"]
+			?? content?.["m.poll.results"];
+		const finalCounts = results && typeof results === "object"
+			? Object.fromEntries(
+				Object.entries(results)
+					.filter(([, v]) => typeof v === "number")
+					.map(([k, v]) => [k, v as number]),
+			)
+			: undefined;
+		return {
+			eventId: eventId as EventId,
+			roomId: room.roomId as RoomId,
+			pollId: pollId as EventId,
+			endedBy: sender as UserId,
+			timestamp: event.getTs(),
+			finalCounts,
+		};
+	}
+
 	/**
 	 * Type-routes a Matrix event into the right handler.  Called from
 	 * both the Timeline listener (cleartext path) and the Decrypted
@@ -3574,6 +3813,21 @@ export class MatrixTransport {
 		if (type === "m.reaction") {
 			const r = this.eventToReaction(event, room);
 			if (r) this.handlers.onReaction(r, { live });
+			return;
+		}
+
+		// Poll responses + ends flow as their own events; the start
+		// event (m.poll.start) IS a message and falls through to
+		// eventToMessage below.  Both stable + unstable MSC3381
+		// prefixes — Element/SchildiChat still send the unstable form.
+		if (type === "m.poll.response" || type === "org.matrix.msc3381.poll.response") {
+			const r = this.eventToPollResponse(event, room);
+			if (r) this.handlers.onPollResponse(r, { live });
+			return;
+		}
+		if (type === "m.poll.end" || type === "org.matrix.msc3381.poll.end") {
+			const e = this.eventToPollEnd(event, room);
+			if (e) this.handlers.onPollEnd(e, { live });
 			return;
 		}
 
@@ -3636,6 +3890,14 @@ export class MatrixTransport {
 		// the Timeline listener defers encrypted events until the
 		// Decrypted listener fires, by which point getType() returns
 		// the cleartext type.
+		// Poll-start events become messages too — they don't carry an
+		// m.room.message type, so route them through a dedicated path
+		// that lifts the question + answers into the Message.poll
+		// field.  Keeps the rest of the Message pipeline (timeline
+		// ordering, redaction, etc.) reusable for polls.
+		if (type === "m.poll.start" || type === "org.matrix.msc3381.poll.start") {
+			return this.eventToPollMessage(event, room);
+		}
 		if (type !== "m.room.message") return null;
 		if (event.isRedacted()) return null;
 
@@ -3803,6 +4065,16 @@ export class MatrixTransport {
  * The leading lines are recognizable: each starts with "> ", and the
  * block ends with a blank line.
  */
+/** Crypto-random URL-safe id used as MSC3381 answer ids on outbound
+ * polls.  16 hex chars (~64 bits) is more than enough to avoid
+ * collisions across federated participants while staying short
+ * enough to read in raw event JSON when debugging. */
+function cryptoRandomId(): string {
+	const bytes = new Uint8Array(8);
+	crypto.getRandomValues(bytes);
+	return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 function stripReplyFallback(body: string): string {
 	const lines = body.split("\n");
 	let cut = 0;
