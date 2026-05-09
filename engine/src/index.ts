@@ -9,8 +9,41 @@ import { tick } from "./weight";
 import { evaluateCollapses } from "./collapse";
 import { bootstrapAdminIfNeeded } from "./admins";
 import { startAllBots, stopAllBots } from "./bot_manager";
+import { registerAppserviceUser } from "./synapse";
 
 console.log(`engine: starting — homeserver=${config.homeserverUrl} db=${config.dbPath}`);
+
+// Ensure @engine (the appservice's sender_localpart user) actually
+// exists on Synapse.  In theory Synapse auto-creates appservice
+// sender users on first contact; in practice we've seen homeservers
+// where it didn't happen — every operation that masquerades as
+// @engine fails with "User not found" / "user not in room", and
+// joinRoomIfNeeded / sendBotEvent / repairRoomInvitePL all silently
+// degrade.  This was the actual cause of the recurring "[403] You
+// don't have permission to invite users" — the PL repair flow
+// couldn't write a new state event because @engine didn't exist.
+//
+// Idempotent: AS-register returns the same shape on a fresh user,
+// and on `M_USER_IN_USE` (already registered) we treat the error as
+// a success and move on.
+{
+	const colon = config.engineUserId.indexOf(":");
+	const localpart = colon > 1 ? config.engineUserId.slice(1, colon) : "engine";
+	void registerAppserviceUser({ username: localpart })
+		.then(r => {
+			if ("error" in r) {
+				const detail = r.detail ?? r.error ?? "";
+				if (/M_USER_IN_USE|user_in_use/i.test(detail)) {
+					// Already there from a previous boot — fine.
+					return;
+				}
+				console.warn(`engine: ${config.engineUserId} register failed: ${r.error} ${r.detail ?? ""}`);
+			} else {
+				console.log(`engine: registered ${config.engineUserId} on Synapse`);
+			}
+		})
+		.catch(err => console.warn(`engine: ${config.engineUserId} register threw`, err));
+}
 
 startServer();
 
