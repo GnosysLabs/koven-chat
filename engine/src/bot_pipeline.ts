@@ -18,7 +18,17 @@ import type { MatrixClient, MatrixEvent, Room as SdkRoom } from "matrix-js-sdk";
 import { MsgType } from "matrix-js-sdk";
 import { type BotRow, bumpBotUsage, getBotKnowledgeContent } from "./db";
 import { openSecret } from "./secret_box";
-import { chatCompletion, type ChatMessage } from "./llm_client";
+import {
+	chatCompletion,
+	type ChatMessage,
+	type AssistantToolCall,
+} from "./llm_client";
+import {
+	openBotMcpBundle,
+	closeBotMcpBundle,
+	dispatchToolCall,
+	type BotMcpBundle,
+} from "./mcp/bot_tools";
 import { config } from "./config";
 
 // (botId, roomId) → "currently waiting on the LLM, ignore further
@@ -37,6 +47,16 @@ const MAX_BODY_CHARS = 4_000;
 // The LLM's own max_tokens is the primary control; this is a
 // defensive trim.
 const MAX_REPLY_CHARS = 8_000;
+
+// Cap on tool-use iterations.  Each iteration is one LLM call + a
+// batch of tool invocations; without a cap a misbehaving model could
+// loop indefinitely (call → result → call → result …) and burn
+// tokens.  8 is enough for any realistic chain ("search, read,
+// summarise") while bounding worst-case cost.  When we hit the cap
+// we feed the loop one more turn with the model's accumulated tool
+// outputs and force a text reply by passing tools=[] on the final
+// call so it can't keep requesting more invocations.
+const MAX_TOOL_ITERATIONS = 8;
 
 // Stale-event guard: drop messages whose origin_server_ts is more
 // than this many ms in the past at receipt time.  Matrix-js-sdk's
@@ -110,28 +130,172 @@ async function dispatch(deps: PipelineDeps): Promise<void> {
 		return;
 	}
 
-	console.log(`bot ${bot.mxid}: → LLM model=${bot.model} provider=${bot.provider} ctx_msgs=${messages.length}`);
-	const result = await chatCompletion({
-		apiBase: bot.api_base,
-		apiKey,
-		model: bot.model,
-		messages,
-		provider: bot.provider,
-		referer: `https://${config.homeserverName}`,
-		title: `Koven (${bot.display_name})`,
-	});
+	// Open MCP sessions up-front for every server attached to this
+	// bot.  Empty bundle (no key, no attachments, all opens failed)
+	// makes the call below behave exactly like the no-tools path.
+	const bundle = await openBotMcpBundle(bot);
+	try {
+		await runToolLoop(deps, messages, apiKey, bundle);
+	} finally {
+		await closeBotMcpBundle(bundle);
+	}
+}
 
-	if (!result.ok) {
-		console.warn(`bot ${bot.mxid}: LLM call failed (${result.error}): ${result.detail}`);
-		await postPlain(client, room.roomId, `(bot error: ${result.error}${result.status ? ` [${result.status}]` : ""}: ${truncate(result.detail, 200)})`);
-		return;
+/** Drive the chat-completion call, handle any tool_calls the model
+ * emits, and post the eventual text reply.  Each iteration:
+ *
+ *   1. Call chatCompletion with the current messages + tools.
+ *   2. If the model returned text and no tool_calls → post + done.
+ *   3. Otherwise execute every requested tool, append the assistant
+ *      message and tool-result messages to history, and loop.
+ *
+ * Stops at MAX_TOOL_ITERATIONS to keep a runaway model from looping
+ * indefinitely.  On the final iteration we pass an empty tools[] so
+ * the model is forced to emit text. */
+async function runToolLoop(
+	deps: PipelineDeps,
+	initialMessages: ChatMessage[],
+	apiKey: string,
+	bundle: BotMcpBundle,
+): Promise<void> {
+	const { bot, client, room } = deps;
+	const messages: ChatMessage[] = [...initialMessages];
+
+	let promptTokensTotal = 0;
+	let completionTokensTotal = 0;
+
+	for (let iter = 0; iter < MAX_TOOL_ITERATIONS; iter++) {
+		const isFinalIter = iter === MAX_TOOL_ITERATIONS - 1;
+		const toolsForCall = isFinalIter ? undefined : (bundle.tools.length > 0 ? bundle.tools : undefined);
+
+		console.log(
+			`bot ${bot.mxid}: → LLM iter=${iter} model=${bot.model} provider=${bot.provider}`
+				+ ` ctx_msgs=${messages.length} tools=${toolsForCall?.length ?? 0}`,
+		);
+		const result = await chatCompletion({
+			apiBase: bot.api_base,
+			apiKey,
+			model: bot.model,
+			messages,
+			provider: bot.provider,
+			referer: `https://${config.homeserverName}`,
+			title: `Koven (${bot.display_name})`,
+			tools: toolsForCall,
+		});
+
+		if (!result.ok) {
+			console.warn(`bot ${bot.mxid}: LLM call failed (${result.error}): ${result.detail}`);
+			// Roll up whatever usage accumulated before the failure.
+			if (promptTokensTotal > 0 || completionTokensTotal > 0) {
+				bumpBotUsage(bot.id, promptTokensTotal, completionTokensTotal);
+			}
+			await postPlain(
+				client,
+				room.roomId,
+				`(bot error: ${result.error}${result.status ? ` [${result.status}]` : ""}: ${truncate(result.detail, 200)})`,
+			);
+			return;
+		}
+
+		promptTokensTotal += result.prompt_tokens;
+		completionTokensTotal += result.completion_tokens;
+
+		// No tool calls → final text reply, post it and stop.
+		if (result.tool_calls.length === 0) {
+			const reply = truncate(result.content.trimEnd(), MAX_REPLY_CHARS);
+			console.log(
+				`bot ${bot.mxid}: ← LLM done iter=${iter}`
+					+ ` prompt=${promptTokensTotal} completion=${completionTokensTotal}`
+					+ ` chars=${reply.length}`,
+			);
+			bumpBotUsage(bot.id, promptTokensTotal, completionTokensTotal);
+			if (reply.length === 0) {
+				console.warn(`bot ${bot.mxid}: empty reply after tool loop, posting placeholder`);
+				await postPlain(client, room.roomId, "(bot returned no reply)");
+			} else {
+				await postPlain(client, room.roomId, reply);
+			}
+			return;
+		}
+
+		// Tool calls present.  This shouldn't happen on the final
+		// iteration (we passed tools=undefined to forbid it), but if a
+		// provider ignores tool_choice we defensively bail with whatever
+		// text the model emitted.
+		if (isFinalIter) {
+			console.warn(
+				`bot ${bot.mxid}: model still requested tools on final iter; aborting loop and posting partial text`,
+			);
+			bumpBotUsage(bot.id, promptTokensTotal, completionTokensTotal);
+			const reply = truncate(result.content.trimEnd(), MAX_REPLY_CHARS) || "(bot exceeded tool-use budget)";
+			await postPlain(client, room.roomId, reply);
+			return;
+		}
+
+		console.log(
+			`bot ${bot.mxid}: ← LLM iter=${iter} requested ${result.tool_calls.length} tool_call(s)`,
+		);
+
+		// Echo the assistant's tool-call request back into history —
+		// OpenAI/OpenRouter require the assistant→tool pair to be
+		// adjacent so each `tool_call_id` resolves.
+		messages.push({
+			role: "assistant",
+			content: result.content ?? "",
+			tool_calls: result.tool_calls,
+		});
+
+		// Execute each tool call sequentially.  Parallel would be
+		// faster, but most servers are stateful (one HTTP/2 stream)
+		// and the SDK doesn't guarantee re-entrancy on a single
+		// transport.  Latency is rarely the bottleneck here.
+		for (const call of result.tool_calls) {
+			const args = parseToolArgs(call);
+			console.log(
+				`bot ${bot.mxid}:   tool ${call.function.name}(${truncate(call.function.arguments, 120)})`,
+			);
+			const toolResult = await dispatchToolCall(bundle, call.function.name, args);
+			console.log(
+				`bot ${bot.mxid}:   ← ${call.function.name} ${toolResult.isError ? "ERROR" : "ok"}`
+					+ ` chars=${toolResult.text.length}`,
+			);
+			messages.push({
+				role: "tool",
+				tool_call_id: call.id,
+				content: toolResult.text,
+			});
+		}
 	}
 
-	const reply = truncate(result.content.trimEnd(), MAX_REPLY_CHARS);
-	console.log(`bot ${bot.mxid}: ← LLM ok prompt=${result.prompt_tokens} completion=${result.completion_tokens} chars=${reply.length}`);
-	bumpBotUsage(bot.id, result.prompt_tokens, result.completion_tokens);
+	// Loop fell through without returning — should be unreachable
+	// thanks to the isFinalIter branch, but be paranoid.
+	console.warn(`bot ${bot.mxid}: tool loop exhausted without final reply`);
+	bumpBotUsage(bot.id, promptTokensTotal, completionTokensTotal);
+	await postPlain(client, room.roomId, "(bot exceeded tool-use budget)");
+}
 
-	await postPlain(client, room.roomId, reply);
+/** Best-effort JSON parse of an LLM's tool-call arguments.  Providers
+ * always wrap the arguments as a string even when the schema is
+ * structured; on rare occasions models emit malformed JSON.  We
+ * surface the parse failure as an empty arg map rather than throwing
+ * — the tool itself will likely error and the model can correct on
+ * the next iteration. */
+function parseToolArgs(call: AssistantToolCall): Record<string, unknown> {
+	const raw = call.function.arguments ?? "";
+	if (raw.trim().length === 0) return {};
+	try {
+		const parsed = JSON.parse(raw);
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+			return parsed as Record<string, unknown>;
+		}
+		console.warn(`tool args for ${call.function.name} were JSON but not an object; ignoring`);
+		return {};
+	} catch (err) {
+		console.warn(
+			`tool args for ${call.function.name} were not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+		);
+		return {};
+	}
 }
 
 // ─── Mention detection ─────────────────────────────────────────────
