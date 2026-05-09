@@ -205,15 +205,12 @@ function buildSnippet(ev: MatrixEvent): string | null {
 export async function fanOutMessage(ev: MatrixEvent): Promise<void> {
 	// State events shouldn't reach here, but defend anyway.
 	if (ev.state_key !== undefined) return;
-	if (isBotOrEngineUser(ev.sender)) {
-		// Don't notify on engine / bot self-state events that look
-		// like messages.  Real bots that post (e.g., user-created
-		// @bot-* assistants) DO emit notifications for users they
-		// mention — that's the loop below, not this guard.
-	}
 
 	const isEncrypted = ev.type === "m.room.encrypted";
+	console.log(`[fanout] ev=${ev.event_id} room=${ev.room_id} sender=${ev.sender} type=${ev.type} encrypted=${isEncrypted}`);
+
 	let members = listJoinedRoomMembers(ev.room_id);
+	console.log(`[fanout] cached members for ${ev.room_id}: ${members.length}`);
 	if (members.length === 0) {
 		// Lazy backfill: the engine's `room_members` table is
 		// populated from m.room.member events in the appservice
@@ -229,6 +226,7 @@ export async function fanOutMessage(ev: MatrixEvent): Promise<void> {
 		// cost exactly once.
 		try {
 			const live = await getJoinedMembers(ev.room_id);
+			console.log(`[fanout] backfill via admin API for ${ev.room_id} → ${live.length} members: ${JSON.stringify(live)}`);
 			if (live.length > 0) {
 				const ts = ev.origin_server_ts;
 				for (const u of live) {
@@ -237,9 +235,12 @@ export async function fanOutMessage(ev: MatrixEvent): Promise<void> {
 				members = live;
 			}
 		} catch (err) {
-			console.warn(`fan-out: backfill of ${ev.room_id} members failed`, err);
+			console.warn(`[fanout] backfill of ${ev.room_id} members failed`, err);
 		}
-		if (members.length === 0) return; // really empty / unreachable; nothing to notify
+		if (members.length === 0) {
+			console.log(`[fanout] no members after backfill for ${ev.room_id} — bailing`);
+			return;
+		}
 	}
 
 	const memberCount = members.length;
@@ -251,6 +252,8 @@ export async function fanOutMessage(ev: MatrixEvent): Promise<void> {
 
 	const snippet = buildSnippet(ev);
 
+	let written = 0;
+	console.log(`[fanout] room=${ev.room_id} memberCount=${memberCount} isDm=${isDm} mentioned=${[...mentioned]} replyTarget=${replyTargetId}`);
 	for (const recipient of members) {
 		// Don't notify the sender about their own message.
 		if (recipient === ev.sender) continue;
@@ -266,8 +269,12 @@ export async function fanOutMessage(ev: MatrixEvent): Promise<void> {
 		else if (mentioned.has(recipient)) kind = "mention";
 		else if (replyTargetId === recipient) kind = "reply";
 
-		if (kind === null) continue;
+		if (kind === null) {
+			console.log(`[fanout] skip ${recipient}: not DM, not mentioned, not reply target`);
+			continue;
+		}
 
+		console.log(`[fanout] write notification: recipient=${recipient} kind=${kind}`);
 		insertNotification({
 			userId: recipient,
 			eventId: ev.event_id,
@@ -277,7 +284,9 @@ export async function fanOutMessage(ev: MatrixEvent): Promise<void> {
 			snippet,
 			createdAt: ev.origin_server_ts,
 		});
+		written++;
 	}
+	console.log(`[fanout] ev=${ev.event_id} done: wrote ${written} notifications`);
 }
 
 /** Compute notification for an m.room.member event with
