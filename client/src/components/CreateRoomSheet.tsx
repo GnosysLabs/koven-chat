@@ -5,7 +5,7 @@
 // content.  We surface that explicitly so the user makes a deliberate
 // choice rather than a default click-through.
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
 	Dialog,
 	DialogContent,
@@ -19,7 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
-import { EyeOff, Globe } from "lucide-react";
+import { Camera, EyeOff, Globe, Trash2 } from "lucide-react";
 
 export interface CreateRoomSheetProps {
 	open: boolean;
@@ -30,6 +30,9 @@ export interface CreateRoomSheetProps {
 		visibility: "public" | "private";
 		encrypted: boolean;
 		nsfw: boolean;
+		// Mirrors CreateSpaceSheet — when set, the file gets uploaded
+		// + written as m.room.avatar after createRoom returns.
+		avatarFile?: File;
 	}): Promise<void>;
 	// True iff the viewer has the "Show NSFW rooms" preference on.
 	// Gates visibility of the NSFW toggle: you can only create an
@@ -53,6 +56,15 @@ export function CreateRoomSheet({ open, onOpenChange, onCreate, showNsfw }: Crea
 	const effectiveEncrypted = canEncrypt && encrypted;
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
+	// Avatar pick state — mirrors CreateSpaceSheet exactly so the two
+	// dialogs feel like the same control.  `avatarFile` is the raw
+	// File the user chose; `avatarPreview` is a data-URL we render
+	// in the swatch as immediate visual feedback.  The actual upload
+	// + m.room.avatar set happens in transport.createRoom after the
+	// room id is known.
+	const fileInputRef = useRef<HTMLInputElement | null>(null);
+	const [avatarFile, setAvatarFile] = useState<File | undefined>(undefined);
+	const [avatarPreview, setAvatarPreview] = useState<string | undefined>(undefined);
 
 	function reset() {
 		setName("");
@@ -60,8 +72,21 @@ export function CreateRoomSheet({ open, onOpenChange, onCreate, showNsfw }: Crea
 		setVisibility("public");
 		setEncrypted(false);
 		setNsfw(false);
+		setAvatarFile(undefined);
+		setAvatarPreview(undefined);
 		setError(null);
 		setPending(false);
+	}
+
+	function pickAvatar(file: File | undefined) {
+		setAvatarFile(file);
+		if (file) {
+			const reader = new FileReader();
+			reader.onload = () => setAvatarPreview(reader.result as string);
+			reader.readAsDataURL(file);
+		} else {
+			setAvatarPreview(undefined);
+		}
 	}
 
 	async function submit(e: React.FormEvent) {
@@ -71,7 +96,14 @@ export function CreateRoomSheet({ open, onOpenChange, onCreate, showNsfw }: Crea
 		setPending(true);
 		setError(null);
 		try {
-			await onCreate({ name: trimmed, topic: topic.trim(), visibility, encrypted: effectiveEncrypted, nsfw });
+			await onCreate({
+				name: trimmed,
+				topic: topic.trim(),
+				visibility,
+				encrypted: effectiveEncrypted,
+				nsfw,
+				avatarFile,
+			});
 			reset();
 			onOpenChange(false);
 		} catch (err) {
@@ -95,18 +127,75 @@ export function CreateRoomSheet({ open, onOpenChange, onCreate, showNsfw }: Crea
 				</DialogHeader>
 
 				<form onSubmit={submit} className="space-y-4">
-					<div className="space-y-1.5">
-						<Label htmlFor="room-name">Name</Label>
-						<Input
-							id="room-name"
-							type="text"
-							value={name}
-							onChange={(e) => setName(e.target.value)}
-							placeholder="general"
-							autoFocus
-							required
-							maxLength={20}
-						/>
+					{/* Avatar + name on the same row — mirrors
+					    CreateSpaceSheet so the two creation flows feel
+					    like the same control.  Avatar swatch on the
+					    left (click anywhere on it to pick a file),
+					    name + Upload/Remove buttons stack on the
+					    right.  Topic moves below as a full-width
+					    field. */}
+					<div className="flex items-start gap-4">
+						<button
+							type="button"
+							onClick={() => fileInputRef.current?.click()}
+							className={cn(
+								"h-20 w-20 rounded-lg border border-border flex items-center justify-center overflow-hidden shrink-0",
+								"hover:border-primary/60 transition-colors",
+								avatarPreview ? "" : "bg-muted text-muted-foreground",
+							)}
+							aria-label="Upload avatar"
+							title="Upload avatar"
+						>
+							{avatarPreview ? (
+								<img src={avatarPreview} alt="" className="h-full w-full object-cover" />
+							) : (
+								<Camera className="h-6 w-6" />
+							)}
+						</button>
+						<div className="flex-1 space-y-3 min-w-0">
+							<div className="space-y-1.5">
+								<Label htmlFor="room-name">Name</Label>
+								<Input
+									id="room-name"
+									type="text"
+									value={name}
+									onChange={(e) => setName(e.target.value)}
+									placeholder="general"
+									autoFocus
+									required
+									maxLength={20}
+								/>
+							</div>
+							<div className="flex items-center gap-2">
+								<Button
+									type="button"
+									variant="outline"
+									size="sm"
+									onClick={() => fileInputRef.current?.click()}
+								>
+									<Camera className="h-3.5 w-3.5 mr-1.5" />
+									{avatarPreview ? "Change avatar" : "Upload avatar"}
+								</Button>
+								{avatarPreview && (
+									<Button
+										type="button"
+										variant="ghost"
+										size="sm"
+										onClick={() => pickAvatar(undefined)}
+										className="text-muted-foreground hover:text-destructive"
+									>
+										<Trash2 className="h-3.5 w-3.5 mr-1" /> Remove
+									</Button>
+								)}
+							</div>
+							<input
+								ref={fileInputRef}
+								type="file"
+								accept="image/*"
+								className="hidden"
+								onChange={(e) => pickAvatar(e.target.files?.[0])}
+							/>
+						</div>
 					</div>
 
 					<div className="space-y-1.5">

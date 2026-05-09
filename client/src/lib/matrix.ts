@@ -1507,6 +1507,10 @@ export class MatrixTransport {
 		// event.  Hides the room from Explore for users who haven't
 		// opted into NSFW discovery; doesn't affect existing members.
 		nsfw?: boolean;
+		// Optional avatar uploaded + set as the room's m.room.avatar
+		// state event after creation.  Same shape as createSpace —
+		// failure is best-effort and doesn't roll back the room.
+		avatarFile?: File;
 	}): Promise<RoomId> {
 		const c = this.requireClient();
 		// Public + encrypted is forbidden by Koven's governance model:
@@ -1615,6 +1619,25 @@ export class MatrixTransport {
 			power_level_content_override: powerLevelContentOverride as any,
 		});
 		const newRoomId = res.room_id as RoomId;
+
+		if (opts.avatarFile) {
+			// Mirror of createSpace's avatar path: upload the bytes,
+			// then write m.room.avatar pointing at the resulting mxc.
+			// Best-effort — a failure here just leaves the room
+			// without an avatar (the founder can re-upload from
+			// RoomEditSheet).  Don't fail the create over it.
+			try {
+				const upload = await c.uploadContent(opts.avatarFile, {
+					name: opts.avatarFile.name,
+					type: opts.avatarFile.type,
+				} as Parameters<typeof c.uploadContent>[1]);
+				await c.sendStateEvent(newRoomId, "m.room.avatar" as Parameters<typeof c.sendStateEvent>[1], {
+					url: upload.content_uri as string,
+				}, "");
+			} catch (err) {
+				console.warn("createRoom: avatar upload failed", err);
+			}
+		}
 
 		if (opts.parentSpaceId) {
 			await this.linkRoomToSpace(opts.parentSpaceId, newRoomId).catch(err => {
