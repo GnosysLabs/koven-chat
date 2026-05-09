@@ -843,6 +843,34 @@ export class MatrixTransport {
 
 	stop(): void {
 		this.stopped = true;
+		// Tear down rust-crypto FIRST so the OlmMachine releases its
+		// IndexedDB handle.  matrix-js-sdk's MatrixClient.stopClient
+		// only stops the /sync loop and event listeners — it does NOT
+		// close the underlying CryptoApi.  Without this call, the
+		// OlmMachine stays alive in WASM after logout, keeps the
+		// matrix-sdk-crypto IDB locked, and the NEXT login's
+		// initRustCrypto hangs / fails to wipe the store on user
+		// switch.  That was the cause of "stuck on Connecting…" on
+		// the second account in the same tab.
+		//
+		// CryptoApi#stop is documented (in the impl) as safe to call
+		// multiple times — it short-circuits when already stopped.
+		// Wrapped in try/catch defensively: if a future SDK version
+		// makes this throw on already-stopped, we still want the
+		// rest of the teardown to run.
+		try {
+			// CryptoApi public typings don't include stop() in
+			// matrix-js-sdk@34, but the rust-crypto implementation
+			// does (rust-crypto/rust-crypto.d.ts) and the runtime
+			// dispatches to it.  Cast through unknown to call it
+			// without weakening the SDK types elsewhere.
+			const crypto = this.client?.getCrypto() as
+				| { stop?: () => void }
+				| undefined;
+			crypto?.stop?.();
+		} catch (err) {
+			console.warn("matrix.stop: getCrypto().stop() threw", err);
+		}
 		this.client?.stopClient();
 		this.client?.removeAllListeners();
 		this.client = null;
