@@ -56,11 +56,20 @@ export function BotsPane({
 		);
 	}
 
+	// Bot mxids share the user's homeserver, so we can derive the
+	// final mxid (and thus the avatar seed) at preview time without
+	// a server round-trip.  Falls back to "local" if the user mxid
+	// is malformed (shouldn't happen given we got it from /whoami).
+	const homeserverName = currentUserId.includes(":")
+		? currentUserId.slice(currentUserId.indexOf(":") + 1)
+		: "local";
+
 	if (selectedBotId === "new") {
 		return (
 			<BotEditForm
 				mode="create"
 				accessToken={accessToken}
+				homeserverName={homeserverName}
 				onSaved={onSaved}
 				onCancel={onSelectionCleared}
 			/>
@@ -81,6 +90,7 @@ export function BotsPane({
 				mode="edit"
 				bot={bot}
 				accessToken={accessToken}
+				homeserverName={homeserverName}
 				onSaved={onSaved}
 				onCancel={onSelectionCleared}
 				onDelete={onDelete}

@@ -66,6 +66,11 @@ export interface BotEditFormProps {
 	// Required in edit mode.
 	bot?: BotSummary | null;
 	accessToken: string | null;
+	// Homeserver portion of the eventual bot mxid (e.g. "100.76.239.128").
+	// Used to make the create-mode avatar preview seed match what the
+	// server will actually compute, so the avatar doesn't visibly
+	// change between preview and post-create.
+	homeserverName: string;
 	// Called after a successful create / edit with the saved bot's
 	// summary (so the caller can update its list + selection).
 	onSaved(saved: BotSummary): void | Promise<void>;
@@ -144,6 +149,7 @@ export function BotEditForm({
 	mode,
 	bot,
 	accessToken,
+	homeserverName,
 	onSaved,
 	onCancel,
 	onDelete,
@@ -526,9 +532,13 @@ export function BotEditForm({
 	// Live preview values — what the bot will look like in the chat
 	// surface.  Falls back to the create-mode placeholder so the
 	// preview is something useful even before the user types.
+	// Compose the preview seed against the user's actual homeserver
+	// so the DiceBear hash matches what MatrixAvatar will render
+	// post-create.  Empty name → "new" placeholder so the avatar is
+	// stable across keystrokes until the user picks something.
 	const previewSeed = mode === "edit" && bot
 		? bot.mxid
-		: `@bot-${form.name || "new"}:local`;
+		: `@bot-${form.name || "new"}:${homeserverName}`;
 	const previewName = form.displayName.trim() || (mode === "create" ? form.name || "New bot" : bot?.display_name ?? "");
 
 	// Effective avatar source: pending preview wins; cleared flag
