@@ -106,6 +106,14 @@ export function InviteSheet({ open, onOpenChange, transport, roomId, roomName, i
 				const botMatches: DirectoryResult[] = botRoster
 					.filter(b => {
 						if (b.mxid === me || selectedIds.has(b.mxid) || directoryIds.has(b.mxid)) return false;
+						// Group invites for non-owner bots are
+						// rejected engine-side (see bot_runtime
+						// auto-decline).  Hide them from the picker
+						// rather than letting users click into a
+						// silent failure.  Self can't be the bot's
+						// owner if me is null (signed-out / unknown),
+						// so be defensive about that too.
+						if (!me || b.ownerId !== me) return false;
 						return b.displayName.toLowerCase().includes(lower)
 							|| b.mxid.toLowerCase().includes(lower);
 					})

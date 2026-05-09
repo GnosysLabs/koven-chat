@@ -2085,7 +2085,7 @@ const listAllBotMxidsStmt = db.prepare(
 	`SELECT mxid FROM bots WHERE enabled = 1`,
 );
 const listAllBotsPublicStmt = db.prepare(
-	`SELECT mxid, display_name, avatar_mxc FROM bots WHERE enabled = 1 ORDER BY display_name COLLATE NOCASE ASC`,
+	`SELECT mxid, display_name, avatar_mxc, owner_id, accept_dms FROM bots WHERE enabled = 1 ORDER BY display_name COLLATE NOCASE ASC`,
 );
 const listAllEnabledBotsStmt = db.prepare(
 	`SELECT * FROM bots WHERE enabled = 1`,
@@ -2178,22 +2178,35 @@ export interface PublicBotEntry {
 	mxid: string;
 	display_name: string;
 	avatar_mxc: string | null;
+	owner_id: string;
+	/** True iff the bot's `accept_dms` flag is on (1).  Lets callers
+	 * (the StartDmSheet) hide bots that opted out of cross-user DMs
+	 * without exposing the underlying integer column directly. */
+	accept_dms: boolean;
 }
 
 /** Public roster entry — one row per enabled bot with just the
  * fields safe to expose unauthenticated.  Powers the invite picker's
  * "show local bots even before they're in any room" behaviour, which
  * Synapse's user-directory can't do for fresh bots that haven't
- * joined anything yet. */
+ * joined anything yet.  We also include owner_id and accept_dms here
+ * (both are already publicly inferrable: owner_id via /api/bots/by-mxid,
+ * accept_dms via "try to DM and watch the bot leave") so the InviteSheet
+ * + StartDmSheet can pre-filter the dropdown rather than offering
+ * non-functional rows the user clicks just to get rejected. */
 export function listAllBotsPublic(): PublicBotEntry[] {
 	return (listAllBotsPublicStmt.all() as Array<{
 		mxid: string;
 		display_name: string;
 		avatar_mxc: string | null;
+		owner_id: string;
+		accept_dms: number;
 	}>).map(r => ({
 		mxid: r.mxid,
 		display_name: r.display_name,
 		avatar_mxc: r.avatar_mxc,
+		owner_id: r.owner_id,
+		accept_dms: r.accept_dms !== 0,
 	}));
 }
 

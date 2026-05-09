@@ -89,9 +89,16 @@ export function StartDmSheet({ open, onOpenChange, transport, onStarted }: Start
 				const lower = trimmed.toLowerCase();
 				const directoryIds = new Set(matches.map(m => m.userId));
 				// Bots first — see InviteSheet for the same merge.
+				// Visibility rule: a viewer can DM a bot iff (a) they
+				// own it, OR (b) it's accepting DMs from anyone.  The
+				// engine enforces the same rule on the inbound invite
+				// (auto-decline if violated), so showing the row when
+				// the rule fails would just be a click-to-fail.
 				const botMatches: DirectoryResult[] = botRoster
 					.filter(b => {
 						if (b.mxid === me || directoryIds.has(b.mxid)) return false;
+						const isMine = !!me && b.ownerId === me;
+						if (!isMine && !b.acceptDms) return false;
 						return b.displayName.toLowerCase().includes(lower)
 							|| b.mxid.toLowerCase().includes(lower);
 					})

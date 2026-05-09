@@ -22,6 +22,7 @@
 		"core:window:allow-show",
 		"core:window:allow-hide",
 		"core:window:allow-set-badge-count",
-		"dialog:default"
+		"dialog:default",
+		"default"
 	]
 }

@@ -1,0 +1,55 @@
+# Permissions for the desktop shell's locally-defined commands.
+#
+# Tauri 2 auto-allows commands defined via tauri::generate_handler! for
+# CONTENT loaded from the local tauri:// scheme.  Our 0.15.0 migration
+# moved the SPA to http://localhost (via tauri-plugin-localhost) so
+# YouTube / Twitter / etc. embeds would work — that flipped the page
+# into "remote content" territory, where every command (including the
+# app's own) needs an explicit permission entry in a capability.
+#
+# We declare one allow-* permission per #[tauri::command] in
+# src/lib.rs + src/plugins/mac_rounded_corners.rs, then bundle them
+# into a `default` permission set the capability can reference as
+# `koven-desktop:default`.
+
+[[permission]]
+identifier = "allow-enable-rounded-corners"
+description = "Apply layer.cornerRadius to the macOS contentView (legacy plugin command)."
+commands.allow = ["enable_rounded_corners"]
+
+[[permission]]
+identifier = "allow-enable-modern-window-style"
+description = "Apply rounded corners + traffic-light repositioning (the call main.tsx makes on mount)."
+commands.allow = ["enable_modern_window_style"]
+
+[[permission]]
+identifier = "allow-reposition-traffic-lights"
+description = "Re-place the macOS traffic-light buttons (after fullscreen toggle)."
+commands.allow = ["reposition_traffic_lights"]
+
+[[permission]]
+identifier = "allow-hide-traffic-lights"
+description = "Hide the macOS native title-bar buttons so the SPA can render its own."
+commands.allow = ["hide_traffic_lights"]
+
+[[permission]]
+identifier = "allow-reveal-app"
+description = "Close the splash window and show the chromed main window."
+commands.allow = ["reveal_app"]
+
+[[permission]]
+identifier = "allow-save-download"
+description = "Pop the native save-as dialog and write the supplied bytes to the picked path."
+commands.allow = ["save_download"]
+
+[[set]]
+identifier = "default"
+description = "All locally-defined desktop-shell commands the SPA invokes."
+permissions = [
+  "allow-enable-rounded-corners",
+  "allow-enable-modern-window-style",
+  "allow-reposition-traffic-lights",
+  "allow-hide-traffic-lights",
+  "allow-reveal-app",
+  "allow-save-download",
+]

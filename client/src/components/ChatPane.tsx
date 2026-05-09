@@ -1613,11 +1613,18 @@ function MessageRow({
 				    the visual gutter where reactions land; even with
 				    one row of pills, reactions render INSIDE that
 				    gutter rather than pushing the next message down. */}
-				<div className="relative flex items-start gap-2">
-					{/* Bubble column.  Just bubble + url preview — no
-					    reactions here, those overlay below via the
-					    absolutely-positioned slot at row level. */}
-					<div className="flex flex-col min-w-0">
+				<div className="flex items-start gap-2">
+					{/* Bubble column.  `relative` so the absolutely-
+					    positioned reaction pills below anchor to the
+					    BUBBLE'S bottom, not the row's bottom.  Anchoring
+					    to the row pulled pills down by the right
+					    column's reserved-toolbar height (~32px) — the
+					    "huge gap between bubble and pill" bug from the
+					    screenshot.  Now they sit flush under the
+					    bubble + URL preview regardless of how tall the
+					    right column happens to be (toolbar slot,
+					    seen-by line, flag pill etc.). */}
+					<div className="relative flex flex-col min-w-0">
 						{isCollapsed ? (
 							<CollapsedBubble collapse={collapse!} onExpand={() => setExpanded(true)} />
 						) : (
@@ -1637,6 +1644,26 @@ function MessageRow({
 							// emotes to keep those layouts clean.  Also skipped
 							// in encrypted rooms — see roomEncrypted prop above.
 							<UrlPreviewSlot text={message.text} />
+						)}
+						{/* Reaction pills layer.  Absolutely positioned
+						    just below the bubble + url preview so adding
+						    / removing a reaction never changes the row's
+						    flow height — the next message stays exactly
+						    where it was.  The pills render INTO the
+						    row's bottom padding (pb-6 on every row; see
+						    rowPadding above for the math).  `top-full`
+						    here anchors to the BUBBLE COLUMN's bottom
+						    edge (now that this div is `relative`); the
+						    4px gap between bubble and pill comes from
+						    ReactionPills' own internal `mt-1`, so we
+						    don't add another margin here — doubling
+						    them up was the cause of the inconsistent
+						    spacing where pills sometimes touched the
+						    next bubble. */}
+						{!isCollapsed && reactions.length > 0 && (
+							<div className="absolute left-0 top-full">
+								<ReactionPills reactions={reactions} onToggle={onToggleReactionPill} />
+							</div>
 						)}
 					</div>
 					<div className="flex flex-col items-start gap-1 shrink-0">
@@ -1698,24 +1725,6 @@ function MessageRow({
 							)}
 						</div>
 					</div>
-					{/* Reaction pills layer.  Absolutely positioned
-					    just below the bubble so adding / removing a
-					    reaction never changes the row's flow height —
-					    the next message stays exactly where it was.
-					    The pills render INTO the row's bottom padding
-					    (pb-7 on reacted rows; see rowPadding above
-					    for the math).  `top-full` anchors the pills
-					    to the bubble row's bottom edge; the 4px gap
-					    between bubble and pill comes from
-					    ReactionPills' own internal `mt-1`, so we
-					    don't add another margin here — doubling them
-					    up was the cause of the inconsistent spacing
-					    where pills sometimes touched the next bubble. */}
-					{!isCollapsed && reactions.length > 0 && (
-						<div className="absolute left-0 top-full">
-							<ReactionPills reactions={reactions} onToggle={onToggleReactionPill} />
-						</div>
-					)}
 				</div>
 			</div>
 			{canFlag && (
