@@ -609,7 +609,16 @@ export default function App() {
 				const repliesToMe = message.replyTo?.sender === myMxid;
 				const room = roomsRef.current.find(r => r.id === message.roomId);
 				const isDm = room?.kind === "dm";
-				if (!isDm && !mentionsMe && !repliesToMe) return;
+				// Per-room notification level override.  When the user
+				// has set this room to "all messages" via the right-
+				// click menu, every regular message here triggers an
+				// OS notification — same gate the engine fanout uses
+				// to write the kind=message bell entry.  When set to
+				// "muted", suppress everything including DM/mention.
+				const notifyLevel = notifyPrefsCacheRef.current?.(message.roomId) ?? "mentions";
+				if (notifyLevel === "muted") return;
+				const followAll = notifyLevel === "all";
+				if (!isDm && !mentionsMe && !repliesToMe && !followAll) return;
 
 				// Skip if the message is in the room the user has open
 				// as their active room — full stop, regardless of tab
@@ -756,6 +765,15 @@ export default function App() {
 		console.time("app.boot: transport.start → encState");
 		t.start(creds).then(async () => {
 			if (cancelled) return;
+			// Hydrate the per-room notification preferences cache so
+			// the sidebar mute indicators + right-click level pickers
+			// have data without per-row round-trips.  Fire-and-forget;
+			// the cache hydration emits to its listeners, so any UI
+			// depending on it re-renders when the data lands.
+			void import("@/lib/notifyPrefs").then(({ hydrateNotifyPrefs }) => {
+				if (cancelled || !creds.access_token) return;
+				void hydrateNotifyPrefs(creds.access_token);
+			});
 			// Pull my avatar mxc once so the SpaceBar tile resolves to my
 			// real avatar instead of the DiceBear fallback.  Map an
 			// undefined `avatarUrl` to `null` so SpaceBar can tell
@@ -899,6 +917,18 @@ export default function App() {
 	useEffect(() => {
 		roomsRef.current = state.rooms;
 	}, [state.rooms]);
+
+	// Reader for the per-room notification level cache.  Lazy-loaded
+	// via dynamic import the first time a notification fires (avoids
+	// pulling notifyPrefs into the App.tsx initial bundle); cached on
+	// the ref so the lookup stays synchronous on the hot path.  Returns
+	// the user's chosen level for a room, or "mentions" by default.
+	const notifyPrefsCacheRef = useRef<((roomId: string) => "all" | "mentions" | "muted") | null>(null);
+	useEffect(() => {
+		void import("@/lib/notifyPrefs").then(({ getRoomNotifyLevel }) => {
+			notifyPrefsCacheRef.current = getRoomNotifyLevel;
+		});
+	}, []);
 
 	// One-shot DM backfill — the engine doesn't have access to a
 	// user's m.direct account_data over the appservice, so it can't
@@ -1509,6 +1539,7 @@ export default function App() {
 							resolveRoomName={(roomId) =>
 								state.rooms.find(r => r.id === roomId)?.name ?? null
 							}
+							accessToken={creds.access_token}
 						/>
 					}
 				/>
@@ -1558,6 +1589,28 @@ export default function App() {
 					onSignOutAccount={handleSignOutOfAccount}
 					onOpenReview={isAdmin ? () => setReviewSheetOpen(true) : undefined}
 					pendingReviewCount={pendingReviewCount}
+					transport={transport}
+					accessToken={creds.access_token}
+					onEditSpace={(id) => setEditingSpaceId(id)}
+					onAddRoomToSpace={(id) => {
+						dispatch({ type: "set_active_space", space: { kind: "space", id } });
+						void openCreateRoomGated();
+					}}
+					onAddExistingRoomToSpace={(id) => setAddExistingRoomTo(id)}
+					onLeaveSpace={(id) => {
+						transport?.leaveRoom(id).catch(err => {
+							dispatch({ type: "error", message: err instanceof Error ? err.message : String(err) });
+						});
+					}}
+					onDeleteSpace={(id) => {
+						// "Delete" semantics: same as leave for now —
+						// proper space tombstoning is a Synapse-admin
+						// path that requires extra plumbing.  Founder-
+						// only via the right-click gate.
+						transport?.leaveRoom(id).catch(err => {
+							dispatch({ type: "error", message: err instanceof Error ? err.message : String(err) });
+						});
+					}}
 				/>
 				</div>
 				{state.activeSpace?.kind === "bots" ? (
@@ -1570,6 +1623,17 @@ export default function App() {
 						atLimit={(myBots ?? []).length >= 30}
 						onSelectBot={id => setSelectedBotId(id)}
 						onNewBot={() => setSelectedBotId("new")}
+						onSendDmToBot={async (mxid) => {
+							if (!transport) return;
+							try {
+								const roomId = await transport.startDm(mxid as UserId);
+								dispatch({ type: "set_active_space", space: { kind: "dms" } });
+								dispatch({ type: "set_active_room", roomId });
+							} catch (e) {
+								dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+							}
+						}}
+						onViewBotProfile={(mxid) => setViewedUserId(mxid as UserId)}
 					/>
 					</div>
 				) : null}
@@ -1621,6 +1685,10 @@ export default function App() {
 					activeSpace={state.activeSpace}
 					activeRoomId={state.activeRoomId}
 					currentUserId={creds.user_id}
+					transport={transport}
+					accessToken={creds.access_token}
+					onEditRoom={(roomId) => setEditingRoomId(roomId)}
+					onOpenProfile={(userId) => setViewedUserId(userId)}
 					collapsedRoomIds={collapsedRoomIds}
 					// True once initial sync has reached the "syncing"
 					// or "ready" state — at that point matrix-js-sdk
@@ -1904,6 +1972,28 @@ export default function App() {
 					isSuspended={!!suspension}
 					onOpenModLog={(roomId) => setModLogRoomId(roomId as RoomId)}
 					onOpenProfile={(userId) => setViewedUserId(userId as UserId)}
+					// Right-click message context menu: Send DM and
+					// Block.  startDm covers "open existing or create
+					// fresh DM" semantics; ignoreUser writes the
+					// m.ignored_user_list account_data.
+					onSendDm={async (userId) => {
+						if (!transport) return;
+						try {
+							const roomId = await transport.startDm(userId);
+							dispatch({ type: "set_active_space", space: { kind: "dms" } });
+							dispatch({ type: "set_active_room", roomId });
+						} catch (e) {
+							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+						}
+					}}
+					onBlockSender={async (userId) => {
+						if (!transport) return;
+						try {
+							await transport.ignoreUser(userId);
+						} catch (e) {
+							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+						}
+					}}
 					accessToken={creds.access_token}
 					giphyEnabled={giphyEnabled}
 					pollsByMessage={state.pollsByMessage}
@@ -2149,6 +2239,7 @@ export default function App() {
 					resolveRoomName={(roomId) =>
 						state.rooms.find(r => r.id === roomId)?.name ?? null
 					}
+					accessToken={creds.access_token}
 				/>
 			)}
 			<CreateRoomSheet

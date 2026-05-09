@@ -3,14 +3,16 @@
 // joined space, "+" to create a space, and Settings/Sign out at the
 // bottom.  Selection here drives what the RoomList shows.
 
-import { forwardRef, useMemo } from "react";
+import { forwardRef, useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
-import type { Room, Space } from "@koven/shared";
+import type { Room, Space, SpaceId, UserId } from "@koven/shared";
 import { Bot, Compass, Hash, Plus, Settings, ShieldAlert, User } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { AccountSwitcher } from "@/components/AccountSwitcher";
+import { SpaceTileContextMenu } from "@/components/SpaceTileContextMenu";
 import type { StoredAccount } from "@/lib/accounts";
 import type { ActiveSpace } from "@/state/store";
+import type { MatrixTransport } from "@/lib/matrix";
 
 export interface SpaceBarProps {
 	currentUserId: string | null;
@@ -51,6 +53,17 @@ export interface SpaceBarProps {
 	// even with a zero-count badge.  Pending count drives the red dot.
 	onOpenReview?(): void;
 	pendingReviewCount?: number;
+	// Right-click context-menu plumbing for space tiles.  Optional
+	// so SpaceBar still renders in test contexts where the transport
+	// isn't available — context menu won't show.
+	transport?: MatrixTransport | null;
+	accessToken?: string | null;
+	onMarkAllReadInSpace?(spaceId: SpaceId): void;
+	onEditSpace?(spaceId: SpaceId): void;
+	onAddRoomToSpace?(spaceId: SpaceId): void;
+	onAddExistingRoomToSpace?(spaceId: SpaceId): void;
+	onLeaveSpace?(spaceId: SpaceId): void;
+	onDeleteSpace?(spaceId: SpaceId): void;
 }
 
 export function SpaceBar({
@@ -73,8 +86,20 @@ export function SpaceBar({
 	onOpenSettings,
 	onOpenReview,
 	pendingReviewCount = 0,
+	transport,
+	accessToken,
+	onMarkAllReadInSpace,
+	onEditSpace,
+	onAddRoomToSpace,
+	onAddExistingRoomToSpace,
+	onLeaveSpace,
+	onDeleteSpace,
 }: SpaceBarProps) {
 	const showSwitcher = !!(accounts && onSwitchAccount && onAddAccount && onSignOutAccount);
+	// Per-tile right-click menu.  Single state object {space, x, y}
+	// rather than per-tile state because only one menu can be open
+	// at a time anyway.
+	const [spaceCtxMenu, setSpaceCtxMenu] = useState<{ space: Space; x: number; y: number } | null>(null);
 	const exploreActive = activeSpace?.kind === "explore";
 	const dmsActive = activeSpace?.kind === "dms";
 	const botsActive = activeSpace?.kind === "bots";
@@ -184,6 +209,11 @@ export function SpaceBar({
 							key={space.id}
 							active={active}
 							onClick={() => onSelectSpace(space.id)}
+							onContextMenu={(e) => {
+								e.preventDefault();
+								e.stopPropagation();
+								setSpaceCtxMenu({ space, x: e.clientX, y: e.clientY });
+							}}
 							title={space.name}
 							ariaLabel={space.name}
 							dot={spaceAttention}
@@ -226,6 +256,44 @@ export function SpaceBar({
 				    "sign out" affordance.  Removing it here avoids two
 				    sign-out buttons on the same screen. */}
 			</div>
+			{spaceCtxMenu && transport && accessToken && currentUserId && (
+				<SpaceTileContextMenu
+					x={spaceCtxMenu.x}
+					y={spaceCtxMenu.y}
+					space={spaceCtxMenu.space}
+					currentUserId={currentUserId as UserId}
+					accessToken={accessToken}
+					roomsInSpace={rooms.filter(r => r.parentSpaceIds.includes(spaceCtxMenu.space.id))}
+					onMarkAllRead={() => {
+						const ids = rooms
+							.filter(r => r.parentSpaceIds.includes(spaceCtxMenu.space.id))
+							.map(r => r.id);
+						for (const rid of ids) {
+							transport.markAsRead(rid).catch(err => {
+								console.warn(`SpaceBar: markAsRead ${rid} failed`, err);
+							});
+						}
+						onMarkAllReadInSpace?.(spaceCtxMenu.space.id);
+					}}
+					onCopyId={() => {
+						void navigator.clipboard.writeText(spaceCtxMenu.space.id);
+					}}
+					onCopyInviteLink={() => {
+						void navigator.clipboard.writeText(`https://matrix.to/#/${spaceCtxMenu.space.id}`);
+					}}
+					onEdit={onEditSpace ? () => onEditSpace(spaceCtxMenu.space.id) : undefined}
+					onAddRoom={onAddRoomToSpace ? () => onAddRoomToSpace(spaceCtxMenu.space.id) : undefined}
+					onAddExistingRoom={onAddExistingRoomToSpace ? () => onAddExistingRoomToSpace(spaceCtxMenu.space.id) : undefined}
+					onLeave={() => {
+						if (onLeaveSpace) onLeaveSpace(spaceCtxMenu.space.id);
+						else transport.leaveRoom(spaceCtxMenu.space.id).catch(err => {
+							console.warn("SpaceBar: leave space failed", err);
+						});
+					}}
+					onDelete={onDeleteSpace ? () => onDeleteSpace(spaceCtxMenu.space.id) : undefined}
+					onClose={() => setSpaceCtxMenu(null)}
+				/>
+			)}
 		</aside>
 	);
 }

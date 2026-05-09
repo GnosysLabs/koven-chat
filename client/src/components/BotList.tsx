@@ -8,10 +8,12 @@
 // like siblings.  Click selects; the active row gets the same
 // pill-on-the-left treatment used elsewhere in the app.
 
-import { Plus } from "lucide-react";
+import { useState } from "react";
+import { Copy, MessageSquare, Pencil, Plus, Power, PowerOff, Trash2, User as UserIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { BotBadge } from "@/components/BotBadge";
+import { ContextMenu, type ContextMenuItem } from "@/components/ui/context-menu";
 import type { BotSummary } from "@/lib/bots";
 
 export interface BotListProps {
@@ -27,6 +29,13 @@ export interface BotListProps {
 	atLimit: boolean;
 	onSelectBot(id: number): void;
 	onNewBot(): void;
+	// Right-click action handlers.  Optional — bots in test fixtures
+	// without a transport just see Edit (which routes through
+	// onSelectBot) and Copy mxid.
+	onSendDmToBot?(mxid: string): void;
+	onViewBotProfile?(mxid: string): void;
+	onToggleBotEnabled?(id: number, enabled: boolean): void;
+	onDeleteBot?(id: number): void;
 }
 
 export function BotList({
@@ -37,6 +46,10 @@ export function BotList({
 	atLimit,
 	onSelectBot,
 	onNewBot,
+	onSendDmToBot,
+	onViewBotProfile,
+	onToggleBotEnabled,
+	onDeleteBot,
 }: BotListProps) {
 	return (
 		<aside className="w-60 shrink-0 bg-card border-r border-border flex flex-col">
@@ -81,6 +94,10 @@ export function BotList({
 								bot={b}
 								active={selectedBotId === b.id}
 								onClick={() => onSelectBot(b.id)}
+								onSendDm={onSendDmToBot ? () => onSendDmToBot(b.mxid) : undefined}
+								onViewProfile={onViewBotProfile ? () => onViewBotProfile(b.mxid) : undefined}
+								onToggleEnabled={onToggleBotEnabled ? () => onToggleBotEnabled(b.id, !b.enabled) : undefined}
+								onDelete={onDeleteBot ? () => onDeleteBot(b.id) : undefined}
 							/>
 						))}
 					</ul>
@@ -100,16 +117,30 @@ function BotRow({
 	bot,
 	active,
 	onClick,
+	onSendDm,
+	onViewProfile,
+	onToggleEnabled,
+	onDelete,
 }: {
 	bot: BotSummary;
 	active: boolean;
 	onClick(): void;
+	onSendDm?(): void;
+	onViewProfile?(): void;
+	onToggleEnabled?(): void;
+	onDelete?(): void;
 }) {
+	const [ctxMenuPos, setCtxMenuPos] = useState<{ x: number; y: number } | null>(null);
 	return (
-		<li>
+		<li className="relative">
 			<button
 				type="button"
 				onClick={onClick}
+				onContextMenu={(e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					setCtxMenuPos({ x: e.clientX, y: e.clientY });
+				}}
 				title={bot.mxid}
 				className={cn(
 					"w-full px-3 py-2 flex items-center gap-2.5 text-left text-sm relative",
@@ -148,6 +179,50 @@ function BotRow({
 					</span>
 				)}
 			</button>
+			{ctxMenuPos && (
+				<ContextMenu
+					x={ctxMenuPos.x}
+					y={ctxMenuPos.y}
+					items={[
+						{
+							label: "Edit bot…",
+							icon: <Pencil className="h-4 w-4" />,
+							onClick,
+						},
+						...(onSendDm ? [{
+							label: "Send DM to bot",
+							icon: <MessageSquare className="h-4 w-4" />,
+							onClick: onSendDm,
+						} satisfies ContextMenuItem] : []),
+						...(onViewProfile ? [{
+							label: "View bot profile",
+							icon: <UserIcon className="h-4 w-4" />,
+							onClick: onViewProfile,
+						} satisfies ContextMenuItem] : []),
+						...(onToggleEnabled ? [{
+							label: bot.enabled ? "Disable bot" : "Enable bot",
+							icon: bot.enabled ? <PowerOff className="h-4 w-4" /> : <Power className="h-4 w-4" />,
+							onClick: onToggleEnabled,
+						} satisfies ContextMenuItem] : []),
+						{ kind: "divider" } satisfies ContextMenuItem,
+						{
+							label: "Copy bot mxid",
+							icon: <Copy className="h-4 w-4" />,
+							onClick: () => { void navigator.clipboard.writeText(bot.mxid); },
+						},
+						...(onDelete ? [
+							{ kind: "divider" } satisfies ContextMenuItem,
+							{
+								label: "Delete bot",
+								icon: <Trash2 className="h-4 w-4" />,
+								danger: true,
+								onClick: onDelete,
+							} satisfies ContextMenuItem,
+						] : []),
+					]}
+					onClose={() => setCtxMenuPos(null)}
+				/>
+			)}
 		</li>
 	);
 }

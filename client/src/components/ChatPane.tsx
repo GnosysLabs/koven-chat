@@ -23,6 +23,7 @@ import { serverOf } from "@/lib/mxid";
 import { FlagDialog } from "@/components/FlagDialog";
 import { DeleteMessageDialog } from "@/components/DeleteMessageDialog";
 import { MediaContextMenu } from "@/components/MediaContextMenu";
+import { MessageContextMenu } from "@/components/MessageContextMenu";
 import { firstLink, linkify } from "@/lib/linkify";
 import { renderWithMentions } from "@/lib/mentionRender";
 import { findYouTubeMatches, isYouTubeUrl, stripYouTubeUrls } from "@/lib/youtube";
@@ -196,6 +197,12 @@ export interface ChatPaneProps {
 	// sheet.  Optional; without it the pills still render but
 	// clicks are no-ops.
 	onOpenProfile?(userId: UserId): void;
+	// Right-click message context menu callbacks.  onSendDm opens
+	// (or creates) a DM with the targeted user; onBlockSender adds
+	// them to the m.ignored_user_list.  Both optional — context menu
+	// items that need them are filtered out when missing.
+	onSendDm?(userId: UserId): void | Promise<void>;
+	onBlockSender?(userId: UserId): void | Promise<void>;
 	// Bearer token used for the engine's Giphy proxy (search /
 	// trending).  Required for the GIF picker to work; absent or
 	// empty keeps the picker hidden even if the integration is
@@ -256,6 +263,8 @@ export function ChatPane({
 	receiptsVersion,
 	viewerUserId,
 	onOpenProfile,
+	onSendDm,
+	onBlockSender,
 	accessToken,
 	giphyEnabled,
 	pollsByMessage,
@@ -939,6 +948,29 @@ export function ChatPane({
 								onPollEnd={onEndPoll}
 								onReact={(emoji) => toggleReaction(m, emoji)}
 								onReply={() => setReplyTarget(m)}
+								// Right-click context menu callbacks.
+								// Quote inserts the message text into
+								// the composer prefixed with `> ` (one
+								// per line) — same shape as the Matrix
+								// reply fallback so quoting + replying
+								// reads as natural conversation.
+								roomId={room.id}
+								onQuote={(text) => {
+									const quoted = text.split("\n").map(l => `> ${l}`).join("\n");
+									setDraft(prev => prev ? `${quoted}\n\n${prev}` : `${quoted}\n\n`);
+									setReplyTarget(m);
+									// Focus the composer so the user can
+									// just start typing.
+									requestAnimationFrame(() => {
+										composeInputRef.current?.focus();
+									});
+								}}
+								onSendDmToSender={onSendDm
+									? () => { void onSendDm(m.sender as UserId); }
+									: undefined}
+								onBlockSender={onBlockSender
+									? () => { void onBlockSender(m.sender as UserId); }
+									: undefined}
 								onFlag={(category, rationale) => onFlag(m.id, category, rationale)}
 								onTogglePillFlag={() => {
 									const cur = flagsByMessage.get(m.id);
@@ -1299,6 +1331,7 @@ function MessageRow({
 	isOwnedBot, isHovered, onDelete,
 	isDm, receiptsVersion, memberAvatars, memberNames, mentionsViewer, onMentionClick, botMxids,
 	pollAggregate, viewerUserId, onPollVote, onPollEnd,
+	roomId, onQuote, onSendDmToSender, onBlockSender,
 }: {
 	message: Message;
 	avatarMxc: string | undefined;
@@ -1378,8 +1411,18 @@ function MessageRow({
 	// Cast / change a vote on this row's poll (when applicable).
 	onPollVote?(pollId: EventId, answerIds: string[]): void | Promise<void>;
 	onPollEnd?(pollId: EventId): void | Promise<void>;
+	// Right-click context menu wiring.  roomId is needed to build
+	// the matrix.to message link; the callbacks come from ChatPane,
+	// which has the transport reference.
+	roomId: string;
+	onQuote?(text: string): void;
+	onSendDmToSender?(): void;
+	onBlockSender?(): void;
 }) {
 	const [flagDialogOpen, setFlagDialogOpen] = useState(false);
+	// Right-click context menu state.  Cursor-positioned, dismissed
+	// via the generic ContextMenu primitive's outside-mousedown handler.
+	const [ctxMenuPos, setCtxMenuPos] = useState<{ x: number; y: number } | null>(null);
 	const [expanded, setExpanded] = useState(false);
 	// Popover state stays local to the row — only relevant for THIS
 	// row's React picker.  Combined with the parent-supplied
@@ -1527,6 +1570,15 @@ function MessageRow({
 		<div
 			data-message-id={message.id}
 			className={cn("flex gap-3 items-start", rowPadding, mentionHighlight)}
+			onContextMenu={(e) => {
+				// Suppress when right-clicking inside an interactive
+				// element that has its own context menu (media, links).
+				// Those handlers stopPropagation, so this only fires
+				// for clicks on the bubble's "empty" area / text.
+				e.preventDefault();
+				e.stopPropagation();
+				setCtxMenuPos({ x: e.clientX, y: e.clientY });
+			}}
 		>
 			<AvatarSlot mxc={avatarMxc} seed={message.sender} hidden={continuesGroup} isBot={isBot} />
 			<div className="flex-1 min-w-0">
@@ -1677,6 +1729,32 @@ function MessageRow({
 					open={deleteDialogOpen}
 					onOpenChange={setDeleteDialogOpen}
 					onConfirm={onDelete}
+				/>
+			)}
+			{ctxMenuPos && (
+				<MessageContextMenu
+					x={ctxMenuPos.x}
+					y={ctxMenuPos.y}
+					message={message}
+					roomId={roomId}
+					isSelf={!!message.isSelf}
+					flaggable={canFlag}
+					onReply={onReply}
+					onReact={() => setReactOpen(true)}
+					onCopyText={() => {
+						const t = message.text ?? "";
+						if (t) void navigator.clipboard.writeText(t);
+					}}
+					onCopyLink={() => {
+						const link = `https://matrix.to/#/${roomId}/${message.id}`;
+						void navigator.clipboard.writeText(link);
+					}}
+					onQuote={() => onQuote?.(message.text ?? "")}
+					onDelete={onDelete && !message.pending ? () => setDeleteDialogOpen(true) : undefined}
+					onFlag={canFlag ? () => setFlagDialogOpen(true) : undefined}
+					onSendDmToSender={onSendDmToSender}
+					onBlockSender={onBlockSender}
+					onClose={() => setCtxMenuPos(null)}
 				/>
 			)}
 		</div>

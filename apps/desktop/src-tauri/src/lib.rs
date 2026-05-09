@@ -33,8 +33,13 @@ use plugins::mac_rounded_corners;
 /// painting the real UI, so swapping the splash for it is a single
 /// invisible transition rather than the white-flash → square-dark
 /// → rounded-dark sequence we saw with an in-window splash.
-/// Write `bytes` to the OS Downloads folder under `filename`, returning
-/// the absolute destination path on success.
+/// Save the given `bytes` to a user-picked location.
+///
+/// Pops the OS native save-as dialog, defaulting the filename to
+/// `filename` and the directory to ~/Downloads/.  If the user picks
+/// a path, write the bytes and return the absolute destination as a
+/// string.  If the user cancels, return Ok(None) so the JS side can
+/// distinguish cancellation from real errors.
 ///
 /// Why this exists despite the on_download WebView hook:
 ///   - WKWebView (macOS) and WebKitGTK (Linux) silently drop anchor
@@ -52,22 +57,17 @@ use plugins::mac_rounded_corners;
 /// WebView interpretation, no platform-specific download policy.
 ///
 /// Filename is sanitised against path-traversal attempts (no `..`,
-/// no separators) so a malicious or buggy caller can't escape the
-/// Downloads folder.  If the chosen filename collides with an
-/// existing file, we suffix `-1`, `-2`, … until we find a free name —
-/// matches the OS's "untitled (1).png" pattern users expect from
-/// browser downloads.
+/// no separators) before being used as the dialog's default name —
+/// if the user accepts the default, the resulting path stays inside
+/// the directory they picked.
 #[tauri::command]
-fn save_download(
+async fn save_download(
 	app: tauri::AppHandle,
 	filename: String,
 	bytes: Vec<u8>,
-) -> Result<String, String> {
-	use std::path::PathBuf;
-	let dl_dir: PathBuf = app
-		.path()
-		.download_dir()
-		.map_err(|e| format!("download_dir: {e}"))?;
+) -> Result<Option<String>, String> {
+	use tauri_plugin_dialog::DialogExt;
+
 	// Strip any path components — caller-supplied filename only,
 	// never a path.  Also drop empty/dot filenames as a belt-and-
 	// braces measure.
@@ -80,28 +80,35 @@ fn save_download(
 	} else {
 		safe
 	};
-	// Create the Downloads directory if it doesn't exist.  On a
-	// fresh Linux user this can happen — XDG dirs aren't
-	// auto-created until something writes to them.
-	std::fs::create_dir_all(&dl_dir).map_err(|e| format!("create_dir_all: {e}"))?;
-	// Resolve a non-colliding final path.  Linear probe is fine —
-	// users rarely have hundreds of same-named downloads.
-	let (stem, ext) = match safe.rfind('.') {
-		Some(i) if i > 0 => (&safe[..i], &safe[i..]),
-		_ => (safe.as_str(), ""),
-	};
-	let mut dest = dl_dir.join(&safe);
-	let mut n = 1u32;
-	while dest.exists() {
-		dest = dl_dir.join(format!("{stem} ({n}){ext}"));
-		n += 1;
-		if n > 9999 {
-			return Err("too many name collisions in Downloads/".to_string());
-		}
+
+	// Default the dialog's starting directory to ~/Downloads/ — best
+	// guess at where the user wants downloads to land.  Falls through
+	// to the OS default (last-used location, typically) when the
+	// PathResolver can't find a Downloads dir.
+	let mut builder = app.dialog().file().set_file_name(&safe);
+	if let Ok(dl_dir) = app.path().download_dir() {
+		builder = builder.set_directory(dl_dir);
 	}
+
+	// Native save-as dialog.  The Rust closure-based API is non-
+	// blocking; we wrap it in a oneshot channel so the async tauri
+	// command can await the user's choice.
+	let (tx, rx) = std::sync::mpsc::channel::<Option<std::path::PathBuf>>();
+	builder.save_file(move |path| {
+		let _ = tx.send(path.and_then(|p| p.into_path().ok()));
+	});
+	let chosen = rx
+		.recv()
+		.map_err(|e| format!("dialog channel: {e}"))?;
+
+	let dest = match chosen {
+		Some(p) => p,
+		None => return Ok(None), // user cancelled
+	};
+
 	std::fs::write(&dest, &bytes).map_err(|e| format!("write: {e}"))?;
 	log::info!("save_download: wrote {} bytes to {}", bytes.len(), dest.display());
-	Ok(dest.to_string_lossy().into_owned())
+	Ok(Some(dest.to_string_lossy().into_owned()))
 }
 
 #[tauri::command]
@@ -308,6 +315,10 @@ pub fn run() {
 		// Signed auto-update from GitHub Releases via the manifest
 		// URL declared in tauri.conf.json.
 		.plugin(tauri_plugin_updater::Builder::new().build())
+		// Native save-as dialog used by the save_download command so
+		// the user picks where each downloaded attachment lands
+		// instead of seeing it disappear silently into ~/Downloads/.
+		.plugin(tauri_plugin_dialog::init())
 		// Rounded-corner plugin commands.  macOS-only — guarded so
 		// the invoke_handler isn't compiled into Linux / Windows
 		// builds that don't need it.  The SPA invokes

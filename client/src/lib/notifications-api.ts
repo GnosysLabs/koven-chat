@@ -11,7 +11,13 @@ export type NotificationKind =
 	| "mention"
 	| "reply"
 	| "invite"
-	| "system";
+	| "system"
+	// "message" — fired when the user has set the room's notification
+	// level to "all messages" via the right-click menu, for any message
+	// that wasn't already a DM/mention/reply.  Lets the user follow
+	// every message in a room they care deeply about without having to
+	// be @-mentioned.
+	| "message";
 
 export interface NotificationEntry {
 	id: number;

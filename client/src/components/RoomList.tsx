@@ -5,12 +5,17 @@
 //   - A specific space: only rooms whose parentSpaceIds include that
 //     space's id.
 
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { COLLAPSED_NAME } from "@/lib/collapsedRooms";
 import type { Room, RoomId, Space, UserId } from "@koven/shared";
-import { Check, EyeOff, Globe, Lock, Pin, Plus, X } from "lucide-react";
+import { BellOff, Check, Copy, EyeOff, Globe, Lock, Pin, Plus, UserX, X } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
+import { RoomRowContextMenu } from "@/components/RoomRowContextMenu";
+import { ContextMenu, type ContextMenuItem } from "@/components/ui/context-menu";
+import { getRoomNotifyLevel, onNotifyPrefsChanged } from "@/lib/notifyPrefs";
 import type { ActiveSpace } from "@/state/store";
+import type { MatrixTransport } from "@/lib/matrix";
 
 export interface RoomListProps {
 	rooms: Room[];
@@ -48,6 +53,18 @@ export interface RoomListProps {
 	// space tabs (or first-paint after sign-in) flashes the empty
 	// hint for a frame before the reducer fans the rooms in.
 	roomsLoaded?: boolean;
+	// Transport + access token are needed for the right-click context
+	// menu's actions (notification-level prefs, leave room, etc.).
+	// Both optional so RoomList can still render in test / preview
+	// contexts where there's no live transport — context menu items
+	// that need them are filtered out when missing.
+	transport?: MatrixTransport | null;
+	accessToken?: string | null;
+	// Action callbacks driven by the right-click menu — open the
+	// edit-room sheet, open a user profile (DM rows), etc.  Owned
+	// by App.tsx since they manipulate App-level overlay state.
+	onEditRoom?(roomId: RoomId): void;
+	onOpenProfile?(userId: UserId): void;
 }
 
 // PL gate for editing the space's `chat.koven.pinned_rooms` state
@@ -61,7 +78,8 @@ export function RoomList({
 	rooms, spaces, activeSpace, activeRoomId, currentUserId,
 	onSelectRoom, onCreateRoom, onAcceptInvite, onDeclineInvite,
 	onPinRoom, onUnpinRoom, collapsedRoomIds,
-	roomsLoaded,
+	roomsLoaded, transport, accessToken,
+	onEditRoom, onOpenProfile,
 }: RoomListProps) {
 	const activeSpaceObj = activeSpace?.kind === "space"
 		? spaces.find(s => s.id === activeSpace.id) ?? null
@@ -158,6 +176,14 @@ export function RoomList({
 								room={room}
 								onAccept={() => onAcceptInvite(room.id)}
 								onDecline={() => onDeclineInvite(room.id)}
+								onCopyId={() => {
+									void navigator.clipboard.writeText(room.id);
+								}}
+								onBlockInviter={room.inviter && transport ? () => {
+									transport.ignoreUser(room.inviter as UserId).catch(err => {
+										console.warn("InviteRow: block inviter failed", err);
+									});
+								} : undefined}
 							/>
 						))}
 					</div>
@@ -188,6 +214,17 @@ export function RoomList({
 								onSelect={() => onSelectRoom(room.id)}
 								onPin={canManagePins && !isPinned ? pinHandler(room.id) : undefined}
 								onUnpin={canManagePins && isPinned ? unpinHandler(room.id) : undefined}
+								// Right-click context menu wiring.  Each
+								// row owns its own menu state so multiple
+								// rooms can have hover affordances without
+								// stomping each other's open menus.
+								currentUserId={currentUserId}
+								transport={transport ?? null}
+								accessToken={accessToken ?? null}
+								activeSpaceId={activeSpaceObj?.id ?? null}
+								canManagePins={canManagePins}
+								onEditRoom={onEditRoom}
+								onOpenProfile={onOpenProfile}
 							/>
 						);
 					})
@@ -314,6 +351,8 @@ function DmPresenceDot({ presence }: { presence: Room["dmPresence"] }) {
 
 function RoomRow({
 	room, active, pinned, collapsed, onSelect, onPin, onUnpin,
+	currentUserId, transport, accessToken, activeSpaceId, canManagePins,
+	onEditRoom, onOpenProfile,
 }: {
 	room: Room;
 	active: boolean;
@@ -334,7 +373,38 @@ function RoomRow({
 	// every member sees which rooms are pinned.
 	onPin?(): void;
 	onUnpin?(): void;
+	// Right-click context menu wiring.
+	currentUserId: UserId;
+	transport: MatrixTransport | null;
+	accessToken: string | null;
+	activeSpaceId: string | null;
+	canManagePins: boolean;
+	onEditRoom?(roomId: RoomId): void;
+	onOpenProfile?(userId: UserId): void;
 }) {
+	// Right-click menu state.  Cursor-positioned, dismissed via the
+	// generic ContextMenu primitive's outside-mousedown handler.
+	const [ctxMenuPos, setCtxMenuPos] = useState<{ x: number; y: number } | null>(null);
+	// Per-row mute indicator.  Reads from the in-memory cache; the
+	// useState forces a re-render when the cache fires its change
+	// event, so toggling mute via the context menu updates the icon
+	// instantly without waiting for the next sync cycle.
+	const [notifyLevel, setNotifyLevel] = useState(() => getRoomNotifyLevel(room.id));
+	useEffect(() => {
+		const unsub = onNotifyPrefsChanged(() => {
+			setNotifyLevel(getRoomNotifyLevel(room.id));
+		});
+		setNotifyLevel(getRoomNotifyLevel(room.id));
+		return unsub;
+	}, [room.id]);
+	const isMuted = notifyLevel === "muted";
+
+	// Founder + edit gates for the context menu.  Founder = creatorId
+	// match.  Edit gates on PL >= 50 (matches the Settings sheet's
+	// own gate).
+	const isFounder = !!room.creatorId && room.creatorId === currentUserId;
+	const canEdit = (room.myPowerLevel ?? 0) >= 50;
+
 	// Pin affordance: button always visible (and clickable) when the
 	// room is pinned and the user can unpin; faded-in on row hover when
 	// the user can pin but the room isn't pinned yet.  When the user
@@ -358,6 +428,11 @@ function RoomRow({
 				"group relative rounded-md transition-colors",
 				active ? "bg-accent" : "hover:bg-accent/60",
 			)}
+			onContextMenu={(e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				setCtxMenuPos({ x: e.clientX, y: e.clientY });
+			}}
 		>
 			<button
 				type="button"
@@ -367,6 +442,10 @@ function RoomRow({
 					"w-full flex items-center gap-2 py-1.5 pl-2 text-sm text-left min-w-0",
 					reservePinSlot ? "pr-8" : "pr-2",
 					active ? "text-foreground" : "text-foreground/90",
+					// Muted rooms render with reduced text contrast +
+					// a small mute icon to communicate "this room is
+					// silenced" at a glance, the way Discord does.
+					isMuted && "text-muted-foreground/70",
 				)}
 				title={collapsed ? COLLAPSED_NAME : room.name}
 			>
@@ -374,7 +453,7 @@ function RoomRow({
 				<span className="flex-1 truncate flex items-center gap-1.5 min-w-0">
 					<span className={cn(
 						"truncate",
-						hasUnread && "font-semibold",
+						hasUnread && !isMuted && "font-semibold",
 						// Italicise + dim the placeholder so collapsed
 						// rooms are visually distinct from regular ones —
 						// they exist in the user's room list (they're
@@ -384,11 +463,14 @@ function RoomRow({
 					)}>
 						{collapsed ? COLLAPSED_NAME : room.name}
 					</span>
+					{isMuted && (
+						<BellOff className="h-3 w-3 shrink-0 text-muted-foreground" aria-label="Muted" />
+					)}
 					{room.encrypted && (
 						<Lock className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
 					)}
 				</span>
-				{hasUnread && (
+				{hasUnread && !isMuted && (
 					<span
 						className={cn(
 							"shrink-0 h-2 w-2 rounded-full",
@@ -430,17 +512,90 @@ function RoomRow({
 					/>
 				</button>
 			)}
+			{ctxMenuPos && transport && accessToken && (
+				<RoomRowContextMenu
+					x={ctxMenuPos.x}
+					y={ctxMenuPos.y}
+					room={room}
+					currentUserId={currentUserId}
+					accessToken={accessToken}
+					activeSpaceId={activeSpaceId as RoomId | null}
+					isPinned={pinned}
+					canManagePins={canManagePins}
+					isFounder={isFounder}
+					canEdit={canEdit}
+					onMarkRead={() => {
+						transport.markAsRead(room.id).catch(err => {
+							console.warn("RoomRow: markAsRead failed", err);
+						});
+					}}
+					onMarkUnread={() => {
+						// matrix-js-sdk doesn't have a direct "mark
+						// unread" API yet; the in-progress MSC2867
+						// path is gated.  Best-effort no-op here:
+						// just pop a console warn so we don't lie
+						// about the action having succeeded.  When
+						// the SDK adds first-class support, swap to
+						// transport.markAsUnread(room.id).
+						console.warn("RoomRow: markAsUnread is not yet implemented");
+					}}
+					onCopyId={() => {
+						void navigator.clipboard.writeText(room.id).catch(err => {
+							console.warn("RoomRow: copy room id failed", err);
+						});
+					}}
+					onCopyInviteLink={() => {
+						void navigator.clipboard.writeText(`https://matrix.to/#/${room.id}`).catch(err => {
+							console.warn("RoomRow: copy invite link failed", err);
+						});
+					}}
+					onEdit={onEditRoom ? () => onEditRoom(room.id) : undefined}
+					onPin={onPin}
+					onUnpin={onUnpin}
+					onLeave={() => {
+						transport.leaveRoom(room.id).catch(err => {
+							console.warn("RoomRow: leave failed", err);
+						});
+					}}
+					onDelete={isFounder ? () => {
+						// Defer to leave for now — proper room
+						// deletion is a Synapse-admin path that
+						// requires extra plumbing.  The Founder-only
+						// "Delete" wording is the safest near-term
+						// approximation: leaving as the only PL=100
+						// member tombstones the room for the engine.
+						transport.leaveRoom(room.id).catch(err => {
+							console.warn("RoomRow: delete (leave) failed", err);
+						});
+					} : undefined}
+					onOpenProfile={room.kind === "dm" && room.dmUserId && onOpenProfile
+						? () => onOpenProfile(room.dmUserId as UserId)
+						: undefined}
+					onBlockDmUser={room.kind === "dm" && room.dmUserId
+						? () => {
+							const target = room.dmUserId as UserId;
+							transport.ignoreUser(target).catch(err => {
+								console.warn("RoomRow: block user failed", err);
+							});
+						}
+						: undefined}
+					onClose={() => setCtxMenuPos(null)}
+				/>
+			)}
 		</div>
 	);
 }
 
 function InviteRow({
-	room, onAccept, onDecline,
+	room, onAccept, onDecline, onBlockInviter, onCopyId,
 }: {
 	room: Room;
 	onAccept(): void | Promise<void>;
 	onDecline(): void | Promise<void>;
+	onBlockInviter?(): void;
+	onCopyId?(): void;
 }) {
+	const [ctxMenuPos, setCtxMenuPos] = useState<{ x: number; y: number } | null>(null);
 	// NSFW pill — surfaces the room's adult-content flag pre-accept
 	// so the viewer can decide before joining.  Note: visibility of
 	// `room.nsfw` on an *invite* depends on Synapse forwarding the
@@ -468,10 +623,17 @@ function InviteRow({
 	// (line-clamp-2) instead of getting chopped at the first colon.
 	const isDm = room.kind === "dm";
 	return (
-		<div className={cn(
-			"rounded-md border p-2 space-y-1.5",
-			isNsfw ? "border-rose-500/40 bg-rose-500/5" : "border-border bg-card/60",
-		)}>
+		<div
+			className={cn(
+				"rounded-md border p-2 space-y-1.5",
+				isNsfw ? "border-rose-500/40 bg-rose-500/5" : "border-border bg-card/60",
+			)}
+			onContextMenu={(e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				setCtxMenuPos({ x: e.clientX, y: e.clientY });
+			}}
+		>
 			<div className="flex items-start gap-2 min-w-0">
 				<RoomAvatar room={room} />
 				<div className="min-w-0 flex-1">
@@ -513,8 +675,49 @@ function InviteRow({
 					<X className="h-3 w-3" /> Decline
 				</button>
 			</div>
+			{ctxMenuPos && <InviteContextMenu
+				x={ctxMenuPos.x}
+				y={ctxMenuPos.y}
+				onAccept={() => { void onAccept(); }}
+				onDecline={() => { void onDecline(); }}
+				onCopyId={onCopyId}
+				onBlockInviter={onBlockInviter}
+				onClose={() => setCtxMenuPos(null)}
+			/>}
 		</div>
 	);
+}
+
+function InviteContextMenu({
+	x, y, onAccept, onDecline, onCopyId, onBlockInviter, onClose,
+}: {
+	x: number;
+	y: number;
+	onAccept(): void;
+	onDecline(): void;
+	onCopyId?(): void;
+	onBlockInviter?(): void;
+	onClose(): void;
+}) {
+	const items: ContextMenuItem[] = [
+		{ label: "Accept", icon: <Check className="h-4 w-4" />, onClick: onAccept },
+		{ label: "Decline", icon: <X className="h-4 w-4" />, onClick: onDecline },
+	];
+	if (onCopyId || onBlockInviter) {
+		items.push({ kind: "divider" });
+		if (onCopyId) {
+			items.push({ label: "Copy room ID", icon: <Copy className="h-4 w-4" />, onClick: onCopyId });
+		}
+		if (onBlockInviter) {
+			items.push({
+				label: "Block inviter",
+				icon: <UserX className="h-4 w-4" />,
+				danger: true,
+				onClick: onBlockInviter,
+			});
+		}
+	}
+	return <ContextMenu x={x} y={y} items={items} onClose={onClose} />;
 }
 
 /** Pull the localpart out of a Matrix user id ("@alice:server" → "alice").

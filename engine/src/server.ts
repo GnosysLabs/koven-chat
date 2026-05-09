@@ -59,6 +59,8 @@ import {
 	isAdmin,
 	issueAuthCode,
 	listAdmins,
+	listRoomNotifyLevels,
+	setRoomNotifyLevel,
 	listAllBotMxids,
 	listAllBotsPublic,
 	listBotsByOwner,
@@ -2122,6 +2124,55 @@ export function startServer(): void {
 				revokeAdmin(targetUserId);
 				console.log(`engine: admin revoke ${targetUserId} by ${auth.userId}`);
 				return json({ ok: true, user_id: targetUserId, admin_count: adminCount() });
+			}
+
+			// ─── Per-room notification preferences ──────────────────
+			// Three levels: 'all' (every message), 'mentions' (default
+			// — DM/mention/reply only), 'muted' (nothing).  Stored
+			// per-(user, room) in room_notify_prefs; missing row =
+			// 'mentions'.  See db.ts for the table; fanOutMessage
+			// reads getRoomNotifyLevel before writing notification
+			// rows so a 'muted' room is silent and an 'all' room
+			// produces a kind=message event for non-mention messages.
+
+			// GET /api/notify-prefs/rooms → { rooms: { [roomId]: level } }
+			// Returns ONLY overridden rows; missing keys = default
+			// 'mentions'.  Client sends one bulk fetch on boot to
+			// hydrate its in-memory cache.
+			if (req.method === "GET" && path === "/api/notify-prefs/rooms") {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				const rows = listRoomNotifyLevels(userId);
+				const map: Record<string, string> = {};
+				for (const r of rows) map[r.room_id] = r.level;
+				return json({ rooms: map });
+			}
+
+			// PUT /api/notify-prefs/rooms/:roomId { level }
+			// Sets the user's level for a specific room.  Passing
+			// 'mentions' clears the override (restores default
+			// behaviour) so we don't accumulate dead rows for users
+			// who toggle off and back to default.
+			{
+				const m = path.match(/^\/api\/notify-prefs\/rooms\/(.+)$/);
+				if (req.method === "PUT" && m) {
+					const userId = await whoami(extractToken(req));
+					if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+					const roomId = decodeURIComponent(m[1]!);
+					if (!roomId.startsWith("!")) {
+						return json({ errcode: "M_INVALID_PARAM", error: "room id must start with !" }, { status: 400 });
+					}
+					const body = (await req.json().catch(() => null)) as { level?: unknown } | null;
+					const level = body?.level;
+					if (level !== "all" && level !== "mentions" && level !== "muted") {
+						return json({
+							errcode: "M_INVALID_PARAM",
+							error: "level must be one of: all, mentions, muted",
+						}, { status: 400 });
+					}
+					setRoomNotifyLevel(userId, roomId, level);
+					return json({ ok: true, user_id: userId, room_id: roomId, level });
+				}
 			}
 
 			// ─── Bulk room-icon lookup ──────────────────────────────

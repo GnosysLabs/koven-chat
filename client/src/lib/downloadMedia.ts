@@ -48,12 +48,17 @@ export async function downloadMediaUrl(url: string, filename: string): Promise<v
 			// so this stays efficient even for multi-MB media.  Going
 			// through Array.from(...) instead would JSON-encode every
 			// byte and blow up memory by ~6x.
+			//
+			// Returns the chosen path on success, or null when the
+			// user cancelled the save dialog (matches Rust's
+			// Option<String> return type).  Cancel is a normal
+			// outcome — silent no-op, no error log.
 			const { invoke } = await import("@tauri-apps/api/core");
-			const dest = await invoke<string>("save_download", {
+			const dest = await invoke<string | null>("save_download", {
 				filename: safeName,
 				bytes: new Uint8Array(buf),
 			});
-			console.info(`downloadMediaUrl: saved to ${dest}`);
+			if (dest) console.info(`downloadMediaUrl: saved to ${dest}`);
 			return;
 		}
 

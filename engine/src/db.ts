@@ -139,6 +139,22 @@ db.exec(`
 		granted_by TEXT             -- NULL when self-bootstrap
 	);
 
+	-- Per-user, per-room notification level.  Three values:
+	--   'all'      → fire on every message (kind=message)
+	--   'mentions' → fire on DM/mention/reply only (current default)
+	--   'muted'    → never fire, even on mentions
+	-- Missing row = 'mentions' default.  Read in fanOutMessage to
+	-- decide whether to write a notification row for a recipient.
+	CREATE TABLE IF NOT EXISTS room_notify_prefs (
+		user_id   TEXT NOT NULL,
+		room_id   TEXT NOT NULL,
+		level     TEXT NOT NULL CHECK (level IN ('all', 'mentions', 'muted')),
+		updated_at INTEGER NOT NULL,
+		PRIMARY KEY (user_id, room_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_room_notify_prefs_user
+		ON room_notify_prefs(user_id);
+
 	-- Instance-wide configuration as a flat key/value store.  Read
 	-- publicly (login page needs it before auth), written only by
 	-- admins.
@@ -1132,6 +1148,60 @@ export function listAdmins(): Array<{
 export function firstSeenUser(): string | null {
 	const row = firstUserStmt.get() as { user_id: string } | undefined;
 	return row?.user_id ?? null;
+}
+
+// ─── Per-room notification preferences ──────────────────────────────
+
+export type RoomNotifyLevel = "all" | "mentions" | "muted";
+
+const getRoomNotifyLevelStmt = db.prepare(`
+	SELECT level FROM room_notify_prefs WHERE user_id = ? AND room_id = ?
+`);
+const setRoomNotifyLevelStmt = db.prepare(`
+	INSERT INTO room_notify_prefs (user_id, room_id, level, updated_at)
+	VALUES (?, ?, ?, ?)
+	ON CONFLICT(user_id, room_id) DO UPDATE
+		SET level = excluded.level, updated_at = excluded.updated_at
+`);
+const deleteRoomNotifyLevelStmt = db.prepare(`
+	DELETE FROM room_notify_prefs WHERE user_id = ? AND room_id = ?
+`);
+const listRoomNotifyLevelsStmt = db.prepare(`
+	SELECT room_id, level FROM room_notify_prefs WHERE user_id = ?
+`);
+
+/** Read the user's notification level for one room.  Returns the
+ * default 'mentions' when no row exists — saves the caller from
+ * having to fall through to the default everywhere. */
+export function getRoomNotifyLevel(userId: string, roomId: string): RoomNotifyLevel {
+	const row = getRoomNotifyLevelStmt.get(userId, roomId) as
+		| { level: RoomNotifyLevel }
+		| undefined;
+	return row?.level ?? "mentions";
+}
+
+/** Write the user's notification level for one room.  Pass 'mentions'
+ * to clear the override (deletes the row, falls back to default).
+ * Other values upsert. */
+export function setRoomNotifyLevel(userId: string, roomId: string, level: RoomNotifyLevel): void {
+	if (level === "mentions") {
+		deleteRoomNotifyLevelStmt.run(userId, roomId);
+		return;
+	}
+	setRoomNotifyLevelStmt.run(userId, roomId, level, Date.now());
+}
+
+/** Return every overridden room → level mapping for one user.  Drives
+ * the client's bulk-load on app boot so the AccountSwitcher / sidebar
+ * can render mute indicators without per-room round-trips. */
+export function listRoomNotifyLevels(userId: string): Array<{
+	room_id: string;
+	level: RoomNotifyLevel;
+}> {
+	return listRoomNotifyLevelsStmt.all(userId) as Array<{
+		room_id: string;
+		level: RoomNotifyLevel;
+	}>;
 }
 
 // ─── Instance config ────────────────────────────────────────────────
@@ -2350,7 +2420,7 @@ export interface NotificationRow {
 	user_id: string;
 	event_id: string;
 	room_id: string;
-	kind: "dm" | "mention" | "reply" | "invite" | "system";
+	kind: "dm" | "mention" | "reply" | "invite" | "system" | "message";
 	sender: string;
 	snippet: string | null;
 	created_at: number;

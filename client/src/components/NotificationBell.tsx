@@ -9,7 +9,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Bell, Trash2, AtSign, Reply, MessageSquare, Mail, Bell as SystemIcon } from "lucide-react";
+import { Bell, Trash2, AtSign, Reply, MessageSquare, Mail, Bell as SystemIcon, Check } from "lucide-react";
+import { ContextMenu, type ContextMenuItem } from "@/components/ui/context-menu";
+import { setRoomNotifyLevel } from "@/lib/notifyPrefs";
 import {
 	Dialog,
 	DialogContent,
@@ -47,6 +49,10 @@ interface NotificationBellProps {
 	///               app doesn't have a permanent top bar.
 	/// Default: "icon".
 	variant?: "icon" | "fab";
+	/// Engine access token, used by the right-click context menu's
+	/// "Mute source room" action.  Without it the menu still shows
+	/// Open + Mark as read but the mute item is hidden.
+	accessToken?: string;
 }
 
 export function NotificationBell({
@@ -55,6 +61,7 @@ export function NotificationBell({
 	resolveDisplayName,
 	resolveRoomName,
 	variant = "icon",
+	accessToken,
 }: NotificationBellProps) {
 	const [open, setOpen] = useState(false);
 	const { unreadCount, entries, error, refresh, markRead, markAllRead, dismissAll } = notifications;
@@ -260,6 +267,14 @@ export function NotificationBell({
 							key={group.key}
 							group={group}
 							onClick={() => handleGroupClick(group)}
+							onMarkRead={group.hasUnread ? () => {
+								for (const e of group.entries) {
+									if (e.read_at === null) void markRead(e.id);
+								}
+							} : undefined}
+							onMuteRoom={accessToken ? () => {
+								void setRoomNotifyLevel(accessToken, group.room_id, "muted");
+							} : undefined}
 							senderName={
 								resolveDisplayName?.(group.sender) ??
 								localpartOf(group.sender)
@@ -512,20 +527,34 @@ function groupNotifications(entries: NotificationEntry[]): NotificationGroup[] {
 function NotificationRow({
 	group,
 	onClick,
+	onMarkRead,
+	onMuteRoom,
 	senderName,
 	roomName,
 }: {
 	group: NotificationGroup;
 	onClick(): void;
+	// Per-row context-menu actions.  Both optional so callers in
+	// limited contexts (no transport / no engine token) can render
+	// the row without the menu items.
+	onMarkRead?(): void;
+	onMuteRoom?(): void;
 	senderName: string;
 	roomName: string | null;
 }) {
 	const { Icon, label } = kindRendering(group.kind, group.count);
+	const [ctxMenuPos, setCtxMenuPos] = useState<{ x: number; y: number } | null>(null);
 
 	return (
 		<button
 			type="button"
 			onClick={onClick}
+			onContextMenu={(e) => {
+				if (!onMarkRead && !onMuteRoom) return;
+				e.preventDefault();
+				e.stopPropagation();
+				setCtxMenuPos({ x: e.clientX, y: e.clientY });
+			}}
 			className={cn(
 				"w-full text-left px-4 py-3 flex items-start gap-3",
 				"border-b border-border/30 last:border-b-0",
@@ -589,8 +618,43 @@ function NotificationRow({
 			{group.hasUnread ? (
 				<div className="shrink-0 mt-2 h-2 w-2 rounded-full bg-primary" aria-hidden />
 			) : null}
+			{ctxMenuPos && (onMarkRead || onMuteRoom) && (
+				<NotificationContextMenu
+					x={ctxMenuPos.x}
+					y={ctxMenuPos.y}
+					hasUnread={group.hasUnread}
+					onOpen={onClick}
+					onMarkRead={onMarkRead}
+					onMuteRoom={onMuteRoom}
+					onClose={() => setCtxMenuPos(null)}
+				/>
+			)}
 		</button>
 	);
+}
+
+function NotificationContextMenu({
+	x, y, hasUnread, onOpen, onMarkRead, onMuteRoom, onClose,
+}: {
+	x: number;
+	y: number;
+	hasUnread: boolean;
+	onOpen(): void;
+	onMarkRead?(): void;
+	onMuteRoom?(): void;
+	onClose(): void;
+}) {
+	const items: ContextMenuItem[] = [
+		{ label: "Open", icon: <MessageSquare className="h-4 w-4" />, onClick: onOpen },
+	];
+	if (hasUnread && onMarkRead) {
+		items.push({ label: "Mark as read", icon: <Check className="h-4 w-4" />, onClick: onMarkRead });
+	}
+	if (onMuteRoom) {
+		items.push({ kind: "divider" });
+		items.push({ label: "Mute source room", icon: <Bell className="h-4 w-4" />, onClick: onMuteRoom });
+	}
+	return <ContextMenu x={x} y={y} items={items} onClose={onClose} />;
 }
 
 function kindRendering(kind: NotificationKind, count: number = 1): { Icon: typeof Bell; label: string } {
@@ -604,6 +668,11 @@ function kindRendering(kind: NotificationKind, count: number = 1): { Icon: typeo
 			case "dm":      return { Icon: MessageSquare, label: `sent you ${count} DMs` };
 			case "invite":  return { Icon: Mail,          label: "invited you" };
 			case "system":  return { Icon: SystemIcon,    label: "system" };
+			// "message" — fired by the per-room "all messages"
+			// notification level.  Reads naturally as "Bob sent 3
+			// messages" since the recipient opted into following
+			// every message in this room.
+			case "message": return { Icon: MessageSquare, label: `sent ${count} messages` };
 		}
 	}
 	switch (kind) {
@@ -612,6 +681,7 @@ function kindRendering(kind: NotificationKind, count: number = 1): { Icon: typeo
 		case "dm":      return { Icon: MessageSquare,  label: "sent you a DM" };
 		case "invite":  return { Icon: Mail,           label: "invited you" };
 		case "system":  return { Icon: SystemIcon,     label: "system" };
+		case "message": return { Icon: MessageSquare,  label: "sent a message" };
 	}
 }
 

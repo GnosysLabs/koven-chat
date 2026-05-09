@@ -1,6 +1,6 @@
 [package]
 name = "koven-desktop"
-version = "0.13.1"
+version = "0.14.0"
 description = "Koven desktop shell — Tauri WebView wrapping client.koven.chat with native window chrome, OS-routed external links, and a minisign-signed in-app updater."
 authors = ["Gnosys Labs"]
 edition = "2021"
@@ -27,6 +27,10 @@ tauri-plugin-opener = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-notification = "2"
+# Native save-as dialog for the save_download command.  Without this,
+# downloads landed silently in ~/Downloads/ — the user wants to pick
+# a location every time, the way browsers' "Save link as…" works.
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"

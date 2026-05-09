@@ -25,6 +25,7 @@
 import type { MatrixEvent } from "./aggregate";
 import { config } from "./config";
 import {
+	getRoomNotifyLevel,
 	insertNotification,
 	isRoomDm,
 	joinedMemberCount,
@@ -267,21 +268,37 @@ export async function fanOutMessage(ev: MatrixEvent): Promise<void> {
 		// Don't notify bot or engine users.
 		if (isBotOrEngineUser(recipient)) continue;
 
+		// Per-room notification level override.  Three values:
+		//   'all'      — even non-mention messages produce a kind=
+		//                message notification (treat the room as a
+		//                "follow everything" room)
+		//   'mentions' — current default behaviour (DM/mention/reply)
+		//   'muted'    — skip the recipient entirely, no row written
+		// Reading getRoomNotifyLevel does ONE indexed SQLite SELECT
+		// per recipient; cheap enough that we don't bother caching.
+		const level = getRoomNotifyLevel(recipient, ev.room_id);
+		if (level === "muted") {
+			console.log(`[fanout] skip ${recipient}: muted in this room`);
+			continue;
+		}
+
 		// Pick the kind: priority order mention > reply > dm >
-		// (fall-through, no notification).  Explicit signals win —
-		// a 2-person private room is `memberCount === 2` so the DM
-		// fallback catches it, but if the message also @-mentions
-		// or replies-to the recipient, that's the more accurate
-		// label and shouldn't get masked by the implicit DM heuristic.
-		// Invite is handled in fanOutMember; system events come from
-		// other pathways.
-		let kind: "dm" | "mention" | "reply" | null = null;
+		// (fall-through to 'message' when level=all, otherwise no
+		// notification).  Explicit signals win — a 2-person private
+		// room is `memberCount === 2` so the DM fallback catches it,
+		// but if the message also @-mentions or replies-to the
+		// recipient, that's the more accurate label and shouldn't
+		// get masked by the implicit DM heuristic.  Invite is
+		// handled in fanOutMember; system events come from other
+		// pathways.
+		let kind: "dm" | "mention" | "reply" | "message" | null = null;
 		if (mentioned.has(recipient)) kind = "mention";
 		else if (replyTargetId === recipient) kind = "reply";
 		else if (isDm) kind = "dm";
+		else if (level === "all") kind = "message";
 
 		if (kind === null) {
-			console.log(`[fanout] skip ${recipient}: not DM, not mentioned, not reply target`);
+			console.log(`[fanout] skip ${recipient}: not DM, not mentioned, not reply target, level=${level}`);
 			continue;
 		}
 
