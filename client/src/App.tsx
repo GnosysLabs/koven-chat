@@ -1750,6 +1750,18 @@ export default function App() {
 									dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
 								}
 							}}
+							// Banner avatar above the members list — only
+							// when the room has a real uploaded image and
+							// no emoji icon override (emojis already win
+							// in MatrixAvatar's fallback chain and show
+							// in the chat header, no need to repeat).
+							roomAvatarUrl={
+								activeRoom && !activeRoom.iconEmoji && activeRoom.avatarUrl
+									? activeRoom.avatarUrl
+									: undefined
+							}
+							roomId={activeRoom?.id}
+							roomName={activeRoom?.name}
 						/>
 					)
 				)}

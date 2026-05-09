@@ -27,6 +27,18 @@ export interface MemberListProps {
 	members: Member[] | null;
 	currentUserId: string | null;
 	onSelectMember(userId: string): void;
+	// Optional banner image: when the active room has a custom
+	// avatar (Room.avatarUrl, raw mxc) AND no iconEmoji override,
+	// render it prominently at the top of the sidebar above the
+	// member list.  Skipped for emoji-iconed rooms (the emoji is
+	// already shown in the chat header) and for rooms with no
+	// avatar at all (DiceBear fallback isn't worth a banner).
+	roomAvatarUrl?: string;
+	// Used as the alt text + the visual seed for the (intentionally
+	// unused, since we only render the banner when a real mxc is
+	// set) DiceBear fallback inside MatrixAvatar.
+	roomId?: string;
+	roomName?: string;
 	// mxids in this Set render with a BOT pill next to the name AND
 	// override their presence to "online" (bots are always live as
 	// long as the engine is up).  Optional.
@@ -80,6 +92,9 @@ export function MemberList({
 	canKickBanBots,
 	onBotKickBan,
 	onStartDm,
+	roomAvatarUrl,
+	roomId,
+	roomName,
 }: MemberListProps) {
 	// Right-click menu state.  Stored as the targeted member +
 	// cursor coords; null when the menu is closed.  We portal the
@@ -125,12 +140,28 @@ export function MemberList({
 			setBusyAction(null);
 		}
 	}
-	// Pre-load: render the chrome (header, scroll container) but
-	// nothing inside.  Avoids flashing "No members." or a header
-	// reading "Members · 0" while the fetch is still in flight.
+	// Pre-load: render the chrome (banner if applicable, header,
+	// scroll container) but no rows inside.  Banner stays during
+	// load so the sidebar's vertical layout doesn't jump when
+	// members arrive.
 	if (members === null) {
 		return (
 			<aside className="w-56 border-l border-border bg-card flex flex-col">
+				{roomAvatarUrl && (
+					<div className="px-4 pt-4 pb-3 border-b border-border flex flex-col items-center gap-2">
+						<MatrixAvatar
+							mxc={roomAvatarUrl}
+							seed={roomId ?? ""}
+							kind="user"
+							className="h-32 w-32 rounded-md"
+						/>
+						{roomName && (
+							<div className="text-sm font-medium text-foreground text-center truncate w-full" title={roomName}>
+								{roomName}
+							</div>
+						)}
+					</div>
+				)}
 				<div className="px-4 h-12 flex items-center border-b border-border">
 					<span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
 						Members
@@ -169,6 +200,31 @@ export function MemberList({
 
 	return (
 		<aside className="w-56 border-l border-border bg-card flex flex-col">
+			{/* Room avatar banner.  Only rendered when the active
+			    room has a real uploaded image (mxc).  Square, full
+			    sidebar width, rounded; the centred-image proportion
+			    matches Discord / Telegram / Slack's room-info pane
+			    so users coming from those clients read it the same
+			    way.  Below the image we put the room name as a
+			    secondary cue — useful in long sessions where the
+			    chat header has scrolled out of casual view.  The
+			    block is fixed-height (no scroll inside this section)
+			    so the member list below still scrolls cleanly. */}
+			{roomAvatarUrl && (
+				<div className="px-4 pt-4 pb-3 border-b border-border flex flex-col items-center gap-2">
+					<MatrixAvatar
+						mxc={roomAvatarUrl}
+						seed={roomId ?? ""}
+						kind="user"
+						className="h-32 w-32 rounded-md"
+					/>
+					{roomName && (
+						<div className="text-sm font-medium text-foreground text-center truncate w-full" title={roomName}>
+							{roomName}
+						</div>
+					)}
+				</div>
+			)}
 			<div className="px-4 h-12 flex items-center border-b border-border">
 				<span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
 					Members &middot; {visibleMembers.length}
