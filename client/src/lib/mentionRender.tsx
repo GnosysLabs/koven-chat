@@ -163,7 +163,7 @@ function MentionPill({
 				"transition-colors",
 			)}
 		>
-			@{name}
+			{name}
 		</button>
 	);
 }
