@@ -385,6 +385,29 @@ export function ChatPane({
 	// anchoring.
 	const loadingMoreRef = useRef(false);
 	const noMoreHistoryRef = useRef<Set<string>>(new Set());
+	// Captured BEFORE pagination, restored INSIDE the useLayoutEffect
+	// below as soon as React commits the longer messages array.  Holds
+	// the "distance from bottom" so the formula is invariant to the
+	// number / size of prepended events:
+	//
+	//   newScrollTop = newScrollHeight - distFromBottom
+	//
+	// If null, no restore is pending — useLayoutEffect is a no-op.
+	//
+	// Why a ref + useLayoutEffect instead of the previous rAF: rAF
+	// fires AFTER the browser has already painted the wrong position
+	// once, so the user sees a single-frame jump where the new
+	// (older) content appears above and their reading position
+	// shifts down.  useLayoutEffect runs after DOM mutation but
+	// BEFORE paint, so the corrected scrollTop is what gets painted.
+	const pendingRestoreRef = useRef<number | null>(null);
+	useLayoutEffect(() => {
+		const el = scrollRef.current;
+		if (!el) return;
+		if (pendingRestoreRef.current === null) return;
+		el.scrollTop = el.scrollHeight - pendingRestoreRef.current;
+		pendingRestoreRef.current = null;
+	}, [messages.length]);
 	useEffect(() => {
 		const el = scrollRef.current;
 		if (!el) return;
@@ -408,28 +431,24 @@ export function ChatPane({
 				!noMoreHistoryRef.current.has(room.id)
 			) {
 				loadingMoreRef.current = true;
-				// Capture pre-fetch geometry so we can restore the
-				// user's visual scroll position after the SDK
-				// prepends older events to the timeline.  Without
-				// this the viewport would yank to the top because
-				// scrollHeight grew but scrollTop stayed where it
-				// was.  scrollHeight - scrollTop = "distance from
-				// the bottom"; preserving that across the resize
-				// keeps the user looking at exactly the same row.
-				const distFromBottom = el.scrollHeight - el.scrollTop;
+				// Capture pre-fetch geometry now so the useLayoutEffect
+				// above has the right anchor as soon as React commits
+				// the new messages.  scrollHeight - scrollTop = the
+				// distance from the bottom; preserving that across
+				// the resize keeps the user looking at exactly the
+				// same row regardless of how much content prepends.
+				pendingRestoreRef.current = el.scrollHeight - el.scrollTop;
 				const roomId = room.id;
 				onLoadMoreHistory(roomId)
 					.then((gotMore) => {
-						if (!gotMore) noMoreHistoryRef.current.add(roomId);
-						// Restore scroll position after the React
-						// re-render commits the new (taller) timeline.
-						// rAF fires after layout, when scrollHeight
-						// reflects the prepended content.
-						requestAnimationFrame(() => {
-							const cur = scrollRef.current;
-							if (!cur) return;
-							cur.scrollTop = cur.scrollHeight - distFromBottom;
-						});
+						if (!gotMore) {
+							noMoreHistoryRef.current.add(roomId);
+							// Nothing came back — no commit will fire
+							// the restore effect, so clear the pending
+							// anchor here so a later pagination doesn't
+							// re-use a stale value.
+							pendingRestoreRef.current = null;
+						}
 					})
 					.finally(() => {
 						loadingMoreRef.current = false;
@@ -857,7 +876,18 @@ export function ChatPane({
 				</div>
 			</header>
 
-			<div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4">
+			{/* overflow-anchor: auto is the browser's native scroll-
+			    anchoring behavior — when content is added above the
+			    viewport, the browser keeps the visible content
+			    visually anchored by adjusting scrollTop automatically.
+			    It's the spec default but Tailwind's preflight + a few
+			    edge cases (scroll containers with flex children,
+			    certain CSS resets) can disable it.  We belt-and-
+			    braces it here as a fallback for when the
+			    useLayoutEffect-based restore in the pagination
+			    handler hasn't fired yet (e.g. between the SDK's
+			    timeline mutation and React's commit). */}
+			<div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4" style={{ overflowAnchor: "auto" }}>
 				{/* Inner content wrapper exists ONLY so the
 				    ResizeObserver in the auto-scroll effect has a
 				    single observable element whose size reflects the
@@ -1402,34 +1432,31 @@ function MessageRow({
 	// timeline reads as steady rhythm and the gutter doubles as the
 	// landing zone for absolutely-positioned reaction pills.
 	//
-	// Two-axis padding: pt controls how far this row starts below
-	// the previous row, pb controls the landing zone for THIS row's
-	// reaction pills (which are absolutely-positioned in the gutter
-	// below the bubble — see the `top-full` block further down).
+	// Row padding.  pb is CONSTANT regardless of whether this row has
+	// reactions — adding a pill must NOT shift layout.  The previous
+	// approach toggled pb-7 vs pb-0.5 based on reaction state, which
+	// made adding a single reaction grow the row by 26px and bump
+	// every message below it down by the same amount.  That was
+	// indistinguishable from "spacing is broken" because reaction
+	// activity and message arrival both produce vertical motion.
 	//
-	// Splitting them lets us tighten the Discord-style stack of
-	// consecutive non-reacted messages from the same sender to a
-	// near-flush layout (pt-1 + pb-0.5 = 6px between rows) while
-	// still reserving enough clearance below any row that does have
-	// reactions for the pills to never overlap the next bubble.
+	// Now: every row reserves the pill landing zone (pb-6 = 24px),
+	// whether or not reactions are present.  Pills paint into that
+	// reserved gutter, so adding/removing one is purely a paint, not
+	// a layout shift.  pt still varies for sender grouping so the
+	// Discord-style "tighter when same sender" rhythm is preserved.
 	//
-	// Pill stack height accounting (from bubble bottom):
-	//   - top-full anchor          0px
-	//   - ReactionPills' own mt-1  4px
-	//   - pill block height       ~24px (px-2 py-0.5 + 1px border)
-	//   total: ~28px
-	// We need pb + next-row pt ≥ 28px to keep the pill clear of the
-	// next bubble.  pb-7 (28px) covers it for both cases:
-	//   pb-7 + pt-1 (continuation) = 32px → 4px tolerance
-	//   pb-7 + pt-4 (new group)    = 44px → comfortable gap
+	// Pill stack height = ReactionPills' internal mt-1 (4px) + pill
+	// block height (~24px) = ~28px below the bubble.  pb-6 + pt-1
+	// (continuation) = 28px, exactly fits the pill.  pb-6 + pt-4
+	// (new group) = 40px, comfortable.
 	//
 	//   - Continuation row pt: pt-1 (4px) — tight stack
 	//   - New-group row pt:    pt-4 (16px) — clear group separator
-	//   - Reacted row pb:      pb-7 (28px) — full pill clearance
-	//   - Non-reacted row pb:  pb-0.5 (2px) — no pills, no gutter
+	//   - All rows pb:         pb-6 (24px) — pill landing zone
 	const rowPadding = cn(
 		continuesGroup ? "pt-1" : "pt-4",
-		reactions.length > 0 ? "pb-7" : "pb-0.5",
+		"pb-6",
 	);
 
 	// Discord-style mention highlight: left accent border + faint
