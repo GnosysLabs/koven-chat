@@ -118,6 +118,18 @@ db.exec(`
 	CREATE INDEX IF NOT EXISTS idx_room_creations_creator_ts
 		ON room_creations(creator_id, created_at);
 
+	-- Rooms started as DMs.  Populated when an m.room.member event
+	-- arrives with content.is_direct = true (the flag clients set
+	-- when they create a 1:1 conversation room and invite the other
+	-- party).  Used by the notification fan-out to distinguish real
+	-- DMs from 2-person private rooms — both have memberCount === 2,
+	-- but only DMs should fire the kind=dm bell on plain messages.
+	-- One row per DM room; idempotent on re-mark via PRIMARY KEY.
+	CREATE TABLE IF NOT EXISTS dm_rooms (
+		room_id   TEXT PRIMARY KEY,
+		marked_at INTEGER NOT NULL
+	);
+
 	-- Instance admins.  First user the engine sees gets auto-promoted
 	-- on bootstrap (see admins.ts).  Subsequent admins must be
 	-- granted by an existing admin via the API.
@@ -909,6 +921,29 @@ export function recordRoomCreation(opts: {
 		opts.visibility ?? "unknown",
 		opts.kind ?? "room",
 	);
+}
+
+// ─── DM rooms ───────────────────────────────────────────────────────
+
+const markRoomAsDmStmt = db.prepare(`
+	INSERT OR IGNORE INTO dm_rooms (room_id, marked_at) VALUES (?, ?)
+`);
+const isRoomDmStmt = db.prepare(`SELECT 1 FROM dm_rooms WHERE room_id = ? LIMIT 1`);
+
+/** Mark a room as a DM.  Called from the appservice transaction
+ * handler whenever an m.room.member event with content.is_direct=true
+ * lands.  Idempotent — once a room is flagged, repeats are no-ops.
+ * The flag never gets cleared: a room that started as a DM stays a
+ * DM forever for notification purposes (matches Element's behaviour). */
+export function markRoomAsDm(roomId: string): void {
+	markRoomAsDmStmt.run(roomId, Date.now());
+}
+
+/** True when this room was started as a DM (we've previously seen an
+ * is_direct=true membership event for it).  Used by the notification
+ * fan-out to decide whether to fire kind=dm on plain messages. */
+export function isRoomDm(roomId: string): boolean {
+	return !!isRoomDmStmt.get(roomId);
 }
 
 /** How many rooms (or spaces) `creatorId` has created of the given

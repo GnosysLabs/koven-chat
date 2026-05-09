@@ -26,6 +26,7 @@ import type { MatrixEvent } from "./aggregate";
 import { config } from "./config";
 import {
 	insertNotification,
+	isRoomDm,
 	joinedMemberCount,
 	listJoinedRoomMembers,
 	lookupPostUser,
@@ -244,7 +245,13 @@ export async function fanOutMessage(ev: MatrixEvent): Promise<void> {
 	}
 
 	const memberCount = members.length;
-	const isDm = memberCount === 2; // 2 joined members → treat as DM
+	// Authoritative DM flag — set when ANY m.room.member event for
+	// this room arrived with content.is_direct=true (clients write
+	// that flag when they create a 1:1 conversation room).  Replaces
+	// the old "memberCount === 2" heuristic, which mis-labelled
+	// 2-person private rooms as DMs and fired kind=dm bells on every
+	// regular message.
+	const isDm = isRoomDm(ev.room_id);
 
 	// Mentions + reply target only resolvable on plaintext events.
 	const mentioned = isEncrypted ? new Set<string>() : extractMentionTargets(ev, members);

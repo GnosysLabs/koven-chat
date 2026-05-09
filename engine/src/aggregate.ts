@@ -14,6 +14,7 @@ import {
 	insertReaction,
 	lookupPostUser,
 	markFlagRetracted,
+	markRoomAsDm,
 	recordRoomCreation,
 	updateSuspensionStatus,
 	upsertRoomMember,
@@ -122,6 +123,15 @@ function handleMember(ev: MatrixEvent): void {
 		membership,
 		ts: ev.origin_server_ts,
 	});
+	// Clients flag DM-flavoured invites with `is_direct: true` on the
+	// invite event's content.  Persist the room-level marker so the
+	// notification fan-out can tell DMs apart from 2-person private
+	// rooms — both have memberCount === 2 but only DMs should fire
+	// kind=dm on plain messages.  Idempotent at the DB layer.
+	const c = ev.content as { is_direct?: unknown } | undefined;
+	if (c?.is_direct === true) {
+		markRoomAsDm(ev.room_id);
+	}
 	fanOutMember(ev);
 }
 

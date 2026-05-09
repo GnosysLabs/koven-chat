@@ -43,6 +43,7 @@ import { ModLogSheet } from "@/components/ModLogSheet";
 import { FloorReviewSheet } from "@/components/FloorReviewSheet";
 import { botKickBan, deleteOwnMessage, fetchAdminStatus, fetchFloorQueue, fetchMyStatus, fetchPublishQuota, flagRoom, type PublishQuota, type SuspensionSummary } from "@/lib/instance";
 import { fetchIntegrationsStatus } from "@/lib/giphy";
+import { ENGINE_URL } from "@/lib/urls";
 import { PublishLimitDialog } from "@/components/PublishLimitDialog";
 import { AddExistingRoomDialog } from "@/components/AddExistingRoomDialog";
 import { useCollapsedRooms } from "@/lib/collapsedRooms";
@@ -737,6 +738,39 @@ export default function App() {
 	useEffect(() => {
 		roomsRef.current = state.rooms;
 	}, [state.rooms]);
+
+	// One-shot DM backfill — the engine doesn't have access to a
+	// user's m.direct account_data over the appservice, so it can't
+	// see which rooms are "real" DMs vs. 2-person private rooms on
+	// its own.  The SPA already has m.direct (matrix-js-sdk uses it
+	// to project room.kind = "dm").  Once per session, after the
+	// first non-empty room list lands, forward those ids to
+	// /api/rooms/mark-dms so the engine's notification fan-out can
+	// distinguish the two.  Forward-going invites that carry
+	// is_direct=true mark themselves through handleMember in the
+	// appservice transaction stream — this is just the bridge for
+	// rooms that pre-date that path.  Idempotent server-side.
+	const dmBackfillDoneRef = useRef(false);
+	useEffect(() => {
+		if (!creds?.access_token) return;
+		if (dmBackfillDoneRef.current) return;
+		const dmIds = state.rooms.filter(r => r.kind === "dm").map(r => r.id);
+		if (dmIds.length === 0) return;
+		dmBackfillDoneRef.current = true;
+		fetch(`${ENGINE_URL}/api/rooms/mark-dms`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${creds.access_token}`,
+			},
+			body: JSON.stringify({ room_ids: dmIds }),
+		}).catch(() => {
+			// Reset the flag on failure so the next room-list update
+			// retries; transient network blips shouldn't permanently
+			// poison the bridge.
+			dmBackfillDoneRef.current = false;
+		});
+	}, [creds, state.rooms]);
 
 	// Tab refocus → catch up on read receipts for the active room.
 	// While the tab is hidden we suppress receipts for incoming

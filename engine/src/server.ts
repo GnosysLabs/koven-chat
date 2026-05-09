@@ -65,6 +65,7 @@ import {
 	lookupUserByEmail,
 	markAuthCodeUsed,
 	markFlagRetracted,
+	markRoomAsDm,
 	purgeUserState,
 	readBio,
 	readInstanceConfig,
@@ -1815,6 +1816,53 @@ export function startServer(): void {
 			// Bounded to 200 ids per call so a malicious caller can't
 			// spin up thousands of parallel state fetches against
 			// Synapse.  The Explore page's default page size is 50.
+			// Backfill DM markers from the client.  The SPA classifies
+			// DMs locally via m.direct account_data (which the engine
+			// can't read without user-context auth); on boot it posts
+			// the user's known DM room ids here so the fan-out can
+			// distinguish actual DMs from 2-person private rooms.
+			//
+			// Membership-checked — without this gate, any signed-in
+			// user could mark arbitrary rooms as DMs and force the
+			// fan-out to fire kind=dm bells on every message in those
+			// rooms.  With it, you can only mark rooms you actually
+			// participate in.  Forward-going: handleMember catches
+			// is_direct=true on new invites; this endpoint is the
+			// one-shot bridge for rooms that pre-date that path.
+			if (req.method === "POST" && path === "/api/rooms/mark-dms") {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				const body = (await req.json().catch(() => null)) as
+					| { room_ids?: unknown }
+					| null;
+				const roomIds = Array.isArray(body?.room_ids)
+					? (body!.room_ids as unknown[]).filter((x): x is string => typeof x === "string")
+					: [];
+				if (roomIds.length === 0) return json({ marked: 0 });
+				if (roomIds.length > 200) {
+					return json(
+						{ errcode: "M_LIMIT_EXCEEDED", error: "max 200 room_ids per request" },
+						{ status: 400 },
+					);
+				}
+				let marked = 0;
+				await Promise.all(
+					roomIds.map(async (rid) => {
+						try {
+							const members = await getJoinedMembers(rid);
+							if (!members.includes(userId)) return;
+							markRoomAsDm(rid);
+							marked++;
+						} catch {
+							// Silently skip — room gone, federation
+							// failure, etc.  Idempotent retry on next
+							// boot.
+						}
+					}),
+				);
+				return json({ marked });
+			}
+
 			if (req.method === "POST" && path === "/api/rooms/icons") {
 				const body = (await req.json().catch(() => null)) as
 					| { room_ids?: unknown }
