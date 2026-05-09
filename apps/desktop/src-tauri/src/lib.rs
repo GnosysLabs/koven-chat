@@ -75,7 +75,9 @@ const LINK_INTERCEPTOR_JS: &str = r#"
 			const u = new URL(rawUrl, window.location.href);
 			if (u.protocol === 'tauri:') return true;
 			if (u.protocol === 'http:' || u.protocol === 'https:') {
-				return u.hostname === 'client.koven.chat' || u.hostname === 'tauri.localhost';
+				return u.hostname === 'client.koven.chat'
+					|| u.hostname === 'tauri.localhost'
+					|| u.hostname === 'challenges.cloudflare.com';
 			}
 			return false;
 		} catch (_) {
@@ -139,6 +141,14 @@ const LINK_INTERCEPTOR_JS: &str = r#"
 /// - `https://client.koven.chat` → the live homeserver itself; matters
 ///                                in dev mode (`devUrl`) and as a
 ///                                fallback if the SPA hard-navigates.
+/// - `https://challenges.cloudflare.com` → Cloudflare Turnstile iframe.
+///                                The bot-detection widget on the login
+///                                page loads its challenge UI from this
+///                                origin; without the allowlist entry,
+///                                the iframe load (and any interactive
+///                                challenge click inside it) gets
+///                                routed out to the OS browser, which
+///                                breaks login entirely.
 ///
 /// Cross-origin XHR / fetch isn't gated by this list; only top-level
 /// navigation requests pass through `on_navigation` below.
@@ -147,6 +157,7 @@ fn is_internal(url: &Url) -> bool {
 		"tauri" => true,
 		"http" | "https" => match url.host_str() {
 			Some("client.koven.chat") | Some("tauri.localhost") => true,
+			Some("challenges.cloudflare.com") => true,
 			// Dev-only: localhost (Vite) counts as internal so
 			// in-SPA navigations don't get routed out to the OS
 			// browser when running `tauri dev`.  Production builds
