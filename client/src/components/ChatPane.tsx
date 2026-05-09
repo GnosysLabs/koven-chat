@@ -1676,7 +1676,14 @@ function MessageBubble({
 	// 50% alpha and switch text to plain foreground on dark — alpha-
 	// composites against the chat background to a muted theme tint
 	// while staying recognisable as "your colour."
-	const selfBubble = "bg-primary text-primary-foreground dark:bg-primary/50 dark:text-foreground";
+	// `bubble-self` carries the dark-mode text colour fallback rule
+	// from index.css — Midnight's primary is near-white, so the
+	// `bg-primary/50` paint composites to a light grey where the
+	// default `text-foreground` (also near-white) reads as poor
+	// contrast.  The CSS rule scopes a dark text colour to Midnight
+	// only; coloured dark themes (Plum, Forest, Aurora, etc.) keep
+	// `text-foreground` since their bubble bg has actual colour.
+	const selfBubble = "bg-primary text-primary-foreground dark:bg-primary/50 dark:text-foreground bubble-self";
 	const otherBubble = "bg-muted text-foreground";
 
 	// Image + video render flush — no surrounding bubble.  The
