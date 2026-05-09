@@ -1252,6 +1252,40 @@ export function startServer(): void {
 				return json({ bots: listAllBotsPublic() });
 			}
 
+			// GET /api/bots/by-mxid/:mxid
+			// Public read.  Returns the public-safe slice of a bot row
+			// keyed by Matrix id.  Used by the profile sheet's "Created
+			// by" row — when any user taps a bot's avatar, the sheet
+			// fetches the bot here to discover its owner_id, then
+			// resolves the owner's Matrix profile (display name + avatar)
+			// for the credit line.  No authed scope: bot owner identity
+			// is intentionally public, the same way a Discord bot's
+			// developer is named on its profile card.
+			//
+			// Strictly limited fields: mxid + display_name + avatar_mxc
+			// + owner_id + bio + created_at.  Secrets (encrypted API
+			// key, Synapse access token), provider config, usage stats,
+			// and spending guardrails all stay private to the owner's
+			// own /api/bots/me view.
+			if (req.method === "GET" && path.startsWith("/api/bots/by-mxid/")) {
+				const mxid = decodeURIComponent(path.slice("/api/bots/by-mxid/".length));
+				if (!mxid.startsWith("@")) {
+					return json({ error: "bad_mxid" }, { status: 400 });
+				}
+				const row = getBotByMxid(mxid);
+				if (!row) return json({ error: "not_found" }, { status: 404 });
+				return json({
+					bot: {
+						mxid: row.mxid,
+						owner_id: row.owner_id,
+						display_name: row.display_name,
+						avatar_mxc: row.avatar_mxc,
+						bio: readBio(row.mxid) ?? "",
+						created_at: row.created_at,
+					},
+				});
+			}
+
 			// GET /api/bots/me
 			// Authed.  Lists bots owned by the caller, with usage stats
 			// but WITHOUT the encrypted secrets (we never echo them).

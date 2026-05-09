@@ -29,6 +29,7 @@ import type { ReputationData } from "@/lib/reputation";
 import { descriptorFor, nextTierUnlockLabel, tickClassForFilled, ticksFor } from "@/lib/reputation";
 import { fetchUserBio, updateMyBio } from "@/lib/profile";
 import { formatMxid, serverOf } from "@/lib/mxid";
+import { getPublicBotInfo } from "@/lib/bots";
 import type { UserId } from "@koven/shared";
 
 export interface ProfileSheetProps {
@@ -79,6 +80,13 @@ export interface ProfileSheetProps {
 	// engine endpoint.  Not invoked unless `canKickBanBots && isBot`,
 	// so callers don't need to re-validate.
 	onBotMembership?(action: "kick" | "ban", botMxid: UserId): void | Promise<void>;
+	// Open another user's profile from inside this sheet.  Used by the
+	// "Created by" credit row on bot profiles — clicking the bot's
+	// owner pivots the sheet to show that owner's profile instead of
+	// the bot's.  Parent (App.tsx) drives the actual viewedUserId
+	// state; we just hand back the target.  When omitted, the credit
+	// row renders non-interactive (still informative, just no nav).
+	onViewProfile?(userId: UserId): void;
 }
 
 interface BaseProfile {
@@ -88,7 +96,7 @@ interface BaseProfile {
 	homeserver: string;
 }
 
-export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ignoredUsers, onSelfProfileSaved, isBot, onStartDm, canKickBanBots, isMyBot, onBotMembership }: ProfileSheetProps) {
+export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ignoredUsers, onSelfProfileSaved, isBot, onStartDm, canKickBanBots, isMyBot, onBotMembership, onViewProfile }: ProfileSheetProps) {
 	const isSelf = useMemo(() => {
 		if (!viewedUserId || !transport) return false;
 		return transport.currentUserId === viewedUserId;
@@ -132,6 +140,17 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 	const [profile, setProfile] = useState<BaseProfile | null>(null);
 	const [displayName, setDisplayName] = useState("");
 	const [bio, setBio] = useState("");
+	// Bot creator (only meaningful when isBot && !isMyBot && !isSelf).
+	// Three-valued like rep: undefined = not yet fetched (suppress
+	// the row), null = fetched but not a registered bot or fetch
+	// failed (skip row), populated = render the credit line.  Lookup
+	// path: GET /api/bots/by-mxid → owner_id → transport.getUserProfile
+	// for the owner's display name + avatar.
+	const [creator, setCreator] = useState<
+		| { userId: UserId; displayName: string; avatarUrl?: string }
+		| null
+		| undefined
+	>(undefined);
 	// Reputation fetched in the same Promise.all as profile + bio so
 	// the body has all three before any of it paints.  Three-valued:
 	//   undefined — fetch hasn't returned yet (suppress body render),
@@ -155,6 +174,7 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 		setPendingAvatar(null);
 		setPendingAvatarPreview(null);
 		setClearAvatar(false);
+		setCreator(undefined);
 
 		// Stale-while-revalidate: only flip into the loading state if
 		// we don't already have data for THIS user.  When the sheet
@@ -207,13 +227,64 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 				setError(err instanceof Error ? err.message : String(err));
 				setLoading(false);
 			});
+
+		// Bot creator lookup runs in parallel with (but separately
+		// from) the main fetch.  We don't gate the body paint on it:
+		// the credit row is supplementary, and a slow engine
+		// shouldn't block the rest of the sheet.  Skipped entirely
+		// for non-bot views and for self-edit (showing "Created by
+		// you" on your own bot would be useless noise).
+		if (isBot && !isSelf) {
+			(async () => {
+				try {
+					const botInfo = await getPublicBotInfo(viewedUserId);
+					if (cancelled || !botInfo) {
+						if (!cancelled) setCreator(null);
+						return;
+					}
+					// Resolve the owner's Matrix profile for the avatar +
+					// display name.  Failures here surface as null, not
+					// an error — we still want the bot's profile to
+					// render even if the engine knows the owner_id but
+					// Synapse hiccups on the lookup.
+					try {
+						const ownerProfile = await transport.getUserProfile(botInfo.owner_id as UserId);
+						if (cancelled) return;
+						setCreator({
+							userId: botInfo.owner_id as UserId,
+							displayName: ownerProfile.displayName,
+							avatarUrl: ownerProfile.avatarUrl,
+						});
+					} catch (err) {
+						console.warn("ProfileSheet: bot owner profile fetch failed", err);
+						if (!cancelled) {
+							// Fall back to mxid as the display name so we
+							// at least credit SOMEONE — better than
+							// silently hiding the row.
+							setCreator({
+								userId: botInfo.owner_id as UserId,
+								displayName: botInfo.owner_id,
+								avatarUrl: undefined,
+							});
+						}
+					}
+				} catch (err) {
+					console.warn("ProfileSheet: bot info fetch failed", err);
+					if (!cancelled) setCreator(null);
+				}
+			})();
+		} else {
+			setCreator(null);
+		}
 		return () => { cancelled = true; };
 		// `profile` intentionally not in deps — including it would re-
 		// run the fetch every time the fetch resolves (we just set
 		// profile in there), creating a loop.  We only want this to
 		// fire when the SHEET opens or the target user changes.
+		// `isBot` is in deps because the creator-lookup branch reads
+		// it to decide whether to fire the engine call.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [open, transport, viewedUserId, isSelf]);
+	}, [open, transport, viewedUserId, isSelf, isBot]);
 
 	// Clean up object URLs we made for previews.
 	useEffect(() => {
@@ -456,6 +527,59 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 							<p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap">
 								{bio}
 							</p>
+						)}
+
+						{isBot && creator && (
+							// "Created by" credit row.  Renders the
+							// owner's avatar + display name with a
+							// tappable target so viewers can pivot to
+							// the owner's profile.  Suppressed for
+							// self-edit (showing "Created by you" on
+							// your own bot is noise) and for non-bot
+							// profiles (humans don't have a creator).
+							//
+							// Falls back to a non-interactive row when
+							// no onViewProfile callback is wired.
+							<div className="pt-2 border-t border-border">
+								<div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">
+									Created by
+								</div>
+								{onViewProfile ? (
+									<button
+										type="button"
+										onClick={() => onViewProfile(creator.userId)}
+										className="flex items-center gap-2 w-full text-left rounded-md hover:bg-accent/40 -m-1 p-1 transition-colors"
+									>
+										<MatrixAvatar
+											mxc={creator.avatarUrl}
+											seed={creator.userId}
+											kind="user"
+											className="h-7 w-7"
+										/>
+										<div className="min-w-0">
+											<div className="text-sm truncate">{creator.displayName}</div>
+											<div className="text-[11px] text-muted-foreground font-mono truncate" title={creator.userId}>
+												{formatMxid(creator.userId, serverOf(transport?.currentUserId ?? null))}
+											</div>
+										</div>
+									</button>
+								) : (
+									<div className="flex items-center gap-2">
+										<MatrixAvatar
+											mxc={creator.avatarUrl}
+											seed={creator.userId}
+											kind="user"
+											className="h-7 w-7"
+										/>
+										<div className="min-w-0">
+											<div className="text-sm truncate">{creator.displayName}</div>
+											<div className="text-[11px] text-muted-foreground font-mono truncate" title={creator.userId}>
+												{formatMxid(creator.userId, serverOf(transport?.currentUserId ?? null))}
+											</div>
+										</div>
+									</div>
+								)}
+							</div>
 						)}
 
 						{!isBot && (

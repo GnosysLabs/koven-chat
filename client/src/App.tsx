@@ -2505,6 +2505,14 @@ export default function App() {
 						dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
 					}
 				}}
+				onViewProfile={(userId) => {
+					// Pivot the sheet from the bot to its creator.
+					// Single-state-update: setViewedUserId triggers the
+					// sheet's own re-fetch effect.  No close/reopen
+					// flicker because the dialog stays mounted; only the
+					// body re-paints.
+					setViewedUserId(userId);
+				}}
 			/>
 			<AppSettingsSheet
 				open={settingsOpen}

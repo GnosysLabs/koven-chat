@@ -136,6 +136,43 @@ export async function listMyBots(accessToken: string): Promise<BotSummary[]> {
 	return body.bots ?? [];
 }
 
+/** Public-safe slice of a bot row, keyed by Matrix id.  Returned by
+ * `GET /api/bots/by-mxid/:mxid` — readable by any caller, used by
+ * the profile sheet's "Created by" credit row.  Distinct from
+ * BotSummary: no usage stats, no provider config, no spending
+ * guardrails, no api-key sentinel.  Just the fields a third-party
+ * viewer is allowed to see. */
+export interface PublicBotInfo {
+	mxid: string;
+	owner_id: string;
+	display_name: string;
+	avatar_mxc: string | null;
+	bio: string;
+	created_at: number;
+}
+
+/** Fetch a bot's public-facing info by mxid.  Unauthenticated — the
+ * engine endpoint is intentionally open since bot ownership is
+ * publicly attributable (same as Discord/Slack bot developer
+ * credits).  Throws on non-2xx like the rest of this module; callers
+ * should treat 404 as "not a registered bot" and skip the credit
+ * row. */
+export async function getPublicBotInfo(mxid: string): Promise<PublicBotInfo | null> {
+	const r = await fetch(
+		`${ENGINE_URL}/api/bots/by-mxid/${encodeURIComponent(mxid)}`,
+		{ headers: { "Content-Type": "application/json" } },
+	);
+	if (r.status === 404) return null;
+	const text = await r.text();
+	let body: unknown = {};
+	try { body = text ? JSON.parse(text) : {}; } catch { /* keep raw */ }
+	if (!r.ok) {
+		const err = body as BotApiError;
+		throw new Error(err.detail ?? err.error ?? `HTTP ${r.status}`);
+	}
+	return (body as { bot: PublicBotInfo }).bot;
+}
+
 export async function createBot(
 	accessToken: string,
 	req: BotCreateRequest,
