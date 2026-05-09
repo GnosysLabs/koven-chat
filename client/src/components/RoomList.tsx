@@ -398,7 +398,17 @@ function InviteRow({
 	onAccept(): void | Promise<void>;
 	onDecline(): void | Promise<void>;
 }) {
-	const inviterLabel = room.inviter ?? room.dmUserId ?? "Someone";
+	// Prefer the inviter's display name; fall back to the localpart of
+	// their mxid if we couldn't resolve a profile (which happens for
+	// federated invites where we haven't synced the inviter's profile
+	// yet); fall back to "Someone" only when we have neither.  The full
+	// `@user:server` was reading as noise — Element / Discord both
+	// surface display names here.
+	const inviterLabel =
+		room.inviterDisplayName
+		?? localpartFromMxid(room.inviter)
+		?? localpartFromMxid(room.dmUserId)
+		?? "Someone";
 	// DMs: the row's primary label IS the inviter's display name
 	// already, so repeating their full @mxid below would just
 	// truncate noisily.  Use a clean verb-only subtitle for those.
@@ -441,4 +451,14 @@ function InviteRow({
 			</div>
 		</div>
 	);
+}
+
+/** Pull the localpart out of a Matrix user id ("@alice:server" → "alice").
+ * Returns undefined when given undefined or a malformed value, so callers
+ * can chain it through `??` to a default. */
+function localpartFromMxid(mxid: string | undefined): string | undefined {
+	if (!mxid) return undefined;
+	if (!mxid.startsWith("@")) return mxid;
+	const colon = mxid.indexOf(":");
+	return colon > 1 ? mxid.slice(1, colon) : mxid.slice(1);
 }

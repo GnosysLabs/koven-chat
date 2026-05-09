@@ -930,7 +930,10 @@ export function ChatPane({
 				<div className="border-t border-border p-4 flex items-center gap-3">
 					<div className="flex-1 text-xs text-muted-foreground leading-snug">
 						<span className="text-foreground font-medium">
-							{room.inviter ?? room.dmUserId ?? "Someone"}
+							{room.inviterDisplayName
+								|| (room.inviter ? localpartOf(room.inviter) : "")
+								|| (room.dmUserId ? localpartOf(room.dmUserId) : "")
+								|| "Someone"}
 						</span>{" "}
 						{room.kind === "dm" ? "wants to chat with you." : `invited you to ${room.name}.`}{" "}
 						Accept to view and reply.

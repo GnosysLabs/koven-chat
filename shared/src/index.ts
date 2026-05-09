@@ -50,6 +50,10 @@ export interface Room {
 	// clickable conversation.  `inviter` is who sent the invite.
 	isInvite?: boolean;
 	inviter?: UserId;
+	/** Inviter's display name, when we can resolve it from the room's
+	 * member state.  Populated only for invites; the request UI shows
+	 * this instead of the raw mxid. */
+	inviterDisplayName?: string;
 	// Federation: every Matrix room id is `!localpart:homeserver`, so
 	// we can tell from the id alone what server hosts it.  The local
 	// engine's moderation only applies to rooms hosted by the user's

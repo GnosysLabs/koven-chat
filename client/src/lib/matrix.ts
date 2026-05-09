@@ -3556,13 +3556,41 @@ export class MatrixTransport {
 
 		// Inviter for non-DM invites — useful for the request UI.
 		// matrix-js-sdk doesn't have a non-DM `getInviter`, so we read
-		// the membership event directly.
+		// the membership event directly.  Resolve the display name too
+		// so the request UI can show "Cyph3r invited you" instead of
+		// the noisy `@koven-admin:koven.chat invited you`.
 		let inviter: UserId | undefined;
+		let inviterDisplayName: string | undefined;
 		if (isInvite) {
 			const me = this.creds?.user_id;
 			if (me) {
 				const ev = r.currentState.getStateEvents("m.room.member", me);
 				inviter = (ev?.getSender() ?? undefined) as UserId | undefined;
+				if (inviter) {
+					// Three places to find the display name, fall through
+					// in priority order:
+					//   1. Inviter's own profile-as-seen-by-this-room
+					//      (the `displayname` they had when they invited
+					//       us; lives in our membership event's content).
+					//   2. The inviter's m.room.member event in this
+					//      room — invitee can read this even pre-join
+					//      since invites carry partial state.
+					//   3. The SDK's global User cache — populated from
+					//      /sync presence + profile fetches.
+					const myMemberContent = ev?.getContent() as
+						{ displayname?: unknown } | undefined;
+					const inviterMember = r.getMember(inviter);
+					const inviterUser = this.client?.getUser(inviter);
+					const fromMyEvent =
+						typeof myMemberContent?.displayname === "string"
+							? undefined // displayname here is OURS, not the inviter's
+							: undefined;
+					void fromMyEvent;
+					inviterDisplayName =
+						inviterMember?.name
+						?? inviterUser?.displayName
+						?? undefined;
+				}
 			}
 		}
 
@@ -3626,6 +3654,7 @@ export class MatrixTransport {
 			dmPresence,
 			isInvite: isInvite || undefined,
 			inviter,
+			inviterDisplayName,
 			homeserver,
 			isFederated,
 			myPowerLevel,
