@@ -1351,11 +1351,19 @@ function MessageRow({
 	// floor pipeline is that this content is never re-served.  No
 	// click-to-view affordance, no way for `expanded` to flip true.
 	const isCollapsed = !!collapse && (collapse.fastTrack || !expanded);
-	// Spacing rules:
-	//   - First row in the scroll: no top margin.
-	//   - Same-sender continuation: small (4px) — bubbles read as a unit.
-	//   - New sender / new group: generous (16px) for visual separation.
-	const topMargin = isFirst ? "" : continuesGroup ? "mt-1" : "mt-4";
+	// Vertical-rhythm rules.  Symmetric vertical padding (`py-`) so
+	// every row has equal breathing room above AND below — the
+	// timeline reads as steady rhythm and the gutter doubles as the
+	// landing zone for absolutely-positioned reaction pills.
+	//
+	// Sized so one row of reaction pills (~26px tall counting the
+	// 4px mt-1) fits between two adjacent bubbles WITHOUT pushing
+	// the next message:
+	//   - Continuation (same sender): py-3 (12px each side → 24px
+	//     between rows; one pill row at 22px fits with 2px clearance).
+	//   - New sender / group: py-4 (16px each side → 32px between
+	//     groups; same fit, more breathing room).
+	const rowPadding = continuesGroup ? "py-3" : "py-4";
 
 	// Discord-style mention highlight: left accent border + faint
 	// background wash spanning the full row.  Subtle but unmissable
@@ -1375,7 +1383,7 @@ function MessageRow({
 		return (
 			<div
 				data-message-id={message.id}
-				className={cn("flex gap-3 items-start py-1", topMargin, mentionHighlight)}
+				className={cn("flex gap-3 items-start", rowPadding, mentionHighlight)}
 			>
 				<AvatarSlot mxc={avatarMxc} seed={message.sender} hidden={continuesGroup} isBot={isBot} />
 				<div className="flex-1 min-w-0 pt-1 text-sm italic text-muted-foreground flex items-center gap-2">
@@ -1424,7 +1432,7 @@ function MessageRow({
 	return (
 		<div
 			data-message-id={message.id}
-			className={cn("flex gap-3 items-start", topMargin, mentionHighlight)}
+			className={cn("flex gap-3 items-start", rowPadding, mentionHighlight)}
 		>
 			<AvatarSlot mxc={avatarMxc} seed={message.sender} hidden={continuesGroup} isBot={isBot} />
 			<div className="flex-1 min-w-0">
@@ -1450,26 +1458,18 @@ function MessageRow({
 					</div>
 				)}
 				{message.replyTo && <ReplyQuote replyTo={message.replyTo} />}
-				{/* Bubble on the left, sidecar (seen-by + flag pill +
-				    hover actions) stacked in a thin column on the
-				    right.  Stacking keeps the sidecar's footprint
-				    constant whether or not the action toolbar is
-				    showing — without it, the toolbar appearing on
-				    hover would force the bubble to shrink to make
-				    room (very visible on full-width content like
-				    polls, but the same effect on text bubbles is a
-				    smaller-but-still-distracting reflow).  Universal
-				    stacking is steadier visually than branching by
-				    message kind. */}
-				<div className="flex items-start gap-2">
-					{/* Bubble + the things that visually belong under the
-					    bubble (link preview, reaction pills) live in the
-					    same min-w-0 column so the sidecar's reserved
-					    toolbar slot can't push them away from the bubble.
-					    Putting the pills AFTER this whole row would let
-					    the sidecar's h-8 reservation create an empty band
-					    between bubble and pills on short messages — which
-					    is what the user complained about. */}
+				{/* Bubble + sidecar.  Reactions are NOT in this row's
+				    flow — they're position:absolute below the bubble
+				    so adding/removing them never changes the row's
+				    height.  The row gets generous symmetric vertical
+				    padding (see rowPadding above) which doubles as
+				    the visual gutter where reactions land; even with
+				    one row of pills, reactions render INSIDE that
+				    gutter rather than pushing the next message down. */}
+				<div className="relative flex items-start gap-2">
+					{/* Bubble column.  Just bubble + url preview — no
+					    reactions here, those overlay below via the
+					    absolutely-positioned slot at row level. */}
 					<div className="flex flex-col min-w-0">
 						{isCollapsed ? (
 							<CollapsedBubble collapse={collapse!} onExpand={() => setExpanded(true)} />
@@ -1490,9 +1490,6 @@ function MessageRow({
 							// emotes to keep those layouts clean.  Also skipped
 							// in encrypted rooms — see roomEncrypted prop above.
 							<UrlPreviewSlot text={message.text} />
-						)}
-						{!isCollapsed && (
-							<ReactionPills reactions={reactions} onToggle={onToggleReactionPill} />
 						)}
 					</div>
 					<div className="flex flex-col items-start gap-1 shrink-0">
@@ -1554,6 +1551,23 @@ function MessageRow({
 							)}
 						</div>
 					</div>
+					{/* Reaction pills layer.  Absolutely positioned
+					    just below the bubble so adding / removing a
+					    reaction never changes the row's flow height —
+					    the next message stays exactly where it was.
+					    The pills render INTO the row's bottom padding
+					    (rowPadding above provides ~12px gutter, enough
+					    for one row of standard pills; many-pill
+					    messages may extend slightly into the gap to
+					    the next row, which is acceptable and only
+					    visible on edge cases).  `top-full` anchors
+					    the pills to the bubble row's bottom edge;
+					    `mt-1` matches the original spacing. */}
+					{!isCollapsed && reactions.length > 0 && (
+						<div className="absolute left-0 top-full mt-1">
+							<ReactionPills reactions={reactions} onToggle={onToggleReactionPill} />
+						</div>
+					)}
 				</div>
 			</div>
 			{canFlag && (
