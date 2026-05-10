@@ -2689,6 +2689,29 @@ export default function App() {
 				<ActiveCallView
 					call={activeCall}
 					peer={peerForCall(activeCall.roomId, state.rooms)}
+					activeRoomId={state.activeRoomId}
+					onClickThumbnail={(roomId) => {
+						// Navigating into the call's room from the
+						// thumbnail also has to fix activeSpace if
+						// that room lives in a non-current space —
+						// the room won't render in the timeline
+						// otherwise.  Reuses the same resolution
+						// path as openRoomFromNotification.
+						const room = roomsRef.current.find(r => r.id === roomId);
+						if (room) {
+							if (room.kind === "dm") {
+								dispatch({ type: "set_active_space", space: { kind: "dms" } });
+							} else if (room.parentSpaceIds.length > 0) {
+								dispatch({
+									type: "set_active_space",
+									space: { kind: "space", id: room.parentSpaceIds[0] as SpaceId },
+								});
+							} else {
+								dispatch({ type: "set_active_space", space: { kind: "rooms" } });
+							}
+						}
+						dispatch({ type: "set_active_room", roomId });
+					}}
 					onEnded={() => setActiveCall(null)}
 				/>
 			)}

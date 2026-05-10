@@ -1,27 +1,30 @@
-// Full-screen in-call surface.  Mounted while a call is connecting,
-// ringing (outbound), or connected.  Stays on top of everything else
-// so the user can switch rooms in the app underneath without losing
-// the call.
+// In-call surface.  Two modes:
 //
-// Layout:
-//   - Voice call: black canvas with the peer's avatar centered, a
-//     status string (Ringing… / Connecting… / Connected / Ended), and
-//     a bottom control bar (mute / hangup).
-//   - Video call: peer's video fills the surface; local self-preview
-//     pip in the bottom-right corner; same control bar (mute / camera
-//     / hangup).
+//   1. Full-screen (default) — `fixed inset-0` overlay.  Peer video
+//      or avatar fills the canvas, local self-preview pip in the
+//      bottom-right (video calls only), control bar at the bottom.
 //
-// State sync:  MatrixCall is an event emitter; we mirror the bits we
+//   2. Minimized (Discord-style PIP) — small floating thumbnail in
+//      the bottom-left corner with peer video / avatar + compact
+//      mute / hangup / expand controls.  Lets the user navigate
+//      around the rest of the app without losing the call.
+//
+// Auto-minimize: when the parent passes `activeRoomId` and it
+// stops matching the call's roomId (user navigated away from the
+// in-call room), the view collapses to the PIP automatically.
+// Re-expands manually via the expand button on the thumbnail.
+//
+// State sync: MatrixCall is an event emitter; we mirror the bits we
 // render into React state via listeners so the component re-paints on
 // State / FeedsChanged / Hangup.
 
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
-import { Mic, MicOff, PhoneOff, Video, VideoOff } from "lucide-react";
+import { Maximize2, Mic, MicOff, Minimize2, PhoneOff, Video, VideoOff } from "lucide-react";
 import { CallEvent, CallState, CallType } from "matrix-js-sdk/lib/webrtc/call";
 import type { MatrixCall } from "matrix-js-sdk/lib/webrtc/call";
-import type { UserId } from "@koven/shared";
+import type { RoomId, UserId } from "@koven/shared";
 import { cn } from "@/lib/utils";
 
 export interface ActiveCallViewProps {
@@ -35,20 +38,46 @@ export interface ActiveCallViewProps {
 		displayName?: string;
 		avatarMxc?: string;
 	};
+	// Currently-active room in the SPA.  When this stops matching
+	// the call's roomId the view auto-minimizes — Discord pattern,
+	// lets the user wander into other channels without losing the
+	// call.  Pass null to opt out of auto-minimize entirely (the
+	// view just stays in whatever mode the user picked).
+	activeRoomId?: RoomId | null;
+	// Click handler invoked when the user clicks the minimized
+	// thumbnail's body (NOT the controls).  Parent uses this to
+	// navigate back to the call's room — without it, the user has
+	// to find the room manually after re-expanding.  Optional; when
+	// omitted, the thumbnail click just expands without nav.
+	onClickThumbnail?(roomId: RoomId): void;
 	// Fires when the call has ended (locally or remotely) and the
 	// view should be unmounted by the parent.
 	onEnded(): void;
 }
 
-export function ActiveCallView({ call, peer, onEnded }: ActiveCallViewProps) {
+export function ActiveCallView({ call, peer, activeRoomId, onClickThumbnail, onEnded }: ActiveCallViewProps) {
 	const [state, setState] = useState<CallState>(call.state);
 	const [muted, setMuted] = useState<boolean>(call.isMicrophoneMuted());
 	const [videoMuted, setVideoMuted] = useState<boolean>(call.isLocalVideoMuted());
 	const [, forceFeedsRefresh] = useState(0);    // bump to refresh stream refs
+	// Manual minimize state (the user clicked the minimize button) +
+	// derived auto-minimize (the user navigated away).  We track them
+	// separately so navigating BACK to the call's room re-expands
+	// automatically only if the user hadn't manually minimized.
+	const [manuallyMinimized, setManuallyMinimized] = useState(false);
+	const autoMinimized = activeRoomId != null && activeRoomId !== call.roomId;
+	const minimized = manuallyMinimized || autoMinimized;
 
 	const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
 	const localVideoRef = useRef<HTMLVideoElement | null>(null);
 	const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+	// Refs for the same media in the minimized thumbnail.  Both modes
+	// render their own <video>/<audio> elements (mounting/unmounting
+	// the same element across modes mid-call drops the WebRTC stream
+	// reference and produces a black frame).  We re-bind srcObject to
+	// whichever set is currently mounted in the layout effect below.
+	const remoteVideoMiniRef = useRef<HTMLVideoElement | null>(null);
+	const remoteAudioMiniRef = useRef<HTMLAudioElement | null>(null);
 
 	const isVideo = call.type === CallType.Video;
 	// Peer identity — see prop docstring.  Caller (App.tsx) resolves
@@ -82,20 +111,25 @@ export function ActiveCallView({ call, peer, onEnded }: ActiveCallViewProps) {
 		};
 	}, [call, onEnded]);
 
-	// Bind WebRTC streams to the media elements every time feeds
-	// change.  setting srcObject is idempotent if the stream is the
-	// same instance, so we just always reattach.
+	// Bind WebRTC streams to whichever set of media elements is
+	// currently mounted (full-screen vs minimized).  setting
+	// srcObject is idempotent if the stream is the same instance,
+	// so we just always reattach to every ref that has a node.
 	useEffect(() => {
-		const remoteVideo = remoteVideoRef.current;
-		const remoteAudio = remoteAudioRef.current;
 		const remoteStream = call.remoteUsermediaStream ?? null;
-		if (remoteVideo) remoteVideo.srcObject = remoteStream;
+		// Full-screen layout video / audio.
+		if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStream;
+		if (remoteAudioRef.current) remoteAudioRef.current.srcObject = remoteStream;
+		// Minimized layout video / audio.  Only one of (full-screen,
+		// minimized) is mounted at any time so the other branch's
+		// refs are null and the assignment no-ops cleanly.
+		if (remoteVideoMiniRef.current) remoteVideoMiniRef.current.srcObject = remoteStream;
+		if (remoteAudioMiniRef.current) remoteAudioMiniRef.current.srcObject = remoteStream;
 		// Even on a video call we route audio through a dedicated
 		// <audio> element — it lets the OS treat the call audio as a
 		// communication stream (echo-cancellation, ducking) and
 		// behaves more reliably than relying on <video> playback for
 		// audio-only flow.
-		if (remoteAudio) remoteAudio.srcObject = remoteStream;
 
 		const localVideo = localVideoRef.current;
 		const localStream = call.localUsermediaStream ?? null;
@@ -138,6 +172,100 @@ export function ActiveCallView({ call, peer, onEnded }: ActiveCallViewProps) {
 		null;
 
 	const showRemoteVideo = isVideo && state === CallState.Connected && !!call.remoteUsermediaStream;
+
+	if (minimized) {
+		// Compact floating thumbnail in the bottom-left.  Click body
+		// to navigate back to the call's room (and clear the manual-
+		// minimize so re-entering the room re-expands fullscreen);
+		// dedicated buttons for mute / hangup / explicit expand.
+		const goBackToCallRoom = () => {
+			setManuallyMinimized(false);
+			if (onClickThumbnail) onClickThumbnail(call.roomId as RoomId);
+		};
+		return (
+			<div className="fixed bottom-4 left-4 z-[100] w-72 rounded-xl bg-black border border-white/15 shadow-2xl overflow-hidden flex flex-col">
+				{/* Audio still needs to play in minimized mode —
+				    re-mounted here so the stream stays bound. */}
+				<audio ref={remoteAudioMiniRef} autoPlay playsInline />
+
+				{/* Body: peer video or avatar + name.  Click to
+				    navigate back / expand. */}
+				<button
+					type="button"
+					onClick={goBackToCallRoom}
+					className="relative h-40 w-full bg-black overflow-hidden cursor-pointer"
+					aria-label={`Return to call with ${peerName}`}
+				>
+					{showRemoteVideo ? (
+						<video
+							ref={remoteVideoMiniRef}
+							autoPlay
+							playsInline
+							className="h-full w-full object-cover"
+						/>
+					) : (
+						<div className="h-full w-full flex flex-col items-center justify-center gap-2 text-white">
+							<MatrixAvatar
+								mxc={peerAvatar}
+								seed={peerUserId}
+								className="h-14 w-14"
+							/>
+							<div className="text-xs font-medium truncate max-w-[14rem] px-2 text-center">
+								{peerName}
+							</div>
+							{statusLabel && (
+								<div className="text-[10px] text-white/60">{statusLabel}</div>
+							)}
+						</div>
+					)}
+					{showRemoteVideo && (
+						<div className="absolute bottom-1 left-2 text-[11px] text-white/80 px-1.5 py-0.5 rounded bg-black/50 backdrop-blur-sm truncate max-w-[14rem]">
+							{peerName}
+						</div>
+					)}
+				</button>
+
+				{/* Compact control strip.  Mute / hangup / expand —
+				    same primary actions as full-screen, miniaturized. */}
+				<div className="h-11 bg-black/80 border-t border-white/10 flex items-center justify-center gap-1.5">
+					<CompactControl
+						active={!muted}
+						onClick={toggleMic}
+						ariaLabel={muted ? "Unmute microphone" : "Mute microphone"}
+					>
+						{muted ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+					</CompactControl>
+					{isVideo && (
+						<CompactControl
+							active={!videoMuted}
+							onClick={toggleCamera}
+							ariaLabel={videoMuted ? "Turn camera on" : "Turn camera off"}
+						>
+							{videoMuted ? <VideoOff className="h-4 w-4" /> : <Video className="h-4 w-4" />}
+						</CompactControl>
+					)}
+					<CompactControl
+						active={true}
+						onClick={() => {
+							setManuallyMinimized(false);
+							if (onClickThumbnail) onClickThumbnail(call.roomId as RoomId);
+						}}
+						ariaLabel="Expand call"
+					>
+						<Maximize2 className="h-4 w-4" />
+					</CompactControl>
+					<button
+						type="button"
+						onClick={hangup}
+						className="h-8 w-8 rounded-full flex items-center justify-center bg-destructive hover:bg-destructive/90 text-destructive-foreground"
+						aria-label="End call"
+					>
+						<PhoneOff className="h-4 w-4" />
+					</button>
+				</div>
+			</div>
+		);
+	}
 
 	return (
 		<div className="fixed inset-0 z-[100] bg-black flex flex-col">
@@ -189,6 +317,20 @@ export function ActiveCallView({ call, peer, onEnded }: ActiveCallViewProps) {
 						{statusLabel}
 					</div>
 				)}
+
+				{/* Minimize button — top-right corner.  Collapses the
+				    full-screen surface to the floating thumbnail so
+				    the user can navigate the rest of the app while
+				    staying in the call (Discord pattern). */}
+				<button
+					type="button"
+					onClick={() => setManuallyMinimized(true)}
+					className="absolute top-4 right-4 h-9 w-9 rounded-full flex items-center justify-center bg-white/15 text-white hover:bg-white/25"
+					aria-label="Minimize call"
+					title="Minimize call"
+				>
+					<Minimize2 className="h-4 w-4" />
+				</button>
 			</div>
 
 			{/* Control bar — fixed height at the bottom of the surface. */}
@@ -220,6 +362,29 @@ export function ActiveCallView({ call, peer, onEnded }: ActiveCallViewProps) {
 				</Button>
 			</div>
 		</div>
+	);
+}
+
+function CompactControl({
+	active, onClick, ariaLabel, children,
+}: {
+	active: boolean;
+	onClick(): void;
+	ariaLabel: string;
+	children: React.ReactNode;
+}) {
+	return (
+		<button
+			type="button"
+			onClick={onClick}
+			aria-label={ariaLabel}
+			className={cn(
+				"h-8 w-8 rounded-full flex items-center justify-center transition-colors",
+				active ? "bg-white/15 text-white hover:bg-white/25" : "bg-white/40 text-black hover:bg-white/55",
+			)}
+		>
+			{children}
+		</button>
 	);
 }
 

@@ -66,6 +66,21 @@ jobs:
   build:
     strategy:
       fail-fast: false
+      # Serialize platform builds so they don't race each other on the
+      # updater-manifest merge.  tauri-action with `includeUpdaterJson:
+      # true` has every platform job read the existing latest.json off
+      # the draft release, splice in its own entry, then DELETE the old
+      # asset and upload the new one.  When two platform jobs run in
+      # parallel and both reach the delete-then-upload step at roughly
+      # the same time, the second one's "delete" call hits a 404
+      # because the first one already replaced the asset — surfaces as
+      # "Not Found - https://docs.github.com/rest/releases/assets#delete-a-release-asset".
+      # Windows lost the race on every release we tried (slowest of the
+      # three so it always finished last and always hit the stale
+      # asset id).  max-parallel: 1 makes platform builds run one
+      # after another; total wall-clock goes up by ~2x but the
+      # deterministic failure goes away.
+      max-parallel: 1
       matrix:
         include:
           # Apple Silicon only — explicitly opted out of Intel.
