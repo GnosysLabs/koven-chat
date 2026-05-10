@@ -850,39 +850,70 @@ export function BotEditForm({
 	// secrets recoverably).  Done button drops the banner + fires
 	// onSaved.
 	if (justCreatedWebhooksBatch && pendingPostSave) {
+		const n = justCreatedWebhooksBatch.length;
+		const plural = n === 1 ? "" : "s";
 		return (
-			<div className="flex-1 min-w-0 flex flex-col bg-background overflow-auto p-6 gap-4">
-				<div className="rounded-md border border-primary/40 bg-primary/5 p-5 space-y-4 max-w-3xl">
-					<div className="flex items-start gap-3">
-						<AlertCircle className="h-5 w-5 text-primary mt-0.5 shrink-0" />
-						<div>
-							<div className="font-semibold text-base">Save these now</div>
-							<div className="text-sm text-muted-foreground mt-1">
-								We just created {justCreatedWebhooksBatch.length} webhook{justCreatedWebhooksBatch.length === 1 ? "" : "s"} for your bot.  The signing secret{justCreatedWebhooksBatch.length === 1 ? "" : "s"} below {justCreatedWebhooksBatch.length === 1 ? "is" : "are"} shown ONCE — copy {justCreatedWebhooksBatch.length === 1 ? "it" : "them"} now or you&rsquo;ll have to roll the secret to recover.  The webhook URLs are visible from the Webhooks tab any time.
+			<div className="flex-1 min-w-0 flex flex-col bg-background overflow-auto">
+				<div className="flex-1 flex items-start justify-center px-6 py-10">
+					<div className="w-full max-w-2xl">
+						{/* Hero header — brand-tinted icon disc + headline.
+						    The disc echoes the BotBadge / FounderBadge
+						    visual language so the moment feels native to
+						    Koven, not a generic "alert" surface. */}
+						<div className="flex flex-col items-center text-center mb-8">
+							<div className="relative mb-4">
+								<div className="absolute inset-0 rounded-full bg-primary/30 blur-xl" />
+								<div className="relative h-14 w-14 rounded-full bg-primary/15 ring-1 ring-primary/40 flex items-center justify-center text-primary">
+									<Webhook className="h-7 w-7" strokeWidth={2} />
+								</div>
 							</div>
+							<h2 className="text-xl font-semibold tracking-tight">
+								{n === 1 ? "Webhook ready" : `${n} webhooks ready`}
+							</h2>
+							<p className="text-sm text-muted-foreground mt-2 max-w-md leading-relaxed">
+								Copy the signing secret{plural} now — {n === 1 ? "it" : "they"} won&rsquo;t be shown again. The webhook URL{plural} {n === 1 ? "stays" : "stay"} visible in the Webhooks tab.
+							</p>
 						</div>
-					</div>
-					<div className="space-y-4">
-						{justCreatedWebhooksBatch.map(w => (
-							<div key={w.id} className="rounded border border-border bg-card p-3 space-y-2">
-								<div className="text-sm font-medium">{w.label || "(unlabeled)"}</div>
-								<CopyableField label="URL" value={webhookUrlFor(w.token)} />
-								{w.secret && <CopyableField label="Signing secret" value={w.secret} />}
-							</div>
-						))}
-					</div>
-					<div className="flex justify-end pt-2">
-						<Button
-							type="button"
-							onClick={async () => {
-								const saved = pendingPostSave;
-								setJustCreatedWebhooksBatch(null);
-								setPendingPostSave(null);
-								if (saved) await onSaved(saved);
-							}}
-						>
-							Done
-						</Button>
+
+						{/* Per-webhook card.  Subtle border + label chip
+						    at the top so multiple webhooks visually
+						    separate without feeling like nested boxes. */}
+						<div className="space-y-3">
+							{justCreatedWebhooksBatch.map(w => (
+								<div
+									key={w.id}
+									className="rounded-lg border border-border/70 bg-card/60 backdrop-blur-sm overflow-hidden"
+								>
+									<div className="px-4 py-2.5 border-b border-border/50 bg-muted/30 flex items-center gap-2">
+										<Webhook className="h-3.5 w-3.5 text-primary/80 shrink-0" />
+										<span className="text-sm font-medium truncate">
+											{w.label || <span className="text-muted-foreground italic">unlabeled</span>}
+										</span>
+									</div>
+									<div className="p-4 space-y-3">
+										<CopyableField label="Webhook URL" value={webhookUrlFor(w.token)} />
+										{w.secret && (
+											<CopyableField label="Signing secret" value={w.secret} secret />
+										)}
+									</div>
+								</div>
+							))}
+						</div>
+
+						<div className="flex justify-end mt-6">
+							<Button
+								type="button"
+								size="lg"
+								onClick={async () => {
+									const saved = pendingPostSave;
+									setJustCreatedWebhooksBatch(null);
+									setPendingPostSave(null);
+									if (saved) await onSaved(saved);
+								}}
+							>
+								I&rsquo;ve copied {n === 1 ? "it" : "them"}
+							</Button>
+						</div>
 					</div>
 				</div>
 			</div>
@@ -2544,10 +2575,10 @@ function WebhooksTab({
 						<AlertCircle className="h-4 w-4" />
 						Save these now — the secret is shown once
 					</div>
-					<div className="space-y-2 font-mono text-xs">
+					<div className="space-y-3">
 						<CopyableField label="Webhook URL" value={webhookUrlFor(justCreated.token)} />
 						{justCreated.secret && (
-							<CopyableField label="Signing secret" value={justCreated.secret} />
+							<CopyableField label="Signing secret" value={justCreated.secret} secret />
 						)}
 					</div>
 					<div className="text-xs text-muted-foreground">
@@ -2670,34 +2701,89 @@ function WebhooksTab({
 	);
 }
 
-function CopyableField({ label, value }: { label: string; value: string }) {
+function CopyableField({
+	label,
+	value,
+	secret = false,
+}: {
+	label: string;
+	value: string;
+	/** Renders the value as obscured dots until the user clicks to
+	 * reveal.  Used for signing secrets so a bystander glance doesn't
+	 * leak them.  Copy still works while obscured. */
+	secret?: boolean;
+}) {
 	const [copied, setCopied] = useState(false);
+	const [revealed, setRevealed] = useState(!secret);
+
+	const onCopy = async () => {
+		try {
+			await navigator.clipboard.writeText(value);
+			setCopied(true);
+			setTimeout(() => setCopied(false), 1800);
+		} catch {
+			// User can still triple-click + ⌘C from the rendered text.
+		}
+	};
+
+	const display = revealed ? value : "•".repeat(Math.min(40, value.length));
+
 	return (
-		<div className="flex items-center gap-2">
-			<span className="text-muted-foreground shrink-0 w-32 text-[11px] uppercase tracking-wider font-sans">{label}</span>
-			<input
-				readOnly
-				value={value}
-				className="flex-1 min-w-0 px-2 py-1 rounded border border-input bg-muted/30 text-xs"
-				onFocus={e => e.currentTarget.select()}
-			/>
-			<button
-				type="button"
-				onClick={async () => {
-					try {
-						await navigator.clipboard.writeText(value);
-						setCopied(true);
-						setTimeout(() => setCopied(false), 1500);
-					} catch {
-						// ignored — user can still select + copy manually
-					}
-				}}
-				className="px-2 py-1 rounded text-xs hover:bg-accent inline-flex items-center gap-1 shrink-0"
-				title="Copy to clipboard"
-			>
-				<Copy className="h-3 w-3" />
-				{copied ? "Copied" : "Copy"}
-			</button>
+		<div className="space-y-1.5">
+			<div className="flex items-center justify-between gap-2">
+				<span className="text-[10.5px] uppercase tracking-[0.08em] font-medium text-muted-foreground">
+					{label}
+				</span>
+				{secret && (
+					<button
+						type="button"
+						onClick={() => setRevealed(r => !r)}
+						className="text-[10.5px] uppercase tracking-[0.08em] font-medium text-muted-foreground hover:text-foreground inline-flex items-center gap-1 transition-colors"
+					>
+						{revealed ? (
+							<>
+								<EyeOff className="h-3 w-3" /> Hide
+							</>
+						) : (
+							<>
+								<Eye className="h-3 w-3" /> Reveal
+							</>
+						)}
+					</button>
+				)}
+			</div>
+			<div className="group flex items-stretch rounded-md border border-border/80 bg-background/40 overflow-hidden focus-within:border-primary/60 focus-within:ring-1 focus-within:ring-primary/30 transition-colors">
+				<div
+					className="flex-1 min-w-0 px-3 py-2 font-mono text-xs select-all overflow-x-auto whitespace-nowrap text-foreground/90 [scrollbar-width:thin]"
+					onClick={(e) => {
+						// One-click select makes ⌘C work without a triple
+						// click — chrome strips the trailing newline that
+						// triple-click on a div otherwise picks up.
+						const range = document.createRange();
+						range.selectNodeContents(e.currentTarget);
+						const sel = window.getSelection();
+						sel?.removeAllRanges();
+						sel?.addRange(range);
+					}}
+					title={value}
+				>
+					{display}
+				</div>
+				<button
+					type="button"
+					onClick={onCopy}
+					className={cn(
+						"shrink-0 px-3 inline-flex items-center gap-1.5 text-xs font-medium border-l border-border/80 transition-colors",
+						copied
+							? "bg-primary/15 text-primary"
+							: "text-muted-foreground hover:bg-accent hover:text-foreground",
+					)}
+					title="Copy to clipboard"
+				>
+					<Copy className="h-3.5 w-3.5" />
+					{copied ? "Copied" : "Copy"}
+				</button>
+			</div>
 		</div>
 	);
 }

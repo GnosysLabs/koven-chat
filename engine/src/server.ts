@@ -1309,6 +1309,29 @@ export function startServer(): void {
 			//         (caller may retry)
 			{
 				const m = path.match(/^\/api\/webhooks\/in\/([A-Za-z0-9_\-]+)$/);
+				// Friendly probe for browsers + uptime checks.  Pasting
+				// the webhook URL into the address bar is the most
+				// natural way to verify "is this URL real" — without
+				// this branch a GET falls through every handler and
+				// hits the appservice gate, which returns
+				// {"errcode":"M_FORBIDDEN","error":"bad token"}.  Looks
+				// like a setup error when it's actually just wrong
+				// method.  HEAD covers uptime probes.
+				if ((req.method === "GET" || req.method === "HEAD") && m) {
+					const hook = getBotWebhookByToken(m[1]!);
+					if (!hook) {
+						return json({ errcode: "M_NOT_FOUND", error: "unknown webhook token" }, { status: 404 });
+					}
+					if (req.method === "HEAD") {
+						return new Response(null, { status: 200, headers: corsHeaders() });
+					}
+					return json({
+						ok: true,
+						endpoint: "koven inbound webhook",
+						hint: "POST your payload to this URL. Use Content-Type: application/json (or text/plain). If you generated a signing secret, include X-Hub-Signature-256 header with HMAC-SHA256 of the raw body.",
+						webhook: hook.label || "(unlabeled)",
+					});
+				}
 				if (req.method === "POST" && m) {
 					const token = m[1]!;
 					const hook = getBotWebhookByToken(token);
