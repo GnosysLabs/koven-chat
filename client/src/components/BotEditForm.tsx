@@ -68,6 +68,14 @@ import {
 	type WebhookCreated,
 	type WebhookDelivery,
 } from "@/lib/webhooks-api";
+import {
+	listBotOutboundWebhooks,
+	createBotOutboundWebhook,
+	deleteBotOutboundWebhook,
+	type OutboundWebhook,
+	type OutboundParam,
+	type OutboundHeader,
+} from "@/lib/outbound-webhooks-api";
 import { useTransport } from "@/lib/transportContext";
 import { claimBellOffset, releaseBellOffset } from "@/state/bell-offset";
 import { cn } from "@/lib/utils";
@@ -2422,13 +2430,66 @@ function countServersInPaste(obj: unknown): number {
 
 // ─── Webhooks tab ────────────────────────────────────────────────────
 //
-// List + create + delete + recent-deliveries view for the bot's
-// inbound webhooks.  Disabled in create mode (need a bot id to
-// hang webhooks off of) — bot must be saved first, then revisit
-// this tab.  Mirrors the ToolsTab pattern: inline form for adding,
-// list of existing rows below, expandable per-row debug log.
+// Two sub-tabs within the same tab pane:
+//
+//   - Inbound  — external services POST to a Koven URL, the bot
+//                processes the payload via its system prompt and
+//                posts the result into a room.
+//   - Outbound — the bot's LLM gets HTTP-request tools it can call
+//                ("fetch_news" → GET https://api.example.com/news?q={q}),
+//                fires them when it decides to, and uses the
+//                response in its reply.
+//
+// WebhooksTab is the thin wrapper that picks which sub-tab is
+// visible.  The actual logic lives in InboundWebhooksSubTab and
+// OutboundWebhooksSubTab below — keeps each focused, since the
+// forms are quite different (room target + signing for inbound;
+// URL template + params + headers for outbound).
 
-function WebhooksTab({
+function WebhooksTab(props: {
+	bot: BotSummary | null;
+	accessToken: string | null;
+	pendingWebhooks: PendingWebhook[];
+	onPendingChange(next: PendingWebhook[]): void;
+}) {
+	type Sub = "inbound" | "outbound";
+	const [sub, setSub] = useState<Sub>("inbound");
+
+	const subs: { key: Sub; label: string; hint: string }[] = [
+		{ key: "inbound",  label: "Inbound",  hint: "Services post to a URL the bot relays" },
+		{ key: "outbound", label: "Outbound", hint: "Tools the bot can call when it decides to" },
+	];
+
+	return (
+		<div className="space-y-5 max-w-3xl">
+			<div className="inline-flex rounded-md border border-border bg-muted/30 p-0.5">
+				{subs.map(s => (
+					<button
+						key={s.key}
+						type="button"
+						onClick={() => setSub(s.key)}
+						title={s.hint}
+						className={cn(
+							"px-3 py-1.5 text-sm rounded transition-colors",
+							sub === s.key
+								? "bg-background text-foreground shadow-sm"
+								: "text-muted-foreground hover:text-foreground",
+						)}
+					>
+						{s.label}
+					</button>
+				))}
+			</div>
+			{sub === "inbound" ? (
+				<InboundWebhooksSubTab {...props} />
+			) : (
+				<OutboundWebhooksSubTab bot={props.bot} accessToken={props.accessToken} />
+			)}
+		</div>
+	);
+}
+
+function InboundWebhooksSubTab({
 	bot,
 	accessToken,
 	pendingWebhooks,
@@ -2606,7 +2667,7 @@ function WebhooksTab({
 		<div className="space-y-6 max-w-3xl">
 			<div className="flex items-center gap-2 text-sm text-muted-foreground">
 				<Webhook className="h-4 w-4" />
-				<span>External services post to a Koven URL, this bot relays the payload into a room.  Recognises GitHub by default; everything else falls back to a JSON code block.</span>
+				<span>External services post to a Koven URL; this bot processes the payload through its system prompt and posts the response into a room.</span>
 			</div>
 
 			{isCreateMode && (
@@ -2784,6 +2845,349 @@ function WebhooksTab({
 					))}
 				</div>
 			)}
+		</div>
+	);
+}
+
+// ─── Outbound webhooks sub-tab ──────────────────────────────────────
+//
+// Each row registers as an OpenAI tool definition the bot's LLM can
+// call.  The user supplies: tool name (LLM sees it), description
+// (LLM uses it to decide when to call), URL template with optional
+// {placeholder} tokens, params (the LLM args, mapped to URL or body),
+// and optional static headers (auth tokens).  Engine fires the HTTP
+// request when the model invokes the tool and hands the response
+// back to the LLM as a tool result.
+//
+// Edit-mode only — outbound webhooks need a bot id to attach to.
+// In create mode we show a "save the bot first" placeholder rather
+// than building a queued-pending flow (the inbound queue exists
+// because users want to define inbound URLs before the bot has
+// landed; outbound URLs are an after-the-fact add).
+
+function OutboundWebhooksSubTab({
+	bot,
+	accessToken,
+}: {
+	bot: BotSummary | null;
+	accessToken: string | null;
+}) {
+	const isCreateMode = bot === null;
+
+	const [hooks, setHooks] = useState<OutboundWebhook[]>([]);
+	const [loading, setLoading] = useState(!isCreateMode);
+	const [listError, setListError] = useState<string | null>(null);
+
+	// Add-form state.  All fields except name/url are optional;
+	// params + headers start empty and grow via the +/- buttons.
+	const [formName, setFormName] = useState("");
+	const [formDescription, setFormDescription] = useState("");
+	const [formMethod, setFormMethod] = useState<"GET" | "POST">("GET");
+	const [formUrl, setFormUrl] = useState("");
+	const [formParams, setFormParams] = useState<OutboundParam[]>([]);
+	const [formHeaders, setFormHeaders] = useState<OutboundHeader[]>([]);
+	const [submitting, setSubmitting] = useState(false);
+	const [formError, setFormError] = useState<string | null>(null);
+
+	useEffect(() => {
+		if (isCreateMode || !accessToken || !bot) return;
+		let cancelled = false;
+		setLoading(true);
+		listBotOutboundWebhooks(accessToken, bot.id)
+			.then(rows => { if (!cancelled) { setHooks(rows); setListError(null); } })
+			.catch(err => { if (!cancelled) setListError(err instanceof Error ? err.message : String(err)); })
+			.finally(() => { if (!cancelled) setLoading(false); });
+		return () => { cancelled = true; };
+	}, [isCreateMode, accessToken, bot]);
+
+	async function refresh() {
+		if (!accessToken || !bot) return;
+		try {
+			const rows = await listBotOutboundWebhooks(accessToken, bot.id);
+			setHooks(rows);
+			setListError(null);
+		} catch (err) {
+			setListError(err instanceof Error ? err.message : String(err));
+		}
+	}
+
+	function resetForm() {
+		setFormName("");
+		setFormDescription("");
+		setFormMethod("GET");
+		setFormUrl("");
+		setFormParams([]);
+		setFormHeaders([]);
+		setFormError(null);
+	}
+
+	async function handleCreate(e: React.FormEvent) {
+		e.preventDefault();
+		setFormError(null);
+		if (!accessToken || !bot) return;
+		const name = formName.trim();
+		const url = formUrl.trim();
+		if (name.length === 0) { setFormError("Tool name required"); return; }
+		if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+			setFormError("Tool name may only contain letters, digits, underscore, hyphen");
+			return;
+		}
+		if (url.length === 0) { setFormError("URL required"); return; }
+		setSubmitting(true);
+		try {
+			await createBotOutboundWebhook({
+				accessToken,
+				botId: bot.id,
+				name,
+				description: formDescription.trim(),
+				method: formMethod,
+				url,
+				params: formParams.filter(p => p.name.trim().length > 0),
+				headers: formHeaders.filter(h => h.name.trim().length > 0),
+			});
+			resetForm();
+			await refresh();
+		} catch (err) {
+			setFormError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setSubmitting(false);
+		}
+	}
+
+	async function handleDelete(wid: number) {
+		if (!accessToken || !bot) return;
+		if (!window.confirm("Delete this outbound tool?  The bot will lose access to it immediately.")) return;
+		try {
+			await deleteBotOutboundWebhook({ accessToken, botId: bot.id, webhookId: wid });
+			await refresh();
+		} catch (err) {
+			window.alert(`Couldn't delete: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	if (isCreateMode) {
+		return (
+			<div className="text-sm text-muted-foreground border border-border/60 rounded-md p-4 bg-muted/30">
+				Save the bot first, then add outbound HTTP tools — they need an existing bot to attach to.
+			</div>
+		);
+	}
+
+	if (loading) {
+		return <div className="text-sm text-muted-foreground">Loading…</div>;
+	}
+
+	return (
+		<div className="space-y-5">
+			<div className="flex items-start gap-2 text-sm text-muted-foreground">
+				<Webhook className="h-4 w-4 mt-0.5 shrink-0 -scale-x-100" />
+				<span>Define HTTP requests the bot can fire when its LLM decides to. The model picks the tool by <em>name</em> + <em>description</em>, fills in <em>params</em>, and uses the response in its reply. Use for news / weather / status APIs, n8n endpoints, internal services — anything that returns a useful body in one HTTP call.</span>
+			</div>
+
+			{listError && <div className="text-sm text-destructive">{listError}</div>}
+
+			<form onSubmit={handleCreate} className="rounded-md border border-border p-4 space-y-3">
+				<div className="text-sm font-medium">Add a tool</div>
+				<div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+					<div className="space-y-1">
+						<Label htmlFor="ob-name">Name</Label>
+						<Input
+							id="ob-name"
+							value={formName}
+							onChange={e => setFormName(e.target.value)}
+							placeholder="e.g. fetch_news"
+							maxLength={64}
+							spellCheck={false}
+						/>
+					</div>
+					<div className="space-y-1">
+						<Label htmlFor="ob-method">Method</Label>
+						<select
+							id="ob-method"
+							value={formMethod}
+							onChange={e => setFormMethod(e.target.value as "GET" | "POST")}
+							className="h-9 w-full px-2 rounded border border-input bg-background text-sm"
+						>
+							<option value="GET">GET</option>
+							<option value="POST">POST</option>
+						</select>
+					</div>
+				</div>
+				<div className="space-y-1">
+					<Label htmlFor="ob-description">Description (what the LLM uses to decide when to call)</Label>
+					<Input
+						id="ob-description"
+						value={formDescription}
+						onChange={e => setFormDescription(e.target.value)}
+						placeholder="e.g. Fetches today's top news headlines on a topic"
+						maxLength={500}
+					/>
+				</div>
+				<div className="space-y-1">
+					<Label htmlFor="ob-url">URL <span className="text-muted-foreground font-normal">(use {`{paramname}`} for substitution)</span></Label>
+					<Input
+						id="ob-url"
+						value={formUrl}
+						onChange={e => setFormUrl(e.target.value)}
+						placeholder="https://api.example.com/news?q={topic}"
+						spellCheck={false}
+					/>
+				</div>
+
+				{/* Params editor */}
+				<div className="space-y-2">
+					<div className="flex items-center justify-between">
+						<Label>Parameters <span className="text-muted-foreground font-normal text-xs">(arguments the LLM fills in)</span></Label>
+						<button
+							type="button"
+							onClick={() => setFormParams(p => [...p, { name: "", description: "", required: false, in: "url" }])}
+							className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+						>
+							<Plus className="h-3 w-3" /> Add
+						</button>
+					</div>
+					{formParams.length === 0 && (
+						<div className="text-xs text-muted-foreground italic">No parameters yet — add one if your URL has placeholders or your POST needs body fields.</div>
+					)}
+					{formParams.map((p, i) => (
+						<div key={i} className="grid grid-cols-12 gap-2 items-start">
+							<input
+								className="col-span-3 h-8 px-2 rounded border border-input bg-background text-xs font-mono"
+								placeholder="name"
+								value={p.name}
+								onChange={e => setFormParams(arr => arr.map((x, idx) => idx === i ? { ...x, name: e.target.value } : x))}
+							/>
+							<input
+								className="col-span-5 h-8 px-2 rounded border border-input bg-background text-xs"
+								placeholder="description (helps the LLM know what to put here)"
+								value={p.description}
+								onChange={e => setFormParams(arr => arr.map((x, idx) => idx === i ? { ...x, description: e.target.value } : x))}
+							/>
+							<select
+								className="col-span-2 h-8 px-1 rounded border border-input bg-background text-xs"
+								value={p.in}
+								onChange={e => setFormParams(arr => arr.map((x, idx) => idx === i ? { ...x, in: e.target.value as "url" | "body" } : x))}
+								title="url = path/query substitution; body = JSON body field (POST only)"
+							>
+								<option value="url">URL</option>
+								<option value="body">Body</option>
+							</select>
+							<label className="col-span-1 h-8 inline-flex items-center justify-center text-xs text-muted-foreground select-none" title="required">
+								<input
+									type="checkbox"
+									checked={p.required}
+									onChange={e => setFormParams(arr => arr.map((x, idx) => idx === i ? { ...x, required: e.target.checked } : x))}
+								/>
+							</label>
+							<button
+								type="button"
+								onClick={() => setFormParams(arr => arr.filter((_, idx) => idx !== i))}
+								className="col-span-1 h-8 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 inline-flex items-center justify-center"
+								title="Remove"
+							>
+								<Trash2 className="h-3.5 w-3.5" />
+							</button>
+						</div>
+					))}
+				</div>
+
+				{/* Headers editor */}
+				<div className="space-y-2">
+					<div className="flex items-center justify-between">
+						<Label>Headers <span className="text-muted-foreground font-normal text-xs">(auth tokens etc.)</span></Label>
+						<button
+							type="button"
+							onClick={() => setFormHeaders(h => [...h, { name: "", value: "" }])}
+							className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+						>
+							<Plus className="h-3 w-3" /> Add
+						</button>
+					</div>
+					{formHeaders.map((h, i) => (
+						<div key={i} className="grid grid-cols-12 gap-2 items-start">
+							<input
+								className="col-span-4 h-8 px-2 rounded border border-input bg-background text-xs font-mono"
+								placeholder="header name"
+								value={h.name}
+								onChange={e => setFormHeaders(arr => arr.map((x, idx) => idx === i ? { ...x, name: e.target.value } : x))}
+							/>
+							<input
+								className="col-span-7 h-8 px-2 rounded border border-input bg-background text-xs font-mono"
+								placeholder="value"
+								value={h.value}
+								type="password"
+								onChange={e => setFormHeaders(arr => arr.map((x, idx) => idx === i ? { ...x, value: e.target.value } : x))}
+							/>
+							<button
+								type="button"
+								onClick={() => setFormHeaders(arr => arr.filter((_, idx) => idx !== i))}
+								className="col-span-1 h-8 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 inline-flex items-center justify-center"
+								title="Remove"
+							>
+								<Trash2 className="h-3.5 w-3.5" />
+							</button>
+						</div>
+					))}
+				</div>
+
+				{formError && <div className="text-xs text-destructive">{formError}</div>}
+				<Button type="submit" size="sm" disabled={submitting}>
+					<Plus className="h-3.5 w-3.5 mr-1.5" />
+					{submitting ? "Creating…" : "Create tool"}
+				</Button>
+			</form>
+
+			{hooks.length === 0 && (
+				<div className="text-sm text-muted-foreground italic">No outbound tools yet.</div>
+			)}
+
+			<div className="space-y-3">
+				{hooks.map(h => (
+					<div key={h.id} className="rounded-md border border-border bg-card/60 p-3">
+						<div className="flex items-start justify-between gap-2">
+							<div className="flex-1 min-w-0">
+								<div className="flex items-baseline gap-2 flex-wrap">
+									<span className="text-sm font-medium font-mono">{h.name}</span>
+									<span className="text-[10px] uppercase tracking-wider px-1.5 py-px rounded bg-primary/15 text-primary font-semibold">{h.method}</span>
+									<span className="text-[11px] text-muted-foreground truncate">{h.url}</span>
+								</div>
+								{h.description && (
+									<div className="text-xs text-muted-foreground mt-1">{h.description}</div>
+								)}
+								{h.params.length > 0 && (
+									<div className="text-[11px] text-muted-foreground mt-2 flex flex-wrap gap-x-3 gap-y-1">
+										{h.params.map(p => (
+											<span key={p.name} className="font-mono">
+												{p.name}
+												{p.required && <span className="text-primary">*</span>}
+												<span className="text-muted-foreground/70">:{p.in}</span>
+											</span>
+										))}
+									</div>
+								)}
+								{h.last_error && (
+									<div className="text-[11px] text-destructive mt-1 truncate" title={h.last_error}>
+										Last error: {h.last_error}
+									</div>
+								)}
+								{h.last_called && !h.last_error && (
+									<div className="text-[11px] text-muted-foreground mt-1">
+										Last called: {new Date(h.last_called).toLocaleString()}
+									</div>
+								)}
+							</div>
+							<button
+								type="button"
+								onClick={() => handleDelete(h.id)}
+								className="text-muted-foreground hover:text-destructive p-1 rounded hover:bg-destructive/10 shrink-0"
+								title="Delete"
+							>
+								<Trash2 className="h-4 w-4" />
+							</button>
+						</div>
+					</div>
+				))}
+			</div>
 		</div>
 	);
 }

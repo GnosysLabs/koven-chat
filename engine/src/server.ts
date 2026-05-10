@@ -95,6 +95,13 @@ import {
 	getBotWebhookByToken,
 	deleteBotWebhook,
 	listBotWebhookDeliveries,
+	insertBotOutboundWebhook,
+	listBotOutboundWebhooks,
+	getBotOutboundWebhookById,
+	updateBotOutboundWebhook,
+	deleteBotOutboundWebhook,
+	type OutboundParam,
+	type OutboundHeader,
 	touchEmailLogin,
 	updateBot,
 	updateSuspensionStatus,
@@ -472,6 +479,133 @@ function parseMcpServerBody(
 
 function isValidBotName(s: string): boolean {
 	return s.length >= 1 && s.length <= 21 && /^[a-z0-9-]+$/.test(s) && !s.startsWith("-") && !s.endsWith("-");
+}
+
+interface ParsedOutboundWebhook {
+	name: string;
+	description: string;
+	method: "GET" | "POST";
+	url: string;
+	params: OutboundParam[];
+	headers: OutboundHeader[];
+}
+
+/** Validate + normalise the body of POST/PATCH /api/bots/:id/outbound-webhooks.
+ * `allowPartial: true` (PATCH path) returns only the fields present
+ * — caller passes that to updateBotOutboundWebhook which uses
+ * COALESCE-on-NULL to leave the rest alone. */
+function parseOutboundWebhookBody(
+	body: {
+		name?: unknown;
+		description?: unknown;
+		method?: unknown;
+		url?: unknown;
+		params?: unknown;
+		headers?: unknown;
+	} | null,
+	opts: { allowPartial?: boolean } = {},
+): ParsedOutboundWebhook | { error: string } {
+	if (!body) return { error: "request body required" };
+	const out: Partial<ParsedOutboundWebhook> = {};
+
+	if (body.name !== undefined) {
+		if (typeof body.name !== "string") return { error: "name must be a string" };
+		const v = body.name.trim();
+		if (v.length === 0) return { error: "name required" };
+		if (v.length > 64) return { error: "name too long (max 64 chars)" };
+		// OpenAI tool name regex: ^[a-zA-Z0-9_-]+$ — sanitiser in
+		// outbound_webhooks.ts will normalise but reject obvious junk
+		// here so the saved name matches what the LLM sees.
+		if (!/^[a-zA-Z0-9_-]+$/.test(v)) {
+			return { error: "name may only contain letters, digits, underscore, hyphen" };
+		}
+		out.name = v;
+	} else if (!opts.allowPartial) {
+		return { error: "name required" };
+	}
+
+	if (body.description !== undefined) {
+		if (typeof body.description !== "string") return { error: "description must be a string" };
+		out.description = body.description.trim().slice(0, 500);
+	} else if (!opts.allowPartial) {
+		out.description = "";
+	}
+
+	if (body.method !== undefined) {
+		if (body.method !== "GET" && body.method !== "POST") {
+			return { error: "method must be GET or POST" };
+		}
+		out.method = body.method;
+	} else if (!opts.allowPartial) {
+		out.method = "GET";
+	}
+
+	if (body.url !== undefined) {
+		if (typeof body.url !== "string") return { error: "url must be a string" };
+		const v = body.url.trim();
+		if (v.length === 0) return { error: "url required" };
+		if (v.length > 2_000) return { error: "url too long" };
+		// Allow {placeholder} tokens — strip them before URL parse so
+		// the validation accepts templates.
+		const probe = v.replace(/\{[a-zA-Z0-9_]+\}/g, "x");
+		try { new URL(probe); } catch { return { error: "url is not a valid URL" }; }
+		out.url = v;
+	} else if (!opts.allowPartial) {
+		return { error: "url required" };
+	}
+
+	if (body.params !== undefined) {
+		if (!Array.isArray(body.params)) return { error: "params must be an array" };
+		const params: OutboundParam[] = [];
+		for (const raw of body.params) {
+			if (typeof raw !== "object" || raw === null) return { error: "params entries must be objects" };
+			const p = raw as Record<string, unknown>;
+			if (typeof p.name !== "string" || p.name.trim().length === 0) {
+				return { error: "param name required" };
+			}
+			const pname = p.name.trim();
+			if (pname.length > 64) return { error: "param name too long (max 64 chars)" };
+			if (!/^[a-zA-Z0-9_]+$/.test(pname)) {
+				return { error: "param name may only contain letters, digits, underscore" };
+			}
+			const desc = typeof p.description === "string" ? p.description.trim().slice(0, 200) : "";
+			const inField: "url" | "body" = p.in === "body" ? "body" : "url";
+			params.push({
+				name: pname,
+				description: desc,
+				required: p.required === true,
+				in: inField,
+			});
+		}
+		out.params = params;
+	} else if (!opts.allowPartial) {
+		out.params = [];
+	}
+
+	if (body.headers !== undefined) {
+		if (!Array.isArray(body.headers)) return { error: "headers must be an array" };
+		const headers: OutboundHeader[] = [];
+		for (const raw of body.headers) {
+			if (typeof raw !== "object" || raw === null) return { error: "headers entries must be objects" };
+			const h = raw as Record<string, unknown>;
+			if (typeof h.name !== "string" || h.name.trim().length === 0) {
+				return { error: "header name required" };
+			}
+			if (typeof h.value !== "string") return { error: "header value must be a string" };
+			const hname = h.name.trim();
+			if (hname.length > 200) return { error: "header name too long" };
+			if (h.value.length > 4_000) return { error: "header value too long" };
+			headers.push({ name: hname, value: h.value });
+		}
+		out.headers = headers;
+	} else if (!opts.allowPartial) {
+		out.headers = [];
+	}
+
+	// In allowPartial mode it's fine to have any subset of fields.
+	// In full mode the explicit return-on-missing branches above
+	// already covered the required ones.
+	return out as ParsedOutboundWebhook;
 }
 
 // Strip secrets out of a BotRow before sending to the client.  Token
@@ -2049,6 +2183,86 @@ export function startServer(): void {
 					if (req.method === "GET" && wid !== null && sub === "deliveries") {
 						const rows = listBotWebhookDeliveries(wid, 50);
 						return json({ deliveries: rows });
+					}
+				}
+			}
+
+			// GET    /api/bots/:id/outbound-webhooks         — list
+			// POST   /api/bots/:id/outbound-webhooks         — create
+			// PATCH  /api/bots/:id/outbound-webhooks/:wid    — update
+			// DELETE /api/bots/:id/outbound-webhooks/:wid    — delete
+			//
+			// LLM-callable HTTP tools.  Each row registers as an OpenAI
+			// tool definition in the bot's chatCompletion call (see
+			// engine/src/outbound_webhooks.ts).  When the model invokes
+			// one, the engine builds the HTTP request from the row's
+			// template + the model's args, fires it, and returns the
+			// response body to the LLM as a tool result.
+			{
+				const m = path.match(/^\/api\/bots\/(\d+)\/outbound-webhooks(?:\/(\d+))?$/);
+				if (m) {
+					const userId = await whoami(extractToken(req));
+					if (!userId) return json({ errcode: "M_FORBIDDEN" }, { status: 401 });
+					const id = Number(m[1]);
+					const wid = m[2] ? Number(m[2]) : null;
+					const existing = getBotById(id);
+					if (!existing) return json({ errcode: "M_NOT_FOUND" }, { status: 404 });
+					if (existing.owner_id !== userId) {
+						return json({ errcode: "M_FORBIDDEN", error: "not your bot" }, { status: 403 });
+					}
+
+					if (req.method === "GET" && wid === null) {
+						return json({ outbound_webhooks: listBotOutboundWebhooks(id) });
+					}
+
+					if (req.method === "POST" && wid === null) {
+						const body = (await req.json().catch(() => null)) as
+							| {
+								name?: unknown;
+								description?: unknown;
+								method?: unknown;
+								url?: unknown;
+								params?: unknown;
+								headers?: unknown;
+							}
+							| null;
+						const parsed = parseOutboundWebhookBody(body);
+						if ("error" in parsed) return json({ errcode: "M_INVALID_PARAM", error: parsed.error }, { status: 400 });
+						const created = insertBotOutboundWebhook({
+							botId: id,
+							name: parsed.name,
+							description: parsed.description,
+							method: parsed.method,
+							url: parsed.url,
+							params: parsed.params,
+							headers: parsed.headers,
+						});
+						return json({ outbound_webhook: created });
+					}
+
+					if (req.method === "PATCH" && wid !== null) {
+						const existing = getBotOutboundWebhookById(wid, id);
+						if (!existing) return json({ errcode: "M_NOT_FOUND" }, { status: 404 });
+						const body = (await req.json().catch(() => null)) as
+							| {
+								name?: unknown;
+								description?: unknown;
+								method?: unknown;
+								url?: unknown;
+								params?: unknown;
+								headers?: unknown;
+							}
+							| null;
+						const parsed = parseOutboundWebhookBody(body, { allowPartial: true });
+						if ("error" in parsed) return json({ errcode: "M_INVALID_PARAM", error: parsed.error }, { status: 400 });
+						updateBotOutboundWebhook(wid, id, parsed);
+						return json({ outbound_webhook: getBotOutboundWebhookById(wid, id) });
+					}
+
+					if (req.method === "DELETE" && wid !== null) {
+						const removed = deleteBotOutboundWebhook(wid, id);
+						if (removed === 0) return json({ errcode: "M_NOT_FOUND" }, { status: 404 });
+						return json({ ok: true });
 					}
 				}
 			}

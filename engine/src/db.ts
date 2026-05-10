@@ -479,6 +479,41 @@ db.exec(`
 		  );
 	END;
 
+	-- ─── Bot OUTBOUND webhooks (LLM-callable HTTP tools) ─────────────
+	-- The mirror of bot_webhooks: instead of external services posting
+	-- IN to the bot, the bot calls OUT to an external HTTP endpoint
+	-- when its LLM decides to invoke the tool.  Each row registers as
+	-- an OpenAI tool definition in the bot's chatCompletion call (see
+	-- engine/src/outbound_webhooks.ts), so the model can reach for it
+	-- like any other tool.
+	--
+	-- name + description are what the LLM sees (and uses to decide
+	-- when to call).  url + method describe the HTTP request — url
+	-- can contain {param} placeholders that get substituted from the
+	-- LLM's args.  params_json is a JSON array of
+	-- {name, description, required, in} where the in field is "url"
+	-- (path/query substitution) or "body" (POST body field).  headers_json is a
+	-- JSON array of {name, value} for static auth headers (the Twilio
+	-- Auth Token, GitHub PAT, etc.) — values are stored in plaintext
+	-- because the encryption needed for true secret storage adds
+	-- complexity disproportionate to the threat model (an attacker
+	-- with DB read already has the bot's API key + Matrix token).
+	CREATE TABLE IF NOT EXISTS bot_outbound_webhooks (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		bot_id        INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+		name          TEXT NOT NULL,
+		description   TEXT NOT NULL DEFAULT '',
+		method        TEXT NOT NULL DEFAULT 'GET',
+		url           TEXT NOT NULL,
+		params_json   TEXT NOT NULL DEFAULT '[]',
+		headers_json  TEXT NOT NULL DEFAULT '[]',
+		created_at    INTEGER NOT NULL,
+		last_called   INTEGER,
+		last_error    TEXT
+	);
+	CREATE INDEX IF NOT EXISTS idx_bot_outbound_webhooks_bot
+		ON bot_outbound_webhooks(bot_id);
+
 	-- ─── Room membership tracker ─────────────────────────────────────
 	-- Updated on every m.room.member state event the engine sees via
 	-- the appservice transaction stream.  Used by the notification
@@ -1820,6 +1855,152 @@ export function listBotWebhookDeliveries(
 	limit: number = 50,
 ): BotWebhookDeliveryRow[] {
 	return listBotWebhookDeliveriesStmt.all(webhookId, limit) as BotWebhookDeliveryRow[];
+}
+
+// ─── Bot OUTBOUND webhooks (LLM-callable HTTP tools) ─────────────
+
+/** A single LLM-callable parameter on an outbound webhook.  `in`
+ * decides where the value goes: "url" → substituted into {placeholder}
+ * tokens in the URL string, falling back to query-string append for
+ * unmatched params; "body" → sent in the JSON body (POST only). */
+export interface OutboundParam {
+	name: string;
+	description: string;
+	required: boolean;
+	in: "url" | "body";
+}
+
+/** A static HTTP header attached to every call (auth tokens etc.). */
+export interface OutboundHeader {
+	name: string;
+	value: string;
+}
+
+export interface BotOutboundWebhookRow {
+	id: number;
+	bot_id: number;
+	name: string;
+	description: string;
+	method: "GET" | "POST";
+	url: string;
+	params_json: string;   // JSON-encoded OutboundParam[]
+	headers_json: string;  // JSON-encoded OutboundHeader[]
+	created_at: number;
+	last_called: number | null;
+	last_error: string | null;
+}
+
+const insertBotOutboundWebhookStmt = db.prepare(`
+	INSERT INTO bot_outbound_webhooks (
+		bot_id, name, description, method, url, params_json, headers_json, created_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	RETURNING id, bot_id, name, description, method, url, params_json,
+	          headers_json, created_at, last_called, last_error
+`);
+
+const listBotOutboundWebhooksStmt = db.prepare(`
+	SELECT id, bot_id, name, description, method, url, params_json,
+	       headers_json, created_at, last_called, last_error
+	FROM bot_outbound_webhooks
+	WHERE bot_id = ?
+	ORDER BY created_at ASC
+`);
+
+const getBotOutboundWebhookByIdStmt = db.prepare(`
+	SELECT id, bot_id, name, description, method, url, params_json,
+	       headers_json, created_at, last_called, last_error
+	FROM bot_outbound_webhooks
+	WHERE id = ? AND bot_id = ?
+`);
+
+const updateBotOutboundWebhookStmt = db.prepare(`
+	UPDATE bot_outbound_webhooks
+	SET name         = COALESCE(?, name),
+	    description  = COALESCE(?, description),
+	    method       = COALESCE(?, method),
+	    url          = COALESCE(?, url),
+	    params_json  = COALESCE(?, params_json),
+	    headers_json = COALESCE(?, headers_json)
+	WHERE id = ? AND bot_id = ?
+`);
+
+const deleteBotOutboundWebhookStmt = db.prepare(`
+	DELETE FROM bot_outbound_webhooks WHERE id = ? AND bot_id = ?
+`);
+
+const recordBotOutboundCallStmt = db.prepare(`
+	UPDATE bot_outbound_webhooks
+	SET last_called = ?, last_error = ?
+	WHERE id = ?
+`);
+
+/** Create a new outbound webhook (LLM-callable HTTP tool) for a bot. */
+export function insertBotOutboundWebhook(opts: {
+	botId: number;
+	name: string;
+	description: string;
+	method: "GET" | "POST";
+	url: string;
+	params: OutboundParam[];
+	headers: OutboundHeader[];
+}): BotOutboundWebhookRow {
+	return insertBotOutboundWebhookStmt.get(
+		opts.botId,
+		opts.name,
+		opts.description,
+		opts.method,
+		opts.url,
+		JSON.stringify(opts.params),
+		JSON.stringify(opts.headers),
+		Date.now(),
+	) as BotOutboundWebhookRow;
+}
+
+export function listBotOutboundWebhooks(botId: number): BotOutboundWebhookRow[] {
+	return listBotOutboundWebhooksStmt.all(botId) as BotOutboundWebhookRow[];
+}
+
+export function getBotOutboundWebhookById(
+	id: number,
+	botId: number,
+): BotOutboundWebhookRow | null {
+	const row = getBotOutboundWebhookByIdStmt.get(id, botId) as BotOutboundWebhookRow | undefined;
+	return row ?? null;
+}
+
+export function updateBotOutboundWebhook(
+	id: number,
+	botId: number,
+	patch: {
+		name?: string;
+		description?: string;
+		method?: "GET" | "POST";
+		url?: string;
+		params?: OutboundParam[];
+		headers?: OutboundHeader[];
+	},
+): void {
+	updateBotOutboundWebhookStmt.run(
+		patch.name ?? null,
+		patch.description ?? null,
+		patch.method ?? null,
+		patch.url ?? null,
+		patch.params !== undefined ? JSON.stringify(patch.params) : null,
+		patch.headers !== undefined ? JSON.stringify(patch.headers) : null,
+		id,
+		botId,
+	);
+}
+
+export function deleteBotOutboundWebhook(id: number, botId: number): number {
+	const r = deleteBotOutboundWebhookStmt.run(id, botId);
+	return r.changes;
+}
+
+/** Stamp the call counter + last error after each invocation.
+ * `error` null on success.  Used by the deliveries-style debug view. */
+export function recordBotOutboundCall(id: number, error: string | null): void {
+	recordBotOutboundCallStmt.run(Date.now(), error, id);
 }
 
 // ─── Suspensions ────────────────────────────────────────────────────

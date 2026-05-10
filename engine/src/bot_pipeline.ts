@@ -46,6 +46,13 @@ import {
 	describeToolCall,
 	type BotMcpBundle,
 } from "./mcp/bot_tools";
+import {
+	loadBotOutboundBundle,
+	dispatchOutboundCall,
+	describeOutboundCall,
+	isOutboundToolName,
+	type BotOutboundBundle,
+} from "./outbound_webhooks";
 import { config } from "./config";
 
 // (botId, eventId) → "we already responded to this event, do not
@@ -237,12 +244,15 @@ async function dispatch(deps: PipelineDeps): Promise<void> {
 	const stopTyping = startTypingHeartbeat(client, room.roomId);
 	const progress = new BotProgress(client, room.roomId);
 
-	// Open MCP sessions up-front for every server attached to this
-	// bot.  Empty bundle (no key, no attachments, all opens failed)
-	// makes the call below behave exactly like the no-tools path.
+	// Open MCP sessions + load outbound webhook tools for this bot.
+	// Both produce bundles with .tools (for chatCompletion) and a
+	// routes table (for dispatch); we merge tools below and dispatch
+	// per-call by tool-name prefix (srv = MCP, wh = outbound).
+	// Empty bundles behave exactly like the no-tools path.
 	const bundle = await openBotMcpBundle(bot);
+	const outbound = loadBotOutboundBundle(bot.id);
 	try {
-		await runToolLoop(deps, messages, apiKey, bundle, progress);
+		await runToolLoop(deps, messages, apiKey, bundle, outbound, progress);
 	} finally {
 		await closeBotMcpBundle(bundle);
 		stopTyping();
@@ -265,6 +275,7 @@ async function runToolLoop(
 	initialMessages: ChatMessage[],
 	apiKey: string,
 	bundle: BotMcpBundle,
+	outbound: BotOutboundBundle,
 	progress: BotProgress,
 ): Promise<void> {
 	const { bot } = deps;
@@ -273,9 +284,14 @@ async function runToolLoop(
 	let promptTokensTotal = 0;
 	let completionTokensTotal = 0;
 
+	// Merge MCP + outbound webhook tools into a single tools[] for
+	// chatCompletion.  Dispatch below picks the right handler per
+	// call by tool-name prefix (srv… → MCP, wh… → outbound).
+	const allTools = [...bundle.tools, ...outbound.tools];
+
 	for (let iter = 0; iter < MAX_TOOL_ITERATIONS; iter++) {
 		const isFinalIter = iter === MAX_TOOL_ITERATIONS - 1;
-		const toolsForCall = isFinalIter ? undefined : (bundle.tools.length > 0 ? bundle.tools : undefined);
+		const toolsForCall = isFinalIter ? undefined : (allTools.length > 0 ? allTools : undefined);
 
 		console.log(
 			`bot ${bot.mxid}: → LLM iter=${iter} model=${bot.model} provider=${bot.provider}`
@@ -377,30 +393,37 @@ async function runToolLoop(
 			console.log(
 				`bot ${bot.mxid}:   tool ${call.function.name}(${truncate(call.function.arguments, 120)})`,
 			);
-			// Show the tool name (srvN__ prefix stripped) plus the
-			// originating MCP server's qualified name, with the
-			// server name bold in formatted_body so it stands out as
-			// "I'm hitting THIS service".  Plain-text fallback drops
-			// the formatting but keeps the same words.  Args are
-			// intentionally omitted — they often contain raw URLs or
-			// full search queries that clutter the bubble without
-			// helping.
-			const desc = describeToolCall(bundle, call.function.name);
-			if (desc) {
-				const server = prettyServerName(desc.server);
-				// Plain body uses markdown bold (`**server**`) — the
-				// Koven client's looksLikeMarkdown picks it up and
-				// renders it via the markdown path.  formatted_body
-				// adds the HTML form for any Matrix client that
-				// prefers that (Element et al).
-				await progress.update(
-					`🔧 calling ${desc.tool} with **${server}**…`,
-					`🔧 calling ${escapeHtml(desc.tool)} with <strong>${escapeHtml(server)}</strong>…`,
-				);
+			// Show the tool name (prefix stripped) plus where it's
+			// going — the MCP server label OR the outbound webhook
+			// name, depending on which dispatcher will handle it.
+			// Args are intentionally omitted: often they're raw URLs
+			// or full search queries that clutter the bubble.
+			const isOutbound = isOutboundToolName(call.function.name);
+			if (isOutbound) {
+				const out = describeOutboundCall(outbound, call.function.name);
+				if (out) {
+					await progress.update(
+						`🔧 calling **${out.name}** (${out.method} ${prettyHost(out.url)})…`,
+						`🔧 calling <strong>${escapeHtml(out.name)}</strong> (${escapeHtml(out.method)} ${escapeHtml(prettyHost(out.url))})…`,
+					);
+				} else {
+					await progress.update(`🔧 calling ${prettyToolName(call.function.name)}…`);
+				}
 			} else {
-				await progress.update(`🔧 calling ${prettyToolName(call.function.name)}…`);
+				const desc = describeToolCall(bundle, call.function.name);
+				if (desc) {
+					const server = prettyServerName(desc.server);
+					await progress.update(
+						`🔧 calling ${desc.tool} with **${server}**…`,
+						`🔧 calling ${escapeHtml(desc.tool)} with <strong>${escapeHtml(server)}</strong>…`,
+					);
+				} else {
+					await progress.update(`🔧 calling ${prettyToolName(call.function.name)}…`);
+				}
 			}
-			const toolResult = await dispatchToolCall(bundle, call.function.name, args);
+			const toolResult = isOutbound
+				? await dispatchOutboundCall(outbound, call.function.name, args)
+				: await dispatchToolCall(bundle, call.function.name, args);
 			console.log(
 				`bot ${bot.mxid}:   ← ${call.function.name} ${toolResult.isError ? "ERROR" : "ok"}`
 					+ ` chars=${toolResult.text.length}`,
@@ -442,6 +465,23 @@ function prettyServerName(qualifiedName: string): string {
 	const slashIdx = qualifiedName.indexOf("/");
 	if (slashIdx >= 0) return qualifiedName.slice(slashIdx + 1);
 	return qualifiedName.startsWith("@") ? qualifiedName.slice(1) : qualifiedName;
+}
+
+/** Hostname-only display of an outbound webhook URL for the
+ * progress bubble.  "https://api.example.com/v1/news?q={q}" →
+ * "api.example.com".  Falls back to the URL if it doesn't parse
+ * (template URLs with raw {placeholder} tokens won't, since URL
+ * parsing chokes on them — strip placeholders before retry). */
+function prettyHost(url: string): string {
+	try {
+		return new URL(url).host;
+	} catch {
+		try {
+			return new URL(url.replace(/\{[a-zA-Z0-9_]+\}/g, "x")).host;
+		} catch {
+			return url.length > 40 ? url.slice(0, 37) + "…" : url;
+		}
+	}
 }
 
 /** Best-effort JSON parse of an LLM's tool-call arguments.  Providers
