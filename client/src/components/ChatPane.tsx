@@ -973,8 +973,12 @@ export function ChatPane({
 			    MatrixCall flow (separate UX, no need for an SFU).
 			    The bar hides itself when the engine reports
 			    M_NOT_CONFIGURED, so instances without RealtimeKit
-			    creds wired up don't see broken UI. */}
-			{room.kind !== "dm" && accessToken && (
+			    creds wired up don't see broken UI.  Per-room
+			    `liveEnabled` lets admins suppress it for rooms
+			    where voice would be noise (#announcements,
+			    #report-a-bug); reader defaults to true so existing
+			    rooms keep the bar without needing to opt in. */}
+			{room.kind !== "dm" && accessToken && room.liveEnabled !== false && (
 				<RoomVoiceBar
 					roomId={room.id}
 					roomName={room.name}

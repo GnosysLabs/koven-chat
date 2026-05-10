@@ -163,6 +163,7 @@ export interface JoinCallResult {
  * return a 503 with a reasonable detail. */
 export async function joinCall(opts: {
 	roomId: string;
+	roomName?: string;
 	userId: string;
 	displayName: string;
 	avatarUrl?: string;
@@ -173,10 +174,12 @@ export async function joinCall(opts: {
 
 	let meetingId = getRoomCallMeetingId(opts.roomId);
 	if (!meetingId) {
-		// Lazy-create.  Title is the Koven room id so the Cloudflare
-		// dashboard groups the right Meetings to the right rooms;
-		// not user-visible.
-		meetingId = await cfCreateMeeting(opts.roomId);
+		// Lazy-create.  Title is the human-readable room name so
+		// the SetupScreen displays "New Features" instead of the
+		// raw `!beebX...:koven.chat` mxid.  Falls back to the room
+		// id if we couldn't resolve a name.  Not load-bearing — the
+		// Cloudflare dashboard also accepts whatever string here.
+		meetingId = await cfCreateMeeting(opts.roomName?.trim() || opts.roomId);
 		rememberRoomCall({
 			roomId: opts.roomId,
 			cfMeetingId: meetingId,

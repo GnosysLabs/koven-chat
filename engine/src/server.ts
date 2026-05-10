@@ -1390,9 +1390,21 @@ export function startServer(): void {
 					// Best-effort: fall back to the mxid as the
 					// participant name.  Avatar is optional anyway.
 				}
+				// Room name powers the SetupScreen meeting title in the
+				// Cloudflare UI Kit.  Best-effort lookup — empty falls
+				// back to the room id inside calls.joinCall.
+				let roomName: string | undefined;
+				try {
+					const state = await getRoomNameAndCreator(roomId);
+					if (state?.name) roomName = state.name;
+				} catch {
+					// Best-effort.  An unnamed room shows the mxid as
+					// title, same as before.
+				}
 				try {
 					const result = await joinCall({
 						roomId,
+						roomName,
 						userId,
 						displayName,
 						avatarUrl,

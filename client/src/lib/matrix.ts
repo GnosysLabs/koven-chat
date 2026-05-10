@@ -2721,6 +2721,11 @@ export class MatrixTransport {
 		visibility?: "public" | "private";
 		// See updateSpace.nsfw — same semantics, same state event.
 		nsfw?: boolean;
+		// Per-room "Live channel" toggle.  Writes the
+		// `chat.koven.live` state event with `{ enabled: bool }`;
+		// absent state event = enabled (the default).  Unlike NSFW
+		// this IS reversible.
+		liveEnabled?: boolean;
 	}): Promise<void> {
 		const c = this.requireClient();
 		// Defense-in-depth: refuse to flip an encrypted room to public.
@@ -2782,6 +2787,18 @@ export class MatrixTransport {
 					"",
 				);
 			}
+		}
+		if (opts.liveEnabled !== undefined) {
+			// Write the state event with the explicit bool.  The reader
+			// treats a missing event as enabled, but we always write
+			// once toggled so other clients see the intent rather than
+			// inferring from absence.
+			await c.sendStateEvent(
+				opts.roomId,
+				"chat.koven.live" as any,
+				{ enabled: !!opts.liveEnabled },
+				"",
+			);
 		}
 		this.emitRoomList();
 	}
@@ -4531,6 +4548,7 @@ export class MatrixTransport {
 			myPowerLevel,
 			creatorId,
 			nsfw: readKovenNsfw(r),
+			liveEnabled: readKovenLiveEnabled(r),
 		};
 	}
 
@@ -5284,6 +5302,20 @@ function readKovenNsfw(r: SdkRoom): boolean {
 	if (!ev) return false;
 	const content = ev.getContent() as { enabled?: unknown };
 	return content.enabled === true;
+}
+
+// Read whether the per-room Live channel (voice/video) is enabled.
+// State event: `chat.koven.live` with content `{ enabled: bool }`.
+// **Default true** — absence of the event means voice is on
+// (Discord-shape baseline; admins explicitly turn it off for
+// rooms where voice would be noise like #announcements or
+// #report-a-bug).  Anything other than `enabled: false` reads as
+// true — defensive against partial writes.
+function readKovenLiveEnabled(r: SdkRoom): boolean {
+	const ev = r.currentState.getStateEvents("chat.koven.live", "");
+	if (!ev) return true;
+	const content = ev.getContent() as { enabled?: unknown };
+	return content.enabled !== false;
 }
 
 /**

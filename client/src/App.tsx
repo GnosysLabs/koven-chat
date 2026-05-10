@@ -2582,6 +2582,7 @@ export default function App() {
 						iconEmoji: opts.iconEmoji,
 						visibility: opts.visibility,
 						nsfw: opts.nsfw,
+						liveEnabled: opts.liveEnabled,
 					});
 				}}
 				onLeave={async (roomId) => {

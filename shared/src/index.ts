@@ -77,6 +77,14 @@ export interface Room {
 	// preference is on) + the NSFW badge on Explore tiles.  Has
 	// no effect on joined rooms — once you're in, you're in.
 	nsfw: boolean;
+	// Whether the per-room voice/video Live channel is enabled.
+	// Read from the `chat.koven.live` state event; default true
+	// (no event = on, mirroring Discord's "every channel can have
+	// voice" baseline).  When false, the RoomVoiceBar at the top
+	// of the room is hidden — useful for rooms where voice would
+	// be noise (#announcements, #report-a-bug, etc.).  Toggle via
+	// the room edit sheet (creator + admins only — state-event PL).
+	liveEnabled: boolean;
 }
 
 // Spaces are Matrix rooms with `type: "m.space"`.  They don't have

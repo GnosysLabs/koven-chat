@@ -21,7 +21,7 @@ import { Switch } from "@/components/ui/switch";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { cn } from "@/lib/utils";
 import { EmojiPicker } from "@/components/EmojiPicker";
-import { Camera, DoorOpen, EyeOff, Globe, Smile, Trash2 } from "lucide-react";
+import { Camera, DoorOpen, EyeOff, Globe, Smile, Trash2, Video } from "lucide-react";
 import type { Room } from "@koven/shared";
 
 export interface RoomEditSheetProps {
@@ -37,6 +37,7 @@ export interface RoomEditSheetProps {
 		iconEmoji?: string;
 		visibility?: "public" | "private";
 		nsfw?: boolean;
+		liveEnabled?: boolean;
 	}): Promise<void>;
 	// Drives visibility of the NSFW toggle.  Hidden unless the
 	// viewer has the "Show NSFW rooms" preference on, OR the room is
@@ -68,6 +69,7 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 	const [clearAvatar, setClearAvatar] = useState(false);
 	const [iconEmoji, setIconEmoji] = useState("");
 	const [nsfw, setNsfw] = useState(false);
+	const [liveEnabled, setLiveEnabled] = useState(true);
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
@@ -101,6 +103,9 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 		setClearAvatar(false);
 		setIconEmoji(room.iconEmoji ?? "");
 		setNsfw(!!room.nsfw);
+		// liveEnabled defaults to true when the state event is missing,
+		// so an undefined here also means "on".
+		setLiveEnabled(room.liveEnabled !== false);
 		setError(null);
 		setPending(false);
 		setConfirmingLeave(false);
@@ -173,6 +178,8 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 		const trimmedEmoji = iconEmoji.trim();
 		if (trimmedEmoji !== (room.iconEmoji ?? "")) opts.iconEmoji = trimmedEmoji;
 		if (nsfw !== !!room.nsfw) opts.nsfw = nsfw;
+		const currentLiveEnabled = room.liveEnabled !== false;
+		if (liveEnabled !== currentLiveEnabled) opts.liveEnabled = liveEnabled;
 
 		// If nothing changed, just close.
 		const hasChanges =
@@ -182,7 +189,8 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 			opts.avatarFile !== undefined ||
 			opts.clearAvatar ||
 			opts.iconEmoji !== undefined ||
-			opts.nsfw !== undefined;
+			opts.nsfw !== undefined ||
+			opts.liveEnabled !== undefined;
 		if (!hasChanges) {
 			onClose();
 			return;
@@ -453,6 +461,33 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 							/>
 						</div>
 					</div>
+
+					{/* Live channel toggle — every room gets a per-room
+					    voice/video channel by default.  Admins can flip
+					    this off for rooms where voice would be noise
+					    (#announcements, #report-a-bug, etc.).  Unlike
+					    NSFW this IS reversible — the state event just
+					    flips back.  Gated to the creator to match the
+					    NSFW pattern; we could open it up to anyone with
+					    state PL later if there's demand. */}
+					{isCreator && (
+						<div className="flex items-start justify-between gap-3 rounded-md border border-border p-3">
+							<div className="space-y-0.5 flex-1 min-w-0">
+								<Label htmlFor="room-edit-live" className="cursor-pointer flex items-center gap-1.5">
+									<Video className="h-3.5 w-3.5" />
+									Enable Live channel
+								</Label>
+								<p className="text-xs text-muted-foreground leading-relaxed">
+									Adds a voice / video / screen-share bar at the top of the room. Turn off for rooms where dropping in a call doesn&rsquo;t make sense.
+								</p>
+							</div>
+							<Switch
+								id="room-edit-live"
+								checked={liveEnabled}
+								onCheckedChange={setLiveEnabled}
+							/>
+						</div>
+					)}
 
 					{/* NSFW marker — one-way by design.  Once a room is
 					    flagged, the toggle disappears and the marker
