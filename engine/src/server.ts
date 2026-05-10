@@ -1943,24 +1943,43 @@ export function startServer(): void {
 						return json({ webhooks: rows });
 					}
 
-					// POST /api/bots/:id/webhooks { target_room_id, label, generate_secret }
+					// POST /api/bots/:id/webhooks
+					//   { target_room_id, label,
+					//     generate_secret?: boolean,
+					//     secret?: string  /* user-supplied — Twilio Auth
+					//                         Token, etc.  Wins over
+					//                         generate_secret if both set. */ }
 					if (req.method === "POST" && wid === null) {
 						const body = (await req.json().catch(() => null)) as
-							| { target_room_id?: unknown; label?: unknown; generate_secret?: unknown }
+							| { target_room_id?: unknown; label?: unknown; generate_secret?: unknown; secret?: unknown }
 							| null;
 						const targetRoomId = typeof body?.target_room_id === "string" ? body.target_room_id.trim() : "";
 						const label = typeof body?.label === "string" ? body.label.trim().slice(0, 80) : "";
 						const generateSecret = body?.generate_secret === true;
+						const providedSecret = typeof body?.secret === "string" ? body.secret.trim() : "";
 						if (!targetRoomId.startsWith("!")) {
 							return json({
 								errcode: "M_INVALID_PARAM",
 								error: "target_room_id must start with !",
 							}, { status: 400 });
 						}
+						if (providedSecret && providedSecret.length > 512) {
+							return json({
+								errcode: "M_INVALID_PARAM",
+								error: "secret must be ≤ 512 chars",
+							}, { status: 400 });
+						}
 						// 32 bytes URL-safe base64 → ~43 chars.  Plenty
 						// of entropy for a capability token (~256 bits).
 						const token = randomToken(32);
-						const secret = generateSecret ? randomToken(32) : null;
+						// Resolve the secret: user-provided wins (Twilio
+						// Auth Token, etc.), then generate-on-server if
+						// requested, else none (open webhook).
+						const secret = providedSecret
+							? providedSecret
+							: generateSecret
+								? randomToken(32)
+								: null;
 						const created = insertBotWebhook({
 							botId: id,
 							token,
@@ -1969,7 +1988,9 @@ export function startServer(): void {
 							label,
 						});
 						// Return the secret in plaintext exactly here —
-						// caller has to copy it now.
+						// for generated secrets, the user needs to copy
+						// it; for user-provided, echo it back so the
+						// post-save banner can show what they pasted.
 						return json({
 							ok: true,
 							webhook: {

@@ -178,24 +178,22 @@ interface LimitOption {
 	label: string;
 }
 
-// Per-reply token cap.  Sized for chat — quick reactions, normal
-// conversational replies, and the occasional explainer.  Labels are
-// calibrated against what real bot replies actually produce on
-// gpt-4o-mini / gemini-flash class models, NOT against the textbook
-// "1 token ≈ 0.75 words" math (real chat replies waste tokens on
-// formatting, hedging, and lead-ins, so a sentence usually burns
-// ~30 tokens not 15).  Anything past ~1000 is the bot monologuing —
-// that doesn't belong in a chat thread regardless of model capacity.
-// Power users who really want longer can edit the underlying number
-// via the engine API; the dropdown is the curated set.
+// Per-reply token cap.  Labels are the raw token counts — vague
+// "sentence / paragraph" descriptors mislead because real reply
+// length depends on the model's verbosity, formatting, and the
+// system-prompt length hint we attach in the engine.  Token count
+// is the only number that's stable across models.  Engine appends a
+// natural-language length cue to the system prompt based on this
+// number (see lengthHint() in engine/src/bot_pipeline.ts), so the
+// model self-limits at sentence/paragraph boundaries above the cap.
 const MAX_REPLY_OPTIONS: LimitOption[] = [
 	{ value: "",     label: "Unlimited" },
-	{ value: "40",   label: "Snappy (~1 sentence)" },
-	{ value: "100",  label: "Brief (~2-3 sentences)" },
-	{ value: "200",  label: "Short (~1 paragraph)" },
-	{ value: "400",  label: "Medium (~2-3 paragraphs)" },
-	{ value: "800",  label: "Long (~half page)" },
-	{ value: "1500", label: "Detailed (~full page)" },
+	{ value: "40",   label: "40 tokens" },
+	{ value: "100",  label: "100 tokens" },
+	{ value: "200",  label: "200 tokens" },
+	{ value: "400",  label: "400 tokens" },
+	{ value: "800",  label: "800 tokens" },
+	{ value: "1500", label: "1500 tokens" },
 ];
 
 const DAILY_TOKEN_OPTIONS: LimitOption[] = [
@@ -308,7 +306,13 @@ type PendingMcpAttachment =
 interface PendingWebhook {
 	label: string;
 	targetRoomId: string;
+	/** Server generates a random HMAC secret on save.  Mutually
+	 * exclusive with `providedSecret`. */
 	generateSecret: boolean;
+	/** User-supplied secret (Twilio Auth Token, etc.).  Sent verbatim
+	 * to the engine on save and stored as the webhook's HMAC secret
+	 * for signature verification. */
+	providedSecret?: string;
 }
 
 /** Tabs are ordered by the typical create flow.  "tools" is gated
@@ -715,6 +719,7 @@ export function BotEditForm({
 							targetRoomId: w.targetRoomId,
 							label: w.label,
 							generateSecret: w.generateSecret,
+							secret: w.providedSecret,
 						});
 						created.push(c);
 					}
@@ -2429,7 +2434,18 @@ function WebhooksTab({
 	// Add-form state (single inline row, like ToolsTab).
 	const [formLabel, setFormLabel] = useState("");
 	const [formRoomId, setFormRoomId] = useState("");
-	const [formGenerateSecret, setFormGenerateSecret] = useState(true);
+	// Three-mode secret picker:
+	//   "none"     — no signing.  Open webhook (anyone with URL posts).
+	//   "generate" — server generates an HMAC secret for us.  Use for
+	//                sources that accept a Koven-issued secret
+	//                (GitHub, Stripe, generic n8n / cron / etc.).
+	//   "provided" — user pastes a secret the source dictates.  Use
+	//                for Twilio (Auth Token), Slack (Signing Secret),
+	//                Stripe (when reusing an existing webhook secret),
+	//                etc. — anywhere you can't pick the key.
+	type SecretMode = "none" | "generate" | "provided";
+	const [formSecretMode, setFormSecretMode] = useState<SecretMode>("generate");
+	const [formProvidedSecret, setFormProvidedSecret] = useState("");
 	const [submitting, setSubmitting] = useState(false);
 	const [formError, setFormError] = useState<string | null>(null);
 
@@ -2486,6 +2502,17 @@ function WebhooksTab({
 			setFormError("Pick a target room");
 			return;
 		}
+		// Resolve the secret mode into the API shape.  "provided"
+		// requires a non-empty paste; surface that as a form error
+		// instead of silently degrading to "none".
+		const trimmedProvided = formProvidedSecret.trim();
+		if (formSecretMode === "provided" && trimmedProvided.length === 0) {
+			setFormError("Paste the source's signing secret, or pick a different mode");
+			return;
+		}
+		const generateSecret = formSecretMode === "generate";
+		const providedSecret = formSecretMode === "provided" ? trimmedProvided : undefined;
+
 		// Create mode: queue locally, parent flushes after createBot.
 		// No POST happens here; the URL + secret are surfaced by the
 		// parent's post-save banner once the bot has an id.
@@ -2493,11 +2520,13 @@ function WebhooksTab({
 			onPendingChange([...pendingWebhooks, {
 				label,
 				targetRoomId,
-				generateSecret: formGenerateSecret,
+				generateSecret,
+				providedSecret,
 			}]);
 			setFormLabel("");
 			setFormRoomId("");
-			setFormGenerateSecret(true);
+			setFormSecretMode("generate");
+			setFormProvidedSecret("");
 			return;
 		}
 		// Edit mode: POST against /api/bots/:id/webhooks immediately.
@@ -2509,12 +2538,14 @@ function WebhooksTab({
 				botId: bot.id,
 				targetRoomId,
 				label,
-				generateSecret: formGenerateSecret,
+				generateSecret,
+				secret: providedSecret,
 			});
 			setJustCreated(created);
 			setFormLabel("");
 			setFormRoomId("");
-			setFormGenerateSecret(true);
+			setFormSecretMode("generate");
+			setFormProvidedSecret("");
 			await refresh();
 		} catch (err) {
 			setFormError(err instanceof Error ? err.message : String(err));
@@ -2622,14 +2653,49 @@ function WebhooksTab({
 						</select>
 					</div>
 				</div>
-				<label className="inline-flex items-center gap-2 text-xs text-muted-foreground select-none">
-					<input
-						type="checkbox"
-						checked={formGenerateSecret}
-						onChange={e => setFormGenerateSecret(e.target.checked)}
-					/>
-					Generate a signing secret (recommended) — sources that sign requests (GitHub, Stripe, etc.) will be verified before posting
-				</label>
+				<div className="space-y-2">
+					<div className="flex items-center gap-2">
+						<Label htmlFor="webhook-secret-mode" className="text-xs text-muted-foreground">
+							Signing
+						</Label>
+						<select
+							id="webhook-secret-mode"
+							value={formSecretMode}
+							onChange={e => setFormSecretMode(e.target.value as SecretMode)}
+							className="h-8 px-2 rounded border border-input bg-background text-xs"
+						>
+							<option value="generate">Generate one for me</option>
+							<option value="provided">I have a secret to paste</option>
+							<option value="none">No signing (open webhook)</option>
+						</select>
+					</div>
+					{formSecretMode === "generate" && (
+						<p className="text-[11px] text-muted-foreground leading-relaxed">
+							Koven generates a random HMAC secret. You&rsquo;ll see it once on save — paste it into the source service&rsquo;s webhook config (GitHub: <em>Secret</em>; Stripe: <em>Signing secret</em>). Inbound requests are verified with HMAC-SHA256.
+						</p>
+					)}
+					{formSecretMode === "provided" && (
+						<>
+							<input
+								type="text"
+								value={formProvidedSecret}
+								onChange={e => setFormProvidedSecret(e.target.value)}
+								placeholder="paste signing secret"
+								spellCheck={false}
+								autoComplete="off"
+								className="w-full h-8 px-2 rounded border border-input bg-background text-xs font-mono"
+							/>
+							<p className="text-[11px] text-muted-foreground leading-relaxed">
+								Use this when the source dictates the key — Twilio (paste your <em>Auth Token</em> from the Twilio Console), Slack (<em>Signing Secret</em>), or any pre-existing webhook secret you want to reuse. Koven verifies signatures with the scheme that matches the detected source (Twilio: HMAC-SHA1 over URL+sorted form params; GitHub-style: HMAC-SHA256 over raw body).
+							</p>
+						</>
+					)}
+					{formSecretMode === "none" && (
+						<p className="text-[11px] text-muted-foreground leading-relaxed">
+							Anyone who learns the URL can post. Fine for internal cron jobs and quick tests; not recommended for public services.
+						</p>
+					)}
+				</div>
 				{formError && <div className="text-xs text-destructive">{formError}</div>}
 				<Button type="submit" size="sm" disabled={submitting}>
 					<Plus className="h-3.5 w-3.5 mr-1.5" />
@@ -2661,8 +2727,10 @@ function WebhooksTab({
 									<span className="text-[11px] text-muted-foreground truncate">
 										→ {ownerRooms.find(r => r.id === p.targetRoomId)?.name ?? p.targetRoomId}
 									</span>
-									{p.generateSecret && (
-										<span className="text-[10px] uppercase tracking-wider px-1.5 py-px rounded bg-primary/15 text-primary font-semibold">HMAC</span>
+									{(p.generateSecret || p.providedSecret) && (
+										<span className="text-[10px] uppercase tracking-wider px-1.5 py-px rounded bg-primary/15 text-primary font-semibold">
+											{p.providedSecret ? "Signed (yours)" : "Signed"}
+										</span>
 									)}
 								</div>
 								<div className="text-[11px] text-muted-foreground italic">

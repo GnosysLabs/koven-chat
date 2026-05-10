@@ -84,7 +84,14 @@ export async function createBotWebhook(opts: {
 	botId: number;
 	targetRoomId: string;
 	label: string;
+	/** Server generates a random HMAC secret.  Mutually exclusive
+	 * with `secret`.  Use this for sources that accept a Koven-
+	 * issued secret (GitHub, Stripe, generic). */
 	generateSecret: boolean;
+	/** User-supplied secret to verify inbound signatures against.
+	 * Use for sources whose signing key is dictated by the source —
+	 * e.g. Twilio's Auth Token, where you can't pick the key. */
+	secret?: string;
 }): Promise<WebhookCreated> {
 	const r = await fetch(`${ENGINE_URL}/api/bots/${opts.botId}/webhooks`, {
 		method: "POST",
@@ -93,6 +100,7 @@ export async function createBotWebhook(opts: {
 			target_room_id: opts.targetRoomId,
 			label: opts.label,
 			generate_secret: opts.generateSecret,
+			...(opts.secret ? { secret: opts.secret } : {}),
 		}),
 	});
 	if (!r.ok) {
