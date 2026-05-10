@@ -28,6 +28,7 @@ import {
 	type BotRow,
 	bumpBotUsage,
 	bumpBotDailyUsage,
+	getBotById,
 	getBotDailyUsage,
 	getBotKnowledgeContent,
 	utcDayKey,
@@ -125,6 +126,16 @@ export interface PipelineDeps {
  * shouldn't kill the timeline listener.
  */
 export async function maybeHandleMention(deps: PipelineDeps): Promise<void> {
+	// Refresh the bot row from the DB on every trigger.  bot_runtime
+	// captures the BotRow at startup, but PATCH /api/bots/:id only
+	// reconciles `enabled` — every other field (system_prompt, model,
+	// max_tokens_per_reply, daily limits, accept_dms, …) would otherwise
+	// stay frozen at the value the bot was started with.  A fresh
+	// lookup costs one indexed SQLite read, well below the LLM call's
+	// network overhead, and means edits in the BotEditForm take effect
+	// on the very next mention without restarting the bot.
+	const fresh = getBotById(deps.bot.id);
+	if (fresh) deps.bot = fresh;
 	const { bot, event, room } = deps;
 
 	// Don't respond to events that were already old when we got
@@ -298,7 +309,21 @@ async function runToolLoop(
 
 		// No tool calls → final text reply, post it and stop.
 		if (result.tool_calls.length === 0) {
-			const reply = truncate(result.content.trimEnd(), MAX_REPLY_CHARS);
+			// Defensive hard cap on the visible reply: some providers
+			// (notably OpenRouter routes for Gemini Flash variants)
+			// silently ignore max_tokens or apply a much higher
+			// internal floor.  When the bot owner has chosen a
+			// per-reply token budget we honour it on OUR side too —
+			// trim the rendered message to ~4 chars per token, which
+			// matches average English encoding for both gpt and
+			// gemini tokenisers within ±15%.  Without this the
+			// dropdown selection would be advisory rather than
+			// enforced, which is exactly the bug report.
+			const charBudget =
+				bot.max_tokens_per_reply > 0
+					? Math.min(MAX_REPLY_CHARS, bot.max_tokens_per_reply * 4)
+					: MAX_REPLY_CHARS;
+			const reply = truncate(result.content.trimEnd(), charBudget);
 			console.log(
 				`bot ${bot.mxid}: ← LLM done iter=${iter}`
 					+ ` prompt=${promptTokensTotal} completion=${completionTokensTotal}`
@@ -323,7 +348,11 @@ async function runToolLoop(
 				`bot ${bot.mxid}: model still requested tools on final iter; aborting loop and posting partial text`,
 			);
 			bumpBotUsage(bot.id, promptTokensTotal, completionTokensTotal);
-			const reply = truncate(result.content.trimEnd(), MAX_REPLY_CHARS) || "(bot exceeded tool-use budget)";
+			const partialBudget =
+				bot.max_tokens_per_reply > 0
+					? Math.min(MAX_REPLY_CHARS, bot.max_tokens_per_reply * 4)
+					: MAX_REPLY_CHARS;
+			const reply = truncate(result.content.trimEnd(), partialBudget) || "(bot exceeded tool-use budget)";
 			await progress.finalise(reply);
 			return;
 		}

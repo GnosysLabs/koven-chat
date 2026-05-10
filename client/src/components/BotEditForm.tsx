@@ -178,16 +178,22 @@ interface LimitOption {
 	label: string;
 }
 
+// Per-reply token cap.  Sized for chat — quick reactions, normal
+// conversational replies, and the occasional explainer.  At ~4
+// chars/token, 100 ≈ a sentence, 250 ≈ a short paragraph, 500 ≈
+// a few paragraphs, 1000 ≈ a long-form answer.  Anything past
+// ~1500 starts being "the bot is monologuing", which doesn't
+// belong in a chat thread regardless of model capacity.  Power
+// users who really want longer can edit the underlying number
+// via the engine API; the dropdown is the curated set.
 const MAX_REPLY_OPTIONS: LimitOption[] = [
-	{ value: "",      label: "Unlimited" },
-	{ value: "256",   label: "256" },
-	{ value: "512",   label: "512" },
-	{ value: "1024",  label: "1K" },
-	{ value: "2048",  label: "2K" },
-	{ value: "4096",  label: "4K" },
-	{ value: "8192",  label: "8K" },
-	{ value: "16384", label: "16K" },
-	{ value: "32768", label: "32K" },
+	{ value: "",     label: "Unlimited" },
+	{ value: "100",  label: "Snappy (~1 sentence)" },
+	{ value: "175",  label: "Brief (~2-3 sentences)" },
+	{ value: "250",  label: "Short (~1 paragraph)" },
+	{ value: "500",  label: "Medium (~few paragraphs)" },
+	{ value: "1000", label: "Long (~half page)" },
+	{ value: "1500", label: "Detailed (~full page)" },
 ];
 
 const DAILY_TOKEN_OPTIONS: LimitOption[] = [
@@ -1883,6 +1889,27 @@ function ToolsTab({
 
 	const editing = editingId !== null;
 
+	// Suppress the entire tab body until the attached-list fetch
+	// resolves.  Without this gate the empty-state banner ("No tools
+	// attached.  Use the form below to add one.") flashes briefly
+	// after the form, even when there ARE attached servers about to
+	// land — the loading state lives inside the list block but the
+	// surrounding form renders unconditionally.  Same intent as the
+	// rule on the notifications bell: don't show any UI against
+	// half-loaded data.  Create mode skips this gate (no fetch
+	// happens; the queue is local).
+	if (!isCreateMode && loading) {
+		return (
+			<section className="space-y-6">
+				<SectionHeader
+					title="Tools"
+					subtitle="Attach MCP servers your bot can call. Paste any Streamable-HTTP MCP endpoint and (optional) auth."
+				/>
+				<div className="text-sm text-muted-foreground">Loading…</div>
+			</section>
+		);
+	}
+
 	return (
 		<section className="space-y-6">
 			<SectionHeader
@@ -1895,9 +1922,7 @@ function ToolsTab({
 				<div className="text-xs font-medium uppercase text-muted-foreground tracking-wide">
 					{isCreateMode ? "Queued" : "Attached"}
 				</div>
-				{!isCreateMode && loading ? (
-					<div className="text-sm text-muted-foreground">Loading…</div>
-				) : listError ? (
+				{listError ? (
 					<div className="text-sm text-destructive border border-destructive/40 bg-destructive/5 rounded-md px-3 py-2">
 						{listError}
 					</div>
@@ -2478,6 +2503,24 @@ function WebhooksTab({
 
 	function handleRemovePending(idx: number) {
 		onPendingChange(pendingWebhooks.filter((_, i) => i !== idx));
+	}
+
+	// Suppress entire body until the webhooks fetch resolves —
+	// matches the rule we apply elsewhere (notification bell, tools
+	// tab): no UI rendered against half-loaded data.  Without this
+	// gate the "No webhooks yet." empty state would flash before
+	// the actual list lands.  Create mode skips since there's no
+	// fetch to wait on.
+	if (!isCreateMode && loading) {
+		return (
+			<div className="space-y-4 max-w-3xl">
+				<div className="flex items-center gap-2 text-sm text-muted-foreground">
+					<Webhook className="h-4 w-4" />
+					<span>External services post to a Koven URL, this bot relays the payload into a room.</span>
+				</div>
+				<div className="text-sm text-muted-foreground">Loading…</div>
+			</div>
+		);
 	}
 
 	return (

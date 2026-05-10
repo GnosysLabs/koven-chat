@@ -188,24 +188,28 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 		setPendingAvatar(null);
 		setPendingAvatarPreview(null);
 		setClearAvatar(false);
-		setCreator(undefined);
 
-		// Stale-while-revalidate: only flip into the loading state if
-		// we don't already have data for THIS user.  When the sheet
-		// is reopened for a profile we've fetched before (most often
-		// the user's own profile), `profile` is still in state from
-		// the previous open and matches `viewedUserId` — keep showing
-		// it while we silently refetch in the background.  Otherwise
-		// (first open, or switching to a different user) we genuinely
-		// have nothing to render and the loading state is correct.
+		// Stale-while-revalidate: only flip into the loading state +
+		// blank the per-user state slots if we don't already have
+		// data for THIS user.  When the sheet is reopened for a
+		// profile we've fetched before, the previous values are
+		// still in state and match `viewedUserId` — keep showing
+		// them while we silently refetch in the background.
+		// Otherwise (first open, or switching to a different user)
+		// the prior values are wrong and we genuinely have nothing
+		// to render until the fetch resolves.
+		//
+		// Critical: blanking creator unconditionally on every open
+		// caused the dialog to close + reopen for bots (the
+		// `creator !== undefined` gate failed mid-cycle) — visible
+		// as multiple flashes when reopening a bot profile.  The
+		// fresh-data branch must hold creator + rep + everything
+		// stable across the silent refetch.
 		const haveFreshDataForThisUser = profile?.userId === viewedUserId;
 		if (!haveFreshDataForThisUser) {
 			setLoading(true);
-			// Reset rep to undefined too so the body waits for the
-			// new user's rep fetch to land.  Without this, switching
-			// from one profile to another would briefly show the
-			// previous user's rep block until the new fetch resolved.
 			setRep(undefined);
+			setCreator(undefined);
 		}
 
 		// Matrix profile (display name, avatar) and engine bio fetched
@@ -420,12 +424,39 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 	// fetch failed), the dialog stays closed — silent on success
 	// path, silent on error path.  Errors get surfaced via the
 	// parent's existing error banner rather than a stuck dialog.
-	const dialogOpen =
+	// Have-everything-ready check.  Used as the FIRST-time gate;
+	// once the dialog opens, we latch it open via `hasMounted`
+	// below so subsequent state shifts (bot cache backfilling,
+	// silent stale-while-revalidate refetches, etc.) can't cause
+	// the dialog to close + reopen mid-life.  That close+reopen
+	// was the "flashing the ui a bunch" symptom on bot profiles.
+	const computedReady =
 		open
 		&& !loading
 		&& !!profile
 		&& profile.userId === viewedUserId
-		&& rep !== undefined;
+		&& rep !== undefined
+		// Bot profiles also wait on the creator-lookup so the
+		// "Created by" row appears in the same paint as the rest of
+		// the body — `creator === undefined` means the lookup is
+		// still in flight.  null is fine (no creator found, row
+		// suppressed) but undefined IS the loading state.  Skipped
+		// for non-bot views since they never query the creator
+		// branch.
+		&& (!isBot || creator !== undefined);
+	// Latch: flips true the first time `computedReady` goes true
+	// for the current `open` lifecycle, resets to false when
+	// `open` flips back to false.  Means a single close+reopen
+	// cycle within one viewing won't fire a re-mount animation.
+	const [hasMounted, setHasMounted] = useState(false);
+	useEffect(() => {
+		if (!open) {
+			setHasMounted(false);
+		} else if (computedReady && !hasMounted) {
+			setHasMounted(true);
+		}
+	}, [open, computedReady, hasMounted]);
+	const dialogOpen = open && (computedReady || hasMounted);
 
 	return (
 		<Dialog open={dialogOpen} onOpenChange={(o) => { if (!o) onClose(); }}>
