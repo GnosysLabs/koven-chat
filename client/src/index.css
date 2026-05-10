@@ -504,16 +504,24 @@
 		@apply border-border;
 	}
 	html, body, #root {
-		height: 100%;
-		/* `100dvh` accounts for the iOS notch / Dynamic Island /
-		 * home-indicator regions that `viewport-fit=cover` makes
-		 * us draw under.  Without this, `height: 100%` is the
-		 * inner viewport (excludes safe areas) and the background
-		 * stops short of the screen edges — visible as bright
-		 * white bars at the top + bottom on iOS, which is the
-		 * WKWebView's default unstyled surface peeking through.
+		/* `height: 100%` constrains html/body/#root to the viewport
+		 * exactly, which is what the chat-pane scroll container
+		 * relies on (its `flex-1 overflow-y-auto` chain only works
+		 * if every flex ancestor up to here has a bounded height).
+		 *
+		 * iOS safe-area handling is in the @media (display-mode:
+		 * standalone | fullscreen) block below, which switches
+		 * #root to `position: fixed; inset: 0` — that's the
+		 * approach that actually reaches the safe-area edges,
+		 * unlike `min-height: 100dvh` which used to live here and
+		 * had the side effect of letting html/body GROW past the
+		 * viewport when chat content overflowed.  When that
+		 * happened, the OUTER body became the scroll surface and
+		 * the chat pane's own scroll container had nothing to
+		 * scroll inside — the "scroll is broken until I resize
+		 * the window" symptom.
 		 */
-		min-height: 100dvh;
+		height: 100%;
 	}
 	html {
 		/* Tells the WKWebView's status-bar overlay to render in

@@ -311,16 +311,31 @@ export function ChatPane({
 	// Auto-grow the composer to fit its content (Discord-style).  Runs
 	// on every draft change: clear the inline height so scrollHeight
 	// reflects the natural content height, then write that back as the
-	// new height.  CSS `max-h` clamps the upper bound — once we hit
-	// the cap, the textarea's own `overflow-y-auto` takes over and
-	// scrolls instead of growing.  useLayoutEffect (not useEffect) so
-	// the height update happens before paint and there's no flash of
-	// the wrong size.
+	// new height.
+	//
+	// CRITICAL: cap by the CSS `max-h-[50vh]`.  Setting `el.style.height`
+	// inline OVERRIDES the CSS max-height — without the manual clamp,
+	// a huge pasted message (or a draft you forgot you typed days ago,
+	// since drafts persist in component state across room switches)
+	// blew the textarea's height past the viewport, leaving zero
+	// room for the scroll container above it.  Symptom: "scroll is
+	// broken in this one room only" with no obvious cause, since the
+	// composer's growth is the only per-room layout the user can
+	// inadvertently trigger.  Reading the computed maxHeight keeps
+	// us honest if the cap class ever changes.
+	//
+	// useLayoutEffect (not useEffect) so the height update happens
+	// before paint and there's no flash of the wrong size.
 	useLayoutEffect(() => {
 		const el = composeInputRef.current;
 		if (!el) return;
 		el.style.height = "auto";
-		el.style.height = `${el.scrollHeight}px`;
+		const maxHeightStr = window.getComputedStyle(el).maxHeight;
+		const maxHeight = parseFloat(maxHeightStr);
+		const cap = Number.isFinite(maxHeight) && maxHeight > 0
+			? maxHeight
+			: window.innerHeight * 0.5;
+		el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
 	}, [draft]);
 	const scrollRef = useRef<HTMLDivElement | null>(null);
 	const scrollContentRef = useRef<HTMLDivElement | null>(null);
@@ -468,6 +483,57 @@ export function ChatPane({
 		el.addEventListener("scroll", onScroll, { passive: true });
 		return () => el.removeEventListener("scroll", onScroll);
 	}, [room?.id, onLoadMoreHistory]);
+
+	// Proactive pagination when the timeline doesn't overflow the
+	// scroll container.  matrix-js-sdk's initial /sync only loads
+	// ~30 events per room — for low-traffic rooms (or rooms whose
+	// recent N events are short text), that batch can fit inside the
+	// viewport entirely.  When that happens scrollTop is stuck at 0
+	// (no overflow = no scroll possible), so the scroll-handler
+	// pagination above never fires, and the user sees a partial
+	// timeline with no way to load more.  Symptom: reply quotes show
+	// "(message)" because the originals never paginated in, and the
+	// user perceives "scroll is broken in this room" — the room just
+	// has invisible older history that's never been requested.
+	//
+	// Fix: after every messages_loaded, if the inner content fits
+	// within the scroll container AND there's history available,
+	// fire one paginate to grow the timeline.  The scroll-handler
+	// takes over once the user actually has something to scroll.
+	useEffect(() => {
+		const el = scrollRef.current;
+		const inner = scrollContentRef.current;
+		if (!el || !inner) return;
+		if (!room || !onLoadMoreHistory) return;
+		if (loadingMoreRef.current) return;
+		if (noMoreHistoryRef.current.has(room.id)) return;
+		// Wait until the room has SOMETHING — paginating an empty
+		// room before /sync has populated its timeline produces no
+		// results and we'd just spin.
+		if (messages.length === 0) return;
+		// Underflow check: the inner content fits inside the scroll
+		// container with room to spare.  Use a small slack (16px) so
+		// near-exact fits don't trigger when only a single line of
+		// padding is missing — that's not actually a "no more
+		// history" problem, just an uninteresting edge case.
+		if (inner.clientHeight >= el.clientHeight - 16) return;
+		const roomId = room.id;
+		loadingMoreRef.current = true;
+		// No scroll-anchor to preserve here — we're at scrollTop = 0
+		// (otherwise the regular scroll-handler path would have
+		// fired), and the user expects new content to APPEAR above
+		// without their viewport jumping.  pendingRestoreRef stays
+		// null; useLayoutEffect doesn't run.
+		onLoadMoreHistory(roomId)
+			.then((gotMore) => {
+				if (!gotMore) {
+					noMoreHistoryRef.current.add(roomId);
+				}
+			})
+			.finally(() => {
+				loadingMoreRef.current = false;
+			});
+	}, [room?.id, messages.length, onLoadMoreHistory, room]);
 
 	// Global hover tracking for the message-action toolbar.
 	//
@@ -1619,8 +1685,18 @@ function MessageRow({
 				    one row of pills, reactions render INSIDE that
 				    gutter rather than pushing the next message down. */}
 				<div className="relative flex items-start gap-2">
-					{/* Bubble column. */}
-					<div className="flex flex-col min-w-0">
+					{/* Bubble column.  `relative` + `w-fit` so the absolute
+					    reaction-pills child anchors to the bubble's
+					    bottom-left corner specifically, not the row's
+					    bottom-left (which would be pulled down by the
+					    right column's reserved-toolbar height + seen-by
+					    line and produce the "pills hang 18px below the
+					    bubble" symptom).  `w-fit` ensures the column's
+					    width = the bubble's actual rendered width, so
+					    pills sit flush under the bubble even on short
+					    messages where flex would otherwise stretch the
+					    column wider. */}
+					<div className="relative w-fit flex flex-col min-w-0">
 						{isCollapsed ? (
 							<CollapsedBubble collapse={collapse!} onExpand={() => setExpanded(true)} />
 						) : (
@@ -1641,8 +1717,28 @@ function MessageRow({
 							// in encrypted rooms — see roomEncrypted prop above.
 							<UrlPreviewSlot text={message.text} />
 						)}
-					</div>
-					<div className="flex flex-col items-start gap-1 shrink-0">
+						{!isCollapsed && reactions.length > 0 && (
+							<div className="absolute left-0 top-full">
+								<ReactionPills reactions={reactions} onToggle={onToggleReactionPill} />
+							</div>
+						)}
+						{/* Right column LIVES INSIDE the bubble column on
+						    purpose — its absolute positioning needs to
+						    anchor to the bubble's right edge, and the
+						    bubble column is `w-fit` (exactly the bubble
+						    width).  Putting it as a sibling of the
+						    bubble column would anchor `left-full` to
+						    the row's full width — which on a wide
+						    chat lands the toolbar way past the right
+						    sidebar.  Inside the bubble column,
+						    `left-full` is the bubble's right edge.
+						    Reservation rationale: the reserved
+						    toolbar slot (~32px) + SeenIndicator
+						    (~14px) used to pull every row to ~50px
+						    when in row flow, leaving an 18px gap
+						    below every bubble.  Now the bubble alone
+						    defines row height. */}
+						<div className="absolute top-0 left-full ml-2 flex flex-row items-center gap-2 shrink-0 whitespace-nowrap">
 						{/* Seen-by indicator on YOUR sent messages.
 						    DM rooms get a "Read · time" line; group
 						    rooms get an avatar stack + count that
@@ -1701,16 +1797,8 @@ function MessageRow({
 							)}
 						</div>
 					</div>
-					{/* Reaction pills layer.  Absolutely positioned
-					    just below the bubble so adding/removing a
-					    reaction never changes the row's flow height.
-					    Anchored to the row's relative container. */}
-					{!isCollapsed && reactions.length > 0 && (
-						<div className="absolute left-0 top-full">
-							<ReactionPills reactions={reactions} onToggle={onToggleReactionPill} />
-						</div>
-					)}
 				</div>
+			</div>
 			</div>
 			{canFlag && (
 				<FlagDialog

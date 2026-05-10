@@ -28,6 +28,7 @@ import { MobileSpacesList } from "@/components/MobileSpacesList";
 import { MobileMeScreen } from "@/components/MobileMeScreen";
 import { isMobileShell } from "@/lib/mobile";
 import { parseShareIntent, clearShareUrl } from "@/lib/inviteLink";
+import { saveView, loadView } from "@/lib/sessionView";
 import { ChatPane } from "@/components/ChatPane";
 import { SpaceLanding } from "@/components/SpaceLanding";
 import { ExplorePane } from "@/components/ExplorePane";
@@ -1044,6 +1045,72 @@ export default function App() {
 			}
 		})();
 	}, [transport, creds, state.syncState]);
+
+	// Persist the user's current view (active space + active room) so a
+	// page refresh leaves them exactly where they were instead of
+	// dumping them back at the Rooms tab with no room selected.  Per-
+	// user scoped via creds.user_id (multi-account installs each get
+	// their own slot).  Skipped while a share-intent is being consumed
+	// (avoids a brief save of the pre-intent view that the intent then
+	// overrides).
+	useEffect(() => {
+		if (!creds?.user_id) return;
+		// Don't persist while we're still bringing up — initial state
+		// is `{rooms, null}` which would clobber any real saved view
+		// before we restore it.  Restore handler below clears
+		// shareIntentConsumedRef AFTER it's done; this effect only
+		// runs once that's true (or when the intent never fires).
+		if (!shareIntentConsumedRef.current) return;
+		saveView(creds.user_id, {
+			activeSpace: state.activeSpace,
+			activeRoomId: state.activeRoomId,
+		});
+	}, [creds?.user_id, state.activeSpace, state.activeRoomId]);
+
+	// Restore the persisted view once the room list is available.  Fires
+	// only once per session (guarded by a ref), only when there's no
+	// share-intent in flight (intent navigation wins over restore), and
+	// only validates the saved room/space against the user's CURRENT
+	// joined set so a stored room id for a room they've since left
+	// doesn't navigate them into a missing room.
+	const viewRestoredRef = useRef(false);
+	useEffect(() => {
+		if (viewRestoredRef.current) return;
+		if (!creds?.user_id) return;
+		if (state.syncState !== "ready" && state.syncState !== "syncing") return;
+		// Skip restore when the URL carried a share intent — that
+		// intent's navigation should win.  parseShareIntent is cheap
+		// (string parse on window.location).
+		if (parseShareIntent()) {
+			viewRestoredRef.current = true;
+			return;
+		}
+		// Wait for the room list to actually populate before validating
+		// the saved roomId — otherwise we'd reject every saved room as
+		// "not in joined set" just because rooms haven't loaded yet.
+		if (state.rooms.length === 0 && state.spaces.length === 0) return;
+		viewRestoredRef.current = true;
+		const saved = loadView(creds.user_id);
+		if (!saved) return;
+		// Validate the space exists (or is one of the virtual kinds
+		// like rooms/dms/explore/bots which don't need a backing
+		// Space row).  A real space the user has since left would
+		// no longer be in state.spaces; falling through to the
+		// default rooms tab is the right behaviour there.
+		if (saved.activeSpace?.kind === "space") {
+			const targetId = saved.activeSpace.id;
+			const exists = state.spaces.some(s => s.id === targetId);
+			if (!exists) return;
+		}
+		dispatch({ type: "set_active_space", space: saved.activeSpace });
+		// Validate the room exists in the user's joined set.
+		if (saved.activeRoomId) {
+			const exists = state.rooms.some(r => r.id === saved.activeRoomId);
+			if (exists) {
+				dispatch({ type: "set_active_room", roomId: saved.activeRoomId });
+			}
+		}
+	}, [creds?.user_id, state.syncState, state.rooms, state.spaces]);
 
 	// When the active room changes, load its existing timeline + members
 	// + reactions from the matrix-js-sdk's in-memory state.

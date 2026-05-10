@@ -35,10 +35,17 @@ export async function requestEmailCode(
 	// reads the X-Koven-Client header below and skips the captcha
 	// gate when set.  Existing email rate-limits stay in place
 	// regardless.
+	//
+	// Same bypass for local Vite dev — Turnstile site key is bound
+	// to client.koven.chat so the widget refuses to render on
+	// http://localhost.  `import.meta.env.DEV` is true only in dev
+	// builds, stripped to false in `vite build`, so this can't ship
+	// to real users.
 	const isDesktop = typeof window !== "undefined"
 		&& (window as { __KOVEN_DESKTOP__?: boolean }).__KOVEN_DESKTOP__ === true;
+	const isDev = import.meta.env.DEV;
 	const headers: Record<string, string> = { "Content-Type": "application/json" };
-	if (isDesktop) headers["X-Koven-Client"] = "desktop";
+	if (isDesktop || isDev) headers["X-Koven-Client"] = "desktop";
 	let r: Response;
 	try {
 		r = await fetch(`${ENGINE_URL}/api/auth/request-code`, {

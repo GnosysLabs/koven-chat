@@ -185,10 +185,19 @@ export function Login({ onLoggedIn, addingAccount, onCancelAddAccount }: LoginPr
 	// just errors out.  The engine sees an X-Koven-Client header
 	// from the desktop fetch and bypasses captcha enforcement on
 	// that path; the existing email rate-limit still applies.
+	//
+	// Same bypass applies to local development (`bun run dev:live`):
+	// the live engine's Turnstile site key is bound to
+	// client.koven.chat, so the widget refuses to render on
+	// http://localhost:1420.  Without this exception nobody can sign
+	// in to test changes locally.  `import.meta.env.DEV` is true only
+	// during Vite dev builds (the prod `vite build` strips it to
+	// false), so this bypass cannot ship to real users.
 	const isDesktop = typeof window !== "undefined"
 		&& (window as { __KOVEN_DESKTOP__?: boolean }).__KOVEN_DESKTOP__ === true;
+	const isDev = import.meta.env.DEV;
 	const turnstileRef = useRef<HTMLDivElement | null>(null);
-	const turnstileSiteKey = isDesktop
+	const turnstileSiteKey = (isDesktop || isDev)
 		? null
 		: (instance as { turnstile_site_key?: string }).turnstile_site_key ?? null;
 	const turnstileEnabled = !!turnstileSiteKey;
