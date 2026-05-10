@@ -348,6 +348,54 @@ export async function adminJoinUserToRoom(
 }
 
 /**
+ * Invite a user to a room AS the holder of `accessToken` — a
+ * thin wrapper around `POST /_matrix/client/v3/rooms/{roomId}/invite`.
+ *
+ * Used to pull a bot into a webhook's target room at create time:
+ * the bot owner is already in the room (the room picker only lists
+ * their joined rooms) so they have invite power; the bot's runtime
+ * has an auto-join handler that accepts owner-issued invites
+ * (bot_runtime.ts).  Net effect: by the time the webhook is saved,
+ * the bot is a member of the target room and the first webhook fire
+ * lands cleanly.
+ *
+ * Idempotent in practice — if the user is already in the room
+ * Synapse returns 403 with `M_FORBIDDEN: <user> is already in the
+ * room`; we treat that as success.  Same for the user already
+ * having a pending invite.  Other failures bubble up so the caller
+ * can surface them.
+ */
+export async function inviteUserToRoom(opts: {
+	accessToken: string;
+	roomId: string;
+	userId: string;
+}): Promise<{ ok: true } | { error: string; detail?: string }> {
+	const url = `${config.homeserverUrl}/_matrix/client/v3/rooms/${encodeURIComponent(opts.roomId)}/invite`;
+	let r: Response;
+	try {
+		r = await fetch(url, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${opts.accessToken}`,
+			},
+			body: JSON.stringify({ user_id: opts.userId }),
+		});
+	} catch (err) {
+		return { error: "network", detail: err instanceof Error ? err.message : String(err) };
+	}
+	if (r.ok) return { ok: true };
+	const txt = await r.text().catch(() => "");
+	// Idempotency: "already in the room" / "already invited" are
+	// both fine for our use case — the goal state is "user is a
+	// member or invited member", which is already true.
+	if (r.status === 403 && /already in the room|already invited/i.test(txt)) {
+		return { ok: true };
+	}
+	return { error: `synapse_${r.status}`, detail: txt.slice(0, 300) };
+}
+
+/**
  * Promote a user to PL `max(existing_admins) + 1` in a room via
  * Synapse's admin endpoint `POST /_synapse/admin/v1/rooms/{roomId}
  * /make_room_admin`.  Used by the invite-permission self-heal: the

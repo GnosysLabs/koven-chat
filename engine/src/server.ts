@@ -122,6 +122,7 @@ import {
 	getRoomNsfw,
 	getRoomNameAndCreator,
 	getSpaceChildRoomIds,
+	inviteUserToRoom,
 	isSpaceRoom,
 	kickOrBanAs,
 	joinRoomIfNeeded,
@@ -1969,6 +1970,34 @@ export function startServer(): void {
 								error: "secret must be ≤ 512 chars",
 							}, { status: 400 });
 						}
+						// Pull the bot into the target room BEFORE inserting
+						// the webhook row.  Without this the webhook
+						// would be created in a state where its first
+						// inbound POST fails with "bot not in room",
+						// because picking a room from the dropdown
+						// doesn't auto-invite the bot — the dropdown
+						// just lists the OWNER's rooms.  Owner has
+						// invite power on their own rooms; bot's
+						// runtime auto-joins owner-issued invites
+						// (see bot_runtime.ts membership handler).
+						// inviteUserToRoom is idempotent — it treats
+						// "already in the room" / "already invited"
+						// as success.
+						const accessToken = extractToken(req);
+						if (accessToken) {
+							const inviteResult = await inviteUserToRoom({
+								accessToken,
+								roomId: targetRoomId,
+								userId: existing.mxid,
+							});
+							if ("error" in inviteResult) {
+								return json({
+									errcode: "M_FORBIDDEN",
+									error: `couldn't invite bot to room: ${inviteResult.detail ?? inviteResult.error}`,
+								}, { status: 400 });
+							}
+						}
+
 						// 32 bytes URL-safe base64 → ~43 chars.  Plenty
 						// of entropy for a capability token (~256 bits).
 						const token = randomToken(32);
