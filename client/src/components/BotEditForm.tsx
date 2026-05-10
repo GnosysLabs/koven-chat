@@ -856,7 +856,22 @@ export function BotEditForm({
 	// onSaved.
 	if (justCreatedWebhooksBatch && pendingPostSave) {
 		const n = justCreatedWebhooksBatch.length;
-		const plural = n === 1 ? "" : "s";
+		// Adapt the headline copy to the actual situation.  When the
+		// user pasted their own secret(s) the engine returns
+		// `secret: null` for those rows, so the "copy this now or roll
+		// it" instruction would be a lie — they already have it.  Only
+		// urge "copy now" when there's at least one server-generated
+		// secret the user genuinely won't see again.
+		const hasGeneratedSecret = justCreatedWebhooksBatch.some(w => !!w.secret);
+		const allHaveGenerated = justCreatedWebhooksBatch.every(w => !!w.secret);
+		const subline = hasGeneratedSecret
+			? (allHaveGenerated
+				? `Copy the signing secret${n === 1 ? "" : "s"} now — ${n === 1 ? "it" : "they"} won’t be shown again. The webhook URL${n === 1 ? "" : "s"} ${n === 1 ? "stays" : "stay"} visible in the Webhooks tab.`
+				: `Copy the generated signing secrets now — they won’t be shown again. Webhook URLs stay visible in the Webhooks tab.`)
+			: `Copy the URL${n === 1 ? "" : "s"} into your source service. ${n === 1 ? "It" : "They"} also stay visible in the Webhooks tab.`;
+		const buttonLabel = hasGeneratedSecret
+			? `I’ve copied ${n === 1 && allHaveGenerated ? "it" : "them"}`
+			: "Done";
 		return (
 			<div className="flex-1 min-w-0 flex flex-col bg-background overflow-auto">
 				<div className="flex-1 flex items-start justify-center px-6 py-10">
@@ -876,7 +891,7 @@ export function BotEditForm({
 								{n === 1 ? "Webhook ready" : `${n} webhooks ready`}
 							</h2>
 							<p className="text-sm text-muted-foreground mt-2 max-w-md leading-relaxed">
-								Copy the signing secret{plural} now — {n === 1 ? "it" : "they"} won&rsquo;t be shown again. The webhook URL{plural} {n === 1 ? "stays" : "stay"} visible in the Webhooks tab.
+								{subline}
 							</p>
 						</div>
 
@@ -916,7 +931,7 @@ export function BotEditForm({
 									if (saved) await onSaved(saved);
 								}}
 							>
-								I&rsquo;ve copied {n === 1 ? "it" : "them"}
+								{buttonLabel}
 							</Button>
 						</div>
 					</div>
@@ -2604,7 +2619,9 @@ function WebhooksTab({
 				<div className="rounded-md border border-primary/40 bg-primary/5 p-4 space-y-3 text-sm">
 					<div className="font-medium flex items-center gap-2">
 						<AlertCircle className="h-4 w-4" />
-						Save these now — the secret is shown once
+						{justCreated.secret
+							? "Save the secret now — it's shown once"
+							: "Webhook ready"}
 					</div>
 					<div className="space-y-3">
 						<CopyableField label="Webhook URL" value={webhookUrlFor(justCreated.token)} />
@@ -2613,7 +2630,9 @@ function WebhooksTab({
 						)}
 					</div>
 					<div className="text-xs text-muted-foreground">
-						Paste the URL into your source service.  If you also have a secret, set it as the webhook&rsquo;s signing secret in that service so we can verify inbound requests with HMAC-SHA256.  GitHub puts this under &ldquo;Secret&rdquo; on the webhook config page.
+						{justCreated.secret
+							? "Paste the URL into your source service, then paste the signing secret into the source's webhook config (GitHub: Secret; Stripe: Signing secret) so Koven can verify inbound requests."
+							: "Paste the URL into your source service.  Koven verifies inbound signatures with the secret you provided."}
 					</div>
 					<button
 						type="button"

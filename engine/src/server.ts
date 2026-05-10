@@ -1987,17 +1987,21 @@ export function startServer(): void {
 							targetRoomId,
 							label,
 						});
-						// Return the secret in plaintext exactly here —
-						// for generated secrets, the user needs to copy
-						// it; for user-provided, echo it back so the
-						// post-save banner can show what they pasted.
+						// Echo the secret back to the caller ONLY when
+						// we generated it ourselves — that's the only
+						// case where the user needs to see it (to paste
+						// into the source service).  For user-provided
+						// secrets, the user already has the value and
+						// re-displaying it is confusing UX (the banner
+						// would tell them to "copy this now" for a
+						// secret they pasted in 5 seconds ago).
 						return json({
 							ok: true,
 							webhook: {
 								id: created.id,
 								bot_id: created.bot_id,
 								token: created.token,
-								secret: secret,
+								secret: providedSecret ? null : secret,
 								target_room_id: created.target_room_id,
 								label: created.label,
 								created_at: created.created_at,
