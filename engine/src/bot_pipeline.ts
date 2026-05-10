@@ -876,3 +876,146 @@ function escapeHtml(s: string): string {
 		.replace(/"/g, "&quot;")
 		.replace(/'/g, "&#39;");
 }
+
+// ─── Webhook → LLM bridge ─────────────────────────────────────────
+
+/** Run an inbound webhook payload through the bot's LLM and post
+ * the resulting reply to the target room.  Used by webhooks.ts so
+ * inbound payloads (Twilio SMS, GitHub events, etc.) get processed
+ * by the bot's behaviour instructions / system prompt instead of
+ * landing as a raw payload dump.
+ *
+ * Differences vs. the mention pipeline (maybeHandleMention):
+ *   - No room timeline context — webhooks are point-in-time events,
+ *     not part of an ongoing conversation.  Just system prompt +
+ *     the inbound payload as the user turn.
+ *   - No tools — keeps the round trip cheap and bounded.
+ *   - No progress placeholder — webhooks don't have a typing
+ *     surface; just post the final reply.
+ *   - No mention-required gating — every inbound webhook is by
+ *     definition addressed to this bot.
+ *
+ * Daily-spend guards still apply (call + token caps both honoured).
+ *
+ * Returns the posted reply text (for the deliveries log) or null
+ * on failure. */
+export async function processWebhookViaLlm(opts: {
+	bot: BotRow;
+	client: MatrixClient;
+	targetRoomId: string;
+	inboundMessage: string;
+}): Promise<string | null> {
+	const { client, targetRoomId, inboundMessage } = opts;
+
+	// Refresh from DB so settings PATCH'd since the runtime started
+	// take effect (mirrors maybeHandleMention's first move).
+	const live = getBotById(opts.bot.id) ?? opts.bot;
+
+	// Daily-spend guardrails.
+	if (live.daily_call_limit > 0 || live.daily_token_limit > 0) {
+		const day = utcDayKey();
+		const used = getBotDailyUsage(live.id, day);
+		if (live.daily_call_limit > 0 && used.calls >= live.daily_call_limit) {
+			console.log(`bot ${live.mxid}: webhook refused — daily call limit (${used.calls}/${live.daily_call_limit})`);
+			await postPlain(
+				client, targetRoomId,
+				`(daily call limit reached — ${used.calls}/${live.daily_call_limit}; resets at 00:00 UTC)`,
+			);
+			return null;
+		}
+		const totalTokens = used.prompt_tokens + used.completion_tokens;
+		if (live.daily_token_limit > 0 && totalTokens >= live.daily_token_limit) {
+			console.log(`bot ${live.mxid}: webhook refused — daily token limit (${totalTokens}/${live.daily_token_limit})`);
+			await postPlain(
+				client, targetRoomId,
+				`(daily token limit reached — ${totalTokens}/${live.daily_token_limit}; resets at 00:00 UTC)`,
+			);
+			return null;
+		}
+	}
+
+	let apiKey: string;
+	try {
+		apiKey = openSecret(live.api_key_enc);
+	} catch (err) {
+		console.error(`bot ${live.mxid}: failed to decrypt API key for webhook`, err);
+		return null;
+	}
+
+	// Compose the system prompt: knowledge block + bot's own
+	// system_prompt + a webhook-specific framing note + length hint.
+	// Without the framing note some models misread the inbound
+	// payload as a system instruction or as a human's chat input.
+	const knowledge = getBotKnowledgeContent(live.id);
+	const knowledgeBlock = knowledge.length === 0
+		? ""
+		: [
+			"# Knowledge base",
+			"",
+			"The following reference material has been provided to you. Treat it as authoritative when relevant.",
+			"",
+			...knowledge.map(k => `## ${k.filename}\n\n${k.content}`),
+			"---",
+			"",
+		].join("\n");
+
+	const promptParts: string[] = [];
+	if (knowledgeBlock) promptParts.push(knowledgeBlock);
+	if (live.system_prompt && live.system_prompt.trim().length > 0) {
+		promptParts.push(live.system_prompt);
+	}
+	promptParts.push(
+		"The user message below is the body of an external webhook event " +
+		"that just fired (e.g. inbound SMS, GitHub event, or similar). " +
+		"Respond per your usual behaviour — paraphrase, summarise, react, " +
+		"or relay as your system prompt directs. Do not pretend a human in " +
+		"the room sent it.",
+	);
+	const lh = lengthHint(live.max_tokens_per_reply);
+	if (lh) promptParts.push(lh);
+
+	const messages: ChatMessage[] = [
+		{ role: "system", content: promptParts.join("\n\n") },
+		{ role: "user", content: inboundMessage },
+	];
+
+	console.log(
+		`bot ${live.mxid}: → LLM (webhook) model=${live.model} provider=${live.provider}`
+			+ ` inbound_chars=${inboundMessage.length}`,
+	);
+
+	const result = await chatCompletion({
+		apiBase: live.api_base,
+		apiKey,
+		model: live.model,
+		messages,
+		provider: live.provider,
+		referer: `https://${config.homeserverName}`,
+		title: `Koven (${live.display_name})`,
+		maxTokens: live.max_tokens_per_reply > 0
+			? Math.ceil(live.max_tokens_per_reply * 1.6)
+			: undefined,
+	});
+
+	if (!result.ok) {
+		console.warn(`bot ${live.mxid}: webhook LLM call failed (${result.error}): ${result.detail}`);
+		await postPlain(
+			client, targetRoomId,
+			`(webhook bot error: ${result.error}${result.status ? ` [${result.status}]` : ""}: ${truncate(result.detail, 200)})`,
+		);
+		return null;
+	}
+
+	bumpBotUsage(live.id, result.prompt_tokens, result.completion_tokens);
+	const reply = truncate(result.content.trimEnd(), MAX_REPLY_CHARS);
+	console.log(
+		`bot ${live.mxid}: ← LLM (webhook) prompt=${result.prompt_tokens}`
+			+ ` completion=${result.completion_tokens} chars=${reply.length}`,
+	);
+	if (reply.length === 0) {
+		console.warn(`bot ${live.mxid}: webhook LLM returned empty reply`);
+		return null;
+	}
+	await postPlain(client, targetRoomId, reply);
+	return reply;
+}

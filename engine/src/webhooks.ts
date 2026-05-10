@@ -21,6 +21,7 @@
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { getRunningBot } from "./bot_manager";
+import { processWebhookViaLlm } from "./bot_pipeline";
 import {
 	getBotById,
 	recordBotWebhookDelivery,
@@ -337,17 +338,24 @@ export async function deliverWebhook(opts: {
 		return { status: "bot_not_running" };
 	}
 
+	// Run the formatted payload through the bot's LLM so the system
+	// prompt + behaviour instructions actually shape the response.
+	// Without this the bot just dumps a raw payload into the room
+	// regardless of how the owner configured it ("paraphrase
+	// inbound SMS in a friendly tone" etc. would be ignored).
+	//
+	// The LLM bridge handles its own posting, daily-limit checks,
+	// and usage accounting — we just hand it the formatted message
+	// and the target room.  Returns the posted text on success or
+	// null on LLM failure (in which case it already posted an error
+	// note to the room and we record that in the deliveries log).
+	let postedText: string | null;
 	try {
-		// matrix-js-sdk's sendEvent typing is a strict tagged union;
-		// cast through unknown to send a well-formed m.room.message
-		// without reconstructing the discriminator.
-		await (running.client as unknown as {
-			sendEvent(roomId: string, eventType: string, content: Record<string, unknown>): Promise<unknown>;
-		}).sendEvent(webhook.target_room_id, "m.room.message", {
-			msgtype: "m.notice",
-			body: stripMarkdown(message),
-			format: "org.matrix.custom.html",
-			formatted_body: markdownToHtml(message),
+		postedText = await processWebhookViaLlm({
+			bot,
+			client: running.client,
+			targetRoomId: webhook.target_room_id,
+			inboundMessage: message,
 		});
 	} catch (err) {
 		const detail = err instanceof Error ? err.message : String(err);
@@ -355,7 +363,7 @@ export async function deliverWebhook(opts: {
 			webhookId: webhook.id,
 			payloadJson: rawBody,
 			postedText: message,
-			error: `matrix send failed: ${detail}`,
+			error: `llm bridge failed: ${detail}`,
 		});
 		return { status: "post_failed", detail };
 	}
@@ -363,8 +371,11 @@ export async function deliverWebhook(opts: {
 	recordBotWebhookDelivery({
 		webhookId: webhook.id,
 		payloadJson: rawBody,
-		postedText: message,
-		error: null,
+		// Log what the LLM actually posted (when successful), or fall
+		// back to the formatted payload if the LLM bridge bailed —
+		// either way the deliveries log shows what reached the room.
+		postedText: postedText ?? message,
+		error: postedText === null ? "llm bridge returned no reply" : null,
 	});
 	return { status: "ok", reply: replyForSource(source) };
 }
