@@ -14,7 +14,7 @@
 // and we only fence off obvious mistakes here so the user gets
 // immediate feedback before the round-trip.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -29,6 +29,7 @@ import {
 	Eye,
 	EyeOff,
 	FileText,
+	Pencil,
 	Plug,
 	Plus,
 	Search,
@@ -71,6 +72,7 @@ import {
 import {
 	listBotOutboundWebhooks,
 	createBotOutboundWebhook,
+	updateBotOutboundWebhook,
 	deleteBotOutboundWebhook,
 	type OutboundWebhook,
 	type OutboundParam,
@@ -2865,6 +2867,260 @@ function InboundWebhooksSubTab({
 // because users want to define inbound URLs before the bot has
 // landed; outbound URLs are an after-the-fact add).
 
+/** Reusable form for creating + editing outbound webhooks.  Used by
+ * OutboundWebhooksSubTab in two places: a single inline create form
+ * at the top of the list, and a per-row edit form that appears in
+ * place of the read-only summary when the user clicks Edit.  Both
+ * modes share the same field layout + validation; the only
+ * difference is initial values, the Submit label, and whether the
+ * Cancel button shows. */
+interface OutboundFormSnapshot {
+	name: string;
+	description: string;
+	method: "GET" | "POST";
+	url: string;
+	params: OutboundParam[];
+	headers: OutboundHeader[];
+}
+
+function OutboundWebhookForm({
+	mode,
+	initial,
+	submitting,
+	onSubmit,
+	onCancel,
+}: {
+	mode: "create" | "edit";
+	/** Initial values.  In create mode usually all empty; in edit
+	 * mode the snapshot of the row being edited. */
+	initial: OutboundFormSnapshot;
+	submitting: boolean;
+	onSubmit(snapshot: OutboundFormSnapshot): Promise<void> | void;
+	onCancel?(): void;
+}) {
+	const [name, setName] = useState(initial.name);
+	const [description, setDescription] = useState(initial.description);
+	const [method, setMethod] = useState<"GET" | "POST">(initial.method);
+	const [url, setUrl] = useState(initial.url);
+	const [params, setParams] = useState<OutboundParam[]>(initial.params);
+	const [headers, setHeaders] = useState<OutboundHeader[]>(initial.headers);
+	const [formError, setFormError] = useState<string | null>(null);
+
+	// Stable ids for `htmlFor` so multiple instances on the same
+	// page (create form + per-row edit forms) don't collide.
+	const idPrefix = useId();
+
+	async function handleSubmit(e: React.FormEvent) {
+		e.preventDefault();
+		setFormError(null);
+		const trimmedName = name.trim();
+		const trimmedUrl = url.trim();
+		if (trimmedName.length === 0) { setFormError("Tool name required"); return; }
+		if (!/^[a-zA-Z0-9_-]+$/.test(trimmedName)) {
+			setFormError("Tool name may only contain letters, digits, underscore, hyphen");
+			return;
+		}
+		if (trimmedUrl.length === 0) { setFormError("URL required"); return; }
+		try {
+			await onSubmit({
+				name: trimmedName,
+				description: description.trim(),
+				method,
+				url: trimmedUrl,
+				params: params.filter(p => p.name.trim().length > 0),
+				headers: headers.filter(h => h.name.trim().length > 0),
+			});
+		} catch (err) {
+			setFormError(err instanceof Error ? err.message : String(err));
+		}
+	}
+
+	return (
+		<form onSubmit={handleSubmit} className="rounded-md border border-border p-4 space-y-3">
+			<div className="text-sm font-medium">{mode === "create" ? "Add a tool" : `Edit ${initial.name || "tool"}`}</div>
+			<div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+				<div className="space-y-1">
+					<Label htmlFor={`${idPrefix}-name`}>Name</Label>
+					<Input
+						id={`${idPrefix}-name`}
+						value={name}
+						onChange={e => setName(e.target.value)}
+						placeholder="e.g. fetch_news"
+						maxLength={64}
+						spellCheck={false}
+					/>
+				</div>
+				<div className="space-y-1">
+					<Label htmlFor={`${idPrefix}-method`}>Method</Label>
+					<select
+						id={`${idPrefix}-method`}
+						value={method}
+						onChange={e => {
+							const m = e.target.value as "GET" | "POST";
+							setMethod(m);
+							// GET requests can't carry a body — auto-
+							// convert any body-scope params to url-
+							// scope so the user doesn't end up with
+							// silently-dropped fields after switching
+							// from POST → GET.
+							if (m === "GET") {
+								setParams(arr => arr.map(p => p.in === "body" ? { ...p, in: "url" } : p));
+							}
+						}}
+						className="h-9 w-full px-2 rounded border border-input bg-background text-sm"
+					>
+						<option value="GET">GET</option>
+						<option value="POST">POST</option>
+					</select>
+				</div>
+			</div>
+			<div className="space-y-1">
+				<Label htmlFor={`${idPrefix}-description`}>Description (what the LLM uses to decide when to call)</Label>
+				<Input
+					id={`${idPrefix}-description`}
+					value={description}
+					onChange={e => setDescription(e.target.value)}
+					placeholder="e.g. Fetches today's top news headlines on a topic"
+					maxLength={500}
+				/>
+			</div>
+			<div className="space-y-1">
+				<Label htmlFor={`${idPrefix}-url`}>URL <span className="text-muted-foreground font-normal">(use {`{paramname}`} for substitution)</span></Label>
+				<Input
+					id={`${idPrefix}-url`}
+					value={url}
+					onChange={e => setUrl(e.target.value)}
+					placeholder="https://api.example.com/news?q={topic}"
+					spellCheck={false}
+				/>
+			</div>
+
+			{/* Params editor */}
+			<div className="space-y-2">
+				<div className="flex items-center justify-between">
+					<Label>Parameters <span className="text-muted-foreground font-normal text-xs">(arguments the LLM fills in)</span></Label>
+					<button
+						type="button"
+						onClick={() => setParams(p => [...p, { name: "", description: "", required: false, in: "url" }])}
+						className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+					>
+						<Plus className="h-3 w-3" /> Add
+					</button>
+				</div>
+				{params.length === 0 && (
+					<div className="text-xs text-muted-foreground italic">No parameters yet — add one if your URL has placeholders or your POST needs body fields.</div>
+				)}
+				{params.map((p, i) => (
+					<div key={i} className="grid grid-cols-12 gap-2 items-start">
+						<input
+							className="col-span-3 h-8 px-2 rounded border border-input bg-background text-xs font-mono"
+							placeholder="name"
+							value={p.name}
+							onChange={e => setParams(arr => arr.map((x, idx) => idx === i ? { ...x, name: e.target.value } : x))}
+						/>
+						<input
+							className={cn(
+								"h-8 px-2 rounded border border-input bg-background text-xs",
+								method === "GET" ? "col-span-8" : "col-span-6",
+							)}
+							placeholder="description (helps the LLM know what to put here)"
+							value={p.description}
+							onChange={e => setParams(arr => arr.map((x, idx) => idx === i ? { ...x, description: e.target.value } : x))}
+						/>
+						{method === "POST" && (
+							<select
+								className="col-span-2 h-8 px-1 rounded border border-input bg-background text-xs"
+								value={p.in}
+								onChange={e => setParams(arr => arr.map((x, idx) => idx === i ? { ...x, in: e.target.value as "url" | "body" } : x))}
+								title="url = path/query substitution; body = JSON body field"
+							>
+								<option value="url">URL</option>
+								<option value="body">Body</option>
+							</select>
+						)}
+						<button
+							type="button"
+							onClick={() => setParams(arr => arr.filter((_, idx) => idx !== i))}
+							className="col-span-1 h-8 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 inline-flex items-center justify-center"
+							title="Remove"
+						>
+							<Trash2 className="h-3.5 w-3.5" />
+						</button>
+					</div>
+				))}
+			</div>
+
+			{/* Headers editor */}
+			<div className="space-y-2">
+				<div className="flex items-center justify-between">
+					<Label>Headers <span className="text-muted-foreground font-normal text-xs">(auth tokens etc.)</span></Label>
+					<button
+						type="button"
+						onClick={() => setHeaders(h => [...h, { name: "", value: "" }])}
+						className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+					>
+						<Plus className="h-3 w-3" /> Add
+					</button>
+				</div>
+				{headers.map((h, i) => (
+					<div key={i} className="grid grid-cols-12 gap-2 items-start">
+						<input
+							className="col-span-4 h-8 px-2 rounded border border-input bg-background text-xs font-mono"
+							placeholder="header name"
+							value={h.name}
+							onChange={e => setHeaders(arr => arr.map((x, idx) => idx === i ? { ...x, name: e.target.value } : x))}
+						/>
+						<input
+							className="col-span-7 h-8 px-2 rounded border border-input bg-background text-xs font-mono"
+							placeholder="value"
+							value={h.value}
+							type="password"
+							onChange={e => setHeaders(arr => arr.map((x, idx) => idx === i ? { ...x, value: e.target.value } : x))}
+						/>
+						<button
+							type="button"
+							onClick={() => setHeaders(arr => arr.filter((_, idx) => idx !== i))}
+							className="col-span-1 h-8 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 inline-flex items-center justify-center"
+							title="Remove"
+						>
+							<Trash2 className="h-3.5 w-3.5" />
+						</button>
+					</div>
+				))}
+				{mode === "edit" && headers.length > 0 && (
+					<p className="text-[11px] text-muted-foreground italic">
+						Header values are masked but stored as-is. Re-type a value to update it; leave alone to keep the existing value.
+					</p>
+				)}
+			</div>
+
+			{formError && <div className="text-xs text-destructive">{formError}</div>}
+			<div className="flex items-center gap-2">
+				<Button type="submit" size="sm" disabled={submitting}>
+					{mode === "create" ? <Plus className="h-3.5 w-3.5 mr-1.5" /> : null}
+					{submitting
+						? (mode === "create" ? "Creating…" : "Saving…")
+						: (mode === "create" ? "Create tool" : "Save changes")}
+				</Button>
+				{onCancel && (
+					<Button type="button" variant="ghost" size="sm" onClick={onCancel} disabled={submitting}>
+						Cancel
+					</Button>
+				)}
+			</div>
+		</form>
+	);
+}
+
+const EMPTY_OUTBOUND_FORM: OutboundFormSnapshot = {
+	name: "",
+	description: "",
+	method: "GET",
+	url: "",
+	params: [],
+	headers: [],
+};
+
 function OutboundWebhooksSubTab({
 	bot,
 	accessToken,
@@ -2878,16 +3134,12 @@ function OutboundWebhooksSubTab({
 	const [loading, setLoading] = useState(!isCreateMode);
 	const [listError, setListError] = useState<string | null>(null);
 
-	// Add-form state.  All fields except name/url are optional;
-	// params + headers start empty and grow via the +/- buttons.
-	const [formName, setFormName] = useState("");
-	const [formDescription, setFormDescription] = useState("");
-	const [formMethod, setFormMethod] = useState<"GET" | "POST">("GET");
-	const [formUrl, setFormUrl] = useState("");
-	const [formParams, setFormParams] = useState<OutboundParam[]>([]);
-	const [formHeaders, setFormHeaders] = useState<OutboundHeader[]>([]);
+	// Per-row edit-mode tracking.  Only one row can be editing at a
+	// time; clicking Edit on another row swaps focus.  null = no
+	// row is being edited (the create form is the only form visible
+	// at the top).
+	const [editingId, setEditingId] = useState<number | null>(null);
 	const [submitting, setSubmitting] = useState(false);
-	const [formError, setFormError] = useState<string | null>(null);
 
 	useEffect(() => {
 		if (isCreateMode || !accessToken || !bot) return;
@@ -2911,44 +3163,33 @@ function OutboundWebhooksSubTab({
 		}
 	}
 
-	function resetForm() {
-		setFormName("");
-		setFormDescription("");
-		setFormMethod("GET");
-		setFormUrl("");
-		setFormParams([]);
-		setFormHeaders([]);
-		setFormError(null);
-	}
-
-	async function handleCreate(e: React.FormEvent) {
-		e.preventDefault();
-		setFormError(null);
+	async function handleCreate(snap: OutboundFormSnapshot) {
 		if (!accessToken || !bot) return;
-		const name = formName.trim();
-		const url = formUrl.trim();
-		if (name.length === 0) { setFormError("Tool name required"); return; }
-		if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
-			setFormError("Tool name may only contain letters, digits, underscore, hyphen");
-			return;
-		}
-		if (url.length === 0) { setFormError("URL required"); return; }
 		setSubmitting(true);
 		try {
 			await createBotOutboundWebhook({
 				accessToken,
 				botId: bot.id,
-				name,
-				description: formDescription.trim(),
-				method: formMethod,
-				url,
-				params: formParams.filter(p => p.name.trim().length > 0),
-				headers: formHeaders.filter(h => h.name.trim().length > 0),
+				...snap,
 			});
-			resetForm();
 			await refresh();
-		} catch (err) {
-			setFormError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setSubmitting(false);
+		}
+	}
+
+	async function handleUpdate(webhookId: number, snap: OutboundFormSnapshot) {
+		if (!accessToken || !bot) return;
+		setSubmitting(true);
+		try {
+			await updateBotOutboundWebhook({
+				accessToken,
+				botId: bot.id,
+				webhookId,
+				patch: snap,
+			});
+			setEditingId(null);
+			await refresh();
 		} finally {
 			setSubmitting(false);
 		}
@@ -2959,6 +3200,7 @@ function OutboundWebhooksSubTab({
 		if (!window.confirm("Delete this outbound tool?  The bot will lose access to it immediately.")) return;
 		try {
 			await deleteBotOutboundWebhook({ accessToken, botId: bot.id, webhookId: wid });
+			if (editingId === wid) setEditingId(null);
 			await refresh();
 		} catch (err) {
 			window.alert(`Couldn't delete: ${err instanceof Error ? err.message : String(err)}`);
@@ -2986,207 +3228,95 @@ function OutboundWebhooksSubTab({
 
 			{listError && <div className="text-sm text-destructive">{listError}</div>}
 
-			<form onSubmit={handleCreate} className="rounded-md border border-border p-4 space-y-3">
-				<div className="text-sm font-medium">Add a tool</div>
-				<div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-					<div className="space-y-1">
-						<Label htmlFor="ob-name">Name</Label>
-						<Input
-							id="ob-name"
-							value={formName}
-							onChange={e => setFormName(e.target.value)}
-							placeholder="e.g. fetch_news"
-							maxLength={64}
-							spellCheck={false}
-						/>
-					</div>
-					<div className="space-y-1">
-						<Label htmlFor="ob-method">Method</Label>
-						<select
-							id="ob-method"
-							value={formMethod}
-							onChange={e => setFormMethod(e.target.value as "GET" | "POST")}
-							className="h-9 w-full px-2 rounded border border-input bg-background text-sm"
-						>
-							<option value="GET">GET</option>
-							<option value="POST">POST</option>
-						</select>
-					</div>
-				</div>
-				<div className="space-y-1">
-					<Label htmlFor="ob-description">Description (what the LLM uses to decide when to call)</Label>
-					<Input
-						id="ob-description"
-						value={formDescription}
-						onChange={e => setFormDescription(e.target.value)}
-						placeholder="e.g. Fetches today's top news headlines on a topic"
-						maxLength={500}
-					/>
-				</div>
-				<div className="space-y-1">
-					<Label htmlFor="ob-url">URL <span className="text-muted-foreground font-normal">(use {`{paramname}`} for substitution)</span></Label>
-					<Input
-						id="ob-url"
-						value={formUrl}
-						onChange={e => setFormUrl(e.target.value)}
-						placeholder="https://api.example.com/news?q={topic}"
-						spellCheck={false}
-					/>
-				</div>
-
-				{/* Params editor */}
-				<div className="space-y-2">
-					<div className="flex items-center justify-between">
-						<Label>Parameters <span className="text-muted-foreground font-normal text-xs">(arguments the LLM fills in)</span></Label>
-						<button
-							type="button"
-							onClick={() => setFormParams(p => [...p, { name: "", description: "", required: false, in: "url" }])}
-							className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
-						>
-							<Plus className="h-3 w-3" /> Add
-						</button>
-					</div>
-					{formParams.length === 0 && (
-						<div className="text-xs text-muted-foreground italic">No parameters yet — add one if your URL has placeholders or your POST needs body fields.</div>
-					)}
-					{formParams.map((p, i) => (
-						<div key={i} className="grid grid-cols-12 gap-2 items-start">
-							<input
-								className="col-span-3 h-8 px-2 rounded border border-input bg-background text-xs font-mono"
-								placeholder="name"
-								value={p.name}
-								onChange={e => setFormParams(arr => arr.map((x, idx) => idx === i ? { ...x, name: e.target.value } : x))}
-							/>
-							<input
-								className="col-span-5 h-8 px-2 rounded border border-input bg-background text-xs"
-								placeholder="description (helps the LLM know what to put here)"
-								value={p.description}
-								onChange={e => setFormParams(arr => arr.map((x, idx) => idx === i ? { ...x, description: e.target.value } : x))}
-							/>
-							<select
-								className="col-span-2 h-8 px-1 rounded border border-input bg-background text-xs"
-								value={p.in}
-								onChange={e => setFormParams(arr => arr.map((x, idx) => idx === i ? { ...x, in: e.target.value as "url" | "body" } : x))}
-								title="url = path/query substitution; body = JSON body field (POST only)"
-							>
-								<option value="url">URL</option>
-								<option value="body">Body</option>
-							</select>
-							<label className="col-span-1 h-8 inline-flex items-center justify-center text-xs text-muted-foreground select-none" title="required">
-								<input
-									type="checkbox"
-									checked={p.required}
-									onChange={e => setFormParams(arr => arr.map((x, idx) => idx === i ? { ...x, required: e.target.checked } : x))}
-								/>
-							</label>
-							<button
-								type="button"
-								onClick={() => setFormParams(arr => arr.filter((_, idx) => idx !== i))}
-								className="col-span-1 h-8 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 inline-flex items-center justify-center"
-								title="Remove"
-							>
-								<Trash2 className="h-3.5 w-3.5" />
-							</button>
-						</div>
-					))}
-				</div>
-
-				{/* Headers editor */}
-				<div className="space-y-2">
-					<div className="flex items-center justify-between">
-						<Label>Headers <span className="text-muted-foreground font-normal text-xs">(auth tokens etc.)</span></Label>
-						<button
-							type="button"
-							onClick={() => setFormHeaders(h => [...h, { name: "", value: "" }])}
-							className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
-						>
-							<Plus className="h-3 w-3" /> Add
-						</button>
-					</div>
-					{formHeaders.map((h, i) => (
-						<div key={i} className="grid grid-cols-12 gap-2 items-start">
-							<input
-								className="col-span-4 h-8 px-2 rounded border border-input bg-background text-xs font-mono"
-								placeholder="header name"
-								value={h.name}
-								onChange={e => setFormHeaders(arr => arr.map((x, idx) => idx === i ? { ...x, name: e.target.value } : x))}
-							/>
-							<input
-								className="col-span-7 h-8 px-2 rounded border border-input bg-background text-xs font-mono"
-								placeholder="value"
-								value={h.value}
-								type="password"
-								onChange={e => setFormHeaders(arr => arr.map((x, idx) => idx === i ? { ...x, value: e.target.value } : x))}
-							/>
-							<button
-								type="button"
-								onClick={() => setFormHeaders(arr => arr.filter((_, idx) => idx !== i))}
-								className="col-span-1 h-8 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 inline-flex items-center justify-center"
-								title="Remove"
-							>
-								<Trash2 className="h-3.5 w-3.5" />
-							</button>
-						</div>
-					))}
-				</div>
-
-				{formError && <div className="text-xs text-destructive">{formError}</div>}
-				<Button type="submit" size="sm" disabled={submitting}>
-					<Plus className="h-3.5 w-3.5 mr-1.5" />
-					{submitting ? "Creating…" : "Create tool"}
-				</Button>
-			</form>
+			{/* Create form — always visible at the top. */}
+			<OutboundWebhookForm
+				mode="create"
+				initial={EMPTY_OUTBOUND_FORM}
+				submitting={submitting && editingId === null}
+				onSubmit={handleCreate}
+			/>
 
 			{hooks.length === 0 && (
 				<div className="text-sm text-muted-foreground italic">No outbound tools yet.</div>
 			)}
 
 			<div className="space-y-3">
-				{hooks.map(h => (
-					<div key={h.id} className="rounded-md border border-border bg-card/60 p-3">
-						<div className="flex items-start justify-between gap-2">
-							<div className="flex-1 min-w-0">
-								<div className="flex items-baseline gap-2 flex-wrap">
-									<span className="text-sm font-medium font-mono">{h.name}</span>
-									<span className="text-[10px] uppercase tracking-wider px-1.5 py-px rounded bg-primary/15 text-primary font-semibold">{h.method}</span>
-									<span className="text-[11px] text-muted-foreground truncate">{h.url}</span>
+				{hooks.map(h => {
+					const isEditing = editingId === h.id;
+					if (isEditing) {
+						return (
+							<OutboundWebhookForm
+								key={h.id}
+								mode="edit"
+								initial={{
+									name: h.name,
+									description: h.description,
+									method: h.method,
+									url: h.url,
+									params: h.params,
+									headers: h.headers,
+								}}
+								submitting={submitting && editingId === h.id}
+								onSubmit={snap => handleUpdate(h.id, snap)}
+								onCancel={() => setEditingId(null)}
+							/>
+						);
+					}
+					return (
+						<div key={h.id} className="rounded-md border border-border bg-card/60 p-3">
+							<div className="flex items-start justify-between gap-2">
+								<div className="flex-1 min-w-0">
+									<div className="flex items-baseline gap-2 flex-wrap">
+										<span className="text-sm font-medium font-mono">{h.name}</span>
+										<span className="text-[10px] uppercase tracking-wider px-1.5 py-px rounded bg-primary/15 text-primary font-semibold">{h.method}</span>
+										<span className="text-[11px] text-muted-foreground truncate">{h.url}</span>
+									</div>
+									{h.description && (
+										<div className="text-xs text-muted-foreground mt-1">{h.description}</div>
+									)}
+									{h.params.length > 0 && (
+										<div className="text-[11px] text-muted-foreground mt-2 flex flex-wrap gap-x-3 gap-y-1">
+											{h.params.map(p => (
+												<span key={p.name} className="font-mono">
+													{p.name}
+													<span className="text-muted-foreground/70">:{p.in}</span>
+												</span>
+											))}
+										</div>
+									)}
+									{h.last_error && (
+										<div className="text-[11px] text-destructive mt-1 truncate" title={h.last_error}>
+											Last error: {h.last_error}
+										</div>
+									)}
+									{h.last_called && !h.last_error && (
+										<div className="text-[11px] text-muted-foreground mt-1">
+											Last called: {new Date(h.last_called).toLocaleString()}
+										</div>
+									)}
 								</div>
-								{h.description && (
-									<div className="text-xs text-muted-foreground mt-1">{h.description}</div>
-								)}
-								{h.params.length > 0 && (
-									<div className="text-[11px] text-muted-foreground mt-2 flex flex-wrap gap-x-3 gap-y-1">
-										{h.params.map(p => (
-											<span key={p.name} className="font-mono">
-												{p.name}
-												{p.required && <span className="text-primary">*</span>}
-												<span className="text-muted-foreground/70">:{p.in}</span>
-											</span>
-										))}
-									</div>
-								)}
-								{h.last_error && (
-									<div className="text-[11px] text-destructive mt-1 truncate" title={h.last_error}>
-										Last error: {h.last_error}
-									</div>
-								)}
-								{h.last_called && !h.last_error && (
-									<div className="text-[11px] text-muted-foreground mt-1">
-										Last called: {new Date(h.last_called).toLocaleString()}
-									</div>
-								)}
+								<div className="flex items-center gap-1 shrink-0">
+									<button
+										type="button"
+										onClick={() => setEditingId(h.id)}
+										className="text-muted-foreground hover:text-foreground p-1 rounded hover:bg-accent"
+										title="Edit"
+									>
+										<Pencil className="h-4 w-4" />
+									</button>
+									<button
+										type="button"
+										onClick={() => handleDelete(h.id)}
+										className="text-muted-foreground hover:text-destructive p-1 rounded hover:bg-destructive/10"
+										title="Delete"
+									>
+										<Trash2 className="h-4 w-4" />
+									</button>
+								</div>
 							</div>
-							<button
-								type="button"
-								onClick={() => handleDelete(h.id)}
-								className="text-muted-foreground hover:text-destructive p-1 rounded hover:bg-destructive/10 shrink-0"
-								title="Delete"
-							>
-								<Trash2 className="h-4 w-4" />
-							</button>
 						</div>
-					</div>
-				))}
+					);
+				})}
 			</div>
 		</div>
 	);

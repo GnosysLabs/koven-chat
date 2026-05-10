@@ -289,33 +289,67 @@ async function runToolLoop(
 	// call by tool-name prefix (srv… → MCP, wh… → outbound).
 	const allTools = [...bundle.tools, ...outbound.tools];
 
+	// Whether a tool result is sitting in `messages` waiting to be
+	// summarised on the next iteration.  Toggled on after a tool
+	// loop, off when this iteration emits a final text reply.
+	// Drives two adjustments:
+	//   1. max_tokens is generously bumped so the model has room to
+	//      summarise a rich tool result (8k+ chars) into a useful
+	//      reply — without this, a "Brief" cap of 100 tokens
+	//      forces the model to punt with "I don't have data" even
+	//      when a tool just returned 8000 chars of news.
+	//   2. A one-shot system message is appended right before the
+	//      LLM call telling the model to USE the data and dropping
+	//      the brevity hint — the user-configured cap was for
+	//      conversational replies, not tool-summary turns.
+	let pendingToolResults = false;
+
 	for (let iter = 0; iter < MAX_TOOL_ITERATIONS; iter++) {
 		const isFinalIter = iter === MAX_TOOL_ITERATIONS - 1;
 		const toolsForCall = isFinalIter ? undefined : (allTools.length > 0 ? allTools : undefined);
 
+		// If a tool result is pending, drop a one-shot system
+		// instruction at the END of the messages list (where it
+		// has the most weight on the very next assistant reply)
+		// asking the model to synthesise from the data + ignore
+		// the brevity hint.  We append it just for this call and
+		// pop it off after — it's not part of the persistent
+		// conversation history.
+		const needsSummariserNote = pendingToolResults;
+		const callMessages: ChatMessage[] = needsSummariserNote
+			? [...messages, {
+				role: "system",
+				content:
+					"A tool just returned data above.  Use it to answer the user's original question " +
+					"with the full detail the data warrants — ignore any earlier brevity instruction " +
+					"for THIS reply.  Do not claim you lack information that the tool just returned.",
+			}]
+			: messages;
+
+		// max_tokens: normal cap on initial reply, bumped 8× (or to
+		// 2000, whichever is larger) when summarising a tool result
+		// so the model has room to actually use the data.
+		const maxTokens = bot.max_tokens_per_reply > 0
+			? (needsSummariserNote
+				? Math.max(2000, bot.max_tokens_per_reply * 8)
+				: Math.ceil(bot.max_tokens_per_reply * 1.6))
+			: undefined;
+
 		console.log(
 			`bot ${bot.mxid}: → LLM iter=${iter} model=${bot.model} provider=${bot.provider}`
-				+ ` ctx_msgs=${messages.length} tools=${toolsForCall?.length ?? 0}`,
+				+ ` ctx_msgs=${callMessages.length} tools=${toolsForCall?.length ?? 0}`
+				+ (needsSummariserNote ? ` summariser_mode max=${maxTokens}` : ""),
 		);
 		const result = await chatCompletion({
 			apiBase: bot.api_base,
 			apiKey,
 			model: bot.model,
-			messages,
+			messages: callMessages,
 			provider: bot.provider,
 			referer: `https://${config.homeserverName}`,
 			title: `Koven (${bot.display_name})`,
 			tools: toolsForCall,
-			// Per-reply token cap.  bot.max_tokens_per_reply = 0
-			// means "let the provider decide".  A positive value is
-			// passed with 1.6× headroom: the system prompt already
-			// tells the model how long to be (see lengthHint), so
-			// max_tokens is a runaway-cost safety net rather than a
-			// content shaper — the headroom lets the model finish a
-			// sentence cleanly instead of getting hard-cut.
-			maxTokens: bot.max_tokens_per_reply > 0
-				? Math.ceil(bot.max_tokens_per_reply * 1.6)
-				: undefined,
+			maxTokens,
 		});
 
 		if (!result.ok) {
@@ -434,6 +468,12 @@ async function runToolLoop(
 				content: toolResult.text,
 			});
 		}
+		// Mark that the next LLM call is a tool-result summary turn
+		// — bumps max_tokens + injects a one-shot system note that
+		// drops any "be brief" hint and tells the model to use the
+		// data it just got.  See the iteration head where these are
+		// applied.
+		pendingToolResults = true;
 		// Tools just finished; flip the placeholder back to a
 		// generic "thinking" while we wait on the next LLM round.
 		await progress.update("Thinking…");
