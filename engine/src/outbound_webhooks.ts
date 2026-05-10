@@ -127,10 +127,19 @@ export async function dispatchOutboundCall(
 	// Build the request.  URL-scope params: substitute into
 	// {placeholder} tokens; remaining url-scope params append as
 	// query string.  Body-scope params: collect into JSON body
-	// (POST only — GET requests ignore body params with a warning
-	// to the model).
+	// (POST only).
+	//
+	// Defensive: if the row is GET but a param is saved as
+	// in: "body", treat it as URL.  GET can't carry a body, so
+	// dropping body params silently means the LLM sends args, the
+	// engine throws them away, the upstream API gets called with
+	// no filters, and the bot reports "no data" — which it
+	// accurately observed but is unhelpful UX.  Promote body→url
+	// for GETs and call it done.  Logs note the fixup so the
+	// owner can clean up the saved config.
 	const urlParams: Record<string, string> = {};
 	const bodyParams: Record<string, unknown> = {};
+	const promoted: string[] = [];
 	for (const p of params) {
 		const v = args[p.name];
 		if (v === undefined || v === null) {
@@ -142,8 +151,15 @@ export async function dispatchOutboundCall(
 			}
 			continue;
 		}
-		if (p.in === "url") urlParams[p.name] = String(v);
+		const effectiveIn: "url" | "body" = (row.method === "GET" && p.in === "body") ? "url" : p.in;
+		if (effectiveIn !== p.in) promoted.push(p.name);
+		if (effectiveIn === "url") urlParams[p.name] = String(v);
 		else bodyParams[p.name] = v;
+	}
+	if (promoted.length > 0) {
+		console.log(
+			`bot outbound: webhook "${row.name}" (id=${row.id}) is GET but ${promoted.length} param(s) saved as body — promoted to URL: ${promoted.join(", ")}`,
+		);
 	}
 
 	let resolvedUrl: string;
@@ -168,12 +184,11 @@ export async function dispatchOutboundCall(
 		if (!hasHeaderCi(reqHeaders, "content-type")) {
 			reqHeaders["Content-Type"] = "application/json";
 		}
-	} else if (Object.keys(bodyParams).length > 0) {
-		console.warn(
-			`bot outbound: webhook "${row.name}" is GET but model passed body params; ignoring`,
-			Object.keys(bodyParams),
-		);
 	}
+	// (No "GET with body params" warning anymore — the param
+	// promotion above handles the saved-as-body case, and any
+	// remaining body params for a GET would be a bug in the
+	// promotion logic itself.)
 
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), OUTBOUND_TIMEOUT_MS);

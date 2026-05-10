@@ -2985,14 +2985,17 @@ function OutboundWebhookForm({
 				/>
 			</div>
 			<div className="space-y-1">
-				<Label htmlFor={`${idPrefix}-url`}>URL <span className="text-muted-foreground font-normal">(use {`{paramname}`} for substitution)</span></Label>
+				<Label htmlFor={`${idPrefix}-url`}>URL</Label>
 				<Input
 					id={`${idPrefix}-url`}
 					value={url}
 					onChange={e => setUrl(e.target.value)}
-					placeholder="https://api.example.com/news?q={topic}"
+					placeholder="https://api.example.com/news"
 					spellCheck={false}
 				/>
+				<p className="text-[11px] text-muted-foreground">
+					URL-scope params append automatically as <code>?name=value</code>. Use <code>{`{name}`}</code> in the URL only when you need to slot a value into a specific spot (e.g. <code>/users/{`{id}`}/posts</code>).
+				</p>
 			</div>
 
 			{/* Params editor */}
