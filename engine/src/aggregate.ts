@@ -138,24 +138,28 @@ function handleMember(ev: MatrixEvent): void {
 
 	// Founder auto-claim safety net.  The signup hook in server.ts
 	// claims a slot for everyone who registered through the engine's
-	// email-code flow, and the boot backfill catches everyone who was
-	// already on Synapse before this feature shipped.  This handler
-	// catches the third case: users created directly on Synapse
-	// (admin-created accounts, future SSO providers, etc.) who never
-	// touched the engine signup path.  Their first observable
-	// activity is always an `m.room.member` join, so claiming on
-	// `join` membership transitions guarantees we eventually see
-	// them.  No-op on retries — claimFounderNumber is idempotent.
-	// Bots and the engine itself are filtered inside
-	// claimFounderNumber via the bot/engine guards in the table's
-	// caller chain — actually no, those guards are in fanOutMessage,
-	// not here, so duplicate the cheap check inline.
+	// email-code flow, and the boot backfill catches everyone who
+	// was already on Synapse before this feature shipped.  This
+	// handler catches the third case: users created directly on
+	// Synapse (admin-created accounts, future SSO providers, etc.)
+	// who never touched the engine signup path.  Their first
+	// observable activity is always an `m.room.member` join, so
+	// claiming on `join` membership transitions guarantees we
+	// eventually see them.  No-op on retries — claimFounderNumber
+	// is idempotent on the user_id PK.  Filter mirrors the boot
+	// backfill exclusions: bots, engine appservice user, and the
+	// admin service accounts.  We can't see the `admin: true` flag
+	// from inside an appservice transaction (that field only appears
+	// on the admin API), so admins get filtered by mxid here — the
+	// boot backfill is the reliable path for them anyway.
 	if (membership === "join") {
 		const sk = ev.state_key;
 		const colon = sk.indexOf(":");
 		const localpart = sk.startsWith("@") && colon > 1 ? sk.slice(1, colon) : "";
-		const isBotOrEngine = localpart.startsWith("bot-") || sk === config.engineUserId;
-		if (!isBotOrEngine) {
+		const isExcluded = localpart.startsWith("bot-")
+			|| sk === config.engineUserId
+			|| (config.synapseAdminUser && localpart === config.synapseAdminUser);
+		if (!isExcluded) {
 			try {
 				claimFounderNumber(sk);
 			} catch (err) {

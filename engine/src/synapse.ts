@@ -678,18 +678,28 @@ export async function adminListLocalUsersByRegistration(
 			| null;
 		const users = Array.isArray(body?.users) ? body!.users : [];
 		if (users.length === 0) break;
-		for (const u of users) {
+		for (const u of users as Array<{ name?: string; creation_ts?: number; user_type?: string | null; admin?: boolean }>) {
 			if (typeof u.name !== "string") continue;
 			if (typeof u.creation_ts !== "number") continue;
-			// Skip bot users (the engine's own service account is
-			// also caught by the second filter, but the bot-namespace
-			// check is cheaper for the common case).
+			// Skip bot users (appservice-owned, namespace prefix).
 			const localpart = u.name.startsWith("@") ? u.name.slice(1).split(":")[0]! : "";
 			if (localpart.startsWith("bot-")) continue;
-			if (config.synapseAdminUser && localpart === config.synapseAdminUser) continue;
-			// user_type is null for normal users, "bot" for appservice-
-			// owned bots, "guest" for guests.  Skip non-null types so
-			// only real human accounts get a founder slot.
+			// Skip the engine's own appservice user by full mxid.
+			// `@engine:server` typically has user_type=null on Synapse
+			// (appservice senders aren't tagged as bots in the user
+			// table), so the user_type filter below misses it; explicit
+			// match by config.engineUserId is the only reliable gate.
+			if (u.name === config.engineUserId) continue;
+			// Skip Synapse admins (the homeserver service account, ops
+			// accounts, etc).  These users sign in via the admin API
+			// flow rather than being community members in the same
+			// sense.  Catches @koven-admin, @koven-svc, and any future
+			// admin-flagged service identities without us having to
+			// enumerate them.
+			if (u.admin === true) continue;
+			// user_type is null for normal users, "bot" for some
+			// appservice-owned bots, "guest" for guests.  Skip non-null
+			// types so only real human accounts get a founder slot.
 			if (u.user_type) continue;
 			out.push({ user_id: u.name, creation_ts: u.creation_ts });
 			if (out.length >= cap) break;
