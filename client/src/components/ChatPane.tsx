@@ -441,15 +441,17 @@ export function ChatPane({
 			followBottomRef.current = distance < 100;
 
 			// Pagination trigger.  matrix-js-sdk's startClient pulls
-			// only ~30 events per room initially; without this the
-			// user can't scroll past the initial batch even though
-			// Synapse has the full history.  Fire when the user
-			// reaches the top 200px AND we're not already loading.
-			// The noMoreHistoryRef Set caches "this room has no more
-			// history" so we don't keep firing requests at the start
-			// of the room.
+			// initialSyncLimit (200) events per room initially;
+			// without this the user can't scroll past the initial
+			// batch even though Synapse has the full history.  Fire
+			// while the user is still 1000px from the top so the
+			// next 500-event chunk lands BEFORE they reach it — the
+			// scroll never has to stall waiting on the network round-
+			// trip.  The noMoreHistoryRef Set caches "this room has
+			// no more history" so we don't keep firing requests at
+			// the start of the room.
 			if (
-				el.scrollTop < 200 &&
+				el.scrollTop < 1000 &&
 				!loadingMoreRef.current &&
 				room &&
 				onLoadMoreHistory &&

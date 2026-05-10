@@ -39,6 +39,7 @@ use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel};
 use objc::{class, msg_send, sel, sel_impl};
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Once;
 
 /// WKPermissionDecision values from WebKit headers.
@@ -122,28 +123,34 @@ pub fn install(ns_window: id) {
             log::warn!("mac_webrtc_permission: WKWebView not found under contentView; getUserMedia will be silently denied");
             return;
         }
-        let delegate: id = msg_send![class, new];
-        // Retain the delegate beyond this scope: setting UIDelegate
-        // takes a WEAK reference, so a stack-local instance would
-        // be deallocated immediately and the next media request
-        // would crash on a dangling pointer.  Boxing into a static
-        // would leak; instead we pin it as an associated object on
-        // the WKWebView itself, which lives for the app's lifetime.
-        let key: *const c_void = &MEDIA_DELEGATE_KEY as *const _ as *const c_void;
-        let _: () = msg_send![
-            webview,
-            setAssociatedObject: delegate
-            withKey: key
-            policy: 1i64  // OBJC_ASSOCIATION_RETAIN_NONATOMIC
-        ];
+        // Retain the delegate beyond this scope.  WKWebView's
+        // `UIDelegate` property is declared `weak`, so a stack-local
+        // instance would be deallocated as soon as install() returns
+        // and the next media request would crash dereferencing the
+        // dangling pointer.  Pin it in a process-static AtomicPtr —
+        // one delegate per app lifetime, lives until process exit.
+        // (Earlier revision tried `objc_setAssociatedObject` via
+        // msg_send, but that's a C function in <objc/runtime.h>, not
+        // an instance method — sending the bogus selector raised
+        // NSInvalidArgumentException and aborted the host process
+        // before the SPA had a chance to load.  Splash never closed.)
+        let existing = DELEGATE_INSTANCE.load(Ordering::Relaxed);
+        let delegate: id = if existing.is_null() {
+            let d: id = msg_send![class, new];
+            DELEGATE_INSTANCE.store(d as *mut Object, Ordering::Relaxed);
+            d
+        } else {
+            existing as id
+        };
         let _: () = msg_send![webview, setUIDelegate: delegate];
         log::info!("mac_webrtc_permission: UIDelegate installed for getUserMedia");
     }
 }
 
-// Private const used as the key for objc_setAssociatedObject.  The
-// VALUE doesn't matter — only the pointer's identity is significant.
-static MEDIA_DELEGATE_KEY: u8 = 0;
+// Process-wide strong reference to the delegate instance.  See the
+// `Retain the delegate beyond this scope` comment in install() for
+// why a static is the right shape here.
+static DELEGATE_INSTANCE: AtomicPtr<Object> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Recursively walk the view hierarchy from `view` looking for a
 /// WKWebView instance.  Tauri / wry typically nests the WKWebView

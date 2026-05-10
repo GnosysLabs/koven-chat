@@ -10,7 +10,8 @@
 // we do (a simple, stable Room/Message shape).
 
 import * as sdk from "matrix-js-sdk";
-import { ClientEvent, MatrixEventEvent, RoomEvent, RoomMemberEvent, UserEvent } from "matrix-js-sdk";
+import { ClientEvent, HttpApiEvent, MatrixEventEvent, RoomEvent, RoomMemberEvent, UserEvent } from "matrix-js-sdk";
+import { IndexedDBStore } from "matrix-js-sdk/lib/store/indexeddb";
 import { CallEventHandlerEvent } from "matrix-js-sdk/lib/webrtc/callEventHandler";
 import type { MatrixCall } from "matrix-js-sdk/lib/webrtc/call";
 import type {
@@ -324,6 +325,16 @@ export interface MatrixHandlers {
 	// MatrixCall directly.  Only one inbound call is surfaced at a
 	// time (the SDK suppresses overlapping invites for the same room).
 	onIncomingCall(call: MatrixCall): void;
+	// Fires when matrix-js-sdk's HTTP layer detects that the access
+	// token has been invalidated server-side (M_UNKNOWN_TOKEN, soft-
+	// logout, device-deleted, admin-revoked session).  Without this
+	// callback, the rust-crypto stack retries /keys/query in a tight
+	// 401 loop while the SPA stays stuck on "Connecting…" forever —
+	// observed when a dev session loaded localStorage creds whose
+	// device had been wiped on the homeserver.  Caller (App.tsx)
+	// reacts by clearing the persisted creds and bouncing to the
+	// login screen so the user has a way out.
+	onSessionLoggedOut(): void;
 }
 
 /**
@@ -368,6 +379,14 @@ function messageFromMatrixError(body: Record<string, unknown>, fallback: string)
 
 export class MatrixTransport {
 	private client: sdk.MatrixClient | null = null;
+	// Per-user IndexedDBStore — persists rooms, timelines, and the
+	// /sync token across page reloads so a cold launch doesn't have
+	// to re-fetch everything.  matrix-js-sdk's startClient picks up
+	// the saved sync token automatically and only fetches the delta.
+	// dbName is namespaced by user_id so multi-account users don't
+	// stomp each other (and account switch doesn't need a wipe — each
+	// account has its own sandbox).
+	private store: IndexedDBStore | null = null;
 	private handlers: MatrixHandlers;
 	private creds: MatrixCredentials | null = null;
 	private syncState: SyncState = "preparing";
@@ -508,11 +527,36 @@ export class MatrixTransport {
 			// Non-fatal — start() continues without the cached marker.
 			console.warn("matrix.start: lastLoggedInUserId write failed", err);
 		}
+		// IndexedDBStore for the matrix-js-sdk room/timeline cache.
+		// Sandboxed per user_id so multi-account never crosses streams,
+		// and a fresh login (no prior data) just opens an empty IDB.
+		// Local-part of the mxid is sanitised into the dbName since
+		// IndexedDB names tolerate `:` but mixed clients have been
+		// burned by it in the past — keep the name conservative.
+		const safeUid = creds.user_id.replace(/[^a-zA-Z0-9._-]/g, "_");
+		const dbName = `koven_matrixjs_${safeUid}`;
+		const buildStore = () => new IndexedDBStore({
+			indexedDB: window.indexedDB,
+			dbName,
+			localStorage: typeof localStorage !== "undefined" ? localStorage : undefined,
+		});
+		this.store = buildStore();
+
 		const buildClient = () => sdk.createClient({
 			baseUrl: creds.homeserver,
 			accessToken: creds.access_token,
 			userId: creds.user_id,
 			deviceId: creds.device_id,
+			// Persistent timeline + sync-token cache.  Without this,
+			// every cold launch refetches /sync from scratch and the
+			// user sees a stale UI for the few seconds it takes to
+			// rebuild rooms/timelines in memory.  IndexedDBStore is a
+			// MemoryStore subclass with periodic write-through to IDB,
+			// so reads stay in-memory fast and writes batch in the
+			// background.  Reused across the rust-crypto-mismatch
+			// retry path (see initRustCrypto catch below) — same
+			// store, same on-disk data, just a fresh client instance.
+			store: this.store ?? undefined,
 			cryptoCallbacks: {
 				// Hand the in-memory SSSS key back to the SDK whenever it
 				// asks.  Returns null until setupEncryption / unlockEncryption
@@ -531,6 +575,22 @@ export class MatrixTransport {
 			},
 		});
 		this.client = buildClient();
+		// IndexedDBStore.startup() rehydrates the in-memory cache from
+		// IDB.  MUST be called AFTER createClient and BEFORE
+		// startClient (per the SDK docstring).  Returns immediately on
+		// first run when there's no saved data; on subsequent runs it
+		// fills the rooms map so the UI paints from cache instantly.
+		console.time("matrix.start: IndexedDBStore.startup");
+		try {
+			await this.store.startup();
+		} catch (err) {
+			// IDB unavailable (private mode, quota exceeded, browser
+			// flag) — degrade silently to memory-only.  matrix-js-sdk
+			// also has its own degraded-fallback path inside the store;
+			// this catch is just for the startup() promise itself.
+			console.warn("matrix.start: IndexedDBStore.startup failed, continuing without persistence", err);
+		}
+		console.timeEnd("matrix.start: IndexedDBStore.startup");
 
 		// Initialize the rust-crypto stack BEFORE startClient so the
 		// initial sync's encrypted events route through the crypto
@@ -678,6 +738,37 @@ export class MatrixTransport {
 			// the SDK on rust-crypto, so we'd be silently swallowing
 			// errors with no actual recovery.  Trust the rust stack.
 			this.routeDecryptedEvent(event, room, false);
+		});
+
+		// Server-side session invalidation (token revoked, device
+		// deleted, admin-forced logout, soft-logout).  matrix-js-sdk
+		// detects M_UNKNOWN_TOKEN responses and emits this; we use it
+		// as the canonical "stop trying, the server doesn't recognize
+		// us anymore" signal.  Without this listener, rust-crypto's
+		// /keys/query loop just keeps 401-ing forever and the SPA
+		// stays stuck on "Connecting…" — observed when a dev session
+		// loaded localStorage creds whose device had been wiped on
+		// the homeserver.  Once-per-call guarded so the dispatch
+		// doesn't fire repeatedly (the SDK can re-emit during the
+		// in-flight retry storm before stop() takes effect).
+		let sessionDeadFired = false;
+		const fireSessionDead = (reason: string) => {
+			if (sessionDeadFired) return;
+			sessionDeadFired = true;
+			console.warn(`matrix: session invalidated (${reason}) — bouncing to login`);
+			try {
+				this.handlers.onSessionLoggedOut();
+			} catch (err) {
+				console.warn("matrix: onSessionLoggedOut handler threw", err);
+			}
+			// Tear down the in-process client so no further requests
+			// fire against the dead token while the SPA navigates
+			// back to login.  stop() is idempotent, App.tsx will run
+			// its own cleanup as soon as the creds prop flips.
+			void this.stop();
+		};
+		this.client.on(HttpApiEvent.SessionLoggedOut, () => {
+			fireSessionDead("HttpApiEvent.SessionLoggedOut");
 		});
 
 		// Hooks must be in place BEFORE startClient or we miss the
@@ -983,7 +1074,14 @@ export class MatrixTransport {
 		// need a "sync is fully ready" barrier — they listen for
 		// SyncState transitions on the transport instead.
 		void this.client.startClient({
-			initialSyncLimit: 30,
+			// 200 events per room on initial sync (was 30).  Text chat
+			// events are tiny — 200 messages per room is a few hundred
+			// KB total even on chatty accounts — and the larger initial
+			// batch means recent rooms feel fully loaded the moment
+			// the SPA paints.  Pairs with the bumped `loadMoreHistory`
+			// chunk size so subsequent scrollback hops also feel
+			// instant rather than chunked.
+			initialSyncLimit: 200,
 			// "detached" lets us call redactEvent (unreact, unflag).  The
 			// default "chronological" mode keeps pending events on a
 			// per-room queue that redactEvent's getPendingEvents helper
@@ -1021,6 +1119,21 @@ export class MatrixTransport {
 			await c.logout(true /* stopClient */);
 		} catch (err) {
 			console.warn("transport.logout: server-side logout failed", err);
+		}
+		// Wipe the persistent matrix-js-sdk cache for THIS user.  Same-
+		// user stop()→start() (page refresh) keeps the data for fast
+		// re-hydration; an explicit logout means the user is leaving
+		// this account, so leaving the cache around would be a
+		// privacy footgun on a shared device AND would surface stale
+		// rooms the next time they sign in.  Best-effort — failures
+		// log and we move on (the local sign-out / token invalidation
+		// already happened, the user is leaving regardless).
+		if (this.store) {
+			try {
+				await this.store.deleteAllData();
+			} catch (err) {
+				console.warn("transport.logout: store.deleteAllData failed", err);
+			}
 		}
 	}
 
@@ -1075,6 +1188,20 @@ export class MatrixTransport {
 		this.client?.stopClient();
 		this.client?.removeAllListeners();
 		this.client = null;
+		// Close the IndexedDBStore connection so the IDB handle drains
+		// promptly and a quick stop()→start() doesn't trip over its
+		// own open connection.  destroy() is idempotent in matrix-js-sdk
+		// — safe to call when already stopped.  Do NOT deleteAllData
+		// here; that path is reserved for logout() so same-user
+		// refreshes / transient teardowns keep the cache hot.
+		if (this.store) {
+			try {
+				await this.store.destroy();
+			} catch (err) {
+				console.warn("matrix.stop: store.destroy() threw", err);
+			}
+			this.store = null;
+		}
 		const teardownUserId = this.creds?.user_id;
 		this.creds = null;
 		// Drop the in-memory SSSS key so a stop()→start() cycle
@@ -3968,12 +4095,14 @@ export class MatrixTransport {
 
 	/**
 	 * Paginate the room's timeline backwards.  matrix-js-sdk's
-	 * startClient pulls only `initialSyncLimit` (30) events per room
-	 * on initial sync; older history requires explicit /messages
-	 * pagination.  Calls `scrollback(room, limit)` which fetches
-	 * earlier events from Synapse and prepends them to the room's
-	 * live timeline.  After this resolves, `getRoomMessages` returns
-	 * the longer list.
+	 * startClient pulls only `initialSyncLimit` events per room on
+	 * initial sync (200 in our config); older history requires
+	 * explicit /messages pagination.  Default `limit` of 500 per hop
+	 * keeps the network round-trips coarse — for text chat the
+	 * payload is small even at 500 events, and a fast scroller blows
+	 * through 50-event chunks in under a second.  Combined with the
+	 * 1000px scroll trigger threshold in ChatPane, the next batch is
+	 * almost always already loaded by the time the user reaches it.
 	 *
 	 * Returns true if the homeserver had more events to give (i.e.
 	 * the timeline grew), false if we hit the start-of-room or
@@ -3981,7 +4110,7 @@ export class MatrixTransport {
 	 * scroll handler) use the return value to stop asking once
 	 * there's nothing left to fetch.
 	 */
-	async loadMoreHistory(roomId: RoomId, limit = 50): Promise<boolean> {
+	async loadMoreHistory(roomId: RoomId, limit = 500): Promise<boolean> {
 		const c = this.requireClient();
 		const room = c.getRoom(roomId);
 		if (!room) return false;

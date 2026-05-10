@@ -2571,6 +2571,40 @@ export function insertNotification(opts: {
 	);
 }
 
+const recentUnreadFromSenderStmt = db.prepare(`
+	SELECT created_at FROM notifications
+	WHERE user_id = ? AND room_id = ? AND sender = ? AND read_at IS NULL
+	ORDER BY created_at DESC
+	LIMIT 1
+`);
+
+/** Look up the timestamp of the most recent UNREAD notification for
+ * a (recipient, room, sender) triple.  Returns null when there isn't
+ * one.
+ *
+ * Used by the fan-out path to coalesce bursts: voice/video calls in
+ * encrypted DMs trickle ~1 m.call.candidates event per ~1.5s, all of
+ * which look identical to the engine (m.room.encrypted with no
+ * readable content) and would otherwise turn into a steady drip of
+ * "Alice sent you a DM" bell entries through the entire call.
+ *
+ * The bell semantically already says "you have unread in this room";
+ * adding another row for the same sender within the same minute
+ * doesn't tell the user anything they don't already know — they'll
+ * see the latest message when they open the room.  Real chat bursts
+ * (someone fires off five DMs in a row) get exactly one bell row
+ * and one OS notification, which matches the user's mental model. */
+export function recentUnreadFromSender(
+	userId: string,
+	roomId: string,
+	sender: string,
+): number | null {
+	const row = recentUnreadFromSenderStmt.get(userId, roomId, sender) as
+		| { created_at: number }
+		| undefined;
+	return row?.created_at ?? null;
+}
+
 /** Paginated list, newest first.  `before` is the exclusive upper
  * bound on `created_at` — pass Number.MAX_SAFE_INTEGER for the first
  * page, then the last row's `created_at` for the next. */

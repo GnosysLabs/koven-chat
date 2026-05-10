@@ -486,16 +486,21 @@ pub fn run() {
 					}
 				}
 
-				// Fallback: 3 seconds after launch, force-reveal even
+				// Fallback: 5 seconds after launch, force-reveal even
 				// if `reveal_app` never fires.  Without this, any
 				// silent failure in the SPA's chrome-setup chain
 				// leaves the main window hidden forever and the user
-				// just stares at the splash.  Plain std::thread is
-				// fine — Tauri's WebviewWindow handles are Send +
-				// Sync so we can poke them from any thread.
+				// just stares at the splash.  5s (was 3s) gives the
+				// SPA enough headroom to finish its full first paint
+				// — IndexedDBStore.startup, initRustCrypto, the
+				// rounded-corner Cocoa setup, and React's first
+				// commit can comfortably exceed 3s on a cold cache.
+				// Plain std::thread is fine — Tauri's WebviewWindow
+				// handles are Send + Sync so we can poke them from
+				// any thread.
 				let app_handle = app.handle().clone();
 				std::thread::spawn(move || {
-					std::thread::sleep(std::time::Duration::from_secs(3));
+					std::thread::sleep(std::time::Duration::from_secs(5));
 					if let Some(s) = app_handle.get_webview_window("splash") {
 						let _ = s.close();
 					}
@@ -708,9 +713,7 @@ pub fn run() {
 					// See plugins/mac_webrtc_permission for the full
 					// 3-gate explanation.
 					if let Ok(ptr) = win.ns_window() {
-						unsafe {
-							plugins::mac_webrtc_permission::install(ptr as id);
-						}
+						plugins::mac_webrtc_permission::install(ptr as id);
 					}
 				}
 			}

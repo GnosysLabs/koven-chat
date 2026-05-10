@@ -31,6 +31,7 @@ import {
 	joinedMemberCount,
 	listJoinedRoomMembers,
 	lookupPostUser,
+	recentUnreadFromSender,
 	upsertRoomMember,
 } from "./db";
 import { getJoinedMembers } from "./synapse";
@@ -38,6 +39,22 @@ import { getJoinedMembers } from "./synapse";
 // Snippet character cap.  200 keeps the bell list compact while
 // still showing enough preview to recognize the conversation.
 const SNIPPET_MAX = 200;
+
+// Window during which additional encrypted events from the same
+// sender in the same room collapse into the existing unread bell
+// row instead of writing a new one.  Calibrated to swallow the
+// ICE-candidate trickle of an in-progress 1:1 voice/video call —
+// matrix-js-sdk fires `m.call.candidates` every ~1.5s and the
+// engine sees them all as `m.room.encrypted` with no way to tell
+// them apart from chat messages.  60s is comfortably longer than
+// any chat burst a human realistically sends and short enough that
+// real, spaced-out follow-up messages still produce their own row.
+//
+// Mentions / replies are unaffected — they're explicit signals (the
+// user typed @-something or hit Reply) and skip the coalesce gate
+// below; the coalescing only applies to encrypted events that fall
+// into the implicit `dm` bucket.
+const ENCRYPTED_DM_COALESCE_MS = 60_000;
 
 // Encrypted message bodies are unreadable to the engine.  Rather
 // than ship "(encrypted message)" as a snippet, we leave it null —
@@ -300,6 +317,29 @@ export async function fanOutMessage(ev: MatrixEvent): Promise<void> {
 		if (kind === null) {
 			console.log(`[fanout] skip ${recipient}: not DM, not mentioned, not reply target, level=${level}`);
 			continue;
+		}
+
+		// Coalesce gate.  Only applies to encrypted events that land
+		// in the implicit `dm` bucket — mention / reply / message kinds
+		// are explicit signals (typed @, hit Reply, or opted into "all
+		// messages") that the user almost certainly wants surfaced
+		// every time, so they bypass.
+		//
+		// The motivating case: 1:1 voice/video calls in encrypted DMs
+		// trickle ICE candidates as `m.call.candidates` events every
+		// ~1.5s for the duration of the call.  All of them encrypt to
+		// `m.room.encrypted`, the engine can't decrypt to discriminate,
+		// and without this gate every one becomes another "Alice sent
+		// you a DM" bell row.  A real DM burst from a chatty friend
+		// produces ONE row per coalesce window — fine, the bell already
+		// communicates "you have unread"; the user opens the room to
+		// see what's there, no information lost.
+		if (isEncrypted && kind === "dm") {
+			const recent = recentUnreadFromSender(recipient, ev.room_id, ev.sender);
+			if (recent !== null && ev.origin_server_ts - recent < ENCRYPTED_DM_COALESCE_MS) {
+				console.log(`[fanout] skip ${recipient}: coalesced into unread bell row from ${ev.sender} (${Math.floor((ev.origin_server_ts - recent) / 1000)}s ago)`);
+				continue;
+			}
 		}
 
 		console.log(`[fanout] write notification: recipient=${recipient} kind=${kind}`);

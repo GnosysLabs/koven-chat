@@ -745,6 +745,35 @@ export default function App() {
 				}
 				setIncomingCall(call);
 			},
+			onSessionLoggedOut: () => {
+				// Server-side session invalidation (token revoked,
+				// device deleted, admin logout, soft-logout).  Drop
+				// this account from local state + storage and pivot
+				// to the next stored account if any, otherwise the
+				// login screen.  We DELIBERATELY don't call
+				// `t.logout()` — the homeserver already considers
+				// this token dead, and a /logout against a dead token
+				// returns 401 in its own loop.  Same reasoning as a
+				// normal handleSignOut otherwise: clear creds, blank
+				// the encryption gate, drop active room.
+				const leaving = creds.user_id;
+				setAccounts(prev => {
+					const next = removeAccount(prev, leaving);
+					saveAccounts(next);
+					return next;
+				});
+				setActiveUserIdState(prevActive => {
+					if (prevActive !== leaving) return prevActive;
+					// The next active account is computed off the
+					// PRE-removal list so pickNextActive can see the
+					// account being removed and skip it.
+					const nextActive = pickNextActive(accounts, leaving);
+					saveActiveUserId(nextActive);
+					return nextActive;
+				});
+				setEncState(null);
+				dispatch({ type: "set_active_room", roomId: null });
+			},
 		});
 		// Hand the freshly-issued UIA password (from email-code login)
 		// to the transport before any UIA-protected op can fire.

@@ -18,7 +18,7 @@
 // render into React state via listeners so the component re-paints on
 // State / FeedsChanged / Hangup.
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { Maximize2, Mic, MicOff, Minimize2, PhoneOff, Video, VideoOff } from "lucide-react";
@@ -27,6 +27,20 @@ import type { MatrixCall } from "matrix-js-sdk/lib/webrtc/call";
 import type { RoomId, UserId } from "@koven/shared";
 import { cn } from "@/lib/utils";
 import { startOutboundDial } from "@/lib/callRingtone";
+
+// localStorage key for the user's last-set self-preview PIP offset
+// (the small camera thumbnail INSIDE the call canvas).  Kept
+// module-level so the lazy initializer in ActiveCallView and the
+// persist handler in onPipMouseDown agree on the same key.
+const PIP_POS_KEY = "koven.callPipOffset";
+// Separate localStorage key for the MINIMIZED-mode floating
+// thumbnail's position (the Discord-style PIP in the bottom-left
+// when the user has navigated away from the call's room).  Kept
+// distinct from PIP_POS_KEY so the two surfaces remember their
+// positions independently — they live in different coordinate
+// spaces (call canvas vs viewport) and a value valid for one is
+// nonsense for the other.
+const MINI_POS_KEY = "koven.callMiniOffset";
 
 export interface ActiveCallViewProps {
 	call: MatrixCall;
@@ -79,6 +93,342 @@ export function ActiveCallView({ call, peer, activeRoomId, onClickThumbnail, onE
 	// whichever set is currently mounted in the layout effect below.
 	const remoteVideoMiniRef = useRef<HTMLVideoElement | null>(null);
 	const remoteAudioMiniRef = useRef<HTMLAudioElement | null>(null);
+
+	// Remote stream's natural aspect ratio.  Defaults to 16:9 until
+	// the video element fires loadedmetadata; updated when we know
+	// the actual W:H so the modal sizes itself to fit the peer's
+	// camera (no letterbox / pillarbox bars).  Stored as a CSS
+	// `aspect-ratio` string ("W / H") so we can drop it straight
+	// into a style prop.  Switches back to 16:9 when there's no
+	// remote video (avatar fallback) so the modal isn't a tiny
+	// portrait sliver while waiting for the call to connect.
+	const [remoteAspect, setRemoteAspect] = useState<string>("16 / 9");
+	const handleRemoteMetadata = () => {
+		const v = remoteVideoRef.current;
+		if (!v || !v.videoWidth || !v.videoHeight) return;
+		setRemoteAspect(`${v.videoWidth} / ${v.videoHeight}`);
+	};
+
+	// Draggable position for the local self-preview PIP.  Stored as
+	// an offset from the default bottom-right anchor (negative x =
+	// further left, negative y = further up).  Persisted to
+	// localStorage so the user's preferred spot survives page
+	// reloads.  Read-once on mount via lazy initializer to skip the
+	// localStorage roundtrip on every render.
+	const [pipOffset, setPipOffset] = useState<{ x: number; y: number }>(() => {
+		try {
+			const raw = typeof localStorage !== "undefined"
+				? localStorage.getItem(PIP_POS_KEY)
+				: null;
+			if (raw) {
+				const parsed = JSON.parse(raw);
+				if (typeof parsed?.x === "number" && typeof parsed?.y === "number") {
+					return { x: parsed.x, y: parsed.y };
+				}
+			}
+		} catch {
+			// Bad JSON / no localStorage — fall through to default.
+		}
+		return { x: 0, y: 0 };
+	});
+	// Live size of the call canvas (the inner div the PIP is anchored
+	// inside).  Tracked via ResizeObserver so we can clamp the PIP
+	// offset to keep the thumbnail fully on-screen when the modal
+	// resizes — viewport shrink, switch to portrait camera, reload
+	// with a stale offset that no longer fits, etc.  Without this the
+	// PIP can drift past the canvas edge into `overflow-hidden`
+	// territory and become un-grabbable.
+	const canvasSizeRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
+	// PIP geometry.  Default anchor is `absolute bottom-24 right-4`
+	// (96px from bottom, 16px from right) and the box is `h-32 w-44`
+	// (128 × 176).  Constants kept local so the clamp math stays
+	// readable and any future class change is a one-line update.
+	const PIP_W = 176;
+	const PIP_H = 128;
+	const PIP_RIGHT_INSET = 16;
+	const PIP_BOTTOM_INSET = 96;
+	const clampOffset = (offset: { x: number; y: number }): { x: number; y: number } => {
+		const { w, h } = canvasSizeRef.current;
+		// Pre-mount / not-yet-measured — pass through; the
+		// ResizeObserver will re-clamp on first measurement.
+		if (!w || !h) return offset;
+		// Bounds derived from the default anchor:
+		//   default top-left  = (w - PIP_RIGHT_INSET - PIP_W,
+		//                        h - PIP_BOTTOM_INSET - PIP_H)
+		//   after translate(x, y) the top-left moves by (x, y).
+		// Constrain so the PIP stays fully inside the canvas — left
+		// edge ≥ 0, right edge ≤ w, top edge ≥ 0, bottom edge ≤ h.
+		const minX = PIP_RIGHT_INSET + PIP_W - w;
+		const maxX = PIP_RIGHT_INSET;
+		const minY = PIP_BOTTOM_INSET + PIP_H - h;
+		const maxY = PIP_BOTTOM_INSET;
+		return {
+			x: Math.min(Math.max(offset.x, minX), maxX),
+			y: Math.min(Math.max(offset.y, minY), maxY),
+		};
+	};
+	// Callback ref + ResizeObserver for the canvas div.  Using a
+	// callback ref instead of useRef + useEffect so observe / unobserve
+	// happens automatically when the canvas mounts and unmounts (it
+	// disappears in the minimized branch, then remounts on expand —
+	// an effect with [] deps would only run once and miss the remount).
+	const observerRef = useRef<ResizeObserver | null>(null);
+	const canvasRef = useCallback((node: HTMLDivElement | null) => {
+		// Tear down any previous observer before re-binding so we
+		// don't leak observers on remount.
+		observerRef.current?.disconnect();
+		observerRef.current = null;
+		if (!node) return;
+		// Initialise size synchronously so the very first paint clamps
+		// against real bounds instead of the {0, 0} placeholder.
+		const rect = node.getBoundingClientRect();
+		canvasSizeRef.current = { w: rect.width, h: rect.height };
+		setPipOffset(prev => clampOffset(prev));
+		const ro = new ResizeObserver(entries => {
+			for (const entry of entries) {
+				const { width, height } = entry.contentRect;
+				canvasSizeRef.current = { w: width, h: height };
+			}
+			// Re-clamp current offset against the new canvas bounds.
+			// Using functional setState so we don't miss concurrent
+			// updates from an in-progress drag.
+			setPipOffset(prev => clampOffset(prev));
+		});
+		ro.observe(node);
+		observerRef.current = ro;
+	}, []);
+	// Track the in-progress drag.  Captured on mousedown, cleared on
+	// mouseup.  Window-level listeners (not element-level) so the
+	// drag doesn't break when the cursor leaves the PIP rectangle —
+	// otherwise fast pointer moves would orphan the drag.
+	const dragStateRef = useRef<{
+		startMouseX: number;
+		startMouseY: number;
+		startOffsetX: number;
+		startOffsetY: number;
+	} | null>(null);
+	const onPipMouseDown = (e: React.MouseEvent) => {
+		// Skip drag init if the click started on a control inside
+		// the PIP (we don't have any yet, but defensive).
+		e.preventDefault();
+		dragStateRef.current = {
+			startMouseX: e.clientX,
+			startMouseY: e.clientY,
+			startOffsetX: pipOffset.x,
+			startOffsetY: pipOffset.y,
+		};
+		const onMove = (ev: MouseEvent) => {
+			const ds = dragStateRef.current;
+			if (!ds) return;
+			setPipOffset(clampOffset({
+				x: ds.startOffsetX + (ev.clientX - ds.startMouseX),
+				y: ds.startOffsetY + (ev.clientY - ds.startMouseY),
+			}));
+		};
+		const onUp = () => {
+			dragStateRef.current = null;
+			window.removeEventListener("mousemove", onMove);
+			window.removeEventListener("mouseup", onUp);
+			// Persist the final position only on drag END (not every
+			// move event) — saves localStorage churn during a drag.
+			try {
+				localStorage.setItem(
+					PIP_POS_KEY,
+					JSON.stringify({ x: pipOffsetRef.current.x, y: pipOffsetRef.current.y }),
+				);
+			} catch {
+				// localStorage unavailable — drag still works in-session.
+			}
+		};
+		window.addEventListener("mousemove", onMove);
+		window.addEventListener("mouseup", onUp);
+	};
+	// Mirror pipOffset into a ref so the persist call inside onUp
+	// (captured at mousedown time) sees the LATEST position rather
+	// than the stale value at mousedown.
+	const pipOffsetRef = useRef(pipOffset);
+	useEffect(() => {
+		pipOffsetRef.current = pipOffset;
+	}, [pipOffset]);
+	// Tear down the ResizeObserver when the component itself
+	// unmounts (call ends).  Callback-ref cleanup handles
+	// mount/unmount of the canvas node, but if the entire view
+	// unmounts while the canvas is still mounted, the callback
+	// ref's "node = null" branch runs first and clears it cleanly.
+	// This guard is belt-and-suspenders for paranoia.
+	useEffect(() => () => {
+		observerRef.current?.disconnect();
+		observerRef.current = null;
+	}, []);
+
+	// ─── Minimized-mode floating thumbnail draggability ─────────────
+	//
+	// Independent of the in-call PIP above.  When the call is
+	// minimized to the Discord-style thumbnail, the user wants to be
+	// able to drag it anywhere on the SPA viewport (not just within
+	// the call canvas — there is no canvas in this mode, the
+	// thumbnail floats over whatever room they navigated to).  Same
+	// pattern as above: localStorage-persisted offset from the
+	// default bottom-left anchor, ResizeObserver to track the
+	// thumbnail's measured size for clamping, window resize listener
+	// to re-clamp on viewport changes, and a drag handler with a
+	// click-vs-drag threshold so a quick tap on the thumbnail body
+	// still navigates back to the call's room.
+	const [miniOffset, setMiniOffset] = useState<{ x: number; y: number }>(() => {
+		try {
+			const raw = typeof localStorage !== "undefined"
+				? localStorage.getItem(MINI_POS_KEY)
+				: null;
+			if (raw) {
+				const parsed = JSON.parse(raw);
+				if (typeof parsed?.x === "number" && typeof parsed?.y === "number") {
+					return { x: parsed.x, y: parsed.y };
+				}
+			}
+		} catch {
+			// Bad JSON / no localStorage — fall through.
+		}
+		return { x: 0, y: 0 };
+	});
+	const miniOffsetRef = useRef(miniOffset);
+	useEffect(() => {
+		miniOffsetRef.current = miniOffset;
+	}, [miniOffset]);
+
+	// Default anchor for the minimized thumbnail.  Mirrors the
+	// `fixed bottom-4 left-4` Tailwind classes on the rendered
+	// element below — keep these in sync if the className changes.
+	const MINI_LEFT_INSET = 16;
+	const MINI_BOTTOM_INSET = 16;
+	// Live measured size of the minimized thumbnail (the video area's
+	// height changes when the remote stream connects mid-call, so we
+	// can't hardcode it).  Updated by the ResizeObserver in
+	// miniRef below; consumed by clampMiniOffset to compute viewport
+	// bounds that keep the thumbnail fully on-screen.
+	const miniSizeRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
+	const clampMiniOffset = (offset: { x: number; y: number }): { x: number; y: number } => {
+		if (typeof window === "undefined") return offset;
+		const { w, h } = miniSizeRef.current;
+		// Pre-measurement — bail through; the resize observer will
+		// re-clamp on first paint.
+		if (!w || !h) return offset;
+		// Default top-left corner of the thumbnail:
+		//   (MINI_LEFT_INSET,  window.innerHeight - MINI_BOTTOM_INSET - h)
+		// After translate(x, y), top-left moves by (x, y).  Keep the
+		// thumbnail fully inside the viewport — left edge ≥ 0, right
+		// edge ≤ vw, top edge ≥ 0, bottom edge ≤ vh.
+		const vw = window.innerWidth;
+		const vh = window.innerHeight;
+		const minX = -MINI_LEFT_INSET;
+		const maxX = vw - MINI_LEFT_INSET - w;
+		const minY = MINI_BOTTOM_INSET + h - vh;
+		const maxY = MINI_BOTTOM_INSET;
+		return {
+			x: Math.min(Math.max(offset.x, minX), maxX),
+			y: Math.min(Math.max(offset.y, minY), maxY),
+		};
+	};
+	// Callback ref + ResizeObserver for the minimized div.  Same
+	// reasoning as canvasRef above (callback ref handles
+	// mount/unmount of the node automatically across the
+	// minimized↔expanded toggle, where a useRef + useEffect with
+	// `[]` deps would silently miss the remount).
+	const miniObserverRef = useRef<ResizeObserver | null>(null);
+	const miniRef = useCallback((node: HTMLDivElement | null) => {
+		miniObserverRef.current?.disconnect();
+		miniObserverRef.current = null;
+		if (!node) return;
+		const rect = node.getBoundingClientRect();
+		miniSizeRef.current = { w: rect.width, h: rect.height };
+		setMiniOffset(prev => clampMiniOffset(prev));
+		const ro = new ResizeObserver(entries => {
+			for (const entry of entries) {
+				const { width, height } = entry.contentRect;
+				miniSizeRef.current = { w: width, h: height };
+			}
+			setMiniOffset(prev => clampMiniOffset(prev));
+		});
+		ro.observe(node);
+		miniObserverRef.current = ro;
+	}, []);
+	// Re-clamp on viewport resize — without this, dragging the
+	// thumbnail to the right edge then shrinking the window would
+	// orphan it past the new edge.  Window resize doesn't fire
+	// inside the ResizeObserver above (that watches the THUMBNAIL,
+	// not the viewport), so we need a dedicated listener.
+	useEffect(() => {
+		const onResize = () => setMiniOffset(prev => clampMiniOffset(prev));
+		window.addEventListener("resize", onResize);
+		return () => window.removeEventListener("resize", onResize);
+	}, []);
+	// Cleanup the resize observer when the view unmounts entirely.
+	useEffect(() => () => {
+		miniObserverRef.current?.disconnect();
+		miniObserverRef.current = null;
+	}, []);
+	// Drag handler for the minimized thumbnail.  Threshold-based
+	// click-vs-drag detection: small movements pass through to the
+	// inner button (which navigates back to the call's room), larger
+	// movements activate drag mode and suppress the synthetic click
+	// that would otherwise fire on mouseup.  Window-level listeners
+	// so fast cursor moves outside the thumbnail rectangle don't
+	// orphan the drag.
+	const onMiniMouseDown = (e: React.MouseEvent) => {
+		// Don't preventDefault here — the inner navigate-back button
+		// needs to receive its click event when this turns out to be
+		// a tap rather than a drag.  We only call preventDefault once
+		// movement exceeds the drag threshold (below).
+		const startX = e.clientX;
+		const startY = e.clientY;
+		const startOffset = { x: miniOffset.x, y: miniOffset.y };
+		let isDragging = false;
+		const DRAG_THRESHOLD = 4; // px; tuned to feel like Discord/Slack
+		const onMove = (ev: MouseEvent) => {
+			const dx = ev.clientX - startX;
+			const dy = ev.clientY - startY;
+			if (!isDragging && (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD)) {
+				isDragging = true;
+			}
+			if (!isDragging) return;
+			ev.preventDefault();
+			setMiniOffset(clampMiniOffset({
+				x: startOffset.x + dx,
+				y: startOffset.y + dy,
+			}));
+		};
+		const onUp = (_ev: MouseEvent) => {
+			window.removeEventListener("mousemove", onMove);
+			window.removeEventListener("mouseup", onUp);
+			if (isDragging) {
+				// Persist the final position only on drag END.
+				try {
+					localStorage.setItem(
+						MINI_POS_KEY,
+						JSON.stringify({
+							x: miniOffsetRef.current.x,
+							y: miniOffsetRef.current.y,
+						}),
+					);
+				} catch {
+					// localStorage unavailable — drag still works in-session.
+				}
+				// Suppress the impending synthetic `click` event so the
+				// inner button's onClick (navigate-back-to-call-room)
+				// doesn't fire.  Capture-phase + once-only so we
+				// intercept the very next click anywhere in the document
+				// then remove ourselves cleanly — leaving the listener
+				// installed would eat unrelated clicks afterwards.
+				const suppressClick = (ce: MouseEvent) => {
+					ce.preventDefault();
+					ce.stopPropagation();
+					window.removeEventListener("click", suppressClick, true);
+				};
+				window.addEventListener("click", suppressClick, true);
+			}
+		};
+		window.addEventListener("mousemove", onMove);
+		window.addEventListener("mouseup", onUp);
+	};
 
 	const isVideo = call.type === CallType.Video;
 	// Peer identity — see prop docstring.  Caller (App.tsx) resolves
@@ -202,7 +552,12 @@ export function ActiveCallView({ call, peer, activeRoomId, onClickThumbnail, onE
 			if (onClickThumbnail) onClickThumbnail(call.roomId as RoomId);
 		};
 		return (
-			<div className="fixed bottom-4 left-4 z-[100] w-72 rounded-xl bg-black border border-white/15 shadow-2xl overflow-hidden flex flex-col">
+			<div
+				ref={miniRef}
+				onMouseDown={onMiniMouseDown}
+				style={{ transform: `translate(${miniOffset.x}px, ${miniOffset.y}px)` }}
+				className="fixed bottom-4 left-4 z-[100] w-72 rounded-xl bg-black border border-white/15 shadow-2xl overflow-hidden flex flex-col cursor-grab active:cursor-grabbing select-none"
+			>
 				{/* Audio still needs to play in minimized mode —
 				    re-mounted here so the stream stays bound. */}
 				<audio ref={remoteAudioMiniRef} autoPlay playsInline />
@@ -296,19 +651,30 @@ export function ActiveCallView({ call, peer, activeRoomId, onClickThumbnail, onE
 			{/* Hidden audio element — peer audio always routes here. */}
 			<audio ref={remoteAudioRef} autoPlay playsInline />
 
-			<div className="relative flex flex-col w-full max-w-5xl max-h-[85vh] aspect-video bg-black border border-white/10 rounded-2xl overflow-hidden shadow-2xl">
+			<div className="relative flex flex-col bg-black border border-white/10 rounded-2xl overflow-hidden shadow-2xl">
 
 			{/* Main canvas — peer video or peer-avatar fallback.
-			    `object-contain` preserves aspect ratio (letterboxes
-			    a 16:9 video on a 4:3 canvas instead of cropping it).
-			    Tested in 1:1 calls between portrait + landscape
-			    cameras — neither participant looked stretched. */}
-			<div className="flex-1 relative flex items-center justify-center overflow-hidden bg-black">
+			    Aspect ratio matches the peer's camera (or 16:9 while
+			    waiting / on audio fallback) so the video fills the
+			    canvas edge-to-edge with no letterbox / pillarbox.
+			    Width capped at max-w-5xl + 80vw; height capped at
+			    85vh minus the bottom control bar (h-24 = 6rem).
+			    Aspect-ratio + bounded max-w/max-h auto-shrinks
+			    correctly on portrait videos. */}
+			<div
+				ref={canvasRef}
+				className="relative flex items-center justify-center overflow-hidden bg-black w-[80vw] max-w-5xl"
+				style={{
+					aspectRatio: showRemoteVideo ? remoteAspect : "16 / 9",
+					maxHeight: "calc(85vh - 6rem)",
+				}}
+			>
 				{showRemoteVideo ? (
 					<video
 						ref={remoteVideoRef}
 						autoPlay
 						playsInline
+						onLoadedMetadata={handleRemoteMetadata}
 						className="h-full w-full object-contain"
 					/>
 				) : (
@@ -329,14 +695,21 @@ export function ActiveCallView({ call, peer, activeRoomId, onClickThumbnail, onE
 
 				{/* Local self-preview pip.  Only shown for video calls
 				    and when the camera isn't muted; voice calls don't
-				    need a self-view. */}
+				    need a self-view.  Draggable: the user grabs it and
+				    moves it anywhere on the call canvas; the offset
+				    persists to localStorage so it sticks across reloads.
+				    `select-none` prevents text-selection cursor flicker
+				    while dragging; `cursor-grab` (active: `grabbing`)
+				    advertises the affordance. */}
 				{isVideo && !videoMuted && (
 					<video
 						ref={localVideoRef}
 						autoPlay
 						playsInline
 						muted
-						className="absolute bottom-24 right-4 h-32 w-44 rounded-lg object-cover border border-white/20 shadow-xl bg-black"
+						onMouseDown={onPipMouseDown}
+						style={{ transform: `translate(${pipOffset.x}px, ${pipOffset.y}px)` }}
+						className="absolute bottom-24 right-4 h-32 w-44 rounded-lg object-cover border border-white/20 shadow-xl bg-black cursor-grab active:cursor-grabbing select-none"
 					/>
 				)}
 
