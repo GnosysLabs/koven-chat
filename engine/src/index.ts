@@ -10,7 +10,8 @@ import { gcMcpScratchDirs } from "./mcp/janitor";
 import { evaluateCollapses } from "./collapse";
 import { bootstrapAdminIfNeeded } from "./admins";
 import { startAllBots, stopAllBots } from "./bot_manager";
-import { registerAppserviceUser } from "./synapse";
+import { adminListLocalUsersByRegistration, registerAppserviceUser } from "./synapse";
+import { FOUNDER_CAP_PUBLIC, claimFounderNumber, getFounderCount } from "./db";
 
 console.log(`engine: starting — homeserver=${config.homeserverUrl} db=${config.dbPath}`);
 
@@ -47,6 +48,33 @@ console.log(`engine: starting — homeserver=${config.homeserverUrl} db=${config
 }
 
 startServer();
+
+// One-shot Founders backfill.  When the table is empty (first boot
+// after this feature ships) we populate it from Synapse's admin user
+// list ordered by registration time, so existing users who signed
+// up before the feature get their badges in the correct order
+// without needing to re-register.  Idempotent — guarded on the
+// table being empty, so subsequent boots no-op.  Failures (admin
+// API down, network blip) are non-fatal: the engine stays up and
+// new signups still claim through the verify-code path.
+{
+	const existing = getFounderCount();
+	if (existing === 0) {
+		console.log(`engine: Founders table empty, backfilling first ${FOUNDER_CAP_PUBLIC} users from Synapse...`);
+		void adminListLocalUsersByRegistration(FOUNDER_CAP_PUBLIC)
+			.then(users => {
+				let claimed = 0;
+				for (const u of users) {
+					const n = claimFounderNumber(u.user_id);
+					if (n !== null) claimed++;
+				}
+				console.log(`engine: Founders backfill complete — claimed ${claimed} of ${FOUNDER_CAP_PUBLIC} slots`);
+			})
+			.catch(err => console.error("engine: Founders backfill failed", err));
+	} else {
+		console.log(`engine: Founders table has ${existing} of ${FOUNDER_CAP_PUBLIC} slots, skipping backfill`);
+	}
+}
 
 // Start every enabled bot in the background.  We don't await this —
 // bot startup involves /sync and crypto init, which can take seconds.

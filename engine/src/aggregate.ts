@@ -4,6 +4,7 @@
 // type the homeserver knows about, including invites, presence, etc.
 
 import {
+	claimFounderNumber,
 	createSuspension,
 	deletePost,
 	deleteReaction,
@@ -20,6 +21,7 @@ import {
 	upsertRoomMember,
 } from "./db";
 import { fanOutMember, fanOutMessage } from "./notification-fanout";
+import { config } from "./config";
 
 // Minimal shape of a Matrix client-server event coming through
 // /transactions.  We only assert on fields we actually read.
@@ -133,6 +135,34 @@ function handleMember(ev: MatrixEvent): void {
 		markRoomAsDm(ev.room_id);
 	}
 	fanOutMember(ev);
+
+	// Founder auto-claim safety net.  The signup hook in server.ts
+	// claims a slot for everyone who registered through the engine's
+	// email-code flow, and the boot backfill catches everyone who was
+	// already on Synapse before this feature shipped.  This handler
+	// catches the third case: users created directly on Synapse
+	// (admin-created accounts, future SSO providers, etc.) who never
+	// touched the engine signup path.  Their first observable
+	// activity is always an `m.room.member` join, so claiming on
+	// `join` membership transitions guarantees we eventually see
+	// them.  No-op on retries — claimFounderNumber is idempotent.
+	// Bots and the engine itself are filtered inside
+	// claimFounderNumber via the bot/engine guards in the table's
+	// caller chain — actually no, those guards are in fanOutMessage,
+	// not here, so duplicate the cheap check inline.
+	if (membership === "join") {
+		const sk = ev.state_key;
+		const colon = sk.indexOf(":");
+		const localpart = sk.startsWith("@") && colon > 1 ? sk.slice(1, colon) : "";
+		const isBotOrEngine = localpart.startsWith("bot-") || sk === config.engineUserId;
+		if (!isBotOrEngine) {
+			try {
+				claimFounderNumber(sk);
+			} catch (err) {
+				console.warn(`engine: founder auto-claim for ${sk} threw`, err);
+			}
+		}
+	}
 }
 
 function handleRoomCreate(ev: MatrixEvent): void {

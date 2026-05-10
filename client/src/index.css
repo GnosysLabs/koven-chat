@@ -852,3 +852,47 @@
  * everything inside paints normally and the desktop wallpaper
  * shows through outside the radius automatically.
  */
+
+/* ───────────────────────────────────────────────────────────────────
+   Holographic Founder badge — see components/FounderBadge.tsx.
+   Iridescent gradient that pans across the chip via a CSS keyframe
+   animation, giving a slow holographic shimmer.  Pure CSS, no
+   images, no JS — the animation runs on the compositor thread, so
+   even a roomful of badges in chat costs effectively zero CPU.
+
+   Reduced-motion users get the static gradient (still pretty, still
+   legible) without the shimmer.  Compact variant (next to usernames
+   in chat) shimmers slower than the profile chip so a screen full
+   of badges doesn't read as visual noise.
+   ─────────────────────────────────────────────────────────────────── */
+.founder-holo {
+	background-image:
+		linear-gradient(
+			120deg,
+			hsl(280 85% 58%) 0%,
+			hsl(195 90% 58%) 22%,
+			hsl(310 90% 65%) 44%,
+			hsl(170 85% 55%) 66%,
+			hsl(265 90% 62%) 88%,
+			hsl(280 85% 58%) 100%
+		);
+	background-size: 220% 220%;
+	background-position: 0% 50%;
+	animation: founder-shimmer 4s ease-in-out infinite;
+}
+.founder-holo-profile {
+	background-size: 240% 240%;
+}
+.founder-holo-compact {
+	background-size: 200% 200%;
+	animation-duration: 5s;
+}
+@keyframes founder-shimmer {
+	0%, 100% { background-position: 0% 50%; }
+	50%      { background-position: 100% 50%; }
+}
+@media (prefers-reduced-motion: reduce) {
+	.founder-holo {
+		animation: none;
+	}
+}

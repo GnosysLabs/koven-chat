@@ -175,6 +175,24 @@ db.exec(`
 		updated_at INTEGER NOT NULL
 	);
 
+	-- Founders log: the first 666 users to sign up.  AUTOINCREMENT
+	-- gives atomic sequential numbering with zero race risk;
+	-- UNIQUE(user_id) prevents double-claims if the signup hook fires
+	-- twice (retry, idempotent boot backfill, etc.); the cap is
+	-- enforced at the insert site (claimFounderNumber) rather than in
+	-- schema so we keep a paper trail of every claim attempt without
+	-- storing rows that don't qualify.  founder_number IS the row id;
+	-- a SELECT returns it directly.
+	--
+	-- Drives the holographic Founder badge surfaced on profiles and
+	-- next to usernames in chat — users in this table see their
+	-- numerical place in the signup queue ("Founder #042 of 666").
+	CREATE TABLE IF NOT EXISTS founders (
+		founder_number INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id        TEXT NOT NULL UNIQUE,
+		claimed_at     INTEGER NOT NULL
+	);
+
 	-- MCP servers attached to each bot.  We're protocol-pure: owners
 	-- paste a Streamable-HTTP MCP URL plus optional auth headers
 	-- (typical: Authorization: Bearer <pat>).  No catalog, no proxy,
@@ -2663,3 +2681,92 @@ export function deleteAllNotifications(userId: string): number {
 	const r = deleteAllNotificationsStmt.run(userId);
 	return Number(r.changes);
 }
+
+// ─── Founders ────────────────────────────────────────────────────────
+//
+// Lifetime cap on Founder badge claims.  First 666 users to sign up
+// get an entry; everyone after is a regular user with no badge.
+// The number is dramatic but deliberate (and matches the upstream
+// product framing) — the cap exists in code rather than SQL so the
+// table itself can store the canonical historical log without
+// silently rejecting the 667th row at the DB layer.
+const FOUNDER_CAP = 666;
+
+const insertFounderStmt = db.prepare(`
+	INSERT OR IGNORE INTO founders (user_id, claimed_at)
+	VALUES (?, ?)
+`);
+
+const getFounderNumberStmt = db.prepare(`
+	SELECT founder_number FROM founders WHERE user_id = ?
+`);
+
+const founderCountStmt = db.prepare(`
+	SELECT COUNT(*) AS n FROM founders
+`);
+
+const allFoundersStmt = db.prepare(`
+	SELECT user_id, founder_number FROM founders
+	ORDER BY founder_number ASC
+`);
+
+/** Atomically claim a founder number for `userId` if there's still
+ * room under the FOUNDER_CAP.  Returns the assigned number on a
+ * fresh claim, the existing number if this user already has one
+ * (idempotent — safe to call twice on signup retries), or null if
+ * the cap has been reached.
+ *
+ * Uses a transaction so the count check and insert can't race
+ * across two simultaneous signups landing at slot 666 vs 667.
+ * SQLite's transaction is the cheapest serialization point for the
+ * engine's single-process model.  AUTOINCREMENT gives us the
+ * sequential id without needing to compute it; the count is just a
+ * gate against admitting more rows than we want. */
+export function claimFounderNumber(userId: string): number | null {
+	// Fast path: already a founder.  Skips the transaction entirely
+	// when this user is in the table — the common case for the
+	// idempotent backfill / retry paths.
+	const existing = getFounderNumberStmt.get(userId) as
+		| { founder_number: number }
+		| undefined;
+	if (existing) return existing.founder_number;
+
+	const tx = db.transaction((uid: string): number | null => {
+		const row = founderCountStmt.get() as { n: number };
+		if (row.n >= FOUNDER_CAP) return null;
+		insertFounderStmt.run(uid, Date.now());
+		const r = getFounderNumberStmt.get(uid) as
+			| { founder_number: number }
+			| undefined;
+		return r?.founder_number ?? null;
+	});
+	return tx(userId);
+}
+
+/** Look up an existing founder number; null if this user isn't a
+ * founder.  Cheap point query — used by the profile API and the
+ * batch-roster endpoint. */
+export function getFounderNumber(userId: string): number | null {
+	const row = getFounderNumberStmt.get(userId) as
+		| { founder_number: number }
+		| undefined;
+	return row?.founder_number ?? null;
+}
+
+/** Total founders claimed.  Drives the "X of 666" denominator on the
+ * client badge tooltip, and the boot-backfill gate that only runs
+ * when the table is empty. */
+export function getFounderCount(): number {
+	const row = founderCountStmt.get() as { n: number };
+	return row.n;
+}
+
+/** Full ordered list of founders for the bulk-roster endpoint.
+ * Tiny payload — capped at FOUNDER_CAP rows, two short fields each
+ * — so the client can fetch once at boot and render badges from a
+ * local Map without per-message round trips. */
+export function listFounders(): { user_id: string; founder_number: number }[] {
+	return allFoundersStmt.all() as { user_id: string; founder_number: number }[];
+}
+
+export const FOUNDER_CAP_PUBLIC = FOUNDER_CAP;

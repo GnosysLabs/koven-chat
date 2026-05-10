@@ -62,6 +62,7 @@ import { NsfwAcceptDialog } from "@/components/NsfwAcceptDialog";
 import { AddExistingRoomDialog } from "@/components/AddExistingRoomDialog";
 import { useCollapsedRooms } from "@/lib/collapsedRooms";
 import { fetchAllBotMxids } from "@/lib/bots-cache";
+import { startFoundersRosterRefresh } from "@/lib/founders-cache";
 import { fetchUiaPassword } from "@/lib/auth";
 import { TransportContext } from "@/lib/transportContext";
 import { applyTheme, loadSettings, saveSettings, type Settings } from "@/state/settings";
@@ -396,6 +397,12 @@ export default function App() {
 			window.clearInterval(id);
 		};
 	}, []);
+
+	// Founders roster — same shape as the bot roster, but keyed by
+	// numerical signup slot.  Cached locally; consumers (chat author
+	// header, member list, profile sheet) read synchronously via
+	// getCachedFounderNumber.  See lib/founders-cache.ts.
+	useEffect(() => startFoundersRosterRefresh(), []);
 
 	// Refresh the user's own bot roster every time they navigate into
 	// the Bots view — keeps usage counters current without a manual

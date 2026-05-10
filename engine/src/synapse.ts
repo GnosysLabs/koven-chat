@@ -642,6 +642,65 @@ export async function getRoomJoinRule(roomId: string): Promise<string | null> {
  * REPLACES whatever was there.  Fine for a single email but worth
  * knowing if we ever extend this to manage multiple addresses.
  */
+/**
+ * List local users sorted by registration time (oldest first), via
+ * Synapse's admin API.  Pages through 100-row chunks until the
+ * response indicates no more.  Filters out:
+ *   - bot users (`@bot-*` namespace)
+ *   - the engine's own service account
+ *   - guest accounts and deactivated accounts
+ *
+ * Used by the founder-table boot backfill to populate the first
+ * `cap` slots in registration order, so existing users (who signed
+ * up before the founder feature shipped) get their numbers
+ * assigned correctly without needing to re-register.  Bounded by
+ * `cap` so we stop pulling pages once we've seen enough — for a
+ * 666-cap, even servers with millions of users only fetch ~7 pages.
+ */
+export async function adminListLocalUsersByRegistration(
+	cap: number,
+): Promise<{ user_id: string; creation_ts: number }[]> {
+	const out: { user_id: string; creation_ts: number }[] = [];
+	const limit = 100;
+	let from = 0;
+	while (out.length < cap) {
+		const path = `/_synapse/admin/v2/users?limit=${limit}&from=${from}`
+			+ `&order_by=creation_ts&dir=f&deactivated=false&guests=false`;
+		const r = await adminFetch(path, { method: "GET" });
+		if (!r.ok) {
+			const txt = await r.text().catch(() => "");
+			console.warn(`engine: adminListLocalUsersByRegistration → ${r.status} ${txt.slice(0, 200)}`);
+			break;
+		}
+		const body = (await r.json().catch(() => null)) as
+			| { users?: Array<{ name?: string; creation_ts?: number; user_type?: string | null }>;
+			    next_token?: string | number; total?: number }
+			| null;
+		const users = Array.isArray(body?.users) ? body!.users : [];
+		if (users.length === 0) break;
+		for (const u of users) {
+			if (typeof u.name !== "string") continue;
+			if (typeof u.creation_ts !== "number") continue;
+			// Skip bot users (the engine's own service account is
+			// also caught by the second filter, but the bot-namespace
+			// check is cheaper for the common case).
+			const localpart = u.name.startsWith("@") ? u.name.slice(1).split(":")[0]! : "";
+			if (localpart.startsWith("bot-")) continue;
+			if (config.synapseAdminUser && localpart === config.synapseAdminUser) continue;
+			// user_type is null for normal users, "bot" for appservice-
+			// owned bots, "guest" for guests.  Skip non-null types so
+			// only real human accounts get a founder slot.
+			if (u.user_type) continue;
+			out.push({ user_id: u.name, creation_ts: u.creation_ts });
+			if (out.length >= cap) break;
+		}
+		if (typeof body?.next_token !== "string" && typeof body?.next_token !== "number") break;
+		from = typeof body.next_token === "number" ? body.next_token : Number(body.next_token);
+		if (!Number.isFinite(from)) break;
+	}
+	return out;
+}
+
 export async function adminSetUserEmail(userId: string, email: string): Promise<boolean> {
 	const path = `/_synapse/admin/v2/users/${encodeURIComponent(userId)}`;
 	const r = await adminFetch(path, {

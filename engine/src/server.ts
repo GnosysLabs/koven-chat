@@ -95,6 +95,10 @@ import {
 	verifyAuthCode,
 	writeBio,
 	writeInstanceConfig,
+	claimFounderNumber,
+	getFounderNumber,
+	listFounders,
+	FOUNDER_CAP_PUBLIC,
 } from "./db";
 import { evaluateCollapses } from "./collapse";
 import {
@@ -742,6 +746,20 @@ export function startServer(): void {
 					}
 					bindEmailToUser(email, candidateMxid);
 					userId = candidateMxid;
+
+					// Claim the next Founder slot if any are still
+					// available.  Idempotent + non-blocking: returns
+					// null past slot 666 (silently no-op'd), and the
+					// signup never depends on the result — the badge
+					// is decoration, not auth.
+					try {
+						const n = claimFounderNumber(candidateMxid);
+						if (n !== null) {
+							console.log(`engine: claimed Founder #${n} for ${candidateMxid}`);
+						}
+					} catch (err) {
+						console.warn(`engine: claimFounderNumber for ${candidateMxid} threw`, err);
+					}
 
 					// Auto-join the new user to the instance's default
 					// space + its public child rooms (if an admin has
@@ -3010,10 +3028,30 @@ export function startServer(): void {
 
 			// Public read: anyone can fetch anyone's bio.  Empty string
 			// when never set (so the response shape is uniform).
+			// Includes `founder_number` (1-666) for users who claimed
+			// a Founder slot, or null otherwise — drives the
+			// holographic Founder badge on the profile sheet.
 			if (req.method === "GET" && path.startsWith("/api/profile/")) {
 				const userId = decodeURIComponent(path.slice("/api/profile/".length));
 				if (!userId) return json({ errcode: "M_INVALID_PARAM", error: "user_id" }, { status: 400 });
-				return json({ user_id: userId, bio: readBio(userId) ?? "" });
+				return json({
+					user_id: userId,
+					bio: readBio(userId) ?? "",
+					founder_number: getFounderNumber(userId),
+				});
+			}
+
+			// Bulk Founders roster — full ordered list of (user_id,
+			// founder_number) pairs.  Cheap: at most FOUNDER_CAP_PUBLIC
+			// rows of two short fields each (~30KB worst case).  The
+			// client fetches this once on boot and caches it locally,
+			// then renders inline Founder badges in chat / member lists
+			// from the local Map without per-message round trips.
+			if (req.method === "GET" && path === "/api/founders") {
+				return json({
+					founders: listFounders(),
+					cap: FOUNDER_CAP_PUBLIC,
+				});
 			}
 
 			// Owner-only write: requires a Matrix token, sets the bio

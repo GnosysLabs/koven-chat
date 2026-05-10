@@ -13,6 +13,8 @@ import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { ReactionPills } from "@/components/ReactionPills";
 import { MessageActions } from "@/components/MessageActions";
 import { BotBadge } from "@/components/BotBadge";
+import { FounderBadge } from "@/components/FounderBadge";
+import { getCachedFounderNumber } from "@/lib/founders-cache";
 import {
 	MentionAutocomplete,
 	activeMentionToken,
@@ -86,6 +88,7 @@ function emojiOnlyCount(text: string): 1 | 2 | 3 | null {
 }
 import { useMatrixAttachment, useMatrixVideoPoster } from "@/lib/useMatrixAttachment";
 import { useMatrixMedia } from "@/lib/useMatrixMedia";
+import { autoAvatarUrl } from "@/lib/avatar";
 import { useUrlPreview } from "@/lib/useUrlPreview";
 import { useTransport } from "@/lib/transportContext";
 import { messageMentionsUser } from "@/lib/mention";
@@ -1663,6 +1666,16 @@ function MessageRow({
 					)}>
 						<span>{message.senderDisplayName}</span>
 						{isBot && <BotBadge />}
+						{(() => {
+							// Founder badge inline next to the name —
+							// only renders when the sender is in the
+							// cached roster (the first 666 signups).
+							// Bots can't be founders, so we skip the
+							// lookup when isBot is true.
+							if (isBot) return null;
+							const fn = getCachedFounderNumber(message.sender);
+							return fn !== null ? <FounderBadge number={fn} /> : null;
+						})()}
 						{/* Subtle timestamp to the right of the
 						    username — same row line as Discord /
 						    Slack / iMessage's group headers.  Only
@@ -2786,15 +2799,24 @@ function SeenIndicator({
 			>
 				{/* Avatars stack horizontally with negative margin so
 				    they overlap slightly — same convention Slack /
-				    Linear / Telegram use for compact reader lists. */}
-				<span className="flex -space-x-1">
-					{visible.map(s => (
-						<MatrixAvatar
+				    Linear / Telegram use for compact reader lists.
+				    Hand-rolled here (no MatrixAvatar) because WKWebView
+				    in Tauri silently collapses <img> elements to 0px
+				    wide inside flex containers regardless of any CSS
+				    width / explicit HTML width attribute we set on
+				    them — the only reliable workaround is to swap the
+				    <img> for a <div> with background-image, which has
+				    no intrinsic dimensions and no flex-basis quirk.
+				    Same image bytes either way; bypasses the IMG
+				    element entirely so WebKit has nothing to argue
+				    with.  Blink renders both forms identically. */}
+				<span className="inline-flex">
+					{visible.map((s, i) => (
+						<SeenAvatarChip
 							key={s.userId}
 							mxc={memberAvatars.get(s.userId) ?? undefined}
 							seed={s.userId}
-							kind="user"
-							className="h-4 w-4 rounded-full ring-1 ring-background"
+							leadingOverlap={i > 0}
 						/>
 					))}
 				</span>
@@ -2834,5 +2856,48 @@ function SeenIndicator({
 				</DialogContent>
 			</Dialog>
 		</>
+	);
+}
+
+/** Compact avatar tile for the seen-by stack.  Renders as a fixed-
+ * size <div> with the avatar pulled in via background-image instead
+ * of an <img>, because Tauri's WKWebView collapses <img> elements
+ * to 0px wide when they sit inside flex containers — even with
+ * inline style width and HTML width attributes set, WebKit picks
+ * its flex-basis from the image's intrinsic dimensions and ignores
+ * everything else.  background-image has no intrinsic dimensions,
+ * so the inline width/height is the only sizing input and the
+ * avatar always renders.  Blob URLs from useMatrixMedia work the
+ * same as in <img src=...>; falls through to the DiceBear fallback
+ * when no mxc is available.  `leadingOverlap` shifts every avatar
+ * after the first 4px to the left, mirroring `-space-x-1` without
+ * relying on Tailwind's child-combinator selector (which also has
+ * had quirky WebKit interactions in older builds). */
+function SeenAvatarChip({
+	mxc,
+	seed,
+	leadingOverlap,
+}: {
+	mxc?: string;
+	seed: string;
+	leadingOverlap: boolean;
+}) {
+	const blobUrl = useMatrixMedia(mxc);
+	const fallbackUrl = autoAvatarUrl(seed, "user");
+	const url = blobUrl ?? (mxc ? null : fallbackUrl);
+	return (
+		<div
+			aria-hidden
+			style={{
+				width: 16,
+				height: 16,
+				marginLeft: leadingOverlap ? -4 : 0,
+				backgroundImage: url ? `url(${JSON.stringify(url)})` : undefined,
+				backgroundSize: "cover",
+				backgroundPosition: "center",
+				backgroundColor: url ? undefined : "hsl(var(--muted))",
+			}}
+			className="rounded-full ring-1 ring-background shrink-0"
+		/>
 	);
 }

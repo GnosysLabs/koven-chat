@@ -25,10 +25,38 @@ export interface MatrixAvatarProps {
 	seed: string;             // e.g. user id or room id — drives the auto-avatar
 	kind?: AvatarKind;        // selects DiceBear style for fallback (default: user)
 	className?: string;       // size + extra styling
+	// Optional inline style passthrough.  Use when an ancestor's flex
+	// / grid layout is fighting Tailwind's `w-*` utility for control of
+	// the rendered width — inline style wins the cascade against any
+	// CSS rule, including preflight's `img { max-width: 100% }` and
+	// any flex-shrink that would otherwise collapse a tightly-packed
+	// stack of avatars to zero width.  Was specifically observed in
+	// the SeenIndicator's overlapping `-space-x-1` avatar stack inside
+	// an inline-flex button: `w-4` was in the rendered className but
+	// computed width came out 0px until we pinned dimensions inline.
+	style?: React.CSSProperties;
 }
 
-export function MatrixAvatar({ mxc, emoji, seed, kind = "user", className }: MatrixAvatarProps) {
+export function MatrixAvatar({ mxc, emoji, seed, kind = "user", className, style }: MatrixAvatarProps) {
 	const blobUrl = useMatrixMedia(mxc);
+
+	// Pull numeric width/height out of `style` so we can also pass
+	// them as HTML attributes on the rendered <img> / <svg>.  Reason:
+	// WKWebView (Tauri's webview on macOS) computes flex-basis from
+	// an <img>'s INTRINSIC dimensions and effectively ignores CSS
+	// `width`/`height` for the basis calculation.  In a flex container
+	// like the SeenIndicator's `-space-x-1` avatar stack, that
+	// collapses every <img> to ~0px wide despite the CSS being
+	// applied.  The HTML `width` / `height` attributes feed WebKit's
+	// flex-basis calculation directly and override the intrinsic
+	// dimensions, restoring the expected layout.  Blink/Chromium
+	// render correctly either way; this is a WebKit-only quirk.
+	const pxW = typeof style?.width === "number" ? style.width
+		: typeof style?.width === "string" && /^\d+(\.\d+)?(px)?$/.test(style.width) ? parseFloat(style.width)
+		: undefined;
+	const pxH = typeof style?.height === "number" ? style.height
+		: typeof style?.height === "string" && /^\d+(\.\d+)?(px)?$/.test(style.height) ? parseFloat(style.height)
+		: undefined;
 
 	// Emoji wins.  A picked emoji is the room's chosen identity — even
 	// if an old mxc avatar is still on the room state event, the emoji
@@ -49,6 +77,9 @@ export function MatrixAvatar({ mxc, emoji, seed, kind = "user", className }: Mat
 					"rounded-full shrink-0 select-none bg-accent",
 					className,
 				)}
+				style={style}
+				width={pxW}
+				height={pxH}
 				aria-hidden
 			>
 				<text
@@ -75,12 +106,16 @@ export function MatrixAvatar({ mxc, emoji, seed, kind = "user", className }: Mat
 					src={blobUrl}
 					alt=""
 					className={cn("rounded-full shrink-0 object-cover", className)}
+					style={style}
+					width={pxW}
+					height={pxH}
 				/>
 			);
 		}
 		return (
 			<div
 				className={cn("rounded-full bg-muted shrink-0", className)}
+				style={style}
 				aria-hidden
 			/>
 		);
@@ -91,6 +126,9 @@ export function MatrixAvatar({ mxc, emoji, seed, kind = "user", className }: Mat
 			src={autoAvatarUrl(seed, kind)}
 			alt=""
 			className={cn("rounded-full shrink-0 object-cover", className)}
+			style={style}
+			width={pxW}
+			height={pxH}
 		/>
 	);
 }

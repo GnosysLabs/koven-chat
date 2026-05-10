@@ -27,7 +27,9 @@ import { BotBadge } from "@/components/BotBadge";
 import { loadReputation } from "@/lib/useReputation";
 import type { ReputationData } from "@/lib/reputation";
 import { descriptorFor, nextTierUnlockLabel, tickClassForFilled, ticksFor } from "@/lib/reputation";
-import { fetchUserBio, updateMyBio } from "@/lib/profile";
+import { fetchUserBio, fetchUserProfile, updateMyBio } from "@/lib/profile";
+import { FounderBadge } from "@/components/FounderBadge";
+import { getFounderCap } from "@/lib/founders-cache";
 import { formatMxid, serverOf } from "@/lib/mxid";
 import { getPublicBotInfo } from "@/lib/bots";
 import type { UserId } from "@koven/shared";
@@ -140,6 +142,9 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 	const [profile, setProfile] = useState<BaseProfile | null>(null);
 	const [displayName, setDisplayName] = useState("");
 	const [bio, setBio] = useState("");
+	// Founder slot for the viewed user (1..666, null if they didn't
+	// claim one).  Drives the holographic Founder chip on the sheet.
+	const [founderNumber, setFounderNumber] = useState<number | null>(null);
 	// Bot creator (only meaningful when isBot && !isMyBot && !isSelf).
 	// Three-valued like rep: undefined = not yet fetched (suppress
 	// the row), null = fetched but not a registered bot or fetch
@@ -209,16 +214,20 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 		// version — exactly the jarring flash the user reported.
 		// Reputation fetch failures resolve as `null` so we don't
 		// gate the whole sheet on a transient engine outage.
+		// fetchUserProfile carries both bio AND founder_number in one
+		// response; replaces the standalone fetchUserBio call so we
+		// only round-trip the engine's /api/profile endpoint once.
 		Promise.all([
 			matrixFetcher,
-			fetchUserBio(viewedUserId),
+			fetchUserProfile(viewedUserId),
 			loadReputation(viewedUserId).catch(() => null),
 		])
-			.then(([p, fetchedBio, fetchedRep]) => {
+			.then(([p, fetchedProfile, fetchedRep]) => {
 				if (cancelled) return;
 				setProfile(p);
 				setDisplayName(p.displayName);
-				setBio(fetchedBio);
+				setBio(fetchedProfile.bio);
+				setFounderNumber(fetchedProfile.founder_number);
 				setRep(fetchedRep);
 				setLoading(false);
 			})
@@ -487,6 +496,21 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 							/>
 						</div>
 
+						{founderNumber !== null && (
+							// Self view of the holographic Founder chip —
+							// users want to see their own badge too, not
+							// just other people's.  Sits between the
+							// edit form and the rep block, same vertical
+							// rhythm as the read-only view.
+							<div>
+								<FounderBadge
+									number={founderNumber}
+									cap={getFounderCap()}
+									variant="profile"
+								/>
+							</div>
+						)}
+
 						{/* Reputation gets the full row now that user id lives
 						    inline under the display name and the Status
 						    placeholder is gone. */}
@@ -522,6 +546,20 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 								</div>
 							</div>
 						</div>
+
+						{founderNumber !== null && (
+							// Holographic Founder chip — sits between the
+							// identity row and the bio so it reads as
+							// part of "who is this person", not metadata
+							// buried below the rep block.
+							<div>
+								<FounderBadge
+									number={founderNumber}
+									cap={getFounderCap()}
+									variant="profile"
+								/>
+							</div>
+						)}
 
 						{bio.trim() && (
 							<p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap">
