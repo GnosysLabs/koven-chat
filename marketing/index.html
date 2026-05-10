@@ -4,9 +4,9 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Koven — chat without the banhammer</title>
-<meta name="description" content="Hiding a message requires a vote from the community. Every flag, every vote, in the public log. Penalties expire. No mods, no banhammer. From Gnosys Labs." />
+<meta name="description" content="Federated group chat with bots, polls, GIFs, voice, video, encrypted DMs — and no banhammer. Hiding a message requires a community vote. From Gnosys Labs." />
 <meta property="og:title" content="Koven — chat without the banhammer" />
-<meta property="og:description" content="tldr; mods suck. We fixed it. Hiding a message takes three people and a vote. Every action goes in the public log." />
+<meta property="og:description" content="Federated group chat with LLM-powered bots, polls, GIFs, voice, video, encrypted DMs — and no banhammer. The community votes; we just log it." />
 <meta property="og:image" content="https://koven.chat/assets/og.png" />
 <meta property="og:url" content="https://koven.chat" />
 <meta property="og:type" content="website" />
@@ -14,7 +14,7 @@
 <meta property="og:image:height" content="630" />
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:title" content="Koven — chat without the banhammer" />
-<meta name="twitter:description" content="tldr; mods suck. We fixed it. Hiding a message takes three people and a vote. Every action goes in the public log." />
+<meta name="twitter:description" content="Federated group chat with LLM-powered bots, polls, GIFs, voice, video, encrypted DMs — and no banhammer." />
 <meta name="twitter:image" content="https://koven.chat/assets/og.png" />
 <meta name="theme-color" content="#1a0e26" />
 <link rel="icon" type="image/png" href="favicon.png" />
@@ -719,6 +719,173 @@
   .dl-modal__steps strong { color: var(--fg); font-weight: 600; }
   .dl-modal__steps ol { margin: 8px 0 0; padding-left: 18px; }
   .dl-modal__steps li { margin-bottom: 6px; }
+
+  /* ─── Founder badge mockup (mirror of FounderBadge.tsx + index.css
+     in the app — pearlescent shimmer, dark text, slow loop) ─────── */
+  .founder-chip {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 14px 26px;
+    border-radius: 9999px;
+    line-height: 1.1;
+    color: #18181b;
+    background-image:
+      linear-gradient(rgba(0, 0, 0, 0.06), rgba(0, 0, 0, 0.06)),
+      linear-gradient(120deg,
+        hsl(340 80% 80%) 0%,
+        hsl(200 80% 78%) 22%,
+        hsl(265 75% 80%) 44%,
+        hsl(155 70% 76%) 66%,
+        hsl(45 85% 82%) 88%,
+        hsl(340 80% 80%) 100%
+      );
+    background-size: 100% 100%, 240% 240%;
+    background-position: 0 0, 0% 50%;
+    animation: founder-shimmer 12s ease-in-out infinite;
+    box-shadow:
+      0 0 24px -4px rgba(167, 139, 250, 0.55),
+      0 8px 32px -12px rgba(0, 0, 0, 0.6);
+    outline: 1px solid rgba(255, 255, 255, 0.22);
+    outline-offset: -1px;
+    user-select: none;
+  }
+  .founder-chip__label {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.22em;
+    font-weight: 600;
+    opacity: 0.82;
+  }
+  .founder-chip__num {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: 'Instrument Serif', ui-serif, Georgia, serif;
+    font-size: 32px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+    line-height: 1;
+    margin-top: 2px;
+  }
+  .founder-chip__num svg {
+    width: 18px;
+    height: 18px;
+    stroke-width: 2.2;
+  }
+  @keyframes founder-shimmer {
+    0%, 100% { background-position: 0 0, 0% 50%; }
+    50%      { background-position: 0 0, 100% 50%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .founder-chip { animation: none; }
+  }
+
+  /* Centered showcase block — used for sections that lead with a
+     single hero element (Founder chip, big section CTA cards). */
+  .showcase {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 28px;
+    text-align: center;
+    padding: 56px 32px;
+    border-radius: 24px;
+    border: 1px solid var(--border);
+    background:
+      radial-gradient(ellipse 70% 50% at 50% 0%, rgba(245, 177, 106, 0.05), transparent 60%),
+      var(--bg-elev);
+  }
+  .showcase__copy {
+    max-width: 560px;
+    color: var(--fg-muted);
+    font-size: 15.5px;
+    line-height: 1.65;
+  }
+  .showcase__copy strong { color: var(--fg); font-weight: 600; }
+
+  /* Two-column "feature focus" sections — image / icon on one side,
+     copy on the other.  Stacks on mobile. */
+  .focus {
+    display: grid;
+    grid-template-columns: 1fr 1.1fr;
+    gap: 48px;
+    align-items: center;
+    padding: 24px 0;
+  }
+  .focus__visual {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    aspect-ratio: 4 / 3;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    background:
+      radial-gradient(ellipse 60% 60% at 50% 50%, rgba(95, 200, 255, 0.08), transparent 70%),
+      var(--bg-elev);
+    color: var(--accent-cyan);
+  }
+  .focus__visual svg { width: 96px; height: 96px; opacity: 0.85; }
+  .focus__visual--bots { color: var(--accent); }
+  .focus__visual--bots {
+    background:
+      radial-gradient(ellipse 60% 60% at 50% 50%, rgba(245, 177, 106, 0.10), transparent 70%),
+      var(--bg-elev);
+  }
+  .focus__visual--dms { color: var(--accent-cyan); }
+  .focus__visual--spaces { color: var(--accent-purple); }
+  .focus__visual--spaces {
+    background:
+      radial-gradient(ellipse 60% 60% at 50% 50%, rgba(198, 111, 245, 0.10), transparent 70%),
+      var(--bg-elev);
+  }
+  .focus__copy h3 {
+    margin: 0 0 12px;
+    font-size: 28px;
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+  }
+  .focus__copy p {
+    margin: 0 0 14px;
+    color: var(--fg-muted);
+    font-size: 15.5px;
+    line-height: 1.65;
+  }
+  .focus__copy ul {
+    margin: 12px 0 0;
+    padding: 0;
+    list-style: none;
+    color: var(--fg-muted);
+    font-size: 14.5px;
+  }
+  .focus__copy ul li {
+    padding: 6px 0 6px 22px;
+    position: relative;
+    line-height: 1.55;
+  }
+  .focus__copy ul li::before {
+    content: "";
+    position: absolute;
+    left: 4px;
+    top: 14px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  .focus--reverse { grid-template-columns: 1.1fr 1fr; }
+  .focus--reverse .focus__visual { order: 2; }
+  .focus--reverse .focus__copy   { order: 1; }
+  @media (max-width: 760px) {
+    .focus { grid-template-columns: 1fr; gap: 24px; padding: 16px 0; }
+    .focus__visual { aspect-ratio: 16 / 10; }
+    .focus__visual svg { width: 72px; height: 72px; }
+    .focus--reverse .focus__visual { order: 0; }
+    .focus--reverse .focus__copy   { order: 0; }
+    .focus__copy h3 { font-size: 22px; }
+    .showcase { padding: 40px 22px; }
+  }
 </style>
 <!-- Fathom - beautiful, simple website analytics -->
 <script src="https://cdn.usefathom.com/script.js" data-site="IXSFCSZU" defer></script>
@@ -735,8 +902,9 @@
       <img class="brand-img" src="assets/koven-logo.png" alt="Koven" />
     </a>
     <nav class="nav-links">
+      <a href="#founder">Founder badge</a>
       <a href="#features">Features</a>
-      <a href="#how">How it works</a>
+      <a href="#bots">Bots</a>
       <a href="/governance.html">Governance</a>
       <a href="https://github.com/GnosysLabs/koven-chat" target="_blank" rel="noopener">GitHub</a>
     </nav>
@@ -793,8 +961,33 @@
   <section style="padding-top: 0;">
     <div class="container">
       <div class="principle fade-up">
-        <p class="lead">Hiding a message requires a vote from the community.<br/><em>That's the whole rule.</em></p>
-        <p class="sub">No banhammer. No founder veto. No mod nuking your message because they're having a bad day. The community votes. We just log it.</p>
+        <p class="lead">Federated group chat that does <em>everything</em>.<br/>Bots, voice, video, polls, GIFs, files. <em>Without the dictator.</em></p>
+        <p class="sub">All the polish you'd expect from Discord — plus encrypted DMs by default, LLM-powered bots you control, and moderation that's a community vote instead of one person's mood. <a href="#how" style="border-bottom: 1px solid rgba(255,220,200,0.25); color: var(--fg);">How the consensus part works ↓</a></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── Founder Badge — top placement, immediate flex ────────── -->
+  <section id="founder" style="padding-top: 0;">
+    <div class="container">
+      <div class="showcase fade-up">
+        <div class="eyebrow"><span style="color: var(--accent-pink);">Limited</span> — only 666 ever</div>
+        <span class="founder-chip" aria-label="Founder badge — limited to the first 666 sign-ups">
+          <span class="founder-chip__label">Founder</span>
+          <span class="founder-chip__num">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden>
+              <path d="M6 3h12l4 6-10 13L2 9z"/><path d="M11 3 8 9l4 13 4-13-3-6"/><path d="M2 9h20"/>
+            </svg>
+            042
+          </span>
+        </span>
+        <h2 style="margin: 0; font-size: clamp(28px, 4vw, 42px); letter-spacing: -0.015em;">Claim your <span style="background: linear-gradient(120deg, hsl(340 80% 80%), hsl(265 75% 80%), hsl(45 85% 82%)); -webkit-background-clip: text; background-clip: text; color: transparent;">Founder Badge</span></h2>
+        <p class="showcase__copy">
+          The first <strong>666 people</strong> to sign in to koven.chat get a permanent, holographic Founder chip on their profile and next to their name in chat. <strong>Auto-claimed on first login</strong> — no application, no waiting list. When they're gone, they're gone.
+        </p>
+        <div class="cta-row">
+          <a class="btn btn-primary btn-lg" href="https://client.koven.chat">Sign in &amp; claim →</a>
+        </div>
       </div>
     </div>
   </section>
@@ -802,80 +995,80 @@
   <section style="padding-top: 0;">
     <div class="container">
       <div class="app-shot-wrap fade-up">
-        <img class="app-shot" src="assets/koven-app.png" alt="Koven web app showing channel list, governance discussion, and members panel" loading="lazy" width="2784" height="1826" />
+        <img class="app-shot" src="assets/koven-app.png" alt="Koven web app — channel list on the left, conversation in the middle, members panel on the right" loading="lazy" width="2784" height="1826" />
       </div>
       <div class="section-head fade-up" id="features">
-        <div class="eyebrow">What's different</div>
-        <h2 class="section-title">All the polish of Discord. None of the banhammer.</h2>
-        <p class="section-sub">Voice. Video. Threads. Reactions. Files. Custom emoji. The mod role just doesn't exist.</p>
+        <div class="eyebrow">What's in the box</div>
+        <h2 class="section-title">A real chat app. Not a moderation experiment.</h2>
+        <p class="section-sub">Everything Discord ships, federated and open-source, with a few things they don't.</p>
       </div>
 
       <div class="features fade-up">
 
         <div class="feature">
-          <div class="feature-icon"><i data-lucide="flag"></i></div>
-          <h3>Three people. One vote.</h3>
-          <p>A message is hidden when three different people flag it AND their combined reputation weight clears the threshold. Both gates have to clear. The math is in the docs.</p>
-        </div>
-
-        <div class="feature">
-          <div class="feature-icon"><i data-lucide="scroll-text"></i></div>
-          <h3>Everything goes in the log</h3>
-          <p>Every flag, every vote, every collapse, with names attached. If you get silenced here, it happens in public or it doesn't happen.</p>
-        </div>
-
-        <div class="feature">
-          <div class="feature-icon"><i data-lucide="hourglass"></i></div>
-          <h3>Penalties expire</h3>
-          <p>Slow-mode, read-only, off-default-feed. All time-bound, all self-expiring. No path from "unpopular post" to "gone forever."</p>
-        </div>
-
-        <div class="feature">
-          <div class="feature-icon"><i data-lucide="ban"></i></div>
-          <h3>No bans. No shadow-bans.</h3>
-          <p>Bans don't exist on Koven, full stop. Admins keep the server running and pick a logo. That's the whole admin surface.</p>
-        </div>
-
-        <div class="feature">
-          <div class="feature-icon"><i data-lucide="scale"></i></div>
-          <h3>Reputation from showing up</h3>
-          <p>Weight is earned by posting, getting reactions, sticking around. Not by being friends with the founder. The math is in the docs.</p>
-        </div>
-
-        <div class="feature">
-          <div class="feature-icon"><i data-lucide="shield-alert"></i></div>
-          <h3>Floor violations skip the vote</h3>
-          <p>CSAM, credible threats, doxxing collapse instantly. False floor flags eat the flagger's reputation. Reviewed in public.</p>
-        </div>
-
-        <div class="feature">
-          <div class="feature-icon"><i data-lucide="network"></i></div>
-          <h3>Federated. Koven only.</h3>
-          <p>Other Koven servers federate in automatically. Random homeservers don't get in. Same rules everywhere on the network. No server can silence another.</p>
+          <div class="feature-icon"><i data-lucide="bot"></i></div>
+          <h3>LLM-powered bots</h3>
+          <p>Drop in any OpenAI-compatible model. Give it a system prompt, a knowledge base, inbound webhooks (Twilio SMS, GitHub, anything), and outbound HTTP tools the LLM calls when it needs them.</p>
         </div>
 
         <div class="feature">
           <div class="feature-icon"><i data-lucide="lock"></i></div>
-          <h3>DMs are E2E encrypted</h3>
-          <p>By default, no toggle to forget. The engine can't read encrypted rooms, so consensus moderation doesn't apply there. The UI says so when it doesn't.</p>
+          <h3>E2E encrypted DMs</h3>
+          <p>Encrypted by default. No toggle to forget, no opt-in flow. The engine can't read your DMs because the keys never leave your devices.</p>
         </div>
 
         <div class="feature">
-          <div class="feature-icon"><i data-lucide="server"></i></div>
-          <h3>Self-host. One script.</h3>
-          <p>One <code>bin/koven setup</code> brings up the whole stack with auto-renewing TLS. Run your own server. Keep your own data. Federate with the rest.</p>
+          <div class="feature-icon"><i data-lucide="layout-grid"></i></div>
+          <h3>Spaces &amp; rooms</h3>
+          <p>Group your channels into spaces. Public, private, NSFW-gated. Custom icons and emoji. Pin the rooms that matter, hide the ones that don't.</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon"><i data-lucide="vote"></i></div>
+          <h3>Native polls</h3>
+          <p>Quick polls or full-blown ranked options. Anonymous voting. Live tally. Closes on its own. No bot required.</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon"><i data-lucide="image"></i></div>
+          <h3>Inline GIPHY search</h3>
+          <p>Hit the GIF button, type, send. Trending and search both work. Same shape as Discord; lands in the message as a real image, not a link preview.</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon"><i data-lucide="paperclip"></i></div>
+          <h3>Files &amp; attachments</h3>
+          <p>Drag-drop or paste. Images preview inline. Videos play inline. Other files get a clean download card. End-to-end encrypted in DMs and private rooms.</p>
         </div>
 
         <div class="feature">
           <div class="feature-icon"><i data-lucide="video"></i></div>
-          <h3>Voice, video, threads, the works</h3>
-          <p>Everything you'd want from a chat app. Presence, files, custom emoji, threads that actually thread. WebRTC with TURN built in.</p>
+          <h3>Voice &amp; video calls</h3>
+          <p>1:1 audio + video built on WebRTC, with our own TURN server. Ringtone, accept/decline, the works.</p>
         </div>
 
         <div class="feature">
-          <div class="feature-icon"><i data-lucide="git-branch"></i></div>
-          <h3>MIT. Source on GitHub.</h3>
-          <p>Event types, schemas, reputation math, all documented. Re-implementable from scratch. No lock-in. Read the source.</p>
+          <div class="feature-icon"><i data-lucide="message-square"></i></div>
+          <h3>Threads, reactions, replies</h3>
+          <p>Reply to a specific message and the thread renders cleanly. React with custom emoji. Mention people; they get notified. Standard chat behaviour, done right.</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon"><i data-lucide="bell"></i></div>
+          <h3>Notifications you control</h3>
+          <p>Per-room: all messages, mentions only, or muted. Per-bot DM: opt-in or block. Browser, OS, and in-app — all consistent.</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon"><i data-lucide="network"></i></div>
+          <h3>Federated, Koven-only</h3>
+          <p>Other Koven servers connect automatically. Random Matrix homeservers don't. Same rules everywhere on the network — no instance can silence another.</p>
+        </div>
+
+        <div class="feature">
+          <div class="feature-icon"><i data-lucide="flag"></i></div>
+          <h3>Consensus moderation</h3>
+          <p>Hiding a message takes three flaggers + a reputation threshold. Penalties expire. No mods, no shadow bans. <a href="#how" style="color: var(--accent); border-bottom: 1px solid rgba(245, 177, 106, 0.4);">How it works ↓</a></p>
         </div>
 
         <div class="feature">
@@ -888,12 +1081,117 @@
     </div>
   </section>
 
+  <!-- ─── Powerful Bots — dedicated section ──────────────────────── -->
+  <section id="bots" style="padding-top: 0;">
+    <div class="container">
+      <div class="section-head fade-up">
+        <div class="eyebrow">Bots</div>
+        <h2 class="section-title">Bots that actually <em>do</em> things.</h2>
+        <p class="section-sub">Every Koven bot is a standalone identity backed by your model of choice — with knowledge files, tool-calling, and webhooks both directions. Build a customer-support agent in an afternoon, a daily news digest in ten minutes.</p>
+      </div>
+
+      <div class="focus fade-up">
+        <div class="focus__visual focus__visual--bots">
+          <i data-lucide="bot"></i>
+        </div>
+        <div class="focus__copy">
+          <h3>Bring your own LLM</h3>
+          <p>Plug in OpenRouter or any OpenAI-compatible endpoint. Your key, your provider, your spend. The platform doesn't lock you in.</p>
+          <ul>
+            <li>System prompt, knowledge base files (.txt, .md, .docx, .rtf)</li>
+            <li>Per-reply token caps, daily token / call quotas</li>
+            <li>Configurable response length — Snappy to Detailed</li>
+            <li>Per-bot avatar, bio, display name</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="focus focus--reverse fade-up">
+        <div class="focus__visual focus__visual--bots">
+          <i data-lucide="webhook"></i>
+        </div>
+        <div class="focus__copy">
+          <h3>Inbound webhooks</h3>
+          <p>External services post to a unique URL; the bot processes the payload through its system prompt and posts the result into a chosen room.</p>
+          <ul>
+            <li>Twilio inbound SMS — paste your Auth Token, done</li>
+            <li>GitHub events (push / PR / issue) with HMAC-SHA256 signing</li>
+            <li>Generic JSON or form-urlencoded for n8n / Zapier / cron</li>
+            <li>Auto-detects the source by signature header or payload shape</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="focus fade-up">
+        <div class="focus__visual focus__visual--bots">
+          <i data-lucide="zap"></i>
+        </div>
+        <div class="focus__copy">
+          <h3>Outbound HTTP tools</h3>
+          <p>Define HTTP requests the bot's LLM can fire when it decides to. The model picks the tool by name, fills in the params, and uses the response in its reply.</p>
+          <ul>
+            <li>"What's the weather in Tokyo?" → bot calls your weather API → answers</li>
+            <li>News, calendar, status pages, internal services, n8n endpoints</li>
+            <li>URL templates with {param} substitution + auth headers</li>
+            <li>Editable inline; the bot picks them up immediately</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── Encrypted DMs — dedicated section ──────────────────────── -->
+  <section style="padding-top: 0;">
+    <div class="container">
+      <div class="focus focus--reverse fade-up">
+        <div class="focus__visual focus__visual--dms">
+          <i data-lucide="lock-keyhole"></i>
+        </div>
+        <div class="focus__copy">
+          <div class="eyebrow" style="margin-bottom: 8px;">Privacy</div>
+          <h3>DMs are end-to-end encrypted. By default. Always.</h3>
+          <p>Every direct message on Koven is encrypted with Matrix's megolm protocol — keys never leave your devices, and the engine can't read a word. There's no toggle to forget; new DMs are encrypted from the first character.</p>
+          <ul>
+            <li>Cross-device key sharing via Secret Storage</li>
+            <li>"Seen by" indicators that respect privacy boundaries</li>
+            <li>Encrypted file uploads in DMs and private rooms</li>
+            <li>Consensus moderation can't reach in — the UI tells you so</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── Spaces & Rooms — dedicated section ─────────────────────── -->
+  <section style="padding-top: 0;">
+    <div class="container">
+      <div class="focus fade-up">
+        <div class="focus__visual focus__visual--spaces">
+          <i data-lucide="layout-grid"></i>
+        </div>
+        <div class="focus__copy">
+          <div class="eyebrow" style="margin-bottom: 8px;">Organization</div>
+          <h3>Spaces are servers. Rooms are channels.</h3>
+          <p>If you've used Discord, you already know the shape. Spaces hold rooms; rooms hold conversations. Pin the ones you use. Set custom icons. Group people by interest, project, or vibe.</p>
+          <ul>
+            <li>Public spaces, private spaces, invite-only rooms, NSFW-gated rooms</li>
+            <li>Custom emoji icons per room — quick visual scan of the sidebar</li>
+            <li>Per-user pinning so YOUR sidebar is YOUR sidebar</li>
+            <li>Federation: spaces span servers, no walled gardens</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── How consensus moderation works (was the lead pitch; now
+       one of many) ─────────────────────────────────────────────── -->
   <section id="how" style="padding-top: 0;">
     <div class="container">
       <div class="section-head fade-up">
-        <div class="eyebrow">How it works</div>
+        <div class="eyebrow">Consensus moderation</div>
         <h2 class="section-title">Flag, tally, collapse, decay.</h2>
-        <p class="section-sub">Four steps. No secret mod chats. Every step is a documented event you can grep for.</p>
+        <p class="section-sub">No mods. No founder veto. The community votes; we just log it. Every step is a documented event you can grep for.</p>
       </div>
 
       <div class="steps fade-up">
@@ -947,11 +1245,11 @@
   <section style="padding-top: 0;">
     <div class="container">
       <div class="cta-card fade-up">
-        <h2>We're a small community rn. Come say hi.</h2>
-        <p>Sign up at koven.chat. Or stand up your own server in five minutes and federate in.</p>
+        <h2>Come hang out. Claim your badge before they're gone.</h2>
+        <p>Sign in at koven.chat. The first 666 sign-ups get the holographic Founder chip on their profile, permanently.</p>
         <div class="cta-row">
           <a class="btn btn-primary btn-lg" href="https://client.koven.chat">Open the app</a>
-          <a class="btn btn-ghost btn-lg" href="https://github.com/GnosysLabs/koven-chat" target="_blank" rel="noopener">Self-host</a>
+          <a class="btn btn-ghost btn-lg" href="https://github.com/GnosysLabs/koven-chat" target="_blank" rel="noopener">View on GitHub</a>
         </div>
       </div>
     </div>
@@ -966,11 +1264,13 @@
         <a class="brand" href="/">
           <img class="brand-img" src="assets/koven-logo.png" alt="Koven" />
         </a>
-        <p>Chat where hiding a message requires a vote from the community. Mods can't nuke your server. Neither can we. From <a href="https://gnosyslabs.xyz" style="border-bottom: 1px solid rgba(255,220,200,0.2); color: var(--fg);">Gnosys Labs</a>.</p>
+        <p>Federated group chat with bots, encrypted DMs, voice, video, polls, GIFs — and no banhammer. From <a href="https://gnosyslabs.xyz" style="border-bottom: 1px solid rgba(255,220,200,0.2); color: var(--fg);">Gnosys Labs</a>.</p>
       </div>
       <ul class="footer-links">
+        <li><a href="#founder">Founder badge</a></li>
         <li><a href="#features">Features</a></li>
-        <li><a href="#how">How it works</a></li>
+        <li><a href="#bots">Bots</a></li>
+        <li><a href="#how">Moderation</a></li>
         <li><a href="/governance.html">Governance</a></li>
         <li><a href="https://github.com/GnosysLabs/koven-chat" target="_blank" rel="noopener">GitHub</a></li>
         <li><a href="/privacy.html">Privacy</a></li>
