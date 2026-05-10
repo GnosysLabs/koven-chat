@@ -165,6 +165,13 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 		| null
 		| undefined
 	>(undefined);
+	// Bot's DM policy.  Only meaningful when isBot.  Tri-valued:
+	// undefined = not yet fetched (suppress the Message button to
+	// avoid offering an action we don't yet know is allowed),
+	// false = bot's owner has DMs disabled (hide Message button),
+	// true = open to anyone (show Message button).  Populated from
+	// the same getPublicBotInfo() fetch that populates `creator`.
+	const [botAcceptsDms, setBotAcceptsDms] = useState<boolean | undefined>(undefined);
 	// Reputation fetched in the same Promise.all as profile + bio so
 	// the body has all three before any of it paints.  Three-valued:
 	//   undefined — fetch hasn't returned yet (suppress body render),
@@ -210,6 +217,7 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 			setLoading(true);
 			setRep(undefined);
 			setCreator(undefined);
+			setBotAcceptsDms(undefined);
 		}
 
 		// Matrix profile (display name, avatar) and engine bio fetched
@@ -270,9 +278,17 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 				try {
 					const botInfo = await getPublicBotInfo(viewedUserId);
 					if (cancelled || !botInfo) {
-						if (!cancelled) setCreator(null);
+						if (!cancelled) {
+							setCreator(null);
+							// Treat unknown-bot as DMs-closed so we don't
+							// offer the Message button against a bot the
+							// engine doesn't know about (would silently
+							// fail anyway).
+							setBotAcceptsDms(false);
+						}
 						return;
 					}
+					if (!cancelled) setBotAcceptsDms(botInfo.accept_dms);
 					// Resolve the owner's Matrix profile for the avatar +
 					// display name.  Failures here surface as null, not
 					// an error — we still want the bot's profile to
@@ -301,11 +317,17 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 					}
 				} catch (err) {
 					console.warn("ProfileSheet: bot info fetch failed", err);
-					if (!cancelled) setCreator(null);
+					if (!cancelled) {
+						setCreator(null);
+						setBotAcceptsDms(false);
+					}
 				}
 			})();
 		} else {
 			setCreator(null);
+			// Non-bot view: leave botAcceptsDms in its default
+			// (undefined) state — the Message button gating only
+			// applies to bots, so the human-DM path is unaffected.
 		}
 		return () => { cancelled = true; };
 		// `profile` intentionally not in deps — including it would re-
@@ -811,17 +833,28 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 							)}
 						</Button>
 					)}
-					{!isSelf && viewedUserId && onStartDm && !isBlocked && (
-						<Button
-							type="button"
-							onClick={() => onStartDm(viewedUserId)}
-							disabled={loading || pending}
-							className="gap-1.5"
-						>
-							<MessageSquare className="h-3.5 w-3.5" />
-							Message
-						</Button>
-					)}
+					{/* Bot DM-policy gate: hide Message when the bot's
+					    owner has `accept_dms` disabled.  The bot would
+					    auto-leave any DM invite from a non-owner
+					    anyway (bot_runtime.ts membership handler), so
+					    offering the button there leads to a confusing
+					    empty-room experience.  Owner (`isMyBot`) and
+					    DMs-open bots (`botAcceptsDms === true`) keep
+					    the button.  Non-bot DMs are unaffected (the
+					    gate only applies when isBot). */}
+					{!isSelf && viewedUserId && onStartDm && !isBlocked
+						&& (!isBot || isMyBot || botAcceptsDms === true)
+						&& (
+							<Button
+								type="button"
+								onClick={() => onStartDm(viewedUserId)}
+								disabled={loading || pending}
+								className="gap-1.5"
+							>
+								<MessageSquare className="h-3.5 w-3.5" />
+								Message
+							</Button>
+						)}
 					{/* Self-edit mode keeps an explicit Cancel because
 					    the dialog has unsaved-edit state — the X
 					    closes too, but Cancel reads as "discard

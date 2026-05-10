@@ -1569,6 +1569,15 @@ export function startServer(): void {
 						avatar_mxc: row.avatar_mxc,
 						bio: readBio(row.mxid) ?? "",
 						created_at: row.created_at,
+						// Surface accept_dms publicly so the profile
+						// sheet can hide the Message button when the
+						// bot's owner has DMs disabled — without this
+						// the user clicks Message, a DM room gets
+						// created, the bot auto-leaves on invite, and
+						// they're sitting in an empty room with no
+						// indication of why.  accept_dms is policy
+						// metadata, not a secret.
+						accept_dms: row.accept_dms === 1,
 					},
 				});
 			}

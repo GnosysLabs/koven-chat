@@ -158,6 +158,10 @@ export interface PublicBotInfo {
 	avatar_mxc: string | null;
 	bio: string;
 	created_at: number;
+	/** Whether this bot accepts DM invites from non-owners.  When
+	 * false the profile sheet hides the Message button so users
+	 * don't fire a DM that the bot will silently auto-leave. */
+	accept_dms: boolean;
 }
 
 /** Fetch a bot's public-facing info by mxid.  Unauthenticated — the
