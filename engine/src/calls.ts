@@ -344,15 +344,25 @@ export async function ensureWebhookRegistered(opts: {
 	try {
 		// List existing webhooks first.  If one already matches
 		// (same name, same url, same events) we're done.
+		// Cloudflare returns 404 (with body
+		// "ResourceNotFound: Webhook not found") when the App has
+		// ZERO webhooks instead of returning an empty array — their
+		// API quirk.  Treat 404 here as "no webhooks, fall through
+		// to create."  Any other non-2xx is a real error.
 		const listRes = await fetch(appUrl("/webhooks"), { headers: authHeaders() });
-		if (!listRes.ok) {
+		let existingWebhooks: Array<{ id: string; name: string; url: string; events: string[] }> = [];
+		if (listRes.status === 404) {
+			// Zero webhooks registered.  Fine.
+		} else if (!listRes.ok) {
 			console.warn(`calls: webhook list failed: ${describeCfError(await listRes.json().catch(() => ({})), listRes.status)}`);
 			return;
+		} else {
+			const list = (await listRes.json()) as {
+				data?: Array<{ id: string; name: string; url: string; events: string[] }>;
+			};
+			existingWebhooks = list.data ?? [];
 		}
-		const list = (await listRes.json()) as {
-			data?: Array<{ id: string; name: string; url: string; events: string[] }>;
-		};
-		const existing = (list.data ?? []).find(w =>
+		const existing = existingWebhooks.find(w =>
 			w.name === WEBHOOK_NAME
 			&& w.url === targetUrl
 			&& WEBHOOK_EVENTS.every(e => w.events.includes(e))
