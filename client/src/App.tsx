@@ -576,18 +576,23 @@ export default function App() {
 			onSpacesUpdated: spaces => dispatch({ type: "spaces_updated", spaces }),
 			onMessage: (message, { live }) => {
 				dispatch({ type: "message_arrived", message, live });
-				// Live message in the room the user is currently
-				// viewing → send a read receipt right away so the
-				// unread dot doesn't light up the moment they
-				// navigate elsewhere.  The on-entry markAsRead only
-				// fires when activeRoomId changes; without this,
-				// every live message that arrives while you're
-				// already in the room is recorded as unread by
-				// Synapse.  Skipped when the tab is backgrounded so
-				// notifications you didn't actually see don't get
-				// swallowed.
+				// Mark-as-read for messages arriving in the room
+				// the user is actively viewing with the tab
+				// focused.  Deliberately NOT gated on `live`:
+				// matrix-js-sdk's Decrypted listener (which is the
+				// path encrypted messages arrive through — that's
+				// every bot DM, every E2EE room) hardcodes
+				// `live: false` because the original Timeline
+				// event was processed earlier as the encrypted
+				// placeholder.  Gating markAsRead on `live` meant
+				// the receipt + counter-zero NEVER fired for
+				// encrypted messages, leaving the SDK's counter
+				// at 1 and the sidebar dot lit while the user
+				// stared at the message they just received.
+				// Receipts are idempotent — extra ones during the
+				// rare initial-sync replay window are cheap and
+				// the SDK dedupes consecutive identical receipts.
 				if (
-					live &&
 					activeRoomIdRef.current === message.roomId &&
 					(typeof document === "undefined" || document.visibilityState === "visible")
 				) {
@@ -998,14 +1003,11 @@ export default function App() {
 	useEffect(() => {
 		const previousRoomId = activeRoomIdRef.current;
 		activeRoomIdRef.current = state.activeRoomId;
-		// Final-flush mark-read for the room being LEFT.  Catches
-		// in-flight notifications that were created in the engine
-		// during the 30-second poll window of use-notifications:
-		// without this, a message that arrived in the active room
-		// at T+25s would still be unread on the server when the user
-		// navigates away at T+27s, and the next poll at T+30s would
-		// ring the bell for the room they just exited.
-		// THE OTHER LOAD-BEARING DUPE-PREVENTION CALL.
+		// Engine-side bell clear for the room being LEFT.  Closes
+		// the gap on the bell side; sidebar-dot side is handled
+		// by markAsRead's setUnreadNotificationCount path which
+		// updates synchronously without needing any presentation-
+		// layer masking.
 		if (previousRoomId && previousRoomId !== state.activeRoomId) {
 			const tok = creds?.access_token;
 			if (tok) {
@@ -1224,6 +1226,14 @@ export default function App() {
 		// and forget — the receipt round-trips to Synapse but we don't
 		// gate the room render on it.
 		transport.markAsRead(state.activeRoomId).catch(() => {});
+		// ALSO ping the engine so its room_active timestamp is
+		// stamped immediately.  Without this, the engine's
+		// notification fanout has no way to know the user is in
+		// the room until the next /api/notifications poll fires
+		// (30s window) — any message that arrives in the meantime
+		// gets a notification row with read_at=null and the bell
+		// rings while the user is staring at the message.
+		apiMarkRoomRead({ accessToken: creds.access_token, roomId: state.activeRoomId }).catch(() => {});
 		dispatch({
 			type: "messages_loaded",
 			roomId: state.activeRoomId,

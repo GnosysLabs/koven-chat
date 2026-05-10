@@ -439,6 +439,10 @@ function RoomRow({
 		if (pinned) onUnpin?.();
 		else onPin?.();
 	};
+	// Source of truth: matrix-js-sdk's per-room unread counter,
+	// which markAsRead zeros locally via setUnreadNotificationCount
+	// before any receipt round-trips.  No presentation-layer
+	// suppression needed — the count itself is the truth.
 	const hasUnread = room.unreadCount > 0 || room.highlightCount > 0;
 	// Reserve room on the right for the pin icon (always when pinned;
 	// also when the user can pin, since the slot needs to be there for

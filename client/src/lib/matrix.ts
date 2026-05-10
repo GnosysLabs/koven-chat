@@ -10,7 +10,7 @@
 // we do (a simple, stable Room/Message shape).
 
 import * as sdk from "matrix-js-sdk";
-import { ClientEvent, HttpApiEvent, MatrixEventEvent, RoomEvent, RoomMemberEvent, UserEvent } from "matrix-js-sdk";
+import { ClientEvent, HttpApiEvent, MatrixEventEvent, NotificationCountType, RoomEvent, RoomMemberEvent, UserEvent } from "matrix-js-sdk";
 import { IndexedDBStore } from "matrix-js-sdk/lib/store/indexeddb";
 import { CallEventHandlerEvent } from "matrix-js-sdk/lib/webrtc/callEventHandler";
 import type { MatrixCall } from "matrix-js-sdk/lib/webrtc/call";
@@ -939,26 +939,29 @@ export class MatrixTransport {
 			this.handlers.onReceiptsUpdated(room.roomId as RoomId);
 		});
 
-		// notification_count changes — fires when the server reports
-		// new unread counts via the /sync `unread_notifications`
-		// block (also after OUR own read marker / receipt clears the
-		// count).  This is the correct signal for "the room's unread
-		// dot needs to redraw"; RoomEvent.Receipt is for INCOMING
-		// receipts and doesn't fire for our own count-clearing
-		// roundtrip.  Without this listener, sending a read receipt
-		// updates room.getUnreadNotificationCount() under the hood
-		// but the App-side cached roomList stays stale, leaving the
-		// DM tab glowing after the user has obviously read it.
-		// matrix-js-sdk's MatrixClient.on type union doesn't include
-		// the per-Room UnreadNotifications event in the strict
-		// signature even though the runtime fires it on the client.
-		// Cast through unknown to a permissive type so this listener
-		// compiles without changing the SDK typings.
-		(this.client as unknown as {
-			on(name: string, cb: () => void): void;
-		}).on(RoomEvent.UnreadNotifications, () => {
-			this.emitRoomList();
-		});
+		// notification_count changes — fires on each Room object when
+		// /sync delivers an updated `unread_notifications` block.
+		//
+		// IMPORTANT: matrix-js-sdk's sync layer does NOT re-emit
+		// RoomEvent.UnreadNotifications up to the client (see
+		// sync.js's reEmit list — it covers Timeline / Receipt /
+		// Tags / etc. but NOT UnreadNotifications).  Listening on
+		// `client.on(RoomEvent.UnreadNotifications, …)` looks
+		// reasonable but is silently dead — the callback never
+		// fires.  We have to attach the listener to each Room
+		// object directly.  ClientEvent.Room fires when a new room
+		// gets added (initial sync, joining a room, accepting an
+		// invite); we hook the per-room listener there.
+		const wireUnreadListener = (room: SdkRoom) => {
+			room.on(RoomEvent.UnreadNotifications, () => this.emitRoomList());
+		};
+		this.client.on(ClientEvent.Room, wireUnreadListener);
+		// Also wire any rooms that already exist at start time (the
+		// indexed-DB store hydrated them before our listener was
+		// attached, so ClientEvent.Room won't fire for them).
+		for (const room of this.client.getRooms()) {
+			wireUnreadListener(room);
+		}
 
 		// Presence updates — fire onMembersUpdated for every room
 		// the user is in so the member-list status dot + grouping
@@ -2922,18 +2925,37 @@ export class MatrixTransport {
 		const c = this.requireClient();
 		const room = c.getRoom(roomId);
 		if (!room) return;
+		// LOCAL-FIRST: zero the room's unread counters immediately
+		// via matrix-js-sdk's setUnreadNotificationCount API.  This
+		// is the same pattern Element-web uses.
+		//
+		// CRITICAL: setUnreadNotificationCount fires
+		// RoomEvent.UnreadNotifications on the ROOM, but the SDK's
+		// sync layer only re-emits a SUBSET of room events up to
+		// the client (see sync.js reEmit list — UnreadNotifications
+		// is NOT in it).  So the obvious "listen on the client"
+		// pattern doesn't work for our local zeroing.  Instead we
+		// just call emitRoomList() ourselves right here — we know
+		// the count changed because we just changed it.  No event
+		// chain to fight with.
+		room.setUnreadNotificationCount(NotificationCountType.Total, 0);
+		room.setUnreadNotificationCount(NotificationCountType.Highlight, 0);
+		this.emitRoomList();
+		// Now send the actual receipt to Synapse so:
+		//   (a) other users in the room see the user has read up
+		//       to this point (drives "seen by" indicators)
+		//   (b) other devices owned by this user see consistent
+		//       read state across sessions
+		// Best-effort — local UI is already correct regardless.
 		const events = room.getLiveTimeline().getEvents();
 		const latest = events[events.length - 1];
-		if (!latest) return;
-		try {
-			await c.sendReadReceipt(latest);
-		} catch (err) {
-			// Common cause: matrix-js-sdk skipping duplicate receipts.
-			// Refresh the local count anyway in case the server already
-			// considered us caught up.
-			console.warn("markAsRead: sendReadReceipt failed", err);
+		if (latest) {
+			try {
+				await c.sendReadReceipt(latest);
+			} catch (err) {
+				console.warn("markAsRead: sendReadReceipt failed (UI already updated locally)", err);
+			}
 		}
-		this.emitRoomList();
 	}
 
 	/** Who has read this message (excluding the sender)?  Returns
@@ -4489,8 +4511,14 @@ export class MatrixTransport {
 			iconEmoji: readKovenIconEmoji(r),
 			kind,
 			memberCount: r.getJoinedMemberCount(),
-			unreadCount: r.getUnreadNotificationCount() ?? 0,
-			highlightCount: r.getUnreadNotificationCount("highlight" as any) ?? 0,
+			// Source of truth: matrix-js-sdk's per-room counters.
+			// markAsRead zeroes them locally via
+			// setUnreadNotificationCount BEFORE the receipt round-
+			// trips, so by the time this mapping runs after a
+			// mark-as-read call, the count is already 0.  Element
+			// uses this exact pattern.
+			unreadCount: r.getUnreadNotificationCount(NotificationCountType.Total) ?? 0,
+			highlightCount: r.getUnreadNotificationCount(NotificationCountType.Highlight) ?? 0,
 			encrypted: r.hasEncryptionStateEvent(),
 			parentSpaceIds,
 			dmUserId: isDm ? (dmUserId as UserId | undefined) : undefined,
