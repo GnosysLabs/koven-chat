@@ -225,13 +225,17 @@ async function dispatch(deps: PipelineDeps): Promise<void> {
 		return;
 	}
 
-	// Surface progress to the room: typing indicator + a placeholder
-	// message we'll edit as work proceeds.  Both are best-effort — if
-	// the placeholder send fails we still continue and the eventual
-	// reply just lands as a fresh message (see BotProgress.finalise).
+	// Surface progress to the room: typing indicator + a *lazy*
+	// placeholder message that's only posted when something
+	// happens that actually warrants a status (a tool call firing).
+	// For bots that just reply to a mention with no tool use — the
+	// common case — we never send a placeholder at all, so there's
+	// no redact-then-post-final dance and no chance for a client
+	// that's slow to apply the redaction to render the placeholder
+	// alongside the final reply (the "double reply" symptom).
+	// Typing indicator alone conveys "thinking" for the no-tool case.
 	const stopTyping = startTypingHeartbeat(client, room.roomId);
 	const progress = new BotProgress(client, room.roomId);
-	await progress.start("Thinking…");
 
 	// Open MCP sessions up-front for every server attached to this
 	// bot.  Empty bundle (no key, no attachments, all opens failed)
@@ -741,59 +745,78 @@ class BotProgress {
 		private readonly roomId: string,
 	) {}
 
-	/** Send the initial placeholder.  Best-effort; failures are
-	 * logged and leave the progress object inert (subsequent
-	 * update() calls no-op, finalise() sends a fresh message). */
-	async start(body: string): Promise<void> {
+	/** Lazily post the placeholder and remember its event id.  Used
+	 * by update() to materialise the bubble on first need; not called
+	 * by external code.  Best-effort: failures leave eventId null and
+	 * subsequent updates no-op (finalise() then posts a fresh reply).
+	 *
+	 * `formattedBody` is optional HTML for clients that render it. */
+	private async ensurePosted(body: string, formattedBody?: string): Promise<void> {
+		if (this.eventId) return;
 		try {
-			const r = await this.client.sendMessage(this.roomId, {
-				msgtype: MsgType.Text,
-				body,
-			});
+			let r;
+			if (formattedBody) {
+				// matrix-js-sdk's RoomMessageEventContent type is a
+				// strict tagged union that doesn't widen well to a
+				// dynamic object with optional format/formatted_body.
+				// The shape is correct on the wire; cast through any.
+				r = await this.client.sendMessage(this.roomId, {
+					msgtype: MsgType.Text,
+					body,
+					format: "org.matrix.custom.html",
+					formatted_body: formattedBody,
+				// eslint-disable-next-line @typescript-eslint/no-explicit-any
+				} as any);
+			} else {
+				r = await this.client.sendMessage(this.roomId, {
+					msgtype: MsgType.Text,
+					body,
+				});
+			}
 			this.eventId = r.event_id ?? null;
 		} catch (err) {
-			console.warn(`bot progress.start failed in ${this.roomId}`, err);
+			console.warn(`bot progress.ensurePosted failed in ${this.roomId}`, err);
 		}
 	}
 
-	/** Edit the placeholder to a new body.  Used while tools fire
-	 * to surface "🔧 calling <tool> with <server>" breadcrumbs —
-	 * the placeholder mutates in place via m.replace rather than
-	 * spawning a fresh message per status change.  No-op when the
-	 * initial send dropped (eventId never landed).
+	/** Surface a status line to the room.  First call posts a fresh
+	 * message; subsequent calls edit it in place via m.replace.  Only
+	 * fires when something interesting is happening (a tool call
+	 * starting, etc.) — bots that reply with no tools never post a
+	 * status bubble at all.
 	 *
 	 * `formattedBody` is optional HTML (org.matrix.custom.html); when
 	 * provided, edit-aware clients render the HTML version while
 	 * older / minimal clients fall back to the plain `body`. */
 	async update(body: string, formattedBody?: string): Promise<void> {
-		if (!this.eventId) return;
+		if (!this.eventId) {
+			await this.ensurePosted(body, formattedBody);
+			return;
+		}
 		await this.sendEdit(body, formattedBody);
 	}
 
-	/** Drop the placeholder (redact) and post the bot's final reply
-	 * as a fresh, clean message.  We deliberately don't edit-into-
-	 * answer here — leaving the placeholder around as the answer's
-	 * row would mean the timeline carries a "Thinking… → answer"
-	 * edit history forever, and any client that doesn't show the
-	 * latest edited body would see "Thinking…" indefinitely.  A
-	 * redacted placeholder + fresh reply leaves a clean answer row
-	 * with no progress detritus.
+	/** Land the bot's final reply.
 	 *
-	 * If the placeholder never landed, just post the reply as the
-	 * one-and-only message. */
+	 * If a status bubble was ever posted (because a tool call fired),
+	 * we EDIT it into the final reply via m.replace — one rendered
+	 * row in the timeline that progresses status → answer.  Edit-
+	 * aware clients show the latest body (the answer); legacy clients
+	 * that ignore edits see the last status line instead, which is at
+	 * worst confusing rather than visibly-broken.
+	 *
+	 * Previously this used redact + new-message, which was clean in
+	 * theory but produced visible "Thinking…  + answer" doubles on
+	 * any client that took a beat to apply the redaction.  Editing
+	 * keeps the timeline to one event id per bot turn, removing the
+	 * race entirely.
+	 *
+	 * If no status bubble was ever posted (no-tool reply), we just
+	 * post the reply as the one-and-only message. */
 	async finalise(body: string): Promise<void> {
 		if (this.eventId) {
-			// Redact first so the redaction lands before the new
-			// message — clients that re-order on receipt time still
-			// show the right thing.  Best-effort: a failed redaction
-			// just leaves the placeholder visible, which is annoying
-			// but harmless.
-			try {
-				await this.client.redactEvent(this.roomId, this.eventId);
-			} catch (err) {
-				console.warn(`bot progress.finalise redact failed in ${this.roomId}`, err);
-			}
-			this.eventId = null;
+			await this.sendEdit(body);
+			return;
 		}
 		await postPlain(this.client, this.roomId, body);
 	}
