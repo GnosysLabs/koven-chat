@@ -81,6 +81,17 @@ startServer();
 // Errors are logged inside the manager; the engine stays up either way.
 startAllBots().catch(err => console.error("engine: startAllBots failed", err));
 
+// Self-register the Cloudflare RealtimeKit webhook so participant
+// join/leave events flow back into our `room_call_participants`
+// mirror.  PUBLIC_ENGINE_URL is the externally-reachable base of
+// this engine (e.g. https://client.koven.chat) — must be set in
+// prod for registration to fire.  Idempotent: lists existing
+// webhooks first and only POSTs if a matching one isn't found.
+import { ensureWebhookRegistered } from "./calls";
+ensureWebhookRegistered({
+	publicEngineUrl: process.env.PUBLIC_ENGINE_URL || null,
+}).catch(err => console.error("engine: ensureWebhookRegistered failed", err));
+
 // Graceful shutdown: stop bots so they flush sync state + crypto.
 const shutdownSignals: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
 for (const sig of shutdownSignals) {

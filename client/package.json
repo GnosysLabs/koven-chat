@@ -11,6 +11,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@cloudflare/realtimekit-react": "^1.4.0",
+    "@cloudflare/realtimekit-react-ui": "^1.1.2",
     "@cloudworxx/tauri-plugin-mac-rounded-corners": "^1.1.1",
     "@emoji-mart/data": "^1.2.1",
     "@emoji-mart/react": "^1.1.1",

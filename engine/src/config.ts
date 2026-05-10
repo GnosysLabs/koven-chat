@@ -170,4 +170,35 @@ export const config = {
 	// a 409 when exceeded.  Hardcoded for v1; movable to instance
 	// config later if values prove contentious.
 	maxBotsPerUser: Number(process.env.MAX_BOTS_PER_USER ?? 30),
+
+	// ─── Cloudflare RealtimeKit (group voice / video calls) ─────────
+	// Backs the per-room voice channel feature.  Each Koven room maps
+	// 1:1 to a RealtimeKit Meeting, lazily created on first join.
+	// Engine mints participant tokens via Add Participant API; client
+	// uses those tokens with @cloudflare/realtimekit-react to join
+	// the call.  All three values come from the Cloudflare dashboard
+	// (Realtime → RealtimeKit → your App + a profile API token with
+	// "Realtime: Edit" scope).
+	//
+	// When unset the calls API returns "M_NOT_CONFIGURED" so the
+	// client can hide the Join Voice button on instances that haven't
+	// wired up an account yet.
+	cfRealtimeAccountId: process.env.CF_REALTIME_ACCOUNT_ID ?? "",
+	cfRealtimeAppId: process.env.CF_REALTIME_APP_ID ?? "",
+	cfRealtimeToken: process.env.CF_REALTIME_TOKEN ?? "",
+	// Default preset name applied to every Add Participant call.  The
+	// four presets RealtimeKit ships with on a fresh App are
+	// `group_call_host`, `group_call_participant`, `group_call_guest`
+	// and `livestreamer_preset_v2`.  We use participant for everyone
+	// (no host hierarchy in a community voice channel).  Override via
+	// env if a custom preset is provisioned later.
+	cfRealtimePreset: process.env.CF_REALTIME_PRESET ?? "group_call_participant",
+	// Random shared secret embedded in the RealtimeKit webhook URL.
+	// RealtimeKit webhooks don't ship a signing-secret / HMAC scheme,
+	// so we rely on URL secrecy: the registered webhook URL contains
+	// this token as a path segment, and the engine 404s any request
+	// whose `:secret` doesn't match.  Equivalent strength to a long
+	// unguessable URL.  Don't commit; rotate by re-running the
+	// webhook registration with a fresh value.
+	cfRealtimeWebhookSecret: process.env.CF_REALTIME_WEBHOOK_SECRET ?? "",
 };

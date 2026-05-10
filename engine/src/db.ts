@@ -590,6 +590,46 @@ db.exec(`
 		last_active_ts INTEGER NOT NULL,
 		PRIMARY KEY (user_id, room_id)
 	);
+
+	-- ─── Per-room voice/video call mapping ────────────────────────
+	-- Each Koven room maps 1:1 to a Cloudflare RealtimeKit Meeting
+	-- (created lazily the first time someone clicks Join Voice in
+	-- that room).  We cache the mapping here so subsequent joins
+	-- reuse the same Meeting instead of creating a new one each time
+	-- (RealtimeKit Meetings are idempotent virtual rooms — they
+	-- exist forever once created and just spin up a new Session
+	-- whenever the first participant joins).
+	CREATE TABLE IF NOT EXISTS room_calls (
+		room_id          TEXT PRIMARY KEY,
+		cf_meeting_id    TEXT NOT NULL,
+		created_at       INTEGER NOT NULL,
+		created_by       TEXT NOT NULL  -- Koven user id who first joined
+	);
+
+	-- ─── Live participants in each room's voice channel ─────────
+	-- Updated by the Cloudflare RealtimeKit webhook receiver
+	-- (POST /api/calls/cf-webhook/<secret>).  Lets the room list
+	-- + room voice bar render "who's currently in voice" without
+	-- the viewer having to be in the call themselves (the
+	-- RealtimeKit SDK only exposes the participant list to active
+	-- session participants, hence the engine-side mirror).
+	--
+	-- Insert on meeting.participantJoined, delete on
+	-- meeting.participantLeft and on meeting.ended (full
+	-- cleanup).  cf_participant_id is the unique key — same Koven
+	-- user across multiple devices joins the call independently
+	-- and we want to count each tile separately, just as the user
+	-- sees them in the RealtimeKit UI.
+	CREATE TABLE IF NOT EXISTS room_call_participants (
+		room_id            TEXT NOT NULL,
+		cf_participant_id  TEXT PRIMARY KEY,
+		user_id            TEXT NOT NULL,
+		display_name       TEXT NOT NULL,
+		avatar_url         TEXT,
+		joined_at          INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_room_call_participants_room
+		ON room_call_participants(room_id);
 `);
 
 // SQLite ships with foreign-key enforcement OFF by default; flip it
@@ -2024,6 +2064,140 @@ export function deleteBotOutboundWebhook(id: number, botId: number): number {
  * `error` null on success.  Used by the deliveries-style debug view. */
 export function recordBotOutboundCall(id: number, error: string | null): void {
 	recordBotOutboundCallStmt.run(Date.now(), error, id);
+}
+
+// ─── Per-room voice/video call mapping (RealtimeKit) ────────────────
+
+const getRoomCallStmt = db.prepare(`
+	SELECT cf_meeting_id FROM room_calls WHERE room_id = ?
+`);
+
+const insertRoomCallStmt = db.prepare(`
+	INSERT INTO room_calls (room_id, cf_meeting_id, created_at, created_by)
+	VALUES (?, ?, ?, ?)
+	ON CONFLICT(room_id) DO NOTHING
+`);
+
+/** Returns the cached RealtimeKit Meeting ID for a Koven room, or
+ * null if no call has ever been started in it. */
+export function getRoomCallMeetingId(roomId: string): string | null {
+	const row = getRoomCallStmt.get(roomId) as { cf_meeting_id: string } | undefined;
+	return row?.cf_meeting_id ?? null;
+}
+
+/** Cache a Koven-room → RealtimeKit-Meeting mapping.  Idempotent
+ * (ON CONFLICT DO NOTHING) so the lazy-create race between two
+ * users clicking Join Voice at the same moment doesn't write
+ * duplicate rows.  Caller should check getRoomCallMeetingId first
+ * to avoid the wasted RealtimeKit Create Meeting API call. */
+export function rememberRoomCall(opts: {
+	roomId: string;
+	cfMeetingId: string;
+	createdBy: string;
+}): void {
+	insertRoomCallStmt.run(
+		opts.roomId,
+		opts.cfMeetingId,
+		Date.now(),
+		opts.createdBy,
+	);
+}
+
+// ─── Live voice channel participants (mirror of RealtimeKit) ──────
+
+export interface CallParticipantRow {
+	room_id: string;
+	cf_participant_id: string;
+	user_id: string;
+	display_name: string;
+	avatar_url: string | null;
+	joined_at: number;
+}
+
+const insertCallParticipantStmt = db.prepare(`
+	INSERT INTO room_call_participants
+		(room_id, cf_participant_id, user_id, display_name, avatar_url, joined_at)
+	VALUES (?, ?, ?, ?, ?, ?)
+	ON CONFLICT(cf_participant_id) DO UPDATE SET
+		room_id      = excluded.room_id,
+		user_id      = excluded.user_id,
+		display_name = excluded.display_name,
+		avatar_url   = excluded.avatar_url
+`);
+
+const deleteCallParticipantStmt = db.prepare(`
+	DELETE FROM room_call_participants WHERE cf_participant_id = ?
+`);
+
+const deleteRoomCallParticipantsStmt = db.prepare(`
+	DELETE FROM room_call_participants WHERE room_id = ?
+`);
+
+const deleteRoomCallParticipantsByMeetingStmt = db.prepare(`
+	DELETE FROM room_call_participants
+	WHERE room_id IN (SELECT room_id FROM room_calls WHERE cf_meeting_id = ?)
+`);
+
+const listRoomCallParticipantsStmt = db.prepare(`
+	SELECT room_id, cf_participant_id, user_id, display_name, avatar_url, joined_at
+	FROM room_call_participants
+	WHERE room_id = ?
+	ORDER BY joined_at ASC
+`);
+
+const listAllActiveCallRoomsStmt = db.prepare(`
+	SELECT DISTINCT room_id FROM room_call_participants
+`);
+
+/** Insert / refresh a participant from a meeting.participantJoined
+ * webhook.  Idempotent on cf_participant_id so duplicate webhook
+ * deliveries don't double-count. */
+export function rememberCallParticipant(opts: {
+	roomId: string;
+	cfParticipantId: string;
+	userId: string;
+	displayName: string;
+	avatarUrl: string | null;
+}): void {
+	insertCallParticipantStmt.run(
+		opts.roomId,
+		opts.cfParticipantId,
+		opts.userId,
+		opts.displayName,
+		opts.avatarUrl,
+		Date.now(),
+	);
+}
+
+/** Drop a participant on meeting.participantLeft. */
+export function forgetCallParticipant(cfParticipantId: string): void {
+	deleteCallParticipantStmt.run(cfParticipantId);
+}
+
+/** Drop every participant for a room — used when the room's call
+ * is ended via meeting.ended (cleanup catch). */
+export function forgetRoomCallParticipants(roomId: string): void {
+	deleteRoomCallParticipantsStmt.run(roomId);
+}
+
+/** Drop every participant whose call belongs to a given Cloudflare
+ * Meeting id.  Used when meeting.ended fires — the webhook payload
+ * has the meeting_id, not the Koven room_id, so we go through the
+ * room_calls join. */
+export function forgetCallParticipantsByMeeting(cfMeetingId: string): void {
+	deleteRoomCallParticipantsByMeetingStmt.run(cfMeetingId);
+}
+
+export function listRoomCallParticipants(roomId: string): CallParticipantRow[] {
+	return listRoomCallParticipantsStmt.all(roomId) as CallParticipantRow[];
+}
+
+/** Distinct room ids with at least one participant in voice.  Used
+ * to drive the sidebar social-signal indicator (avatars next to
+ * room names in the room list). */
+export function listRoomsWithActiveCalls(): string[] {
+	const rows = listAllActiveCallRoomsStmt.all() as { room_id: string }[];
+	return rows.map(r => r.room_id);
 }
 
 // ─── Suspensions ────────────────────────────────────────────────────

@@ -139,6 +139,18 @@ services:
       # by `bin/koven setup`.
       BOT_KEY_ENCRYPTION_SECRET: ${BOT_KEY_ENCRYPTION_SECRET:-}
       MAX_BOTS_PER_USER: ${MAX_BOTS_PER_USER:-30}
+      # Cloudflare RealtimeKit (per-room voice/video calls).  When
+      # unset, the Join Voice button is hidden and /api/calls/*
+      # returns 503.  PUBLIC_ENGINE_URL is the externally-reachable
+      # base URL for this engine — used by the boot-time webhook
+      # self-registration so RealtimeKit knows where to fire
+      # participant join/leave events.
+      CF_REALTIME_ACCOUNT_ID:    ${CF_REALTIME_ACCOUNT_ID:-}
+      CF_REALTIME_APP_ID:        ${CF_REALTIME_APP_ID:-}
+      CF_REALTIME_TOKEN:         ${CF_REALTIME_TOKEN:-}
+      CF_REALTIME_WEBHOOK_SECRET: ${CF_REALTIME_WEBHOOK_SECRET:-}
+      CF_REALTIME_PRESET:        ${CF_REALTIME_PRESET:-group_call_participant}
+      PUBLIC_ENGINE_URL:         ${PUBLIC_ENGINE_URL:-}
     depends_on:
       - synapse
 

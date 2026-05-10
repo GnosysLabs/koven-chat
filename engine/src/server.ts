@@ -116,6 +116,12 @@ import {
 import { evaluateCollapses } from "./collapse";
 import { deliverWebhook } from "./webhooks";
 import {
+	joinCall,
+	applyWebhookEvent as applyCallWebhook,
+	activeParticipantsFor,
+	isConfigured as callsIsConfigured,
+} from "./calls";
+import {
 	adminCreateUser,
 	adminJoinUserToRoom,
 	adminResetPassword,
@@ -1317,6 +1323,162 @@ export function startServer(): void {
 				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
 				const deleted = deleteAllNotifications(userId);
 				return json({ ok: true, deleted });
+			}
+
+			// POST /api/calls/:roomId/join
+			// Mint a Cloudflare RealtimeKit participant token for the
+			// caller to join the voice/video channel attached to
+			// `roomId`.  Lazy-creates the underlying Meeting on first
+			// use (cached forever after).  Each call returns a fresh
+			// JWT — these are single-use per the RealtimeKit docs, so
+			// the client should call this every time the user clicks
+			// Join Voice (not cache it).
+			//
+			// Membership is enforced via Synapse's admin /members
+			// list — only users currently joined to the room can hop
+			// in.  Same access shape as Discord: if you can read the
+			// room, you can speak in it.
+			if (req.method === "POST" && /^\/api\/calls\/[^/]+\/join$/.test(path)) {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				const roomId = decodeURIComponent(path.split("/")[3]!);
+				if (!roomId.startsWith("!") || !roomId.includes(":")) {
+					return json({ errcode: "M_INVALID_PARAM", error: "room_id required in path" }, { status: 400 });
+				}
+				if (!callsIsConfigured()) {
+					return json({
+						errcode: "M_NOT_CONFIGURED",
+						error: "Cloudflare RealtimeKit credentials not set on this engine",
+					}, { status: 503 });
+				}
+				// Membership check.  Synapse admin /members is the
+				// single source of truth; matrix-js-sdk's local view
+				// could be stale on a freshly-joined room.
+				let members: string[] = [];
+				try {
+					members = await getJoinedMembers(roomId);
+				} catch (err) {
+					console.warn(`calls: getJoinedMembers(${roomId}) failed`, err);
+					return json({ errcode: "M_UNKNOWN", error: "couldn't verify room membership" }, { status: 502 });
+				}
+				if (!members.includes(userId)) {
+					return json({
+						errcode: "M_FORBIDDEN",
+						error: "not a member of this room",
+					}, { status: 403 });
+				}
+				// Resolve the caller's display name + avatar from
+				// Synapse so RealtimeKit shows the right identity in
+				// its participant list (otherwise it'd label them by
+				// their full mxid).
+				let displayName = userId;
+				let avatarUrl: string | undefined;
+				try {
+					const profileRes = await fetch(
+						`${config.homeserverUrl}/_matrix/client/v3/profile/${encodeURIComponent(userId)}`,
+					);
+					if (profileRes.ok) {
+						const p = await profileRes.json() as { displayname?: string; avatar_url?: string };
+						if (typeof p.displayname === "string" && p.displayname.length > 0) {
+							displayName = p.displayname;
+						}
+						if (typeof p.avatar_url === "string" && p.avatar_url.length > 0) {
+							avatarUrl = p.avatar_url;
+						}
+					}
+				} catch {
+					// Best-effort: fall back to the mxid as the
+					// participant name.  Avatar is optional anyway.
+				}
+				try {
+					const result = await joinCall({
+						roomId,
+						userId,
+						displayName,
+						avatarUrl,
+					});
+					return json({
+						meeting_id: result.meetingId,
+						auth_token: result.authToken,
+						participant_id: result.participantId,
+						preset_name: result.presetName,
+					});
+				} catch (err) {
+					const detail = err instanceof Error ? err.message : String(err);
+					console.warn(`calls: joinCall(${roomId}, ${userId}) failed`, err);
+					return json({
+						errcode: "M_UNKNOWN",
+						error: detail,
+					}, { status: 502 });
+				}
+			}
+
+			// GET /api/calls/:roomId/active
+			// Returns the live participant list for a room's voice
+			// channel — drives the social-signal indicator (avatars
+			// next to the room in the sidebar + in the room voice
+			// bar).  Same membership check as /join: only members
+			// can see who's in voice.
+			if (req.method === "GET" && /^\/api\/calls\/[^/]+\/active$/.test(path)) {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				const roomId = decodeURIComponent(path.split("/")[3]!);
+				if (!roomId.startsWith("!") || !roomId.includes(":")) {
+					return json({ errcode: "M_INVALID_PARAM", error: "room_id required" }, { status: 400 });
+				}
+				let members: string[] = [];
+				try {
+					members = await getJoinedMembers(roomId);
+				} catch (err) {
+					console.warn(`calls /active: getJoinedMembers(${roomId}) failed`, err);
+					return json({ errcode: "M_UNKNOWN", error: "couldn't verify membership" }, { status: 502 });
+				}
+				if (!members.includes(userId)) {
+					return json({ errcode: "M_FORBIDDEN", error: "not a member" }, { status: 403 });
+				}
+				const rows = activeParticipantsFor(roomId);
+				return json({
+					participants: rows.map(r => ({
+						user_id: r.user_id,
+						display_name: r.display_name,
+						avatar_url: r.avatar_url,
+						joined_at: r.joined_at,
+					})),
+				});
+			}
+
+			// POST /api/calls/cf-webhook/:secret
+			// Cloudflare RealtimeKit webhook receiver.  Auth is the
+			// long random `:secret` path segment matching
+			// CF_REALTIME_WEBHOOK_SECRET — RealtimeKit doesn't ship
+			// an HMAC signing scheme so URL secrecy is the auth.
+			// Updates the engine's mirror of who's in voice from
+			// participantJoined / participantLeft / meeting.ended
+			// events.  Returns 200 quickly so RealtimeKit doesn't
+			// retry-storm us.
+			{
+				const m = path.match(/^\/api\/calls\/cf-webhook\/([A-Za-z0-9_\-]+)$/);
+				if (req.method === "POST" && m) {
+					const presented = m[1]!;
+					const expected = config.cfRealtimeWebhookSecret;
+					if (!expected || presented !== expected) {
+						// Same response shape as a no-route — don't
+						// leak that the path partially matched.
+						return new Response("not found", { status: 404, headers: corsHeaders() });
+					}
+					const body = await req.json().catch(() => null);
+					if (!body || typeof body !== "object") {
+						return json({ errcode: "M_BAD_JSON" }, { status: 400 });
+					}
+					try {
+						applyCallWebhook(body as Parameters<typeof applyCallWebhook>[0]);
+					} catch (err) {
+						console.warn("calls webhook: handler threw", err);
+						// Still ack — Cloudflare retries on non-2xx;
+						// we'd rather lose one event than retry-storm.
+					}
+					return json({ ok: true });
+				}
 			}
 
 			// POST /api/notifications/:id/read

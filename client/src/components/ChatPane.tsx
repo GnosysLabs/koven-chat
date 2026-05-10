@@ -13,6 +13,7 @@ import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { ReactionPills } from "@/components/ReactionPills";
 import { MessageActions } from "@/components/MessageActions";
 import { BotBadge } from "@/components/BotBadge";
+import { RoomVoiceBar } from "@/components/voice/RoomVoiceBar";
 import { FounderBadge } from "@/components/FounderBadge";
 import { getCachedFounderNumber } from "@/lib/founders-cache";
 import {
@@ -966,6 +967,20 @@ export function ChatPane({
 					)}
 				</div>
 			</header>
+
+			{/* Voice channel bar — every group room implicitly has a
+			    voice channel attached.  DMs keep the existing 1:1
+			    MatrixCall flow (separate UX, no need for an SFU).
+			    The bar hides itself when the engine reports
+			    M_NOT_CONFIGURED, so instances without RealtimeKit
+			    creds wired up don't see broken UI. */}
+			{room.kind !== "dm" && accessToken && (
+				<RoomVoiceBar
+					roomId={room.id}
+					roomName={room.name}
+					accessToken={accessToken}
+				/>
+			)}
 
 			{/* overflow-anchor: auto is the browser's native scroll-
 			    anchoring behavior — when content is added above the
