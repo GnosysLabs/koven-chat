@@ -866,30 +866,46 @@
    of badges doesn't read as visual noise.
    ─────────────────────────────────────────────────────────────────── */
 .founder-holo {
+	/* Pearlescent palette — soft, high-lightness pastels rather
+	   than saturated rainbow.  Mother-of-pearl reads classier and
+	   doesn't fight content placed on top.  Lightness ~85% across
+	   the cycle keeps every hue legible against dark text without
+	   needing as heavy a dark overlay; we still layer a very
+	   subtle 6% black dimmer on top so direct contact between the
+	   shiniest hue and the icon stroke doesn't blow out.
+
+	   Multi-background `background-position` keeps the dimmer
+	   pinned at 0 while the pearl gradient pans — see the
+	   keyframes for the per-layer position list. */
 	background-image:
+		linear-gradient(rgba(0, 0, 0, 0.06), rgba(0, 0, 0, 0.06)),
 		linear-gradient(
 			120deg,
-			hsl(280 85% 58%) 0%,
-			hsl(195 90% 58%) 22%,
-			hsl(310 90% 65%) 44%,
-			hsl(170 85% 55%) 66%,
-			hsl(265 90% 62%) 88%,
-			hsl(280 85% 58%) 100%
+			hsl(340 80% 80%) 0%,
+			hsl(200 80% 78%) 22%,
+			hsl(265 75% 80%) 44%,
+			hsl(155 70% 76%) 66%,
+			hsl(45 85% 82%) 88%,
+			hsl(340 80% 80%) 100%
 		);
-	background-size: 220% 220%;
-	background-position: 0% 50%;
-	animation: founder-shimmer 4s ease-in-out infinite;
+	background-size: 100% 100%, 220% 220%;
+	background-position: 0 0, 0% 50%;
+	/* Slow shimmer — present but not attention-grabbing.  12s base
+	   for the profile chip (one big badge per sheet); compact gets
+	   18s because dozens can be on screen at once in chat and a
+	   faster cadence reads as visual noise. */
+	animation: founder-shimmer 12s ease-in-out infinite;
 }
 .founder-holo-profile {
-	background-size: 240% 240%;
+	background-size: 100% 100%, 240% 240%;
 }
 .founder-holo-compact {
-	background-size: 200% 200%;
-	animation-duration: 5s;
+	background-size: 100% 100%, 200% 200%;
+	animation-duration: 18s;
 }
 @keyframes founder-shimmer {
-	0%, 100% { background-position: 0% 50%; }
-	50%      { background-position: 100% 50%; }
+	0%, 100% { background-position: 0 0, 0% 50%; }
+	50%      { background-position: 0 0, 100% 50%; }
 }
 @media (prefers-reduced-motion: reduce) {
 	.founder-holo {

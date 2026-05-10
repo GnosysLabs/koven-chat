@@ -108,15 +108,50 @@ export async function setRoomNotifyLevel(
 
 /** Bulk-set the level for every room in `roomIds`.  Used by the
  * space tile context menu's "Set notifications for all rooms in
- * space" action.  Fires N PUTs in parallel; partial failures are
- * tolerated (cache reflects the server's actual state via the
- * per-call revert logic).  Resolves when all calls have settled. */
+ * space" action.  Single atomic round-trip to the engine, then a
+ * forced re-hydrate so the local cache exactly matches the server
+ * — no chance of partial application or cache drift, which the
+ * previous "fire N parallel PUTs" implementation could fall into.
+ * Throws on any failure so the caller can surface it (instead of
+ * the silent half-applied state we had before). */
 export async function setRoomNotifyLevelBulk(
 	accessToken: string,
 	roomIds: string[],
 	level: RoomNotifyLevel,
-): Promise<void> {
-	await Promise.all(roomIds.map(id => setRoomNotifyLevel(accessToken, id, level)));
+): Promise<{ updated: number }> {
+	if (roomIds.length === 0) return { updated: 0 };
+	// Optimistic local update so the right-click menu's checked
+	// state flips instantly even if the server is slow.  Will be
+	// overwritten by the re-hydrate below.
+	for (const id of roomIds) {
+		if (level === "mentions") cache.delete(id);
+		else cache.set(id, level);
+	}
+	emit();
+	const r = await fetch(`${ENGINE_URL}/api/notify-prefs/rooms-bulk`, {
+		method: "PUT",
+		headers: {
+			Authorization: `Bearer ${accessToken}`,
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify({ room_ids: roomIds, level }),
+	});
+	if (!r.ok) {
+		// Re-hydrate from the server so the local cache reflects
+		// the actual stored state, not our optimistic guess.
+		await hydrateNotifyPrefs(accessToken);
+		const body = (await r.json().catch(() => ({}))) as { error?: string };
+		throw new Error(body.error ?? `setRoomNotifyLevelBulk: HTTP ${r.status}`);
+	}
+	const body = (await r.json()) as { updated?: number };
+	// Force-rehydrate after success.  Belt-and-suspenders: the
+	// optimistic update should already match the server, but the
+	// cost is a single GET and the upside is a guaranteed
+	// post-condition that the local cache is exactly what the
+	// server has.  This is the rule the user asked for — make it
+	// impossible to fail silently.
+	await hydrateNotifyPrefs(accessToken);
+	return { updated: body.updated ?? roomIds.length };
 }
 
 /** Has the cache been hydrated yet?  False during the brief window

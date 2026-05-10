@@ -20,7 +20,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Ban, Camera, MessageSquare, Trash2, UserCheck, UserX } from "lucide-react";
+import { Ban, Camera, MessageSquare, Pencil, Trash2, UserCheck, UserX } from "lucide-react";
 import type { MatrixTransport } from "@/lib/matrix";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { BotBadge } from "@/components/BotBadge";
@@ -145,6 +145,15 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 	// Founder slot for the viewed user (1..666, null if they didn't
 	// claim one).  Drives the holographic Founder chip on the sheet.
 	const [founderNumber, setFounderNumber] = useState<number | null>(null);
+	// Self-profile editing.  When viewing your OWN profile the sheet
+	// opens in read-only mode (same view everyone else sees) and only
+	// flips into the edit form when the user clicks the pencil button
+	// in the header.  Cancel + Save both return to read-only without
+	// closing the dialog.  Originals stored separately so Cancel can
+	// revert any in-flight edits to whatever was last fetched.
+	const [editing, setEditing] = useState(false);
+	const originalDisplayNameRef = useRef("");
+	const originalBioRef = useRef("");
 	// Bot creator (only meaningful when isBot && !isMyBot && !isSelf).
 	// Three-valued like rep: undefined = not yet fetched (suppress
 	// the row), null = fetched but not a registered bot or fetch
@@ -230,6 +239,15 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 				setFounderNumber(fetchedProfile.founder_number);
 				setRep(fetchedRep);
 				setLoading(false);
+				// Cache the just-fetched values so a later Cancel
+				// can revert any in-flight edits back to this state
+				// without re-fetching.
+				originalDisplayNameRef.current = p.displayName;
+				originalBioRef.current = fetchedProfile.bio;
+				// Reset editing flag — opening the sheet for a new
+				// user always starts in read-only mode regardless of
+				// whether the previous viewing was mid-edit.
+				setEditing(false);
 			})
 			.catch(err => {
 				if (cancelled) return;
@@ -342,12 +360,49 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 				await updateMyBio(accessToken, bio.trim());
 			}
 			onSelfProfileSaved?.(avatarUrl);
-			onClose();
+			// Update the local profile snapshot so the read-only view
+			// (which we're about to flip back into) renders the new
+			// avatar / displayname without needing a re-fetch.
+			setProfile(prev => prev ? {
+				...prev,
+				displayName: displayName.trim(),
+				avatarUrl: pendingAvatar
+					? avatarUrl ?? prev.avatarUrl
+					: clearAvatar
+						? undefined
+						: prev.avatarUrl,
+			} : prev);
+			// Cache the saved values as the new originals — a later
+			// Edit + Cancel cycle reverts to THIS state, not the one
+			// we loaded with at sheet open.
+			originalDisplayNameRef.current = displayName.trim();
+			originalBioRef.current = bio.trim();
+			// Discard any pending avatar preview blob so it isn't kept
+			// alive past the save.
+			if (pendingAvatarPreview) URL.revokeObjectURL(pendingAvatarPreview);
+			setPendingAvatar(null);
+			setPendingAvatarPreview(null);
+			setClearAvatar(false);
+			// Flip back to read-only view, leave the dialog open so
+			// the user can confirm their changes look right.
+			setEditing(false);
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
 		} finally {
 			setPending(false);
 		}
+	}
+
+	function cancelEdit() {
+		// Revert in-flight edits to whatever was last fetched / saved.
+		setDisplayName(originalDisplayNameRef.current);
+		setBio(originalBioRef.current);
+		if (pendingAvatarPreview) URL.revokeObjectURL(pendingAvatarPreview);
+		setPendingAvatar(null);
+		setPendingAvatarPreview(null);
+		setClearAvatar(false);
+		setError(null);
+		setEditing(false);
 	}
 
 	const hasRealAvatar = !!(pendingAvatarPreview || (!clearAvatar && profile?.avatarUrl));
@@ -374,9 +429,29 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 
 	return (
 		<Dialog open={dialogOpen} onOpenChange={(o) => { if (!o) onClose(); }}>
-			<DialogContent className={isSelf ? "sm:max-w-lg" : "sm:max-w-md"}>
+			<DialogContent className={isSelf && editing ? "sm:max-w-lg" : "sm:max-w-md"}>
 				<DialogHeader>
-					<DialogTitle>{isSelf ? "Profile" : "Member"}</DialogTitle>
+					<DialogTitle className="flex items-center justify-between gap-2 pr-6">
+						<span>{isSelf ? "Profile" : "Member"}</span>
+						{/* Edit button — visible only on your own
+						    profile in read-only mode.  Flips into the
+						    edit form without closing the dialog.
+						    `pr-6` on the title row clears the dialog's
+						    built-in close affordance in the top-right
+						    corner so the Edit button doesn't crash
+						    into it. */}
+						{isSelf && !editing && (
+							<button
+								type="button"
+								onClick={() => setEditing(true)}
+								className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+								aria-label="Edit profile"
+							>
+								<Pencil className="h-3.5 w-3.5" />
+								Edit
+							</button>
+						)}
+					</DialogTitle>
 					<DialogDescription>
 						{isSelf
 							? "Visible to anyone you share a room with."
@@ -397,7 +472,7 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 				    rep paint instantly. */}
 				{!profile || profile.userId !== viewedUserId || rep === undefined ? (
 					<div className="py-8 text-center text-sm text-muted-foreground">Loading…</div>
-				) : isSelf ? (
+				) : isSelf && editing ? (
 					// ─── Self-edit layout ──────────────────────────────────
 					// Two-column: avatar/buttons on the left, name + bio on
 					// the right.  Metadata sits below in another two-column
@@ -496,21 +571,6 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 							/>
 						</div>
 
-						{founderNumber !== null && (
-							// Self view of the holographic Founder chip —
-							// users want to see their own badge too, not
-							// just other people's.  Sits between the
-							// edit form and the rep block, same vertical
-							// rhythm as the read-only view.
-							<div>
-								<FounderBadge
-									number={founderNumber}
-									cap={getFounderCap()}
-									variant="profile"
-								/>
-							</div>
-						)}
-
 						{/* Reputation gets the full row now that user id lives
 						    inline under the display name and the Status
 						    placeholder is gone. */}
@@ -545,21 +605,22 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 									{formatMxid(profile.userId, serverOf(transport?.currentUserId ?? null))}
 								</div>
 							</div>
+							{/* Holograph chip lives in the header row,
+							    right-aligned next to the name/handle.
+							    `flex-1` on the middle column pushes the
+							    badge to the right edge automatically;
+							    `shrink-0` keeps it intact when the
+							    display name truncates. */}
+							{founderNumber !== null && (
+								<div className="shrink-0">
+									<FounderBadge
+										number={founderNumber}
+										cap={getFounderCap()}
+										variant="profile"
+									/>
+								</div>
+							)}
 						</div>
-
-						{founderNumber !== null && (
-							// Holographic Founder chip — sits between the
-							// identity row and the bio so it reads as
-							// part of "who is this person", not metadata
-							// buried below the rep block.
-							<div>
-								<FounderBadge
-									number={founderNumber}
-									cap={getFounderCap()}
-									variant="profile"
-								/>
-							</div>
-						)}
 
 						{bio.trim() && (
 							<p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap">
@@ -622,7 +683,13 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 
 						{!isBot && (
 							<div className="pt-2 border-t border-border">
-								<ReputationRow rep={rep ?? null} />
+								{/* `isSelf` here surfaces the next-tier
+								    unlock label below the level meter
+								    on your own profile.  Hidden on
+								    others' profiles because calling out
+								    where someone is on their tier
+								    ladder reads as surveillance. */}
+								<ReputationRow rep={rep ?? null} isSelf={isSelf} />
 							</div>
 						)}
 
@@ -727,10 +794,13 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 					{/* Self-edit mode keeps an explicit Cancel because
 					    the dialog has unsaved-edit state — the X
 					    closes too, but Cancel reads as "discard
-					    these changes" alongside the Save button. */}
-					{isSelf && (
+					    these changes" alongside the Save button.
+					    Cancel reverts to the read-only view (without
+					    closing the dialog) and discards any in-flight
+					    edits via cancelEdit's reset. */}
+					{isSelf && editing && (
 						<>
-							<Button type="button" variant="ghost" onClick={onClose} disabled={pending}>
+							<Button type="button" variant="ghost" onClick={cancelEdit} disabled={pending}>
 								Cancel
 							</Button>
 							<Button type="button" onClick={save} disabled={loading || pending}>

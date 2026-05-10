@@ -61,6 +61,7 @@ import {
 	listAdmins,
 	listRoomNotifyLevels,
 	setRoomNotifyLevel,
+	setRoomNotifyLevelBulk,
 	listAllBotMxids,
 	listAllBotsPublic,
 	listBotsByOwner,
@@ -2319,6 +2320,46 @@ export function startServer(): void {
 					setRoomNotifyLevel(userId, roomId, level);
 					return json({ ok: true, user_id: userId, room_id: roomId, level });
 				}
+			}
+
+			// PUT /api/notify-prefs/rooms-bulk { room_ids: [], level }
+			// Atomic bulk version of the per-room PUT above.  Wraps
+			// every row write in a single SQLite transaction so the
+			// result is all-or-nothing — the previous client-side
+			// "fire N parallel PUTs" pattern could leave the user
+			// in a partially-applied state if any of them failed,
+			// and there was no way for the client to know which
+			// rooms had taken vs which hadn't.  This endpoint
+			// returns the count of rows touched so the client can
+			// confirm and re-hydrate its local cache afterwards.
+			if (req.method === "PUT" && path === "/api/notify-prefs/rooms-bulk") {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				const body = (await req.json().catch(() => null)) as
+					| { room_ids?: unknown; level?: unknown }
+					| null;
+				const level = body?.level;
+				if (level !== "all" && level !== "mentions" && level !== "muted") {
+					return json({
+						errcode: "M_INVALID_PARAM",
+						error: "level must be one of: all, mentions, muted",
+					}, { status: 400 });
+				}
+				if (!Array.isArray(body?.room_ids)) {
+					return json({ errcode: "M_INVALID_PARAM", error: "room_ids must be an array" }, { status: 400 });
+				}
+				const roomIds: string[] = [];
+				for (const id of body.room_ids) {
+					if (typeof id !== "string" || !id.startsWith("!")) {
+						return json({
+							errcode: "M_INVALID_PARAM",
+							error: "every room id must be a string starting with !",
+						}, { status: 400 });
+					}
+					roomIds.push(id);
+				}
+				const updated = setRoomNotifyLevelBulk(userId, roomIds, level);
+				return json({ ok: true, updated, level });
 			}
 
 			// ─── Bulk room-icon lookup ──────────────────────────────

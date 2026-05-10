@@ -19,6 +19,7 @@
 // frantic.  Reduced-motion users get the gradient without the
 // animation (respect their preference).
 
+import { Gem } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export interface FounderBadgeProps {
@@ -48,20 +49,11 @@ export function FounderBadge({
 		return (
 			<div
 				className={cn(
-					// Layout: compact horizontal chip with crystal icon
-					// on the left + label/number stacked on the right.
-					"inline-flex items-center gap-2.5 px-3 py-1.5 rounded-full",
-					// Visible text colour overrides the holograph's
-					// gradient; we want the label readable rather than
-					// merging into the rainbow.
-					"text-white",
-					// "Founder" wordmark + animated shimmer.  The
-					// gradient + animation live in the inline style
-					// below so reduced-motion users can opt out via
-					// the prefers-reduced-motion media query (the CSS
-					// `animation-name: none` overrides the inline rule
-					// when that media query matches — see the @media
-					// block we add to index.css).
+					// Type-only chip — "FOUNDER" wordmark over the
+					// numerical slot.  Dropping the glyph reads
+					// classier; the holograph is decoration enough.
+					"inline-flex flex-col items-center px-3 py-1.5 rounded-full leading-tight",
+					"text-zinc-900",
 					"founder-holo founder-holo-profile",
 					"shadow-[0_0_24px_-6px_rgba(167,139,250,0.55)]",
 					"ring-1 ring-white/20",
@@ -72,42 +64,26 @@ export function FounderBadge({
 				aria-label={tooltip}
 				title={tooltip}
 			>
-				{/* Crystal icon — diamond outline + center facet.  Pure
-				    SVG so it sharpens on retina and inherits the chip's
-				    text colour.  viewBox sized so it visually matches
-				    the wordmark cap height. */}
-				<svg
-					viewBox="0 0 24 24"
-					className="h-5 w-5 shrink-0 drop-shadow-[0_1px_4px_rgba(255,255,255,0.45)]"
-					fill="none"
-					stroke="currentColor"
-					strokeWidth="1.6"
-					strokeLinejoin="round"
-					strokeLinecap="round"
-					aria-hidden
-				>
-					<path d="M12 2 L22 9 L12 22 L2 9 Z" />
-					<path d="M2 9 L22 9" />
-					<path d="M12 2 L8 9 L12 22 L16 9 Z" />
-				</svg>
-				<div className="flex flex-col leading-tight">
-					<span className="text-[9px] uppercase tracking-[0.2em] font-semibold opacity-80">
-						Founder
-					</span>
-					<span className="text-base font-display font-bold tabular-nums tracking-tight">
-						{pad(number)}
-					</span>
-				</div>
+				<span className="text-[9px] uppercase tracking-[0.2em] font-semibold opacity-80">
+					Founder
+				</span>
+				<span className="inline-flex items-center gap-1 text-base font-display font-bold tabular-nums tracking-tight">
+					<Gem className="h-3.5 w-3.5 shrink-0" strokeWidth={2.2} aria-hidden />
+					{pad(number).slice(1)}
+				</span>
 			</div>
 		);
 	}
 	// Compact inline variant — sits next to a username at a glance.
+	// Gem stands in for the `#` prefix on the inline chip only — the
+	// profile chip still uses the `FOUNDER` wordmark + #042 format
+	// because there's room for type to do the work there.
 	return (
 		<span
 			className={cn(
-				"inline-flex items-center gap-1 px-1.5 py-px rounded-full",
-				"text-[9px] font-semibold tracking-wide tabular-nums",
-				"text-white",
+				"inline-flex items-center gap-0.5 px-1.5 py-px rounded-full",
+				"text-[9px] font-bold tracking-wide tabular-nums",
+				"text-zinc-900",
 				"founder-holo founder-holo-compact",
 				"ring-1 ring-white/15",
 				"select-none align-middle",
@@ -117,19 +93,8 @@ export function FounderBadge({
 			aria-label={tooltip}
 			title={tooltip}
 		>
-			<svg
-				viewBox="0 0 24 24"
-				className="h-2.5 w-2.5 shrink-0"
-				fill="none"
-				stroke="currentColor"
-				strokeWidth="2"
-				strokeLinejoin="round"
-				strokeLinecap="round"
-				aria-hidden
-			>
-				<path d="M12 2 L22 9 L12 22 L2 9 Z" />
-			</svg>
-			{pad(number)}
+			<Gem className="h-2.5 w-2.5 shrink-0" strokeWidth={2.4} aria-hidden />
+			{pad(number).slice(1)}
 		</span>
 	);
 }

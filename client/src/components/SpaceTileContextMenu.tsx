@@ -57,12 +57,26 @@ export function SpaceTileContextMenu({
 		});
 
 		// Bulk notification level — submenu.  Sets the same level on
-		// every joined room in this space.  Per-room overrides set
-		// later still win; this is purely a convenience for "I want
-		// to follow / mute this whole community."
+		// every joined room in this space via a single atomic engine
+		// transaction (see lib/notifyPrefs.setRoomNotifyLevelBulk).
+		// Throws on failure so the user gets a real error rather than
+		// the silent half-applied state the previous parallel-PUT
+		// implementation could leave behind.
 		const setBulk = async (level: RoomNotifyLevel) => {
 			const ids = roomsInSpace.map(r => r.id);
-			await setRoomNotifyLevelBulk(accessToken, ids, level);
+			try {
+				await setRoomNotifyLevelBulk(accessToken, ids, level);
+			} catch (err) {
+				const detail = err instanceof Error ? err.message : String(err);
+				console.error("SpaceTileContextMenu: bulk notify failed", err);
+				// Loud failure mode — silent failures here are exactly
+				// the bug the user keeps hitting.  An alert is ugly
+				// but unmissable; if/when we wire a global toast, this
+				// becomes a toast call.
+				if (typeof window !== "undefined") {
+					window.alert(`Couldn't update notifications for this space:\n\n${detail}`);
+				}
+			}
 		};
 		out.push({
 			kind: "submenu",

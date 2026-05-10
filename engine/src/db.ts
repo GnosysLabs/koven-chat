@@ -1250,6 +1250,35 @@ export function listRoomNotifyLevels(userId: string): Array<{
 	}>;
 }
 
+/** Atomically set the same notification level on every room in
+ * `roomIds` for one user.  Wrapped in a single SQLite transaction
+ * so the result is all-or-nothing — either every row gets the new
+ * level or the database is unchanged.  Used by the space tile's
+ * "Set notifications for all rooms" submenu, which previously
+ * fired N parallel single-room PUTs and could leave the user in a
+ * partially-applied state if any of them failed. */
+export function setRoomNotifyLevelBulk(
+	userId: string,
+	roomIds: string[],
+	level: RoomNotifyLevel,
+): number {
+	if (roomIds.length === 0) return 0;
+	const ts = Date.now();
+	const tx = db.transaction((ids: string[]) => {
+		let n = 0;
+		for (const id of ids) {
+			if (level === "mentions") {
+				deleteRoomNotifyLevelStmt.run(userId, id);
+			} else {
+				setRoomNotifyLevelStmt.run(userId, id, level, ts);
+			}
+			n++;
+		}
+		return n;
+	});
+	return tx(roomIds);
+}
+
 // ─── Instance config ────────────────────────────────────────────────
 
 const readConfigStmt = db.prepare(`SELECT key, value FROM instance_config`);

@@ -81,6 +81,69 @@ extern "C" fn grant_media_capture(
     }
 }
 
+/// Handle `webView:runOpenPanelWithParameters:initiatedByFrame:completionHandler:`
+/// — the WKUIDelegate hook WKWebView calls when an `<input type="file">`
+/// is clicked.  Without this method on the UIDelegate, WKWebView
+/// silently does nothing on file input clicks: no picker opens, no
+/// error fires.  Tauri's wry doesn't ship a delegate for it, so we
+/// provide one here.
+///
+/// We pop the standard NSOpenPanel synchronously on the main thread,
+/// then call the completion handler with the selected URL(s) (or nil
+/// for cancel).  The completion handler is an ObjC block that takes
+/// an NSArray<NSURL*>* (or nil) — same Block_layout pattern as the
+/// media-capture grant above, but with a single id argument instead
+/// of an i64.
+extern "C" fn run_open_panel(
+    _this: &Object,
+    _cmd: Sel,
+    _webview: id,
+    parameters: id,
+    _frame: id,
+    completion_handler: *mut c_void,
+) {
+    unsafe {
+        // Read parameters: allowsMultipleSelection.  We don't expose
+        // directories in our UI, so we leave that flag at the AppKit
+        // default of NO regardless of what the page asks for.
+        let allows_multiple: BOOL = if parameters.is_null() {
+            cocoa::base::NO
+        } else {
+            msg_send![parameters, allowsMultipleSelection]
+        };
+
+        // NSOpenPanel — standard AppKit file chooser.  `runModal`
+        // blocks the main thread until the user picks or cancels;
+        // since the WKUIDelegate method is itself called on the main
+        // thread, this is the simplest correct path.
+        let panel: id = msg_send![class!(NSOpenPanel), openPanel];
+        let _: () = msg_send![panel, setCanChooseFiles: YES];
+        let _: () = msg_send![panel, setCanChooseDirectories: cocoa::base::NO];
+        let _: () = msg_send![panel, setAllowsMultipleSelection: allows_multiple];
+        // Modal response codes — NSModalResponseOK = 1.
+        let response: i64 = msg_send![panel, runModal];
+
+        // Block layout — invoke pointer at offset 16, takes one id arg
+        // (an NSArray<NSURL*>* or nil).
+        let invoke_ptr = (completion_handler as *const u8).add(16)
+            as *const extern "C" fn(*mut c_void, id);
+        let invoke = *invoke_ptr;
+
+        if response != 1 {
+            // User cancelled — pass nil to signal "no selection".
+            invoke(completion_handler, nil);
+            return;
+        }
+
+        // Selected URLs come back as `[NSURL]` from `URLs`.  Pass the
+        // array straight through — WKWebView wants an NSArray, not a
+        // Rust Vec.  When allowsMultipleSelection is NO, AppKit
+        // guarantees at most one element.
+        let urls: id = msg_send![panel, URLs];
+        invoke(completion_handler, urls);
+    }
+}
+
 fn ensure_delegate_class() -> *const Class {
     REGISTER_DELEGATE.call_once(|| {
         let superclass = class!(NSObject);
@@ -90,6 +153,14 @@ fn ensure_delegate_class() -> *const Class {
             decl.add_method(
                 sel!(webView:requestMediaCapturePermissionForOrigin:initiatedByFrame:type:decisionHandler:),
                 grant_media_capture as extern "C" fn(&Object, Sel, id, id, id, i64, *mut c_void),
+            );
+            // File picker support.  Without this method, WKWebView
+            // silently no-ops on `<input type="file">` clicks — even
+            // direct user clicks on the input element.  See the
+            // run_open_panel docstring for the full reasoning.
+            decl.add_method(
+                sel!(webView:runOpenPanelWithParameters:initiatedByFrame:completionHandler:),
+                run_open_panel as extern "C" fn(&Object, Sel, id, id, id, *mut c_void),
             );
         }
         let class = decl.register();

@@ -64,26 +64,44 @@ export function NotificationBell({
 	accessToken,
 }: NotificationBellProps) {
 	const [open, setOpen] = useState(false);
-	const { unreadCount, entries, error, refresh, markRead, markAllRead, dismissAll } = notifications;
+	const { unreadCount, entries, loading, error, refresh, markRead, markAllRead, dismissAll } = notifications;
+	// `opening` flips true between the bell click and the refresh
+	// resolving.  During this window the panel itself stays closed
+	// — no body content paints, no empty-state can flash — and the
+	// bell button shows a tiny pulse so the user knows their click
+	// landed.  Then we open the panel with the real data already
+	// in place.
 	// Extra px the FAB needs to lift to clear sticky pane footers
 	// (e.g. the bot edit form's Cancel/Create buttons).  Drives the
 	// `bottom` calc below; ignored for the icon variant which sits in
 	// flow inside the mobile top bar and never overlaps anything.
 	const bellOffset = useBellOffset();
 
+	const [opening, setOpening] = useState(false);
+
 	async function handleOpenChange(next: boolean) {
-		setOpen(next);
 		if (next) {
-			// 1. Refresh the list so it's current (polled count
-			//    flagged "new stuff" but cached entries may predate it).
-			// 2. Then mark everything read on the server — opening the
-			//    panel IS reading them.  No separate "Mark all read"
-			//    button needed; if the user pulled the panel up, they
-			//    saw what's in it.  Only unread → read flips happen here;
-			//    rows aren't deleted, so the user can still scroll
-			//    history of past notifications.
-			await refresh();
+			// Don't open the panel yet.  Fetch the list first, THEN
+			// flip open=true with real data already populated.  This
+			// is the rule the user keeps reiterating: no UI rendered
+			// against incomplete data, even for a single frame.
+			// Re-opening always re-fetches (same as before).  Guard
+			// against double-clicks via the `opening` flag — a
+			// second click while a fetch is in flight is a no-op.
+			if (opening) return;
+			setOpening(true);
+			try {
+				await refresh();
+			} finally {
+				setOpening(false);
+			}
+			setOpen(true);
+			// Mark-all-read fires AFTER the panel opens — the user's
+			// "read" intent is "I'm looking at it now", and the
+			// server-side update doesn't need to gate the open.
 			void markAllRead();
+		} else {
+			setOpen(false);
 		}
 	}
 
@@ -145,7 +163,7 @@ export function NotificationBell({
 					"transition-all duration-150",
 				)}
 			>
-				<Bell className="h-5 w-5" strokeWidth={2.2} />
+				<Bell className={cn("h-5 w-5", opening && "animate-pulse")} strokeWidth={2.2} />
 				{unreadCount > 0 ? (
 					<span
 						aria-hidden
@@ -190,7 +208,7 @@ export function NotificationBell({
 					"text-foreground active:bg-muted relative",
 				)}
 			>
-				<Bell className="h-5 w-5" />
+				<Bell className={cn("h-5 w-5", opening && "animate-pulse")} />
 				{unreadCount > 0 ? (
 					<span
 						aria-hidden

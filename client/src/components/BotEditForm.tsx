@@ -756,7 +756,10 @@ export function BotEditForm({
 			{/* Header — bot identity preview at the top of the pane.
 			    The avatar is clickable: opens a file picker that swaps
 			    in a local preview; the actual upload happens on Save
-			    (handleSubmit). */}
+			    (handleSubmit).  WKWebView (Tauri) needs the file-
+			    picker UIDelegate from src-tauri/src/plugins/
+			    mac_webrtc_permission.rs to be installed, otherwise
+			    file inputs silently no-op. */}
 			<div className="px-6 pt-6 pb-4 border-b border-border flex items-center gap-4">
 				<div className="relative shrink-0">
 					<button
@@ -779,9 +782,6 @@ export function BotEditForm({
 								className="h-12 w-12"
 							/>
 						)}
-						{/* Hover overlay — surfaces the affordance only
-						    when the user moves over the avatar so the
-						    bot's image reads cleanly otherwise. */}
 						<span className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
 							<Camera className="h-4 w-4" />
 						</span>
@@ -800,13 +800,11 @@ export function BotEditForm({
 					<input
 						ref={avatarFileInputRef}
 						type="file"
-						accept="image/png,image/jpeg,image/webp,image/gif"
+						accept="image/*"
 						className="hidden"
 						onChange={e => {
 							const file = e.target.files?.[0];
 							if (file) pickAvatar(file);
-							// Reset so the same file can be re-picked
-							// after a clear + re-attach in one flow.
 							e.target.value = "";
 						}}
 					/>
