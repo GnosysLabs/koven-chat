@@ -27,6 +27,7 @@ import { config } from "./config";
 import {
 	getRoomNotifyLevel,
 	insertNotification,
+	wasRecentlyActiveInRoom,
 	isRoomDm,
 	joinedMemberCount,
 	listJoinedRoomMembers,
@@ -342,7 +343,16 @@ export async function fanOutMessage(ev: MatrixEvent): Promise<void> {
 			}
 		}
 
-		console.log(`[fanout] write notification: recipient=${recipient} kind=${kind}`);
+		// Anti-race for in-flight active sessions: if the recipient
+		// recently called /api/notifications/read-by-room for this
+		// room (within RECENTLY_ACTIVE_MS), they're actively reading
+		// it and the row should be born already-read so the bell
+		// never lights up for an event they demonstrably already saw.
+		// Closes the gap where the client's read-by-room call beats
+		// the appservice transaction to the engine and clears 0 rows
+		// (because the row didn't exist yet at that moment).
+		const bornRead = wasRecentlyActiveInRoom(recipient, ev.room_id);
+		console.log(`[fanout] write notification: recipient=${recipient} kind=${kind}${bornRead ? " (born-read: recently active)" : ""}`);
 		insertNotification({
 			userId: recipient,
 			eventId: ev.event_id,
@@ -351,6 +361,7 @@ export async function fanOutMessage(ev: MatrixEvent): Promise<void> {
 			sender: ev.sender,
 			snippet,
 			createdAt: ev.origin_server_ts,
+			readAt: bornRead ? Date.now() : undefined,
 		});
 		written++;
 	}

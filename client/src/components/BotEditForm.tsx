@@ -425,6 +425,14 @@ export function BotEditForm({
 	const [justCreatedWebhooksBatch, setJustCreatedWebhooksBatch] = useState<WebhookCreated[] | null>(null);
 	const [pendingPostSave, setPendingPostSave] = useState<BotSummary | null>(null);
 
+	// Snapshot of the form at load time — used by the dirty check
+	// that gates the Save button in edit mode so it isn't clickable
+	// when the user hasn't actually changed anything.  Reset in the
+	// same useEffect that resets the form (mode / bot id change).
+	// In create mode the snapshot is the empty starting state, so
+	// editing any field marks the form dirty straight away.
+	const initialFormRef = useRef<FormState>(freshFormState());
+
 	// Push the floating notification bell up by the footer height
 	// while this form is mounted — without this, the FAB sits on top
 	// of the Cancel / Save buttons in the bottom-right corner.
@@ -459,9 +467,13 @@ export function BotEditForm({
 		setKnowledgeError(null);
 		setPendingMcpAttachments([]);
 		if (mode === "edit" && bot) {
-			setForm(formStateFromBot(bot));
+			const snap = formStateFromBot(bot);
+			setForm(snap);
+			initialFormRef.current = snap;
 		} else {
-			setForm(freshFormState());
+			const snap = freshFormState();
+			setForm(snap);
+			initialFormRef.current = snap;
 		}
 	}, [mode, bot?.id]);
 
@@ -556,6 +568,44 @@ export function BotEditForm({
 		form.apiBase.trim().length > 0 &&
 		form.model.trim().length > 0 &&
 		(mode === "edit" || (form.name.length > 0 && !nameError && form.apiKey.length > 0));
+
+	// Dirty check — has anything actually changed vs the loaded
+	// snapshot?  Used in edit mode to grey out Save when there's
+	// nothing to save.  Compares each form field individually
+	// (cheaper than JSON.stringify on every render) and folds in
+	// the side-channel "pending" pieces that don't live in form
+	// state (avatar pick / clear, queued knowledge / MCP / webhook
+	// items in create mode).  In create mode the snapshot is the
+	// empty starting state so any non-default field counts as dirty
+	// — matches the existing "Create bot requires displayName +
+	// name + apiKey" gate, which already covers the validity side.
+	const formChanged = useMemo(() => {
+		const a = form;
+		const b = initialFormRef.current;
+		return (
+			a.name !== b.name
+			|| a.displayName !== b.displayName
+			|| a.bio !== b.bio
+			|| a.provider !== b.provider
+			|| a.apiBase !== b.apiBase
+			|| a.apiKey !== b.apiKey
+			|| a.apiKeyMasked !== b.apiKeyMasked
+			|| a.model !== b.model
+			|| a.systemPrompt !== b.systemPrompt
+			|| a.contextWindow !== b.contextWindow
+			|| a.maxTokensPerReply !== b.maxTokensPerReply
+			|| a.dailyTokenLimit !== b.dailyTokenLimit
+			|| a.dailyCallLimit !== b.dailyCallLimit
+			|| a.acceptDms !== b.acceptDms
+		);
+	}, [form]);
+	const sideChannelDirty =
+		!!pendingAvatarFile
+		|| clearAvatarOnSave
+		|| pendingKnowledge.length > 0
+		|| pendingMcpAttachments.length > 0
+		|| pendingWebhooks.length > 0;
+	const isDirty = formChanged || sideChannelDirty;
 
 	// Tools tab is available in both modes.  In create mode picks
 	// queue locally in `pendingMcpAttachments` and flush after
@@ -756,7 +806,19 @@ export function BotEditForm({
 			// Edit mode only: in create mode the form is unmounting
 			// (selection flips to the new bot), so the indicator
 			// would be invisible anyway.
-			if (mode === "edit") setJustSaved(true);
+			if (mode === "edit") {
+				setJustSaved(true);
+				// Re-baseline the dirty snapshot to the just-saved
+				// state.  Without this, even after a successful save
+				// the dirty check would report "still dirty" because
+				// the snapshot still points at the pre-edit version
+				// of the form, and the Save button would re-enable
+				// the moment the user touches anything (which would
+				// be confusing — they just saved).  formStateFromBot
+				// reads the SAME row we just persisted via patchBot,
+				// so this is the correct new baseline.
+				initialFormRef.current = formStateFromBot(saved);
+			}
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
 		} finally {
@@ -1149,17 +1211,27 @@ export function BotEditForm({
 					type="button"
 					size="sm"
 					onClick={handleSubmit}
-					// Disabled while submitting OR after a clean save
-					// until the user edits again — the button labels
-					// reflect each state in turn ("Saving…" → "Saved"
-					// → "Save changes" the moment a field changes).
-					disabled={!canSubmit || justSaved}
-					// `variant=secondary` for the saved state so the
-					// button visibly recedes (greyed out instead of
+					// Disabled when:
+					//   - submitting (avoids double-click)
+					//   - just saved (user hasn't touched anything since)
+					//   - in edit mode AND the form is clean (no actual
+					//     changes to send — without this gate the button
+					//     was always clickable on bot edit, which read
+					//     as "what does this even do" UX)
+					// Create mode keeps the existing presence-based gate
+					// (canSubmit) — there's no "saved snapshot" to be
+					// dirty against, the form starts blank by definition.
+					disabled={
+						!canSubmit
+						|| justSaved
+						|| (mode === "edit" && !isDirty)
+					}
+					// `variant=secondary` for the saved / clean state so
+					// the button visibly recedes (greyed out instead of
 					// the primary accent), reinforcing the "no work
 					// queued" read.  Active button keeps the default
 					// primary variant.
-					variant={justSaved ? "secondary" : "default"}
+					variant={(justSaved || (mode === "edit" && !isDirty)) ? "secondary" : "default"}
 				>
 					{submitting
 						? "Saving…"
@@ -1331,26 +1403,23 @@ export function BotEditForm({
 					</div>
 				</div>
 
-				{/* OpenRouter has exactly one valid base URL —
-				    locking the field stops the user from typing
-				    something the engine can't reach.  Switching
-				    to "openai_compatible" via Provider clears
-				    the field (see onProviderChange). */}
-				<div className="space-y-1.5">
-					<Label htmlFor="bot-api-base">API base URL</Label>
-					<Input
-						id="bot-api-base"
-						value={form.apiBase}
-						onChange={e => update("apiBase", e.target.value)}
-						placeholder={form.provider === "openrouter" ? "" : "https://api.example.com/v1"}
-						disabled={form.provider === "openrouter"}
-					/>
-					{form.provider === "openrouter" && (
-						<p className="text-xs text-muted-foreground">
-							Locked to OpenRouter's endpoint. Switch the Provider to "OpenAI-compatible" to use a custom URL.
-						</p>
-					)}
-				</div>
+				{/* API base URL: only relevant when the provider is
+				    "openai_compatible".  OpenRouter has exactly one
+				    valid base URL (kept in form state via
+				    onProviderChange but never edited or displayed),
+				    so showing a disabled field with a "locked"
+				    explainer is just noise.  Hidden entirely. */}
+				{form.provider === "openai_compatible" && (
+					<div className="space-y-1.5">
+						<Label htmlFor="bot-api-base">API base URL</Label>
+						<Input
+							id="bot-api-base"
+							value={form.apiBase}
+							onChange={e => update("apiBase", e.target.value)}
+							placeholder="https://api.example.com/v1"
+						/>
+					</div>
+				)}
 
 				<div className="space-y-1.5">
 					<Label htmlFor="bot-api-key">API key</Label>
@@ -3065,6 +3134,9 @@ function OutboundWebhookForm({
 						<Plus className="h-3 w-3" /> Add
 					</button>
 				</div>
+				{headers.length === 0 && (
+					<div className="text-xs text-muted-foreground italic">No headers yet — add one for auth tokens (e.g. <code>Authorization: Bearer …</code>).</div>
+				)}
 				{headers.map((h, i) => (
 					<div key={i} className="grid grid-cols-12 gap-2 items-start">
 						<input

@@ -567,6 +567,33 @@ db.exec(`
 		ON notifications(user_id, created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_notifications_user_unread
 		ON notifications(user_id, read_at, created_at DESC);
+
+	-- ─── Per-(user, room) "active in room" timestamp ─────────────
+	-- Updated by /api/notifications/read-by-room (i.e. every time
+	-- the client says "I'm actively reading this room").  Read by
+	-- the notification fanout: when an inbound event would create
+	-- a notification for user U in room R, we check this table —
+	-- if U was active in R within the last RECENTLY_ACTIVE_MS, the
+	-- notification is born already-read (read_at = now at insert)
+	-- so the bell never sees it.
+	--
+	-- This closes the race where:
+	--   T+0   Client receives event via /sync, fires markRoomRead
+	--         immediately (clears 0 rows, the engine hasn't seen
+	--         the event yet)
+	--   T+150 Engine receives same event via appservice transaction
+	--         and creates the notification row with read_at=null
+	--   T+30s Bell poll finds the unread row, dings — for a room
+	--         the user has been actively watching the whole time.
+	-- With this timestamp written on every markRoomRead, the
+	-- T+150 insert sees the recent-active marker and writes
+	-- read_at=now instead of null.  Bell never lights up.
+	CREATE TABLE IF NOT EXISTS room_active (
+		user_id        TEXT NOT NULL,
+		room_id        TEXT NOT NULL,
+		last_active_ts INTEGER NOT NULL,
+		PRIMARY KEY (user_id, room_id)
+	);
 `);
 
 // SQLite ships with foreign-key enforcement OFF by default; flip it
@@ -2951,9 +2978,47 @@ export function joinedMemberCount(roomId: string): number {
 
 const insertNotificationStmt = db.prepare(`
 	INSERT OR IGNORE INTO notifications
-		(user_id, event_id, room_id, kind, sender, snippet, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?)
+		(user_id, event_id, room_id, kind, sender, snippet, created_at, read_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 `);
+
+// ─── Room-active timestamp (anti-race) ───────────────────────────
+//
+// Window during which a markRoomRead suppresses freshly-created
+// notifications for the same user+room.  60s is comfortably wider
+// than the tightest /sync vs appservice-transaction lag we've
+// observed (~300ms tail) and the 30s bell poll interval — covers
+// the user-leaves-then-poll-fires window the bug report named.
+
+const RECENTLY_ACTIVE_MS = 60_000;
+
+const upsertRoomActiveStmt = db.prepare(`
+	INSERT INTO room_active (user_id, room_id, last_active_ts)
+	VALUES (?, ?, ?)
+	ON CONFLICT(user_id, room_id) DO UPDATE SET last_active_ts = excluded.last_active_ts
+`);
+
+const getRoomActiveStmt = db.prepare(`
+	SELECT last_active_ts FROM room_active WHERE user_id = ? AND room_id = ?
+`);
+
+/** Stamp "user U was active in room R at this moment."  Called by
+ * the markRoomNotificationsRead path so the notification fanout
+ * can see in-flight active sessions and skip lighting the bell. */
+export function markRoomActive(userId: string, roomId: string): void {
+	upsertRoomActiveStmt.run(userId, roomId, Date.now());
+}
+
+/** True iff the user was marked active in this room within the
+ * last RECENTLY_ACTIVE_MS window.  Used by the notification
+ * fanout to set read_at = now at insert time when the user is
+ * actively watching the room (closes the markRoomRead-vs-fanout
+ * race, see room_active comment in the schema block above). */
+export function wasRecentlyActiveInRoom(userId: string, roomId: string): boolean {
+	const row = getRoomActiveStmt.get(userId, roomId) as { last_active_ts: number } | undefined;
+	if (!row) return false;
+	return (Date.now() - row.last_active_ts) < RECENTLY_ACTIVE_MS;
+}
 
 const listNotificationsStmt = db.prepare(`
 	SELECT id, user_id, event_id, room_id, kind, sender, snippet, created_at, read_at
@@ -3016,6 +3081,12 @@ export function insertNotification(opts: {
 	sender: string;
 	snippet: string | null;
 	createdAt: number;
+	/** When set, the row is written with read_at populated — i.e.
+	 * "born already-read."  Used by the fanout when the recipient
+	 * was actively in the room at insert time (see
+	 * wasRecentlyActiveInRoom).  Keeps the bell dark for events
+	 * the user demonstrably already saw. */
+	readAt?: number;
 }): void {
 	insertNotificationStmt.run(
 		opts.userId,
@@ -3025,6 +3096,7 @@ export function insertNotification(opts: {
 		opts.sender,
 		opts.snippet,
 		opts.createdAt,
+		opts.readAt ?? null,
 	);
 }
 
@@ -3108,6 +3180,12 @@ export function markRoomNotificationsRead(opts: {
 	readAt: number;
 }): number {
 	const r = markRoomNotificationsReadStmt.run(opts.readAt, opts.userId, opts.roomId);
+	// Stamp the room-active marker so a notification that's
+	// IN-FLIGHT from the appservice transaction stream — but
+	// hasn't been written yet at the moment this call lands —
+	// gets born already-read instead of as null.  See the
+	// room_active table comment in the schema block.
+	markRoomActive(opts.userId, opts.roomId);
 	return Number(r.changes);
 }
 

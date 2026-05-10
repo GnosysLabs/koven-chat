@@ -459,6 +459,17 @@ export class MatrixTransport {
 	// back through sync — at that point the SDK's own cache has the
 	// truth and we don't need our shim anymore.
 	private pendingDmMappings: Map<string, string> = new Map();
+	// Set of userIds for whom we've fired a one-shot profile fetch
+	// (DM avatar fallback path).
+	private peerProfileFetched: Set<string> = new Set();
+	// Self-managed avatar override per userId, populated when our
+	// fallback profile fetch resolves with an avatar.  The DM
+	// avatar resolution path checks this BEFORE falling through to
+	// DiceBear so we don't depend on matrix-js-sdk's User event
+	// system to wire the new avatar back into the UI (which it
+	// inconsistently does — the User object's avatarUrl can be
+	// updated without UserEvent.AvatarUrl emitting).
+	private resolvedPeerAvatars: Map<string, string> = new Map();
 
 	// Latch flipped by stop().  start() awaits initRustCrypto and
 	// startClient — both can take seconds.  React's <StrictMode> double-
@@ -975,6 +986,16 @@ export class MatrixTransport {
 		};
 		this.client.on(UserEvent.Presence, (_event, user) => refreshPresenceFor(user?.userId));
 		this.client.on(UserEvent.CurrentlyActive, (_event, user) => refreshPresenceFor(user?.userId));
+		// Re-emit when a DM peer's avatar / display name updates so
+		// the room list tile reflects the change.  Bots whose avatars
+		// were set after the bot first joined the DM rely on this:
+		// the join membership event carries the at-join-time avatar
+		// (often empty), but a later getProfileInfo() populates the
+		// User object's avatarUrl, which our DM avatar fallback
+		// chain reads — without this listener the new avatar wouldn't
+		// surface until the next sync round-trip.
+		this.client.on(UserEvent.AvatarUrl, (_event, user) => refreshPresenceFor(user?.userId));
+		this.client.on(UserEvent.DisplayName, (_event, user) => refreshPresenceFor(user?.userId));
 
 		// 1:1 voice/video — the SDK fires CallEventHandlerEvent.Incoming
 		// once when a remote m.call.invite is processed and ringing.
@@ -3632,6 +3653,58 @@ export class MatrixTransport {
 	}
 
 	/**
+	 * Fire-and-forget profile fetch for a DM peer when our local
+	 * cache has no avatar for them.  Synapse responds with the
+	 * peer's CURRENT profile (display name + avatar mxc), which
+	 * matrix-js-sdk applies to the User object — the resulting
+	 * UserEvent.AvatarUrl emit re-renders the room list with the
+	 * real avatar in place of the DiceBear fallback.
+	 *
+	 * Used for bot DMs whose avatar was set after the bot first
+	 * joined — the join membership event carries the at-join-time
+	 * (often empty) avatar, but the live profile has the new one.
+	 *
+	 * Per-userId once-only; failures are silent (best-effort).
+	 */
+	private kickPeerProfileFetch(userId: string): void {
+		if (this.peerProfileFetched.has(userId)) return;
+		this.peerProfileFetched.add(userId);
+		const c = this.client;
+		if (!c) return;
+		c.getProfileInfo(userId).then(profile => {
+			let changed = false;
+			if (typeof profile.avatar_url === "string" && profile.avatar_url.length > 0) {
+				const existing = this.resolvedPeerAvatars.get(userId);
+				if (existing !== profile.avatar_url) {
+					this.resolvedPeerAvatars.set(userId, profile.avatar_url);
+					changed = true;
+				}
+			}
+			// Also update matrix-js-sdk's User object so other code
+			// paths (member list, profile sheet) pick up the live
+			// data.  Best-effort — don't depend on this for the
+			// room-list avatar to render.
+			const user = c.getUser(userId);
+			if (user) {
+				if (typeof profile.avatar_url === "string" && profile.avatar_url !== user.avatarUrl) {
+					user.setAvatarUrl(profile.avatar_url);
+				}
+				if (typeof profile.displayname === "string" && profile.displayname !== user.displayName) {
+					user.setDisplayName(profile.displayname);
+				}
+			}
+			// Re-emit so the room mapping re-runs and picks up the
+			// new avatar from resolvedPeerAvatars.  Only when we
+			// actually got a new value to avoid pointless renders.
+			if (changed) this.emitRoomList();
+		}).catch(() => {
+			// Best-effort: a failed profile fetch just leaves the
+			// DiceBear fallback in place.  Don't retry on the same
+			// userId — re-add to peerProfileFetched ensures that.
+		});
+	}
+
+	/**
 	 * Read the current user's Matrix-side profile fields.  Bio isn't
 	 * here any more — it's stored on the engine (see lib/profile.ts)
 	 * since Matrix has no public-bio field and account_data is private.
@@ -4286,13 +4359,42 @@ export class MatrixTransport {
 
 		// For DMs, the room itself rarely has its own avatar; the
 		// natural identity is the other participant's profile picture.
-		// Fall back to that when there's no room-level avatar set, and
-		// surface dmUserId so the UI can also use it as the auto-avatar
-		// seed.
+		// Fallback chain (most-specific → most-current):
+		//   1. Room-level m.room.avatar
+		//   2. Other party's avatar from their room member event
+		//      (snapshot of their profile at join time)
+		//   3. Other party's live profile avatar (matrix-js-sdk User
+		//      object) — catches the case where the peer changed
+		//      their avatar AFTER joining, common for bots whose
+		//      owner sets the avatar via the bot edit form post-
+		//      creation; the join membership event still carries the
+		//      old / empty avatar but the live profile has the new one.
+		// Without (3) bots whose avatar was set late render with a
+		// generic DiceBear fallback in DM lists.
 		let avatarUrl = r.getMxcAvatarUrl() ?? undefined;
 		if (isDm && !avatarUrl && dmUserId) {
 			const other = r.getMember(dmUserId);
 			avatarUrl = other?.getMxcAvatarUrl() ?? undefined;
+			if (!avatarUrl) {
+				const liveUser = this.client?.getUser(dmUserId);
+				avatarUrl = liveUser?.avatarUrl ?? undefined;
+			}
+			if (!avatarUrl) {
+				// Final fallback: our own resolved-avatars map.
+				// Populated by kickPeerProfileFetch when a previous
+				// mapping pass missed.  When this fires, the room
+				// list has already been re-emitted with the new
+				// avatar in place — we just read it back from the
+				// map.
+				avatarUrl = this.resolvedPeerAvatars.get(dmUserId) ?? undefined;
+			}
+			if (!avatarUrl) {
+				// Still nothing — kick a one-shot profile fetch.
+				// On resolve we write to resolvedPeerAvatars and
+				// emitRoomList(), which re-runs this mapping and
+				// picks up the avatar in the branch above.
+				this.kickPeerProfileFetch(dmUserId);
+			}
 		}
 
 		// Inviter for non-DM invites — useful for the request UI.

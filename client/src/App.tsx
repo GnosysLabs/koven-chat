@@ -72,6 +72,7 @@ import { initialState, reduce } from "@/state/store";
 import type { RoomId, SpaceId } from "@koven/shared";
 import { NotificationBell } from "@/components/NotificationBell";
 import { useNotifications } from "@/state/use-notifications";
+import { markRoomRead as apiMarkRoomRead } from "@/lib/notifications-api";
 
 /**
  * Resolve a call's peer identity from the DM's room data.  Used to
@@ -591,6 +592,25 @@ export default function App() {
 					(typeof document === "undefined" || document.visibilityState === "visible")
 				) {
 					t.markAsRead(message.roomId).catch(() => {});
+					// Engine-side notification clear.  The Matrix
+					// receipt above only updates Synapse's per-user
+					// unread counter — Koven's bell uses a separate
+					// engine-side notifications table that gets a row
+					// per relevant event from the appservice
+					// transaction stream.  Without firing markRoomRead
+					// here, those rows accumulate during the
+					// 30-second poll window in use-notifications, and
+					// the moment the user navigates away the next poll
+					// finds them and rings the bell — for the room
+					// they were actively watching.
+					//
+					// THIS IS THE LOAD-BEARING DUPE-PREVENTION CALL.
+					// Removing it brings back the "I just left the
+					// chat and got pinged for messages I read" bug.
+					const tok = creds?.access_token;
+					if (tok) {
+						apiMarkRoomRead({ accessToken: tok, roomId: message.roomId }).catch(() => {});
+					}
 				}
 
 				// Notification gate.  Live, not-from-me, and ANY of:
@@ -976,8 +996,23 @@ export default function App() {
 	// — see the transport setup useEffect below.
 	const activeRoomIdRef = useRef<RoomId | null>(null);
 	useEffect(() => {
+		const previousRoomId = activeRoomIdRef.current;
 		activeRoomIdRef.current = state.activeRoomId;
-	}, [state.activeRoomId]);
+		// Final-flush mark-read for the room being LEFT.  Catches
+		// in-flight notifications that were created in the engine
+		// during the 30-second poll window of use-notifications:
+		// without this, a message that arrived in the active room
+		// at T+25s would still be unread on the server when the user
+		// navigates away at T+27s, and the next poll at T+30s would
+		// ring the bell for the room they just exited.
+		// THE OTHER LOAD-BEARING DUPE-PREVENTION CALL.
+		if (previousRoomId && previousRoomId !== state.activeRoomId) {
+			const tok = creds?.access_token;
+			if (tok) {
+				apiMarkRoomRead({ accessToken: tok, roomId: previousRoomId }).catch(() => {});
+			}
+		}
+	}, [state.activeRoomId, creds?.access_token]);
 
 	// Keep a stable reference to the current rooms list so the
 	// transport's onMessage handler (captured at boot time) can
@@ -1889,6 +1924,7 @@ export default function App() {
 					onEditRoom={(roomId) => setEditingRoomId(roomId)}
 					onOpenProfile={(userId) => setViewedUserId(userId)}
 					collapsedRoomIds={collapsedRoomIds}
+					botMxids={botMxids}
 					// True once initial sync has reached the "syncing"
 					// or "ready" state — at that point matrix-js-sdk
 					// has populated `state.rooms` with whatever the

@@ -261,7 +261,7 @@ fn is_internal(url: &Url) -> bool {
 			Some("challenges.cloudflare.com") => true,
 			Some("www.youtube-nocookie.com") | Some("youtube-nocookie.com") => true,
 			Some("www.youtube.com") | Some("youtube.com") | Some("m.youtube.com") => true,
-			// localhost / 127.0.0.1 cover both dev (Vite on :1420)
+			// localhost / 127.0.0.1 cover both dev (Vite on :1421)
 			// AND production (tauri-plugin-localhost on a portpicker-
 			// assigned port).  The production move from tauri:// to
 			// http://localhost was driven by third-party embed
@@ -307,7 +307,7 @@ fn build_init_script() -> String {
 pub fn run() {
 	// Pin a free local port up front so the `is_internal` check + the
 	// webview URL agree on the same number.  Production only —
-	// development still loads from Vite at http://localhost:1420.
+	// development still loads from Vite at http://localhost:1421.
 	//
 	// We pick a port once at process start (rather than letting the
 	// localhost plugin pick on its own) so the value is reachable from
@@ -337,7 +337,7 @@ pub fn run() {
 		// "potentially trustworthy" origin and embeds just work.
 		//
 		// Dev mode skips this entirely and keeps loading from Vite at
-		// http://localhost:1420 — same scheme, same secure-context
+		// http://localhost:1421 — same scheme, same secure-context
 		// treatment, no compatibility delta between dev and prod.
 		.plugin(tauri_plugin_localhost::Builder::new(local_port).build())
 		// OS-default URL / path handler.  Used by the navigation
@@ -454,7 +454,15 @@ pub fn run() {
 			#[cfg(target_os = "macos")]
 			{
 				let splash_url = if cfg!(debug_assertions) {
-					WebviewUrl::External("http://localhost:1420/splash.html".parse().unwrap())
+					// Dev: Vite serves splash.html.  Port matches
+					// `devUrl` in tauri.conf.json AND the `--port`
+					// flag in client/package.json's dev:tauri script.
+					// Bumped from 1420 to 1421 so dev:lan (LAN-
+					// accessible Vite on 1420) and dev:tauri can run
+					// concurrently — without this, the user can have
+					// either the web view OR the desktop view live,
+					// not both.
+					WebviewUrl::External("http://localhost:1421/splash.html".parse().unwrap())
 				} else {
 					WebviewUrl::External(
 						format!("http://localhost:{local_port}/splash.html").parse().unwrap(),
@@ -526,7 +534,7 @@ pub fn run() {
 				// the VITE_ENGINE_URL / VITE_HOMESERVER_URL env vars
 				// the dev:tauri script sets — no local engine /
 				// Synapse needed.
-				WebviewUrl::External("http://localhost:1420".parse().unwrap())
+				WebviewUrl::External("http://localhost:1421".parse().unwrap())
 			} else {
 				// Production: bundled `client/dist/` is served by
 				// tauri-plugin-localhost on http://localhost:<local_port>/.

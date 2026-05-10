@@ -66,6 +66,13 @@ export interface RoomListProps {
 	// by App.tsx since they manipulate App-level overlay state.
 	onEditRoom?(roomId: RoomId): void;
 	onOpenProfile?(userId: UserId): void;
+	// Set of mxids known to be bots.  Used by the per-row avatar
+	// to pick the right DiceBear style for bot DMs (kind="bot" →
+	// bottts robot fallback) instead of the default kind="user"
+	// fun-emoji face.  Without this the DM sidebar shows a yellow
+	// smiley for a bot DM while the same conversation's chat
+	// header + profile show the bot robot — visibly inconsistent.
+	botMxids?: Set<UserId>;
 }
 
 // PL gate for editing the space's `chat.koven.pinned_rooms` state
@@ -80,7 +87,7 @@ export function RoomList({
 	onSelectRoom, onCreateRoom, onAcceptInvite, onDeclineInvite,
 	onPinRoom, onUnpinRoom, collapsedRoomIds,
 	roomsLoaded, transport, accessToken,
-	onEditRoom, onOpenProfile,
+	onEditRoom, onOpenProfile, botMxids,
 }: RoomListProps) {
 	const activeSpaceObj = activeSpace?.kind === "space"
 		? spaces.find(s => s.id === activeSpace.id) ?? null
@@ -226,6 +233,9 @@ export function RoomList({
 								canManagePins={canManagePins}
 								onEditRoom={onEditRoom}
 								onOpenProfile={onOpenProfile}
+								isBotPeer={
+									room.kind === "dm" && !!room.dmUserId && !!botMxids?.has(room.dmUserId)
+								}
 							/>
 						);
 					})
@@ -298,19 +308,26 @@ function emptyHintFor(activeSpace: ActiveSpace): string {
 // kind stays at-a-glance readable; for DMs it's a presence dot mirroring
 // the member-list pattern (green = online, amber = idle, nothing when
 // offline) so you can tell who's around without opening each chat.
-function RoomAvatar({ room }: { room: Room }) {
+function RoomAvatar({ room, isBotPeer }: { room: Room; isBotPeer?: boolean }) {
 	// For DMs, seed with the other user's id so the auto-avatar reflects
 	// THEIR identity (not the room's), and round to a circle since it's
 	// effectively a person avatar.
 	const isDm = room.kind === "dm";
 	const seed = isDm ? (room.dmUserId ?? room.id) : room.id;
+	// DiceBear style: bots → bottts robot (matches the chat header /
+	// profile sheet which both pass kind="bot"), humans → fun-emoji
+	// face, rooms/spaces → shapes.  Without isBotPeer, every DM
+	// (including bot DMs) used kind="user" and the sidebar showed a
+	// yellow smiley while the same conversation's chat header / profile
+	// showed a robot — visibly inconsistent.
+	const dmKind = isBotPeer ? "bot" : "user";
 	return (
 		<div className="relative shrink-0">
 			<MatrixAvatar
 				mxc={room.avatarUrl}
 				emoji={isDm ? undefined : room.iconEmoji}
 				seed={seed}
-				kind={isDm ? "user" : "room"}
+				kind={isDm ? dmKind : "room"}
 				className={isDm ? "h-7 w-7 rounded-full" : "h-7 w-7 rounded-md"}
 			/>
 			{isDm
@@ -353,7 +370,7 @@ function DmPresenceDot({ presence }: { presence: Room["dmPresence"] }) {
 function RoomRow({
 	room, active, pinned, collapsed, onSelect, onPin, onUnpin,
 	currentUserId, transport, accessToken, activeSpaceId, canManagePins,
-	onEditRoom, onOpenProfile,
+	onEditRoom, onOpenProfile, isBotPeer,
 }: {
 	room: Room;
 	active: boolean;
@@ -382,6 +399,10 @@ function RoomRow({
 	canManagePins: boolean;
 	onEditRoom?(roomId: RoomId): void;
 	onOpenProfile?(userId: UserId): void;
+	// True when this is a DM whose peer is a known bot — flips the
+	// avatar's DiceBear fallback style from fun-emoji ("user") to
+	// bottts ("bot") so the sidebar matches the rest of the UI.
+	isBotPeer?: boolean;
 }) {
 	// Right-click menu state.  Cursor-positioned, dismissed via the
 	// generic ContextMenu primitive's outside-mousedown handler.
@@ -450,7 +471,7 @@ function RoomRow({
 				)}
 				title={collapsed ? COLLAPSED_NAME : room.name}
 			>
-				<RoomAvatar room={room} />
+				<RoomAvatar room={room} isBotPeer={isBotPeer} />
 				<span className="flex-1 truncate flex items-center gap-1.5 min-w-0">
 					<span className={cn(
 						"truncate",

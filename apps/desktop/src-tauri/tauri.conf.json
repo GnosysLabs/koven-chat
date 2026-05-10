@@ -7,7 +7,7 @@
     "beforeBuildCommand": "bun install && bun run --cwd ../../client build",
     "beforeDevCommand": "bun run --cwd ../../client dev:tauri",
     "frontendDist": "../../../client/dist",
-    "devUrl": "http://localhost:1420"
+    "devUrl": "http://localhost:1421"
   },
   "app": {
     "windows": [],

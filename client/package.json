@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:tauri": "KOVEN_DEV_HTTP=1 VITE_ENGINE_URL=https://client.koven.chat VITE_HOMESERVER_URL=https://client.koven.chat vite",
+    "dev:tauri": "KOVEN_DEV_HTTP=1 VITE_ENGINE_URL=https://client.koven.chat VITE_HOMESERVER_URL=https://client.koven.chat vite --port 1421 --strictPort",
     "dev:live": "KOVEN_DEV_HTTP=1 VITE_ENGINE_URL=https://client.koven.chat VITE_HOMESERVER_URL=https://client.koven.chat vite",
     "dev:lan": "VITE_ENGINE_URL=https://client.koven.chat VITE_HOMESERVER_URL=https://client.koven.chat vite",
     "build": "tsc -b && vite build",
