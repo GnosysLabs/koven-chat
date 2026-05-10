@@ -1328,8 +1328,17 @@ export function startServer(): void {
 					return json({
 						ok: true,
 						endpoint: "koven inbound webhook",
-						hint: "POST your payload to this URL. Use Content-Type: application/json (or text/plain). If you generated a signing secret, include X-Hub-Signature-256 header with HMAC-SHA256 of the raw body.",
 						webhook: hook.label || "(unlabeled)",
+						accepts: [
+							"application/json — generic + GitHub events",
+							"application/x-www-form-urlencoded — Twilio inbound SMS, generic forms",
+						],
+						signing: {
+							github: "X-Hub-Signature-256: sha256=<hex HMAC-SHA256>",
+							twilio: "X-Twilio-Signature: <base64 HMAC-SHA1 of URL+sorted params> (use Twilio Auth Token as the secret)",
+							none: "leave the webhook's signing secret blank to accept unsigned requests",
+						},
+						hint: "POST your payload to this URL. The source is auto-detected by signature header or payload shape. Twilio receives an empty TwiML <Response/> reply.",
 					});
 				}
 				if (req.method === "POST" && m) {
@@ -1339,19 +1348,40 @@ export function startServer(): void {
 						return json({ errcode: "M_NOT_FOUND", error: "unknown webhook token" }, { status: 404 });
 					}
 					// Read raw body once.  Need it as a string for both
-					// HMAC verification (over exact bytes the source
-					// signed) and for JSON parsing in the formatter.
+					// signature verification (over exact bytes the source
+					// signed) and for parsing in the formatter.
 					const rawBody = await req.text();
 					if (rawBody.length > 1_000_000) {
 						return json({ errcode: "M_TOO_LARGE", error: "body > 1MB" }, { status: 413 });
 					}
+					// Reconstruct the public URL the source posted to
+					// (Twilio's signature canonicalisation needs this).
+					// Trust the X-Forwarded-* headers from our own reverse
+					// proxy (Caddy) — engine isn't directly internet-
+					// facing, so these are not user-controllable here.
+					const xfProto = req.headers.get("x-forwarded-proto");
+					const xfHost = req.headers.get("x-forwarded-host") ?? req.headers.get("host");
+					const reqUrlObj = new URL(req.url);
+					const requestUrl = xfHost
+						? `${xfProto ?? "https"}://${xfHost}${reqUrlObj.pathname}${reqUrlObj.search}`
+						: req.url;
 					const result = await deliverWebhook({
 						webhook: hook,
 						headers: req.headers,
 						rawBody,
+						requestUrl,
 					});
 					switch (result.status) {
 						case "ok":
+							// Source-specific reply (Twilio wants TwiML
+							// XML, not JSON) overrides the default
+							// {ok:true} when present.
+							if (result.reply) {
+								return new Response(result.reply.body, {
+									status: 200,
+									headers: { ...corsHeaders(), "Content-Type": result.reply.contentType },
+								});
+							}
 							return json({ ok: true });
 						case "hmac_invalid":
 							return json({ errcode: "M_FORBIDDEN", error: "invalid signature" }, { status: 401 });

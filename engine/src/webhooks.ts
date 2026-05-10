@@ -1,21 +1,23 @@
 // Inbound webhook delivery pipeline.
 //
-// Single entry point: deliverWebhook(row, headers, rawBody).  Handles:
+// Single entry point: deliverWebhook(row, headers, rawBody, requestUrl).
+// Steps:
 //
-//   1. Optional HMAC verification (X-Hub-Signature-256, GitHub-compat).
-//   2. Auto-detect the payload's source (GitHub for now; extensible).
-//   3. Format the payload into a markdown message string.
-//   4. Post that message via the bot's matrix-js-sdk client into the
-//      configured target room.
-//   5. Log the delivery to bot_webhook_deliveries (success or failure).
+//   1. Detect the source by signature header or payload shape
+//      (github / twilio / slack / stripe / generic).
+//   2. Parse the body using the right content-type rules
+//      (JSON / form-urlencoded / raw text).
+//   3. Verify the source's signing scheme against the webhook's
+//      stored secret (GitHub: X-Hub-Signature-256 HMAC-SHA256;
+//      Twilio: X-Twilio-Signature HMAC-SHA1 of URL+sorted-params).
+//   4. Format the parsed payload into a markdown chat message.
+//   5. Post via the bot's matrix-js-sdk client into the target room.
+//   6. Log success/failure to bot_webhook_deliveries.
 //
-// Error handling: any failure logs to the deliveries table with the
-// `error` field set + bumps last_error on the parent webhook row, and
-// the function still returns gracefully (the caller decides the HTTP
-// response).  Posting via the bot's own client (vs. the engine's
-// appservice user) keeps the bot's identity intact in encrypted rooms
-// — the bot's crypto state is already loaded at that point, so megolm
-// session sharing works out of the box.
+// Returns DeliveryResult with an optional `reply` field — sources
+// that expect a specific response shape (Twilio expects 200 +
+// text/xml + TwiML) get that reply; everything else returns
+// {ok:true} JSON from the HTTP handler.
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { getRunningBot } from "./bot_manager";
@@ -27,20 +29,56 @@ import {
 
 /** Outcome of a single delivery attempt.  Returned to the HTTP
  * handler so it can pick the right status code (200 ok, 401 hmac
- * fail, 503 transient post failure, 502 wrong bot id, etc.). */
+ * fail, 503 transient post failure, etc.).  Optional `reply`
+ * overrides the default JSON response for sources that expect a
+ * source-specific shape (e.g. Twilio expects TwiML XML). */
 export type DeliveryResult =
-	| { status: "ok" }
+	| { status: "ok"; reply?: SourceReply }
 	| { status: "hmac_invalid" }
 	| { status: "bot_not_running" }
 	| { status: "post_failed"; detail: string };
 
+/** Source-specific HTTP reply body.  Twilio etc. don't accept JSON. */
+export interface SourceReply {
+	contentType: string;
+	body: string;
+}
+
+/** Detected source of an inbound webhook.  Drives signature scheme,
+ * payload-shape parsing, formatting, and reply shape. */
+type Source = "github" | "twilio" | "slack" | "stripe" | "generic";
+
 const MAX_BODY_BYTES = 1_000_000; // 1MB, enforced upstream by the HTTP handler too.
+
+// ─── Source detection ─────────────────────────────────────────────
+
+/** Auto-detect the source.  Header-based hints win because they're
+ * cheaper than re-parsing the body, and most sources include a
+ * distinctive signature header even on unsigned requests. */
+function detectSource(headers: Headers, rawBody: string): Source {
+	if (headers.get("x-twilio-signature")) return "twilio";
+	if (headers.get("stripe-signature")) return "stripe";
+	if (headers.get("x-slack-signature")) return "slack";
+	if (headers.get("x-github-event") || headers.get("x-hub-signature-256")) return "github";
+
+	// Fallback: peek at the body shape for unsigned probes.
+	// Twilio inbound SMS comes as form-urlencoded with MessageSid;
+	// even without the signature header, that shape is unmistakable.
+	const ct = (headers.get("content-type") ?? "").toLowerCase();
+	if (ct.includes("application/x-www-form-urlencoded")) {
+		const params = new URLSearchParams(rawBody);
+		if (params.has("MessageSid")) return "twilio";
+	}
+
+	return "generic";
+}
+
+// ─── Signature verification ───────────────────────────────────────
 
 /** Verify GitHub-style `X-Hub-Signature-256` header.  Format:
  * "sha256=<hex>" where <hex> is HMAC-SHA256(secret, rawBody).  Uses
- * timingSafeEqual to avoid leaking the comparison via timing.  Returns
- * true iff the signature is present AND valid. */
-function verifyHmacSha256(secret: string, rawBody: string, header: string | undefined): boolean {
+ * timingSafeEqual to avoid leaking the comparison via timing. */
+function verifyGithubHmac(secret: string, rawBody: string, header: string | undefined): boolean {
 	if (!header) return false;
 	const m = header.match(/^sha256=([a-f0-9]+)$/i);
 	if (!m) return false;
@@ -50,26 +88,98 @@ function verifyHmacSha256(secret: string, rawBody: string, header: string | unde
 	return timingSafeEqual(provided, expected);
 }
 
-/** Format an incoming payload into a markdown message.  Currently
- * supports:
+/** Verify Twilio's `X-Twilio-Signature` header.
  *
- *   - GitHub push events — recognises the {pusher, commits,
- *     repository} shape and renders a one-line summary.
- *   - Generic JSON fallback — pretty-printed JSON inside a markdown
- *     code block, capped at 1500 chars (rooms with longer payloads
- *     get truncated with a "[...]" suffix; the full payload stays in
- *     the deliveries log for debugging).
+ * Twilio's scheme: HMAC-SHA1, base64-encoded, computed over the
+ * request's full URL (including query string) concatenated with the
+ * form parameters sorted alphabetically by key, each key directly
+ * followed by its value (no separator between pairs).
  *
- * New presets can be added by detecting their distinctive payload
- * shape inside this function and returning a hand-formatted string.
- * Order matters — first match wins, generic fallback is last. */
-export function formatPayload(payload: unknown): string {
-	// ---- GitHub push ----
-	// Distinctive fields: pusher.name, head_commit, repository.full_name.
-	// Drives "🟢 alice pushed 3 commits to main of repo".  Branch comes
-	// out of `ref` ("refs/heads/<branch>"); commit count from `commits`.
+ * The `secret` here is the Twilio Auth Token from the user's Twilio
+ * console — the user pastes it into the webhook's signing-secret
+ * field same as a GitHub HMAC secret.  Different scheme, same
+ * field. */
+function verifyTwilioHmac(
+	secret: string,
+	requestUrl: string,
+	rawBody: string,
+	header: string | undefined,
+): boolean {
+	if (!header) return false;
+	const params = new URLSearchParams(rawBody);
+	const sortedKeys = [...params.keys()].sort();
+	let canonical = requestUrl;
+	for (const k of sortedKeys) {
+		// URLSearchParams collapses multi-value keys into the first
+		// occurrence on .get(); use getAll + concat to match Twilio's
+		// canonicalisation when a key repeats (rare for inbound SMS).
+		for (const v of params.getAll(k)) {
+			canonical += k + v;
+		}
+	}
+	const expected = createHmac("sha1", secret).update(canonical).digest("base64");
+	// Constant-time compare on the base64 strings.  Lengths match by
+	// construction (HMAC-SHA1 is always 20 bytes → 28-char base64).
+	const a = Buffer.from(header);
+	const b = Buffer.from(expected);
+	if (a.length !== b.length) return false;
+	return timingSafeEqual(a, b);
+}
+
+// ─── Body parsing ─────────────────────────────────────────────────
+
+/** Parse the raw body into something formatPayload can render.
+ * JSON gets parsed, form-urlencoded becomes a Record<string,string>,
+ * everything else stays as the raw string. */
+function parseBody(headers: Headers, rawBody: string): unknown {
+	const ct = (headers.get("content-type") ?? "").toLowerCase();
+	if (ct.includes("application/json") || ct.includes("text/json")) {
+		try {
+			return JSON.parse(rawBody);
+		} catch {
+			return rawBody;
+		}
+	}
+	if (ct.includes("application/x-www-form-urlencoded")) {
+		const params = new URLSearchParams(rawBody);
+		const obj: Record<string, string> = {};
+		for (const [k, v] of params.entries()) obj[k] = v;
+		return obj;
+	}
+	// Some sources send JSON with no Content-Type — try as JSON
+	// before giving up to the raw-string formatter.
+	try {
+		return JSON.parse(rawBody);
+	} catch {
+		return rawBody;
+	}
+}
+
+// ─── Source-aware formatting ──────────────────────────────────────
+
+/** Format an incoming payload into a markdown chat message.  The
+ * `source` hint lets us hand-format known shapes; unknown sources
+ * fall through to a generic JSON code block. */
+export function formatPayload(payload: unknown, source: Source = "generic"): string {
+	// ---- Twilio inbound SMS ----
+	// Form fields: From, To, Body, MessageSid, NumMedia, etc.
+	// Surface the message conversationally — phone number → SMS body.
+	if (source === "twilio" && typeof payload === "object" && payload !== null) {
+		const p = payload as Record<string, string>;
+		const from = p.From ?? "?";
+		const to = p.To ?? "?";
+		const body = p.Body ?? "";
+		const mediaCount = Number(p.NumMedia ?? "0");
+		const mediaNote = mediaCount > 0 ? ` *(+ ${mediaCount} media)*` : "";
+		// Wrap From in code so phone numbers don't get auto-linked or
+		// styled as @mentions by Matrix clients.
+		return `📱 SMS from \`${from}\` → \`${to}\`${mediaNote}\n\n${body || "_(no body)_"}`;
+	}
+
 	if (typeof payload === "object" && payload !== null) {
 		const p = payload as Record<string, unknown>;
+
+		// ---- GitHub push ----
 		const pusher = p.pusher as { name?: string } | undefined;
 		const repository = p.repository as { full_name?: string; html_url?: string } | undefined;
 		const commits = Array.isArray(p.commits) ? p.commits : null;
@@ -83,8 +193,7 @@ export function formatPayload(payload: unknown): string {
 			return `🟢 **${pusher.name}** pushed ${n} ${word} to \`${branch}\` of [${repo}](${url})`;
 		}
 
-		// ---- GitHub pull request opened/closed ----
-		// Distinctive: `action` plus `pull_request` object.
+		// ---- GitHub pull request ----
 		const pr = p.pull_request as
 			| { number?: number; title?: string; html_url?: string; user?: { login?: string } }
 			| undefined;
@@ -109,10 +218,9 @@ export function formatPayload(payload: unknown): string {
 		}
 	}
 
-	// ---- Generic JSON fallback ----
-	// Pretty-printed code block.  Truncated at 1500 chars so a giant
-	// payload doesn't make a wall of text in chat — the full body
-	// stays in the deliveries log for debugging.
+	// ---- Generic fallback ----
+	// Pretty-printed code block, capped at 1500 chars so a giant
+	// payload doesn't make a wall of text in chat.
 	let json: string;
 	try {
 		json = JSON.stringify(payload, null, 2);
@@ -126,28 +234,75 @@ export function formatPayload(payload: unknown): string {
 	return "```json\n" + json + "\n```";
 }
 
+// ─── Source-specific HTTP replies ────────────────────────────────
+
+/** Twilio expects its webhook to respond with TwiML (XML) — an empty
+ * `<Response/>` means "I got the message, do nothing".  Returning
+ * JSON here makes Twilio mark the webhook as failing with an error
+ * "11200 — HTTP retrieval failure" or similar. */
+const TWILIO_EMPTY_TWIML =
+	`<?xml version="1.0" encoding="UTF-8"?>\n<Response></Response>`;
+
+function replyForSource(source: Source): SourceReply | undefined {
+	if (source === "twilio") {
+		return { contentType: "text/xml; charset=utf-8", body: TWILIO_EMPTY_TWIML };
+	}
+	return undefined;
+}
+
+// ─── Main entry point ─────────────────────────────────────────────
+
 /** Single attempt to deliver a webhook.  Returns the outcome so the
  * HTTP handler can pick a status code; logs to bot_webhook_deliveries
- * regardless of outcome so the bot owner can debug failures. */
+ * regardless of outcome so the bot owner can debug failures.
+ *
+ * `requestUrl` is the FULL URL the source posted to (scheme + host +
+ * path + query) — needed for Twilio signature verification, which
+ * canonicalises over the URL plus form params. */
 export async function deliverWebhook(opts: {
 	webhook: BotWebhookRow;
 	headers: Headers;
 	rawBody: string;
+	requestUrl: string;
 }): Promise<DeliveryResult> {
-	const { webhook, headers, rawBody } = opts;
+	const { webhook, headers, rawBody, requestUrl } = opts;
 
-	// HMAC check first — if the secret is set, an invalid signature
-	// means we don't even log the payload (could be probe/spam).
+	const source = detectSource(headers, rawBody);
+
+	// Signature check: scheme depends on detected source.  When the
+	// webhook has a stored secret, signatures are required (else we
+	// reject — could be probe/spam).  When no secret is stored, we
+	// skip verification entirely (the webhook is "open" — fine for
+	// internal cron jobs etc., not recommended for public sources).
 	if (webhook.secret_hmac) {
-		const sig = headers.get("x-hub-signature-256") ?? undefined;
-		if (!verifyHmacSha256(webhook.secret_hmac, rawBody, sig)) {
+		let ok = false;
+		switch (source) {
+			case "github":
+			case "generic":
+				ok = verifyGithubHmac(webhook.secret_hmac, rawBody, headers.get("x-hub-signature-256") ?? undefined);
+				break;
+			case "twilio":
+				ok = verifyTwilioHmac(
+					webhook.secret_hmac,
+					requestUrl,
+					rawBody,
+					headers.get("x-twilio-signature") ?? undefined,
+				);
+				break;
+			case "slack":
+			case "stripe":
+				// Not yet implemented — fall through to "invalid" so the
+				// owner sees the failure in the deliveries log instead of
+				// silently accepting unverified payloads.
+				ok = false;
+				break;
+		}
+		if (!ok) {
 			return { status: "hmac_invalid" };
 		}
 	}
 
-	// Body size check.  The HTTP layer should reject earlier but
-	// belt-and-braces here so a misconfigured proxy can't slip a
-	// huge payload through.
+	// Body size belt-and-braces (HTTP layer rejects earlier).
 	if (rawBody.length > MAX_BODY_BYTES) {
 		recordBotWebhookDelivery({
 			webhookId: webhook.id,
@@ -158,22 +313,9 @@ export async function deliverWebhook(opts: {
 		return { status: "post_failed", detail: "body too large" };
 	}
 
-	// Parse + format.  Invalid JSON falls through to formatPayload
-	// with the raw string, which gets the generic code-block
-	// treatment.
-	let parsed: unknown = rawBody;
-	try {
-		parsed = JSON.parse(rawBody);
-	} catch {
-		// keep `parsed` as the raw string; format will still render it.
-	}
-	const message = formatPayload(parsed);
+	const parsed = parseBody(headers, rawBody);
+	const message = formatPayload(parsed, source);
 
-	// Look up the bot's running matrix client.  If the bot isn't
-	// currently running (engine restart in progress, bot disabled,
-	// crashed earlier), we log the delivery as failed and tell the
-	// caller — the source can retry, and the next /sync of the
-	// bot might pick up the missed signal via other channels.
 	const bot = getBotById(webhook.bot_id);
 	if (!bot) {
 		recordBotWebhookDelivery({
@@ -195,16 +337,10 @@ export async function deliverWebhook(opts: {
 		return { status: "bot_not_running" };
 	}
 
-	// Post the formatted text into the target room as the bot.
-	// Use sendEvent rather than sendMessage so the body shape is
-	// fully under our control (msgtype + body + format/formatted_body
-	// for markdown rendering by clients that respect it).
 	try {
-		// matrix-js-sdk's sendEvent typing for the third arg is the
-		// content shape derived from the second arg (event type) — for
-		// "m.room.message" that's a tagged union.  Cast through `any`
-		// to avoid having to construct the discriminated union here;
-		// the runtime accepts any well-formed m.room.message body.
+		// matrix-js-sdk's sendEvent typing is a strict tagged union;
+		// cast through unknown to send a well-formed m.room.message
+		// without reconstructing the discriminator.
 		await (running.client as unknown as {
 			sendEvent(roomId: string, eventType: string, content: Record<string, unknown>): Promise<unknown>;
 		}).sendEvent(webhook.target_room_id, "m.room.message", {
@@ -230,13 +366,12 @@ export async function deliverWebhook(opts: {
 		postedText: message,
 		error: null,
 	});
-	return { status: "ok" };
+	return { status: "ok", reply: replyForSource(source) };
 }
 
-/** Cheap markdown → plaintext fallback for the m.room.message `body`
- * field.  Renderers that don't support `formatted_body` show this.
- * Strips bold/italic markers, link syntax (keeps the label text),
- * code-block fences (keeps the inner text), and inline backticks. */
+// ─── Markdown rendering helpers ───────────────────────────────────
+
+/** Cheap markdown → plaintext for the m.room.message `body` field. */
 function stripMarkdown(md: string): string {
 	return md
 		.replace(/```[a-z]*\n([\s\S]*?)\n```/g, "$1")
@@ -247,18 +382,11 @@ function stripMarkdown(md: string): string {
 }
 
 /** Cheap markdown → HTML for `formatted_body`.  Covers the subset
- * the formatter actually emits: bold (`**x**`), inline code
- * (backtick), code blocks, and links.  Not a general markdown
- * parser — we control both ends so we don't need one. */
+ * the formatter actually emits. */
 function markdownToHtml(md: string): string {
-	// Escape HTML special chars first so user-controlled bits don't
-	// inject markup.  The transformations below only run against
-	// the escaped string.
 	const escape = (s: string) =>
 		s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 	let html = escape(md);
-	// Code blocks first (must run before single-backtick to avoid
-	// matching their fence backticks).
 	html = html.replace(/```([a-z]*)\n([\s\S]*?)\n```/g, (_m, _lang, body: string) =>
 		`<pre><code>${body}</code></pre>`,
 	);
