@@ -19,6 +19,7 @@ import { Phone, PhoneOff, Video } from "lucide-react";
 import { CallEvent, CallType } from "matrix-js-sdk/lib/webrtc/call";
 import type { MatrixCall } from "matrix-js-sdk/lib/webrtc/call";
 import type { UserId } from "@koven/shared";
+import { startInboundRing } from "@/lib/callRingtone";
 
 export interface IncomingCallSheetProps {
 	call: MatrixCall;
@@ -68,6 +69,15 @@ export function IncomingCallSheet({ call, peer, onAccept, onDismiss }: IncomingC
 			call.off(CallEvent.Error, onError);
 		};
 	}, [call, onDismiss]);
+
+	// Audible ringtone while this sheet is mounted.  Stops when the
+	// caller hangs up (we unmount via onDismiss) OR when the user
+	// accepts/declines (also unmount via the parent state machine).
+	// Web Audio synth, no audio asset to bundle — see lib/callRingtone.
+	useEffect(() => {
+		const ring = startInboundRing();
+		return () => ring.stop();
+	}, []);
 
 	async function accept() {
 		setPending(true);

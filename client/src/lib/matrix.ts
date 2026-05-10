@@ -142,11 +142,21 @@ export type SyncState = "preparing" | "syncing" | "ready" | "error" | "offline";
  * `clearStores()` also wipes the regular store, which we don't want.
  * Used as the recovery path when initRustCrypto reports an account
  * mismatch (server reset, user re-registered, etc.).
+ *
+ * Throws when any of the deletes fails to complete (timed out
+ * blocked).  Caller must NOT proceed to initRustCrypto on a
+ * thrown wipe — the data is in a "tried to nuke, didn't actually
+ * nuke" state and the next initRustCrypto will fail to load it,
+ * leaving the user stuck on "Connecting…" forever.
  */
 async function wipeRustCryptoIndexedDB(): Promise<void> {
 	if (typeof indexedDB === "undefined") return;
 	const names = ["matrix-js-sdk::matrix-sdk-crypto", "matrix-js-sdk::matrix-sdk-crypto-meta"];
-	await Promise.all(names.map(name => deleteDatabaseAwait(name)));
+	const results = await Promise.all(names.map(name => deleteDatabaseAwait(name)));
+	const failed = names.filter((_, i) => !results[i]);
+	if (failed.length > 0) {
+		throw new Error(`wipeRustCryptoIndexedDB: failed to delete ${failed.join(", ")} (blocked by open connections that didn't close in 30s)`);
+	}
 }
 
 /**
@@ -169,36 +179,49 @@ async function wipeRustCryptoIndexedDB(): Promise<void> {
  *      which still has the previous user's olm account — and hangs
  *      indefinitely on the account-mismatch error.
  *
- * Fix: when we get `blocked`, wait up to 5 seconds for either a
- * `success` (the connection eventually drained and the delete went
- * through) or a hard timeout (browser is stuck — let the next init
- * try its luck on the existing DB; the in-init mismatch-recovery
- * path will fire if needed).
+ * Fix: when we get `blocked`, wait for a `success` or a hard 30s
+ * timeout.  Resolves to `true` on actual deletion, `false` if we
+ * timed out without the delete completing.  The CALLER then decides
+ * whether to retry or rethrow — running initRustCrypto against a
+ * not-actually-wiped store is the worst outcome (silent stale data
+ * + stuck-on-Connecting), so callers treat `false` as a hard error.
  */
-function deleteDatabaseAwait(name: string): Promise<void> {
-	return new Promise<void>((resolve) => {
+function deleteDatabaseAwait(name: string): Promise<boolean> {
+	return new Promise<boolean>((resolve) => {
 		const req = indexedDB.deleteDatabase(name);
 		let done = false;
-		const finish = () => {
+		const finishOk = () => {
 			if (done) return;
 			done = true;
-			resolve();
+			resolve(true);
 		};
-		req.onsuccess = finish;
-		req.onerror = finish;
-		// `onblocked` fires once when another connection is preventing
-		// the delete.  We DON'T resolve on this event — instead we wait
-		// for the eventual `success`/`error` (which fires after the
-		// blocking connection actually closes) or a 5s safety timeout.
+		const finishFail = () => {
+			if (done) return;
+			done = true;
+			resolve(false);
+		};
+		req.onsuccess = finishOk;
+		req.onerror = () => {
+			// `error` is unusual but not necessarily catastrophic; the
+			// caller treats it the same as a successful wipe (the DB
+			// might not exist, or the platform refused for a benign
+			// reason).
+			finishOk();
+		};
 		req.onblocked = () => {
-			console.warn(`indexedDB.deleteDatabase(${name}): blocked, waiting up to 5s for it to drain…`);
+			console.warn(`indexedDB.deleteDatabase(${name}): blocked by an open connection, waiting up to 30s for it to drain…`);
 		};
+		// 30s upper bound — we'd rather fail loudly than silently
+		// run initRustCrypto against a still-locked DB (which gives
+		// the user a permanent "stuck on Connecting…" with no log
+		// trail).  The previous 5s + "proceed anyway" path was the
+		// account-switch bug.
 		setTimeout(() => {
 			if (!done) {
-				console.warn(`indexedDB.deleteDatabase(${name}): timed out after 5s, proceeding anyway`);
-				finish();
+				console.error(`indexedDB.deleteDatabase(${name}): timed out after 30s — caller will signal mismatch-recovery instead of running on stale data`);
+				finishFail();
 			}
-		}, 5000);
+		}, 30_000);
 	});
 }
 
@@ -250,7 +273,15 @@ export async function wipeAllMatrixIndexedDB(): Promise<void> {
 			"matrix-js-sdk:default",
 		];
 	}
-	await Promise.all(names.map(name => deleteDatabaseAwait(name)));
+	// Sign-out cleanup is best-effort: if a delete is blocked we
+	// can't really do anything user-facing about it (the user is
+	// already signing out).  Log failures so a stuck wipe doesn't
+	// silently slip through, but don't throw.
+	const results = await Promise.all(names.map(name => deleteDatabaseAwait(name)));
+	const failed = names.filter((_, i) => !results[i]);
+	if (failed.length > 0) {
+		console.warn(`wipeAllMatrixIndexedDB: ${failed.length} DBs failed to delete: ${failed.join(", ")}`);
+	}
 }
 
 export interface MatrixHandlers {
@@ -448,27 +479,34 @@ export class MatrixTransport {
 		// session) hits the localStorage read and compare and is
 		// done — no IndexedDB churn, no extra latency.
 		const LAST_USER_KEY = "koven.lastLoggedInUserId";
+		const prev = typeof localStorage !== "undefined"
+			? localStorage.getItem(LAST_USER_KEY)
+			: null;
+		const isUserSwitch = !!(prev && prev !== creds.user_id);
+		if (isUserSwitch) {
+			console.info(
+				"matrix.start: detected user switch (%s → %s), wiping crypto store preemptively",
+				prev,
+				creds.user_id,
+			);
+			// Let wipeRustCryptoIndexedDB throw on a blocked wipe.
+			// Running initRustCrypto against a not-actually-wiped store
+			// silently fails as "stuck on Connecting…" — a thrown
+			// error here surfaces as bootError on the SPA, which is
+			// recoverable by refreshing.  In practice the App.tsx
+			// teardown-await fix means this should never block; the
+			// throw is the safety net for cases where something OTHER
+			// than the previous transport has the IDB open.
+			await wipeRustCryptoIndexedDB();
+		}
 		try {
-			const prev = typeof localStorage !== "undefined"
-				? localStorage.getItem(LAST_USER_KEY)
-				: null;
-			if (prev && prev !== creds.user_id) {
-				console.info(
-					"matrix.start: detected user switch (%s → %s), wiping crypto store preemptively",
-					prev,
-					creds.user_id,
-				);
-				await wipeRustCryptoIndexedDB();
-			}
 			if (typeof localStorage !== "undefined") {
 				localStorage.setItem(LAST_USER_KEY, creds.user_id);
 			}
 		} catch (err) {
-			// localStorage / IndexedDB might be unavailable in private
-			// modes; the catch-and-retry path inside initRustCrypto
-			// below is the same flow's fallback, so failure here just
-			// means the user hits the slow path on this one login.
-			console.warn("matrix.start: preemptive store check failed", err);
+			// localStorage might be unavailable in private modes.
+			// Non-fatal — start() continues without the cached marker.
+			console.warn("matrix.start: lastLoggedInUserId write failed", err);
 		}
 		const buildClient = () => sdk.createClient({
 			baseUrl: creds.homeserver,

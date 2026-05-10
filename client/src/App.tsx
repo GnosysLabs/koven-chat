@@ -548,6 +548,17 @@ export default function App() {
 		return () => navigator.serviceWorker.removeEventListener("message", onMessage);
 	}, []);
 
+	// Tracks the previous transport's teardown promise across creds
+	// changes.  Account-switch path was racing the new start() against
+	// the old transport's still-open IndexedDB connections — wipe was
+	// blocked, timed out after 5s, and initRustCrypto then ran against
+	// stale data.  Symptom was "stuck on Connecting…" on the second
+	// account.  We now await this promise (when set) before the new
+	// transport calls start(), so the old crypto IDB is fully released
+	// first.  useRef survives the StrictMode dev double-effect; the
+	// promise stays resolvable across both invocations.
+	const previousTeardownRef = useRef<Promise<void> | null>(null);
+
 	// Bootstrap (and re-bootstrap) the transport whenever creds change.
 	useEffect(() => {
 		if (!creds) return;
@@ -765,7 +776,26 @@ export default function App() {
 		// real UI window, so the user can correlate wall-clock wait
 		// against the per-phase timers inside transport.
 		console.time("app.boot: transport.start → encState");
-		t.start(creds).then(async () => {
+		// Wait for the previous transport's teardown to finish BEFORE
+		// firing start().  start() calls wipeRustCryptoIndexedDB
+		// internally on user-switch detection, and the wipe blocks
+		// indefinitely if the previous transport's OlmMachine still
+		// holds the IDB open.  Without this await, the wipe times out
+		// after 5s, "proceeds anyway" against stale data, and the
+		// user gets stuck on "Connecting…" forever.
+		const startWithTeardownAwait = async () => {
+			if (previousTeardownRef.current) {
+				try {
+					await previousTeardownRef.current;
+				} catch (err) {
+					console.warn("app.boot: previous teardown rejected", err);
+				}
+				previousTeardownRef.current = null;
+			}
+			if (cancelled) return;
+			await t.start(creds);
+		};
+		startWithTeardownAwait().then(async () => {
 			if (cancelled) return;
 			// Hydrate the per-room notification preferences cache so
 			// the sidebar mute indicators + right-click level pickers
@@ -885,16 +915,19 @@ export default function App() {
 			cancelled = true;
 			unsubscribe();
 			unsubscribeNsfw();
-			// `transport.stop()` is async (it awaits the IDB drain so the
-			// next start() on this origin can't race a stale OlmMachine
-			// handle), but useEffect cleanups can't be async — fire-and-
-			// forget here.  React's StrictMode + concurrent rendering
-			// means the next `creds`-driven mount may run before this
-			// stop() has resolved; that's fine because start() is
-			// idempotent on `stopped` mid-init AND each transport
-			// instance owns its own client, so the in-flight teardown
-			// can't disturb the new instance's state.
-			void t.stop();
+			// useEffect cleanups can't be async, so we record the stop
+			// promise on a ref the NEXT effect awaits before its own
+			// start().  Without this handoff, the new transport hits
+			// the wipeRustCryptoIndexedDB step while THIS transport's
+			// OlmMachine still has the IDB open — wipe gets blocked,
+			// times out after 5s, then initRustCrypto reads stale
+			// data and the user gets stuck on "Connecting…" forever.
+			//
+			// The promise is intentionally allowed to settle even
+			// after `cancelled` flips — start() short-circuits on
+			// cancelled, but we still want stop() to fully complete
+			// so its IDB connections close.
+			previousTeardownRef.current = t.stop();
 			setTransport(null);
 			setIgnoredUsers(new Set());
 		};

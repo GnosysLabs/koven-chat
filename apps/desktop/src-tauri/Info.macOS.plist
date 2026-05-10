@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+	Partial Info.plist for the macOS bundle.  Tauri's build merges
+	these keys into the generated Info.plist at bundle time.
+
+	NS*UsageDescription strings are what macOS shows in the
+	permission prompt the first time the app tries to access each
+	device.  They MUST be present for getUserMedia() to even fire
+	the prompt — without them, macOS silently returns
+	NotAllowedError and the app never appears in System Settings →
+	Privacy & Security.  The strings should be a short sentence
+	answering "why does this app want this?" — Apple's review
+	guidelines for the App Store apply even outside the store
+	(Gatekeeper warns aggressively if these are vague or missing).
+
+	Pair each description here with the matching entitlement in
+	Entitlements.plist — both halves are required for the
+	hardened-runtime case (which we run in because we notarize via
+	tauri-action).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Koven uses your microphone for voice and video calls.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Koven uses your camera for video calls.</string>
+</dict>
+</plist>

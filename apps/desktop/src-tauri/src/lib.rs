@@ -701,6 +701,17 @@ pub fn run() {
 						let ns_window: id = ptr as id;
 						let _: () = msg_send![ns_window, setCollectionBehavior: FULL_SCREEN_NONE];
 					}
+					// Install the WKWebView UIDelegate that auto-grants
+					// getUserMedia.  Without this, the page sees
+					// NotAllowedError on every camera/mic request even
+					// with the Info.plist + Entitlements in place.
+					// See plugins/mac_webrtc_permission for the full
+					// 3-gate explanation.
+					if let Ok(ptr) = win.ns_window() {
+						unsafe {
+							plugins::mac_webrtc_permission::install(ptr as id);
+						}
+					}
 				}
 			}
 

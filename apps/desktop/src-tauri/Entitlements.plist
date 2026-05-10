@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+	macOS Hardened Runtime entitlements for Koven Desktop.
+
+	macOS gates microphone, camera, and screen-capture access behind
+	BOTH the Info.plist usage-description string AND the matching
+	hardened-runtime entitlement.  Without the entitlement, even a
+	notarized app with the description string still fails to acquire
+	the device — getUserMedia() throws NotAllowedError immediately
+	and the app NEVER appears in System Settings → Privacy & Security
+	at all (because macOS treats it as "didn't ask, didn't get
+	asked").  That's the symptom of "call ended immediately when
+	they tried to pick up": the answering side couldn't grab its
+	mic/camera, so the call setup aborted.
+
+	Each entitlement is paired with a usage description in
+	Info.macOS.plist (referenced from tauri.conf.json's
+	bundle.macOS.infoPlist) — both must be present for the prompt to
+	fire.
+
+	JIT entitlement is required for the matrix-rust-sdk WASM bundle
+	(WebAssembly.instantiate uses it).  Without it, the WASM crypto
+	stack fails to initialize and the app can't sign in.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+	<key>com.apple.security.device.camera</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+</dict>
+</plist>

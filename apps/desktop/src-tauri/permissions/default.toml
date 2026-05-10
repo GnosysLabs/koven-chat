@@ -9,8 +9,20 @@
 #
 # We declare one allow-* permission per #[tauri::command] in
 # src/lib.rs + src/plugins/mac_rounded_corners.rs, then bundle them
-# into a `default` permission set the capability can reference as
-# `koven-desktop:default`.
+# into the namespace's `default_permission` so the capability can
+# reference us as just `"default"`.
+#
+# Schema note: the `[default]` block at the bottom is NOT the same as
+# `[[set]] identifier = "default"`.  `[default]` registers as the
+# namespace's `default_permission` field, which is what the capability
+# resolver looks for when it sees a bare `"default"` reference.
+# `[[set]]` registers a NAMED permission set that has to be referenced
+# explicitly — and our app-acl namespace has no plugin-style prefix,
+# so a `"default"` reference can ONLY find it via `default_permission`,
+# not via permission_sets.  Earlier attempt used `[[set]]` and the
+# commands stayed denied — gen/schemas/acl-manifests.json showed
+# `default_permission: null` while working plugins (dialog, opener,
+# updater) all had `default_permission: true`.
 
 [[permission]]
 identifier = "allow-enable-rounded-corners"
@@ -42,8 +54,7 @@ identifier = "allow-save-download"
 description = "Pop the native save-as dialog and write the supplied bytes to the picked path."
 commands.allow = ["save_download"]
 
-[[set]]
-identifier = "default"
+[default]
 description = "All locally-defined desktop-shell commands the SPA invokes."
 permissions = [
   "allow-enable-rounded-corners",

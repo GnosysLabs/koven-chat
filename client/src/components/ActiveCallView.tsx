@@ -26,6 +26,7 @@ import { CallEvent, CallState, CallType } from "matrix-js-sdk/lib/webrtc/call";
 import type { MatrixCall } from "matrix-js-sdk/lib/webrtc/call";
 import type { RoomId, UserId } from "@koven/shared";
 import { cn } from "@/lib/utils";
+import { startOutboundDial } from "@/lib/callRingtone";
 
 export interface ActiveCallViewProps {
 	call: MatrixCall;
@@ -88,6 +89,24 @@ export function ActiveCallView({ call, peer, activeRoomId, onClickThumbnail, onE
 	const peerUserId = (peer?.userId ?? opponent?.userId ?? call.roomId ?? "") as UserId;
 	const peerName = peer?.displayName ?? opponent?.name ?? "Calling…";
 	const peerAvatar = peer?.avatarMxc ?? opponent?.getMxcAvatarUrl() ?? undefined;
+
+	// Outbound dial tone while the call is in pre-connected states
+	// (InviteSent, Ringing, Connecting).  Stops the moment we hit
+	// Connected or any terminal state.  Skipped entirely when the
+	// call started in Connected (e.g. an inbound call we already
+	// answered before this view mounted) — the inbound ring on the
+	// IncomingCallSheet was the audible cue, no need for a second
+	// tone after it disappears.
+	useEffect(() => {
+		const isPreConnected = state === CallState.InviteSent
+			|| state === CallState.Ringing
+			|| state === CallState.Connecting
+			|| state === CallState.CreateOffer
+			|| state === CallState.CreateAnswer;
+		if (!isPreConnected) return;
+		const ring = startOutboundDial();
+		return () => ring.stop();
+	}, [state]);
 
 	// State-change wiring.  We re-read MatrixCall's getters each time
 	// rather than copying values into state up-front because the SDK
@@ -268,18 +287,29 @@ export function ActiveCallView({ call, peer, activeRoomId, onClickThumbnail, onE
 	}
 
 	return (
-		<div className="fixed inset-0 z-[100] bg-black flex flex-col">
+		// Outer backdrop dims the rest of the app so the call surface
+		// reads as a centered modal rather than swallowing the whole
+		// screen.  Inner card is bounded to a max width / height with
+		// rounded corners so the call has obvious "edges" the way
+		// Zoom / Discord's windowed-call mode does.
+		<div className="fixed inset-0 z-[100] bg-black/85 backdrop-blur-sm flex items-center justify-center p-6">
 			{/* Hidden audio element — peer audio always routes here. */}
 			<audio ref={remoteAudioRef} autoPlay playsInline />
 
-			{/* Main canvas — peer video or peer-avatar fallback. */}
-			<div className="flex-1 relative flex items-center justify-center overflow-hidden">
+			<div className="relative flex flex-col w-full max-w-5xl max-h-[85vh] aspect-video bg-black border border-white/10 rounded-2xl overflow-hidden shadow-2xl">
+
+			{/* Main canvas — peer video or peer-avatar fallback.
+			    `object-contain` preserves aspect ratio (letterboxes
+			    a 16:9 video on a 4:3 canvas instead of cropping it).
+			    Tested in 1:1 calls between portrait + landscape
+			    cameras — neither participant looked stretched. */}
+			<div className="flex-1 relative flex items-center justify-center overflow-hidden bg-black">
 				{showRemoteVideo ? (
 					<video
 						ref={remoteVideoRef}
 						autoPlay
 						playsInline
-						className="h-full w-full object-cover"
+						className="h-full w-full object-contain"
 					/>
 				) : (
 					<div className="flex flex-col items-center text-center gap-4 text-white">
@@ -360,6 +390,7 @@ export function ActiveCallView({ call, peer, activeRoomId, onClickThumbnail, onE
 				>
 					<PhoneOff className="h-5 w-5" />
 				</Button>
+			</div>
 			</div>
 		</div>
 	);
