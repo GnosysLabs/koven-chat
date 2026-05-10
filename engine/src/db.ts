@@ -569,25 +569,21 @@ db.exec(`
 		ON notifications(user_id, read_at, created_at DESC);
 
 	-- ─── Per-(user, room) "active in room" timestamp ─────────────
-	-- Updated by /api/notifications/read-by-room (i.e. every time
-	-- the client says "I'm actively reading this room").  Read by
-	-- the notification fanout: when an inbound event would create
-	-- a notification for user U in room R, we check this table —
-	-- if U was active in R within the last RECENTLY_ACTIVE_MS, the
-	-- notification is born already-read (read_at = now at insert)
-	-- so the bell never sees it.
+	-- Updated by /api/notifications/read-by-room (every time the
+	-- client says "I'm actively reading this room" — fired on room
+	-- entry, on every message that arrives in the active focused
+	-- room, and on room exit).  Read by the notification fanout:
+	-- when an inbound event would create a notification for user
+	-- U in room R, the fanout checks this table — if U was active
+	-- in R within the last RECENTLY_ACTIVE_MS, the row is SKIPPED
+	-- entirely.  The bell is for catch-up; if the user watched the
+	-- event arrive in real time, there's nothing to catch up on.
 	--
-	-- This closes the race where:
-	--   T+0   Client receives event via /sync, fires markRoomRead
-	--         immediately (clears 0 rows, the engine hasn't seen
-	--         the event yet)
-	--   T+150 Engine receives same event via appservice transaction
-	--         and creates the notification row with read_at=null
-	--   T+30s Bell poll finds the unread row, dings — for a room
-	--         the user has been actively watching the whole time.
-	-- With this timestamp written on every markRoomRead, the
-	-- T+150 insert sees the recent-active marker and writes
-	-- read_at=now instead of null.  Bell never lights up.
+	-- Closes the race where the engine's appservice transaction
+	-- stream can lag the client's /sync by 50-300ms, so the
+	-- client's read-by-room call lands BEFORE the notification
+	-- row exists; without this stamp, the row would land moments
+	-- later as unread despite the user demonstrably being there.
 	CREATE TABLE IF NOT EXISTS room_active (
 		user_id        TEXT NOT NULL,
 		room_id        TEXT NOT NULL,
@@ -3011,9 +3007,9 @@ export function markRoomActive(userId: string, roomId: string): void {
 
 /** True iff the user was marked active in this room within the
  * last RECENTLY_ACTIVE_MS window.  Used by the notification
- * fanout to set read_at = now at insert time when the user is
- * actively watching the room (closes the markRoomRead-vs-fanout
- * race, see room_active comment in the schema block above). */
+ * fanout to SKIP writing notification rows when the user is
+ * actively watching the room — see the room_active comment in
+ * the schema block above for the full reasoning. */
 export function wasRecentlyActiveInRoom(userId: string, roomId: string): boolean {
 	const row = getRoomActiveStmt.get(userId, roomId) as { last_active_ts: number } | undefined;
 	if (!row) return false;
@@ -3081,12 +3077,6 @@ export function insertNotification(opts: {
 	sender: string;
 	snippet: string | null;
 	createdAt: number;
-	/** When set, the row is written with read_at populated — i.e.
-	 * "born already-read."  Used by the fanout when the recipient
-	 * was actively in the room at insert time (see
-	 * wasRecentlyActiveInRoom).  Keeps the bell dark for events
-	 * the user demonstrably already saw. */
-	readAt?: number;
 }): void {
 	insertNotificationStmt.run(
 		opts.userId,
@@ -3096,7 +3086,7 @@ export function insertNotification(opts: {
 		opts.sender,
 		opts.snippet,
 		opts.createdAt,
-		opts.readAt ?? null,
+		null,
 	);
 }
 

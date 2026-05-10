@@ -597,21 +597,13 @@ export default function App() {
 					(typeof document === "undefined" || document.visibilityState === "visible")
 				) {
 					t.markAsRead(message.roomId).catch(() => {});
-					// Engine-side notification clear.  The Matrix
-					// receipt above only updates Synapse's per-user
-					// unread counter — Koven's bell uses a separate
-					// engine-side notifications table that gets a row
-					// per relevant event from the appservice
-					// transaction stream.  Without firing markRoomRead
-					// here, those rows accumulate during the
-					// 30-second poll window in use-notifications, and
-					// the moment the user navigates away the next poll
-					// finds them and rings the bell — for the room
-					// they were actively watching.
-					//
-					// THIS IS THE LOAD-BEARING DUPE-PREVENTION CALL.
-					// Removing it brings back the "I just left the
-					// chat and got pinged for messages I read" bug.
+					// Engine-side: stamp the room_active timestamp
+					// so the notification fanout sees this user as
+					// actively in the room and skips writing bell
+					// rows for events arriving in the next ~60s
+					// (RECENTLY_ACTIVE_MS in db.ts).  Without this
+					// stamp the bell would log "Newsly sent you 3
+					// DMs" for messages the user watched arrive.
 					const tok = creds?.access_token;
 					if (tok) {
 						apiMarkRoomRead({ accessToken: tok, roomId: message.roomId }).catch(() => {});

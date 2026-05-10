@@ -379,32 +379,3 @@ export async function deliverWebhook(opts: {
 	});
 	return { status: "ok", reply: replyForSource(source) };
 }
-
-// ─── Markdown rendering helpers ───────────────────────────────────
-
-/** Cheap markdown → plaintext for the m.room.message `body` field. */
-function stripMarkdown(md: string): string {
-	return md
-		.replace(/```[a-z]*\n([\s\S]*?)\n```/g, "$1")
-		.replace(/`([^`]+)`/g, "$1")
-		.replace(/\*\*([^*]+)\*\*/g, "$1")
-		.replace(/\*([^*]+)\*/g, "$1")
-		.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
-}
-
-/** Cheap markdown → HTML for `formatted_body`.  Covers the subset
- * the formatter actually emits. */
-function markdownToHtml(md: string): string {
-	const escape = (s: string) =>
-		s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-	let html = escape(md);
-	html = html.replace(/```([a-z]*)\n([\s\S]*?)\n```/g, (_m, _lang, body: string) =>
-		`<pre><code>${body}</code></pre>`,
-	);
-	html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
-	html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-	html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
-	html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
-	html = html.replace(/\n/g, "<br>");
-	return html;
-}
