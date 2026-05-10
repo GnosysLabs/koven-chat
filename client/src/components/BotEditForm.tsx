@@ -21,15 +21,20 @@ import { Label } from "@/components/ui/label";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { BotBadge } from "@/components/BotBadge";
 import {
+	AlertCircle,
 	Camera,
 	ChevronDown,
+	ChevronRight,
+	Copy,
 	Eye,
 	EyeOff,
 	FileText,
 	Plug,
+	Plus,
 	Search,
 	Trash2,
 	Upload,
+	Webhook,
 	X,
 } from "lucide-react";
 import {
@@ -53,6 +58,17 @@ import {
 	detachBotMcpServer,
 	type BotMcpAttachment,
 } from "@/lib/bot-mcp";
+import {
+	listBotWebhooks,
+	createBotWebhook,
+	deleteBotWebhook,
+	listBotWebhookDeliveries,
+	webhookUrlFor,
+	type WebhookSummary,
+	type WebhookCreated,
+	type WebhookDelivery,
+} from "@/lib/webhooks-api";
+import { useTransport } from "@/lib/transportContext";
 import { claimBellOffset, releaseBellOffset } from "@/state/bell-offset";
 import { cn } from "@/lib/utils";
 
@@ -277,10 +293,20 @@ type PendingMcpAttachment =
 		pasteJson: string;
 	};
 
+/** A webhook the user added during create mode, queued in
+ * BotEditForm and flushed against /api/bots/:id/webhooks once the
+ * bot exists.  Same fields as the create body; matches PendingMcp's
+ * pattern so a single handleSubmit can walk both queues. */
+interface PendingWebhook {
+	label: string;
+	targetRoomId: string;
+	generateSecret: boolean;
+}
+
 /** Tabs are ordered by the typical create flow.  "tools" is gated
  * behind edit mode in create flows (the bot needs to exist before we
  * can attach a server to it) — see the `availableTabs` memo below. */
-type TabKey = "identity" | "connection" | "behavior" | "knowledge" | "tools" | "limits";
+type TabKey = "identity" | "connection" | "behavior" | "knowledge" | "tools" | "webhooks" | "limits";
 
 interface TabDef {
 	key: TabKey;
@@ -293,6 +319,7 @@ const ALL_TABS: TabDef[] = [
 	{ key: "behavior",   label: "Behavior"   },
 	{ key: "knowledge",  label: "Knowledge"  },
 	{ key: "tools",      label: "Tools"      },
+	{ key: "webhooks",   label: "Webhooks"   },
 	{ key: "limits",     label: "Limits"     },
 ];
 
@@ -358,6 +385,23 @@ export function BotEditForm({
 	// per-server config the user entered through the McpConfigDialog
 	// — empty for servers that don't need any.
 	const [pendingMcpAttachments, setPendingMcpAttachments] = useState<PendingMcpAttachment[]>([]);
+	// Webhooks queued during create mode.  Same idea as
+	// pendingMcpAttachments: in create mode the bot doesn't have
+	// an id yet so we can't POST against /api/bots/:id/webhooks;
+	// queue locally + flush after createBot succeeds.  The flush
+	// returns each webhook's URL + (optional) secret which we
+	// stash in `justCreatedWebhooksBatch` below to surface in a
+	// one-time banner the user must acknowledge before onSaved
+	// closes the form.
+	const [pendingWebhooks, setPendingWebhooks] = useState<PendingWebhook[]>([]);
+	// One-time post-save credentials banner.  Set to the array of
+	// freshly-created webhooks (with plaintext secrets) only when a
+	// create-mode flush produces them; cleared by the "Done" button
+	// which then triggers onSaved.  Edit-mode webhook creation has
+	// its own per-call banner inside WebhooksTab and doesn't touch
+	// this state.
+	const [justCreatedWebhooksBatch, setJustCreatedWebhooksBatch] = useState<WebhookCreated[] | null>(null);
+	const [pendingPostSave, setPendingPostSave] = useState<BotSummary | null>(null);
 
 	// Push the floating notification bell up by the footer height
 	// while this form is mounted — without this, the FAB sits on top
@@ -643,6 +687,45 @@ export function BotEditForm({
 				}
 			}
 
+			// Webhook follow-up: same shape as MCP and knowledge —
+			// queued during create mode in `pendingWebhooks`, flushed
+			// here against /api/bots/:id/webhooks.  The POST returns
+			// each webhook's plaintext secret (when generated); we
+			// stash the batch in `justCreatedWebhooksBatch` and gate
+			// onSaved behind the user dismissing a one-time
+			// credentials banner so they have a chance to copy them.
+			// Without that gate the secrets would be lost forever
+			// the moment the form closes — the engine intentionally
+			// doesn't store secrets in a recoverable form.
+			if (pendingWebhooks.length > 0) {
+				const created: WebhookCreated[] = [];
+				try {
+					for (const w of pendingWebhooks) {
+						const c = await createBotWebhook({
+							accessToken,
+							botId: saved.id,
+							targetRoomId: w.targetRoomId,
+							label: w.label,
+							generateSecret: w.generateSecret,
+						});
+						created.push(c);
+					}
+					setPendingWebhooks([]);
+				} catch (err) {
+					setError(`Saved, but webhook create failed: ${err instanceof Error ? err.message : String(err)}`);
+					await onSaved(saved);
+					return;
+				}
+				if (created.length > 0) {
+					// Defer onSaved until the user dismisses the
+					// secrets banner — see the JSX render block
+					// keyed off justCreatedWebhooksBatch below.
+					setJustCreatedWebhooksBatch(created);
+					setPendingPostSave(saved);
+					return;
+				}
+			}
+
 			await onSaved(saved);
 			// Flip into the "Saved" affordance after a clean save —
 			// the button stays greyed and disabled until the user
@@ -750,6 +833,53 @@ export function BotEditForm({
 			? undefined
 			: (mode === "edit" ? bot?.avatar_mxc ?? undefined : undefined);
 	const showRemove = !!pendingAvatarPreview || (mode === "edit" && !!bot?.avatar_mxc && !clearAvatarOnSave);
+
+	// One-time secrets banner.  Renders ABOVE the rest of the form
+	// (and disables the form interaction visually) when a create-mode
+	// flush produced webhooks with secrets — the user must
+	// acknowledge it so they have a chance to copy the URLs +
+	// signing secrets before the form closes (engine doesn't store
+	// secrets recoverably).  Done button drops the banner + fires
+	// onSaved.
+	if (justCreatedWebhooksBatch && pendingPostSave) {
+		return (
+			<div className="flex-1 min-w-0 flex flex-col bg-background overflow-auto p-6 gap-4">
+				<div className="rounded-md border border-primary/40 bg-primary/5 p-5 space-y-4 max-w-3xl">
+					<div className="flex items-start gap-3">
+						<AlertCircle className="h-5 w-5 text-primary mt-0.5 shrink-0" />
+						<div>
+							<div className="font-semibold text-base">Save these now</div>
+							<div className="text-sm text-muted-foreground mt-1">
+								We just created {justCreatedWebhooksBatch.length} webhook{justCreatedWebhooksBatch.length === 1 ? "" : "s"} for your bot.  The signing secret{justCreatedWebhooksBatch.length === 1 ? "" : "s"} below {justCreatedWebhooksBatch.length === 1 ? "is" : "are"} shown ONCE — copy {justCreatedWebhooksBatch.length === 1 ? "it" : "them"} now or you&rsquo;ll have to roll the secret to recover.  The webhook URLs are visible from the Webhooks tab any time.
+							</div>
+						</div>
+					</div>
+					<div className="space-y-4">
+						{justCreatedWebhooksBatch.map(w => (
+							<div key={w.id} className="rounded border border-border bg-card p-3 space-y-2">
+								<div className="text-sm font-medium">{w.label || "(unlabeled)"}</div>
+								<CopyableField label="URL" value={webhookUrlFor(w.token)} />
+								{w.secret && <CopyableField label="Signing secret" value={w.secret} />}
+							</div>
+						))}
+					</div>
+					<div className="flex justify-end pt-2">
+						<Button
+							type="button"
+							onClick={async () => {
+								const saved = pendingPostSave;
+								setJustCreatedWebhooksBatch(null);
+								setPendingPostSave(null);
+								if (saved) await onSaved(saved);
+							}}
+						>
+							Done
+						</Button>
+					</div>
+				</div>
+			</div>
+		);
+	}
 
 	return (
 		<div className="flex-1 min-w-0 flex flex-col bg-background overflow-hidden">
@@ -877,6 +1007,14 @@ export function BotEditForm({
 							accessToken={accessToken}
 							pendingAttachments={pendingMcpAttachments}
 							onPendingChange={setPendingMcpAttachments}
+						/>
+					)}
+					{currentTabKey === "webhooks"   && (
+						<WebhooksTab
+							bot={bot ?? null}
+							accessToken={accessToken}
+							pendingWebhooks={pendingWebhooks}
+							onPendingChange={setPendingWebhooks}
 						/>
 					)}
 					{currentTabKey === "limits"     && renderLimitsTab()}
@@ -2202,4 +2340,419 @@ function countServersInPaste(obj: unknown): number {
 		return entries.length;
 	}
 	return 0;
+}
+
+// ─── Webhooks tab ────────────────────────────────────────────────────
+//
+// List + create + delete + recent-deliveries view for the bot's
+// inbound webhooks.  Disabled in create mode (need a bot id to
+// hang webhooks off of) — bot must be saved first, then revisit
+// this tab.  Mirrors the ToolsTab pattern: inline form for adding,
+// list of existing rows below, expandable per-row debug log.
+
+function WebhooksTab({
+	bot,
+	accessToken,
+	pendingWebhooks,
+	onPendingChange,
+}: {
+	bot: BotSummary | null;
+	accessToken: string | null;
+	pendingWebhooks: PendingWebhook[];
+	onPendingChange(next: PendingWebhook[]): void;
+}) {
+	const transport = useTransport();
+	const isCreateMode = bot === null;
+
+	const [hooks, setHooks] = useState<WebhookSummary[]>([]);
+	const [loading, setLoading] = useState(!isCreateMode);
+	const [listError, setListError] = useState<string | null>(null);
+
+	// Add-form state (single inline row, like ToolsTab).
+	const [formLabel, setFormLabel] = useState("");
+	const [formRoomId, setFormRoomId] = useState("");
+	const [formGenerateSecret, setFormGenerateSecret] = useState(true);
+	const [submitting, setSubmitting] = useState(false);
+	const [formError, setFormError] = useState<string | null>(null);
+
+	// Just-created webhook — edit-mode only.  Exposes the secret
+	// EXACTLY ONCE in a banner above the list, so the user can
+	// copy it before it disappears.  Create-mode uses the parent's
+	// post-save banner via `justCreatedWebhooksBatch` instead.
+	const [justCreated, setJustCreated] = useState<WebhookCreated | null>(null);
+
+	// Rooms the bot has joined — populated from the bot owner's
+	// view of joined rooms via the transport.  We can only target a
+	// room the bot is actually in (sendEvent fails otherwise), so
+	// the room dropdown filters to the bot's joined rooms.  For
+	// v1 we approximate "bot's joined rooms" as "the owner's
+	// joined rooms" — the bot sync state isn't exposed to the
+	// client, but in practice bots are added to rooms from the
+	// owner's invite UI, so the overlap is close enough.
+	const ownerRooms = useMemo(() => {
+		if (!transport) return [];
+		return transport.getRooms()
+			.filter(r => r.kind !== "dm")
+			.map(r => ({ id: r.id, name: r.name || r.id }))
+			.sort((a, b) => a.name.localeCompare(b.name));
+	}, [transport]);
+
+	useEffect(() => {
+		if (isCreateMode || !accessToken || !bot) return;
+		let cancelled = false;
+		setLoading(true);
+		listBotWebhooks(accessToken, bot.id)
+			.then(rows => { if (!cancelled) { setHooks(rows); setListError(null); } })
+			.catch(err => { if (!cancelled) setListError(err instanceof Error ? err.message : String(err)); })
+			.finally(() => { if (!cancelled) setLoading(false); });
+		return () => { cancelled = true; };
+	}, [isCreateMode, accessToken, bot]);
+
+	async function refresh() {
+		if (!accessToken || !bot) return;
+		try {
+			const rows = await listBotWebhooks(accessToken, bot.id);
+			setHooks(rows);
+			setListError(null);
+		} catch (err) {
+			setListError(err instanceof Error ? err.message : String(err));
+		}
+	}
+
+	async function handleCreate(e: React.FormEvent) {
+		e.preventDefault();
+		setFormError(null);
+		const label = formLabel.trim();
+		const targetRoomId = formRoomId.trim();
+		if (!targetRoomId.startsWith("!")) {
+			setFormError("Pick a target room");
+			return;
+		}
+		// Create mode: queue locally, parent flushes after createBot.
+		// No POST happens here; the URL + secret are surfaced by the
+		// parent's post-save banner once the bot has an id.
+		if (isCreateMode) {
+			onPendingChange([...pendingWebhooks, {
+				label,
+				targetRoomId,
+				generateSecret: formGenerateSecret,
+			}]);
+			setFormLabel("");
+			setFormRoomId("");
+			setFormGenerateSecret(true);
+			return;
+		}
+		// Edit mode: POST against /api/bots/:id/webhooks immediately.
+		if (!accessToken || !bot) return;
+		setSubmitting(true);
+		try {
+			const created = await createBotWebhook({
+				accessToken,
+				botId: bot.id,
+				targetRoomId,
+				label,
+				generateSecret: formGenerateSecret,
+			});
+			setJustCreated(created);
+			setFormLabel("");
+			setFormRoomId("");
+			setFormGenerateSecret(true);
+			await refresh();
+		} catch (err) {
+			setFormError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setSubmitting(false);
+		}
+	}
+
+	async function handleDelete(wid: number) {
+		if (!accessToken || !bot) return;
+		if (!window.confirm("Delete this webhook?  External services posting to its URL will start getting 404s.")) return;
+		try {
+			await deleteBotWebhook({ accessToken, botId: bot.id, webhookId: wid });
+			await refresh();
+		} catch (err) {
+			window.alert(`Couldn't delete: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
+
+	function handleRemovePending(idx: number) {
+		onPendingChange(pendingWebhooks.filter((_, i) => i !== idx));
+	}
+
+	return (
+		<div className="space-y-6 max-w-3xl">
+			<div className="flex items-center gap-2 text-sm text-muted-foreground">
+				<Webhook className="h-4 w-4" />
+				<span>External services post to a Koven URL, this bot relays the payload into a room.  Recognises GitHub by default; everything else falls back to a JSON code block.</span>
+			</div>
+
+			{isCreateMode && (
+				<div className="text-xs text-muted-foreground border border-border/60 rounded-md p-3 bg-muted/30">
+					Webhooks queued here will be created when you save the bot.  URLs and signing secrets are shown once at that point — copy them then.
+				</div>
+			)}
+
+			{justCreated && (
+				<div className="rounded-md border border-primary/40 bg-primary/5 p-4 space-y-3 text-sm">
+					<div className="font-medium flex items-center gap-2">
+						<AlertCircle className="h-4 w-4" />
+						Save these now — the secret is shown once
+					</div>
+					<div className="space-y-2 font-mono text-xs">
+						<CopyableField label="Webhook URL" value={webhookUrlFor(justCreated.token)} />
+						{justCreated.secret && (
+							<CopyableField label="Signing secret" value={justCreated.secret} />
+						)}
+					</div>
+					<div className="text-xs text-muted-foreground">
+						Paste the URL into your source service.  If you also have a secret, set it as the webhook&rsquo;s signing secret in that service so we can verify inbound requests with HMAC-SHA256.  GitHub puts this under &ldquo;Secret&rdquo; on the webhook config page.
+					</div>
+					<button
+						type="button"
+						onClick={() => setJustCreated(null)}
+						className="text-xs text-muted-foreground hover:text-foreground underline"
+					>
+						Dismiss
+					</button>
+				</div>
+			)}
+
+			<form onSubmit={handleCreate} className="rounded-md border border-border p-4 space-y-3">
+				<div className="text-sm font-medium">Add a webhook</div>
+				<div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+					<div className="space-y-1">
+						<Label htmlFor="webhook-label">Label</Label>
+						<Input
+							id="webhook-label"
+							value={formLabel}
+							onChange={e => setFormLabel(e.target.value)}
+							placeholder="e.g. GitHub - frontend"
+							maxLength={80}
+						/>
+					</div>
+					<div className="space-y-1">
+						<Label htmlFor="webhook-room">Target room</Label>
+						<select
+							id="webhook-room"
+							value={formRoomId}
+							onChange={e => setFormRoomId(e.target.value)}
+							className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+						>
+							<option value="">Pick a room…</option>
+							{ownerRooms.map(r => (
+								<option key={r.id} value={r.id}>{r.name}</option>
+							))}
+						</select>
+					</div>
+				</div>
+				<label className="inline-flex items-center gap-2 text-xs text-muted-foreground select-none">
+					<input
+						type="checkbox"
+						checked={formGenerateSecret}
+						onChange={e => setFormGenerateSecret(e.target.checked)}
+					/>
+					Generate a signing secret (recommended) — sources that sign requests (GitHub, Stripe, etc.) will be verified before posting
+				</label>
+				{formError && <div className="text-xs text-destructive">{formError}</div>}
+				<Button type="submit" size="sm" disabled={submitting}>
+					<Plus className="h-3.5 w-3.5 mr-1.5" />
+					{isCreateMode
+						? "Queue webhook"
+						: submitting ? "Creating…" : "Create webhook"}
+				</Button>
+			</form>
+
+			{!isCreateMode && loading && <div className="text-sm text-muted-foreground">Loading…</div>}
+			{!isCreateMode && listError && <div className="text-sm text-destructive">{listError}</div>}
+
+			{isCreateMode && pendingWebhooks.length === 0 && (
+				<div className="text-sm text-muted-foreground italic">No webhooks queued.</div>
+			)}
+			{!isCreateMode && !loading && hooks.length === 0 && !justCreated && (
+				<div className="text-sm text-muted-foreground italic">No webhooks yet.</div>
+			)}
+
+			{/* Create-mode pending list — no URL yet, gets one on save. */}
+			{isCreateMode && (
+				<div className="space-y-3">
+					{pendingWebhooks.map((p, idx) => (
+						<div key={idx} className="rounded-md border border-border bg-card/40 p-3 flex items-start gap-3">
+							<Webhook className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
+							<div className="flex-1 min-w-0 space-y-1">
+								<div className="flex items-baseline gap-2 flex-wrap">
+									<span className="text-sm font-medium truncate">{p.label || "(unlabeled)"}</span>
+									<span className="text-[11px] text-muted-foreground truncate">
+										→ {ownerRooms.find(r => r.id === p.targetRoomId)?.name ?? p.targetRoomId}
+									</span>
+									{p.generateSecret && (
+										<span className="text-[10px] uppercase tracking-wider px-1.5 py-px rounded bg-primary/15 text-primary font-semibold">HMAC</span>
+									)}
+								</div>
+								<div className="text-[11px] text-muted-foreground italic">
+									URL will be generated when you save the bot
+								</div>
+							</div>
+							<button
+								type="button"
+								onClick={() => handleRemovePending(idx)}
+								className="text-muted-foreground hover:text-destructive p-1 rounded hover:bg-destructive/10"
+								title="Remove from queue"
+							>
+								<Trash2 className="h-3.5 w-3.5" />
+							</button>
+						</div>
+					))}
+				</div>
+			)}
+
+			{/* Edit-mode live list — full webhook rows with URLs + deliveries. */}
+			{!isCreateMode && (
+				<div className="space-y-3">
+					{hooks.map(h => (
+						<WebhookRow
+							key={h.id}
+							hook={h}
+							accessToken={accessToken!}
+							botId={bot!.id}
+							onDelete={() => handleDelete(h.id)}
+							roomName={ownerRooms.find(r => r.id === h.target_room_id)?.name ?? h.target_room_id}
+						/>
+					))}
+				</div>
+			)}
+		</div>
+	);
+}
+
+function CopyableField({ label, value }: { label: string; value: string }) {
+	const [copied, setCopied] = useState(false);
+	return (
+		<div className="flex items-center gap-2">
+			<span className="text-muted-foreground shrink-0 w-32 text-[11px] uppercase tracking-wider font-sans">{label}</span>
+			<input
+				readOnly
+				value={value}
+				className="flex-1 min-w-0 px-2 py-1 rounded border border-input bg-muted/30 text-xs"
+				onFocus={e => e.currentTarget.select()}
+			/>
+			<button
+				type="button"
+				onClick={async () => {
+					try {
+						await navigator.clipboard.writeText(value);
+						setCopied(true);
+						setTimeout(() => setCopied(false), 1500);
+					} catch {
+						// ignored — user can still select + copy manually
+					}
+				}}
+				className="px-2 py-1 rounded text-xs hover:bg-accent inline-flex items-center gap-1 shrink-0"
+				title="Copy to clipboard"
+			>
+				<Copy className="h-3 w-3" />
+				{copied ? "Copied" : "Copy"}
+			</button>
+		</div>
+	);
+}
+
+function WebhookRow({
+	hook,
+	accessToken,
+	botId,
+	onDelete,
+	roomName,
+}: {
+	hook: WebhookSummary;
+	accessToken: string;
+	botId: number;
+	onDelete(): void;
+	roomName: string;
+}) {
+	const url = webhookUrlFor(hook.token);
+	const [showDeliveries, setShowDeliveries] = useState(false);
+	const [deliveries, setDeliveries] = useState<WebhookDelivery[] | null>(null);
+	const [delivLoading, setDelivLoading] = useState(false);
+
+	useEffect(() => {
+		if (!showDeliveries || deliveries !== null) return;
+		setDelivLoading(true);
+		listBotWebhookDeliveries({ accessToken, botId, webhookId: hook.id })
+			.then(setDeliveries)
+			.catch(() => setDeliveries([]))
+			.finally(() => setDelivLoading(false));
+	}, [showDeliveries, deliveries, accessToken, botId, hook.id]);
+
+	return (
+		<div className="rounded-md border border-border bg-card/40">
+			<div className="p-3 flex items-start gap-3">
+				<Webhook className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
+				<div className="flex-1 min-w-0 space-y-1">
+					<div className="flex items-baseline gap-2 flex-wrap">
+						<span className="text-sm font-medium truncate">{hook.label || "(unlabeled)"}</span>
+						<span className="text-[11px] text-muted-foreground truncate">→ {roomName}</span>
+						{hook.has_secret && (
+							<span className="text-[10px] uppercase tracking-wider px-1.5 py-px rounded bg-primary/15 text-primary font-semibold">HMAC</span>
+						)}
+					</div>
+					<CopyableField label="URL" value={url} />
+					{hook.last_error && (
+						<div className="text-[11px] text-destructive truncate" title={hook.last_error}>
+							Last error: {hook.last_error}
+						</div>
+					)}
+					{hook.last_delivery && !hook.last_error && (
+						<div className="text-[11px] text-muted-foreground">
+							Last delivered: {new Date(hook.last_delivery).toLocaleString()}
+						</div>
+					)}
+					<button
+						type="button"
+						onClick={() => setShowDeliveries(s => !s)}
+						className="text-[11px] text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+					>
+						{showDeliveries ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+						Recent deliveries
+					</button>
+				</div>
+				<button
+					type="button"
+					onClick={onDelete}
+					className="text-muted-foreground hover:text-destructive p-1 rounded hover:bg-destructive/10"
+					title="Delete webhook"
+				>
+					<Trash2 className="h-3.5 w-3.5" />
+				</button>
+			</div>
+			{showDeliveries && (
+				<div className="border-t border-border bg-background/50 p-3 max-h-72 overflow-y-auto">
+					{delivLoading && <div className="text-xs text-muted-foreground">Loading…</div>}
+					{!delivLoading && deliveries && deliveries.length === 0 && (
+						<div className="text-xs text-muted-foreground italic">No deliveries recorded yet.</div>
+					)}
+					<div className="space-y-2">
+						{deliveries?.map(d => (
+							<div key={d.id} className="text-[11px] font-mono space-y-1">
+								<div className={cn("flex items-center gap-2", d.error ? "text-destructive" : "text-muted-foreground")}>
+									<span>{new Date(d.received_at).toLocaleString()}</span>
+									{d.error ? <span>· {d.error}</span> : <span>· delivered</span>}
+								</div>
+								<details className="ml-2">
+									<summary className="cursor-pointer text-muted-foreground/80">payload</summary>
+									<pre className="mt-1 p-2 rounded bg-muted/40 overflow-x-auto whitespace-pre-wrap break-words max-h-48">{d.payload_json}</pre>
+								</details>
+								{d.posted_text && (
+									<details className="ml-2">
+										<summary className="cursor-pointer text-muted-foreground/80">posted</summary>
+										<pre className="mt-1 p-2 rounded bg-muted/40 overflow-x-auto whitespace-pre-wrap break-words">{d.posted_text}</pre>
+									</details>
+								)}
+							</div>
+						))}
+					</div>
+				</div>
+			)}
+		</div>
+	);
 }

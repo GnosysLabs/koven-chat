@@ -90,6 +90,11 @@ import {
 	listBotKnowledge,
 	deleteBotKnowledge,
 	totalBotKnowledgeBytes,
+	insertBotWebhook,
+	listBotWebhooks,
+	getBotWebhookByToken,
+	deleteBotWebhook,
+	listBotWebhookDeliveries,
 	touchEmailLogin,
 	updateBot,
 	updateSuspensionStatus,
@@ -102,6 +107,7 @@ import {
 	FOUNDER_CAP_PUBLIC,
 } from "./db";
 import { evaluateCollapses } from "./collapse";
+import { deliverWebhook } from "./webhooks";
 import {
 	adminCreateUser,
 	adminJoinUserToRoom,
@@ -513,6 +519,20 @@ function randomPassword(): string {
 	const bytes = new Uint8Array(32);
 	crypto.getRandomValues(bytes);
 	return btoa(String.fromCharCode(...bytes))
+		.replace(/\+/g, "-")
+		.replace(/\//g, "_")
+		.replace(/=+$/, "");
+}
+
+/** URL-safe random token of `bytes` bytes, base64url-encoded.
+ * Used for inbound-webhook capability tokens + their optional HMAC
+ * secrets.  Same shape + same entropy guarantees as randomPassword
+ * above; kept separate so the call sites are self-documenting
+ * (passwords vs. webhook tokens have very different lifecycles). */
+function randomToken(bytes: number): string {
+	const buf = new Uint8Array(bytes);
+	crypto.getRandomValues(buf);
+	return btoa(String.fromCharCode(...buf))
 		.replace(/\+/g, "-")
 		.replace(/\//g, "_")
 		.replace(/=+$/, "");
@@ -1265,6 +1285,54 @@ export function startServer(): void {
 				return json({ bots: listAllBotMxids() });
 			}
 
+			// POST /api/webhooks/in/:token
+			// Unauthenticated inbound webhook endpoint.  The token IS
+			// the auth (it's a 32-byte URL-safe random); optional HMAC
+			// further locks it down for sources that support signing
+			// (X-Hub-Signature-256, GitHub-compat).  See engine/src/
+			// webhooks.ts for the delivery pipeline.  Always returns
+			// quickly so the source's retry policy doesn't hammer us.
+			//
+			// Status mapping:
+			//   200 — delivered to the room
+			//   401 — HMAC signature invalid
+			//   404 — unknown token
+			//   413 — body > 1MB
+			//   503 — bot not currently running OR matrix post failed
+			//         (caller may retry)
+			{
+				const m = path.match(/^\/api\/webhooks\/in\/([A-Za-z0-9_\-]+)$/);
+				if (req.method === "POST" && m) {
+					const token = m[1]!;
+					const hook = getBotWebhookByToken(token);
+					if (!hook) {
+						return json({ errcode: "M_NOT_FOUND", error: "unknown webhook token" }, { status: 404 });
+					}
+					// Read raw body once.  Need it as a string for both
+					// HMAC verification (over exact bytes the source
+					// signed) and for JSON parsing in the formatter.
+					const rawBody = await req.text();
+					if (rawBody.length > 1_000_000) {
+						return json({ errcode: "M_TOO_LARGE", error: "body > 1MB" }, { status: 413 });
+					}
+					const result = await deliverWebhook({
+						webhook: hook,
+						headers: req.headers,
+						rawBody,
+					});
+					switch (result.status) {
+						case "ok":
+							return json({ ok: true });
+						case "hmac_invalid":
+							return json({ errcode: "M_FORBIDDEN", error: "invalid signature" }, { status: 401 });
+						case "bot_not_running":
+							return json({ errcode: "M_UNAVAILABLE", error: "bot offline" }, { status: 503 });
+						case "post_failed":
+							return json({ errcode: "M_UNKNOWN", error: result.detail }, { status: 503 });
+					}
+				}
+			}
+
 			// GET /api/bots/directory
 			// Public read.  Richer roster (mxid + display_name + avatar)
 			// for the invite picker, which needs to surface bots BEFORE
@@ -1756,6 +1824,117 @@ export function startServer(): void {
 						const ok = deleteBotKnowledge(fileId, id);
 						if (!ok) return json({ errcode: "M_NOT_FOUND" }, { status: 404 });
 						return json({ ok: true });
+					}
+				}
+			}
+
+			// GET    /api/bots/:id/webhooks                — list
+			// POST   /api/bots/:id/webhooks                — create
+			// DELETE /api/bots/:id/webhooks/:wid           — delete
+			// GET    /api/bots/:id/webhooks/:wid/deliveries — debug log
+			//
+			// Inbound-webhook CRUD for bot owners.  Each webhook is a
+			// unique URL the owner pastes into an external service
+			// (GitHub, Stripe, Linear, n8n, etc.).  Inbound POSTs to
+			// the unauthenticated /api/webhooks/in/:token endpoint
+			// (above) look up the row, format the payload, and post
+			// it via the bot's matrix client into the configured room.
+			// Optional HMAC secret locks the URL down so a leaked
+			// token alone isn't enough to post.
+			//
+			// On create we generate the token + (optional) secret and
+			// return them ONCE.  The secret is stored hashed-not so
+			// the owner has to copy it immediately or regenerate the
+			// webhook to get a new one.  (Future improvement: hash
+			// the secret with bcrypt and verify against the hash.
+			// For v1 we store plaintext to keep HMAC verification
+			// path simple.)
+			{
+				const m = path.match(/^\/api\/bots\/(\d+)\/webhooks(?:\/(\d+)(?:\/(deliveries))?)?$/);
+				if (m) {
+					const userId = await whoami(extractToken(req));
+					if (!userId) return json({ errcode: "M_FORBIDDEN" }, { status: 401 });
+					const id = Number(m[1]);
+					const wid = m[2] ? Number(m[2]) : null;
+					const sub = m[3] ?? null;
+					const existing = getBotById(id);
+					if (!existing) return json({ errcode: "M_NOT_FOUND" }, { status: 404 });
+					if (existing.owner_id !== userId) {
+						return json({ errcode: "M_FORBIDDEN", error: "not your bot" }, { status: 403 });
+					}
+
+					// GET /api/bots/:id/webhooks
+					if (req.method === "GET" && wid === null) {
+						// Strip secret_hmac from the response — it's
+						// shown ONCE on create and after that the bot
+						// owner shouldn't be able to read it back.
+						// (They can always delete + recreate to roll.)
+						const rows = listBotWebhooks(id).map(r => ({
+							id: r.id,
+							bot_id: r.bot_id,
+							token: r.token,
+							has_secret: !!r.secret_hmac,
+							target_room_id: r.target_room_id,
+							label: r.label,
+							created_at: r.created_at,
+							last_delivery: r.last_delivery,
+							last_error: r.last_error,
+						}));
+						return json({ webhooks: rows });
+					}
+
+					// POST /api/bots/:id/webhooks { target_room_id, label, generate_secret }
+					if (req.method === "POST" && wid === null) {
+						const body = (await req.json().catch(() => null)) as
+							| { target_room_id?: unknown; label?: unknown; generate_secret?: unknown }
+							| null;
+						const targetRoomId = typeof body?.target_room_id === "string" ? body.target_room_id.trim() : "";
+						const label = typeof body?.label === "string" ? body.label.trim().slice(0, 80) : "";
+						const generateSecret = body?.generate_secret === true;
+						if (!targetRoomId.startsWith("!")) {
+							return json({
+								errcode: "M_INVALID_PARAM",
+								error: "target_room_id must start with !",
+							}, { status: 400 });
+						}
+						// 32 bytes URL-safe base64 → ~43 chars.  Plenty
+						// of entropy for a capability token (~256 bits).
+						const token = randomToken(32);
+						const secret = generateSecret ? randomToken(32) : null;
+						const created = insertBotWebhook({
+							botId: id,
+							token,
+							secretHmac: secret,
+							targetRoomId,
+							label,
+						});
+						// Return the secret in plaintext exactly here —
+						// caller has to copy it now.
+						return json({
+							ok: true,
+							webhook: {
+								id: created.id,
+								bot_id: created.bot_id,
+								token: created.token,
+								secret: secret,
+								target_room_id: created.target_room_id,
+								label: created.label,
+								created_at: created.created_at,
+							},
+						});
+					}
+
+					// DELETE /api/bots/:id/webhooks/:wid
+					if (req.method === "DELETE" && wid !== null && sub === null) {
+						const removed = deleteBotWebhook(wid, id);
+						if (removed === 0) return json({ errcode: "M_NOT_FOUND" }, { status: 404 });
+						return json({ ok: true });
+					}
+
+					// GET /api/bots/:id/webhooks/:wid/deliveries
+					if (req.method === "GET" && wid !== null && sub === "deliveries") {
+						const rows = listBotWebhookDeliveries(wid, 50);
+						return json({ deliveries: rows });
 					}
 				}
 			}

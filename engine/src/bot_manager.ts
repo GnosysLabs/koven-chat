@@ -79,3 +79,12 @@ export async function stopAllBots(): Promise<void> {
 	const ids = Array.from(running.keys());
 	await Promise.all(ids.map(id => stopOne(id)));
 }
+
+/** Look up the live RunningBot for a bot id, or null if it's not
+ * currently running.  Used by the webhook inbound endpoint so it
+ * can post via the bot's matrix-js-sdk client (with the bot's
+ * crypto state already loaded — important for posting into
+ * encrypted rooms). */
+export function getRunningBot(botId: number): RunningBot | null {
+	return running.get(botId) ?? null;
+}

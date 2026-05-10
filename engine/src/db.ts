@@ -414,6 +414,71 @@ db.exec(`
 	);
 	CREATE INDEX IF NOT EXISTS idx_bot_knowledge_bot ON bot_knowledge(bot_id);
 
+	-- ─── Inbound webhooks per bot ───────────────────────────────────
+	-- Each row is a unique URL the bot owner can paste into an
+	-- external service (GitHub, Stripe, Linear, n8n, etc.).  Inbound
+	-- POSTs to /api/webhooks/in/:token look up the row, optionally
+	-- verify HMAC if a secret is set, format the payload, and post
+	-- it as the bot in target_room_id.  Cascading delete with the
+	-- bot — losing a bot drops its webhooks too.
+	--
+	-- token: random 32-byte URL-safe base64.  Treated as the
+	--        capability for posting; the URL contains it so anyone
+	--        with the URL can post unless secret_hmac is also set.
+	-- secret_hmac: optional shared secret.  When set, requests must
+	--        include an X-Hub-Signature-256 header (sha256=<hex>)
+	--        over the raw body.  Matches GitHub standard so most
+	--        sources plug in unchanged.
+	-- last_delivery / last_error: for the bot owner's debug view.
+	CREATE TABLE IF NOT EXISTS bot_webhooks (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		bot_id          INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+		token           TEXT NOT NULL UNIQUE,
+		secret_hmac     TEXT,
+		target_room_id  TEXT NOT NULL,
+		label           TEXT NOT NULL DEFAULT '',
+		created_at      INTEGER NOT NULL,
+		last_delivery   INTEGER,
+		last_error      TEXT
+	);
+	CREATE INDEX IF NOT EXISTS idx_bot_webhooks_bot ON bot_webhooks(bot_id);
+	CREATE INDEX IF NOT EXISTS idx_bot_webhooks_token ON bot_webhooks(token);
+
+	-- Per-webhook delivery log, capped to the most recent N rows
+	-- (enforced via a trigger below) so a chatty source can't grow
+	-- the database unboundedly.  payload_json is the raw incoming
+	-- body, posted_text is what we actually sent to the room (or
+	-- null if formatting/posting failed), error is the failure
+	-- reason if any.  Drives the bot owner's "recent deliveries"
+	-- debug view.
+	CREATE TABLE IF NOT EXISTS bot_webhook_deliveries (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		webhook_id    INTEGER NOT NULL REFERENCES bot_webhooks(id) ON DELETE CASCADE,
+		received_at   INTEGER NOT NULL,
+		payload_json  TEXT NOT NULL,
+		posted_text   TEXT,
+		error         TEXT
+	);
+	CREATE INDEX IF NOT EXISTS idx_bot_webhook_deliveries_webhook
+		ON bot_webhook_deliveries(webhook_id, received_at DESC);
+
+	-- Cap the delivery log per webhook at 100 rows.  A trigger fires
+	-- after each insert and deletes the oldest rows beyond the cap.
+	-- Cheaper than a periodic janitor sweep + bounds the table size
+	-- proportional to webhook count rather than delivery volume.
+	CREATE TRIGGER IF NOT EXISTS trg_bot_webhook_deliveries_cap
+	AFTER INSERT ON bot_webhook_deliveries
+	BEGIN
+		DELETE FROM bot_webhook_deliveries
+		WHERE webhook_id = NEW.webhook_id
+		  AND id NOT IN (
+			SELECT id FROM bot_webhook_deliveries
+			WHERE webhook_id = NEW.webhook_id
+			ORDER BY received_at DESC
+			LIMIT 100
+		  );
+	END;
+
 	-- ─── Room membership tracker ─────────────────────────────────────
 	-- Updated on every m.room.member state event the engine sees via
 	-- the appservice transaction stream.  Used by the notification
@@ -1591,6 +1656,170 @@ export function getBotMcpServerById(id: number): BotMcpServer | null {
 
 export function deleteBotMcpServer(id: number): void {
 	deleteBotMcpServerStmt.run(id);
+}
+
+// ─── Bot inbound webhooks ────────────────────────────────────────────
+//
+// Each bot can have N webhooks; each webhook has a unique URL token,
+// optional HMAC secret, and a target room.  Inbound POSTs to
+// /api/webhooks/in/:token look up the row, optionally verify HMAC,
+// format the payload, and post via the bot's matrix client into the
+// target room.  Per-webhook delivery log capped at 100 rows by a
+// trigger declared in the schema migration block above.
+
+export interface BotWebhookRow {
+	id: number;
+	bot_id: number;
+	token: string;
+	secret_hmac: string | null;
+	target_room_id: string;
+	label: string;
+	created_at: number;
+	last_delivery: number | null;
+	last_error: string | null;
+}
+
+export interface BotWebhookDeliveryRow {
+	id: number;
+	webhook_id: number;
+	received_at: number;
+	payload_json: string;
+	posted_text: string | null;
+	error: string | null;
+}
+
+const insertBotWebhookStmt = db.prepare(`
+	INSERT INTO bot_webhooks (
+		bot_id, token, secret_hmac, target_room_id, label, created_at
+	) VALUES (?, ?, ?, ?, ?, ?)
+	RETURNING id, bot_id, token, secret_hmac, target_room_id, label,
+	          created_at, last_delivery, last_error
+`);
+
+const listBotWebhooksStmt = db.prepare(`
+	SELECT id, bot_id, token, secret_hmac, target_room_id, label,
+	       created_at, last_delivery, last_error
+	FROM bot_webhooks
+	WHERE bot_id = ?
+	ORDER BY created_at ASC
+`);
+
+const getBotWebhookByTokenStmt = db.prepare(`
+	SELECT id, bot_id, token, secret_hmac, target_room_id, label,
+	       created_at, last_delivery, last_error
+	FROM bot_webhooks
+	WHERE token = ?
+`);
+
+const getBotWebhookByIdStmt = db.prepare(`
+	SELECT id, bot_id, token, secret_hmac, target_room_id, label,
+	       created_at, last_delivery, last_error
+	FROM bot_webhooks
+	WHERE id = ? AND bot_id = ?
+`);
+
+const deleteBotWebhookStmt = db.prepare(`
+	DELETE FROM bot_webhooks WHERE id = ? AND bot_id = ?
+`);
+
+const updateBotWebhookStatusStmt = db.prepare(`
+	UPDATE bot_webhooks
+	SET last_delivery = ?, last_error = ?
+	WHERE id = ?
+`);
+
+const insertBotWebhookDeliveryStmt = db.prepare(`
+	INSERT INTO bot_webhook_deliveries (
+		webhook_id, received_at, payload_json, posted_text, error
+	) VALUES (?, ?, ?, ?, ?)
+`);
+
+const listBotWebhookDeliveriesStmt = db.prepare(`
+	SELECT id, webhook_id, received_at, payload_json, posted_text, error
+	FROM bot_webhook_deliveries
+	WHERE webhook_id = ?
+	ORDER BY received_at DESC
+	LIMIT ?
+`);
+
+/** Create a new webhook for `botId`.  Caller is responsible for
+ * generating the random token (32 bytes URL-safe base64) and the
+ * optional HMAC secret — keeping that in the caller lets the
+ * endpoint return the secret to the user EXACTLY ONCE without ever
+ * persisting the plaintext beyond storage. */
+export function insertBotWebhook(opts: {
+	botId: number;
+	token: string;
+	secretHmac: string | null;
+	targetRoomId: string;
+	label: string;
+}): BotWebhookRow {
+	return insertBotWebhookStmt.get(
+		opts.botId,
+		opts.token,
+		opts.secretHmac,
+		opts.targetRoomId,
+		opts.label,
+		Date.now(),
+	) as BotWebhookRow;
+}
+
+/** All webhooks for a bot, oldest first. */
+export function listBotWebhooks(botId: number): BotWebhookRow[] {
+	return listBotWebhooksStmt.all(botId) as BotWebhookRow[];
+}
+
+/** Look up a webhook by its URL token.  Used by the inbound
+ * endpoint to resolve which bot + room a delivery belongs to. */
+export function getBotWebhookByToken(token: string): BotWebhookRow | null {
+	const row = getBotWebhookByTokenStmt.get(token) as BotWebhookRow | undefined;
+	return row ?? null;
+}
+
+/** Look up a webhook by id, scoped to a specific bot — guards
+ * against cross-bot id enumeration in the CRUD endpoints. */
+export function getBotWebhookById(id: number, botId: number): BotWebhookRow | null {
+	const row = getBotWebhookByIdStmt.get(id, botId) as BotWebhookRow | undefined;
+	return row ?? null;
+}
+
+/** Delete a webhook (and its deliveries via cascade).  Returns the
+ * number of rows actually removed so callers can detect "tried to
+ * delete a webhook that didn't belong to this bot." */
+export function deleteBotWebhook(id: number, botId: number): number {
+	const r = deleteBotWebhookStmt.run(id, botId);
+	return Number(r.changes);
+}
+
+/** Append a delivery log entry + bump the parent webhook's
+ * last_delivery / last_error fields so the bot owner's debug view
+ * can show "last failed at X with error Y" without needing to query
+ * the deliveries table for the latest row. */
+export function recordBotWebhookDelivery(opts: {
+	webhookId: number;
+	payloadJson: string;
+	postedText: string | null;
+	error: string | null;
+}): void {
+	const ts = Date.now();
+	insertBotWebhookDeliveryStmt.run(
+		opts.webhookId,
+		ts,
+		opts.payloadJson,
+		opts.postedText,
+		opts.error,
+	);
+	updateBotWebhookStatusStmt.run(ts, opts.error, opts.webhookId);
+}
+
+/** Recent deliveries for the debug view, newest first.  Capped at
+ * 50 by default; the table itself is capped at 100 by a trigger so
+ * even a request for limit=999 returns at most 100. */
+export function listBotWebhookDeliveries(
+	webhookId: number,
+	limit: number = 50,
+): BotWebhookDeliveryRow[] {
+	return listBotWebhookDeliveriesStmt.all(webhookId, limit) as BotWebhookDeliveryRow[];
 }
 
 // ─── Suspensions ────────────────────────────────────────────────────
