@@ -293,7 +293,14 @@ function isAuthorizedAsHomeserver(req: Request): boolean {
 function corsHeaders(): Record<string, string> {
 	return {
 		"Access-Control-Allow-Origin": "*",
-		"Access-Control-Allow-Methods": "GET, PUT, POST, OPTIONS",
+		// PATCH + DELETE are required by bot CRUD (bot edit form
+		// sends PATCH /api/bots/:id, webhook delete sends DELETE
+		// /api/bots/:id/webhooks/:wid).  Browsers reject the actual
+		// request before sending if the preflight doesn't list the
+		// method, manifesting as "Failed to fetch" with no useful
+		// error in the network tab — confirmed via curl that this
+		// list was the gate.
+		"Access-Control-Allow-Methods": "GET, PUT, POST, PATCH, DELETE, OPTIONS",
 		"Access-Control-Allow-Headers": "Content-Type, Authorization, X-Matrix-Token, X-Koven-Client",
 	};
 }
