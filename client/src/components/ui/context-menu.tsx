@@ -100,10 +100,23 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
 	// a fresh right-click on another row closes us BEFORE that row's
 	// onContextMenu handler fires — otherwise the second open would
 	// race the first close and the menu would flicker shut.
+	//
+	// Critical exclusion: submenus are rendered via createPortal to
+	// document.body so they're NOT a DOM descendant of the parent
+	// menu's ref.  Without the `[data-submenu-portal]` ancestor
+	// check, a mousedown on a submenu item is treated as outside-the-
+	// menu — the entire context menu closes BEFORE the click event
+	// can fire, so the submenu item's onClick handler never runs.
+	// That manifested as "every submenu action does nothing" and was
+	// the actual root cause of the bulk-notify failure (verified by
+	// nginx logs showing zero PUTs from the user despite repeated
+	// attempts).
 	useEffect(() => {
 		const onDown = (e: MouseEvent) => {
-			if (!ref.current) return;
-			if (ref.current.contains(e.target as Node)) return;
+			const target = e.target as HTMLElement | null;
+			if (!ref.current || !target) return;
+			if (ref.current.contains(target)) return;
+			if (target.closest("[data-submenu-portal]")) return;
 			onClose();
 		};
 		const onKey = (e: KeyboardEvent) => {
@@ -209,9 +222,40 @@ function SubmenuRow({
 	const ref = useRef<HTMLDivElement | null>(null);
 	const [open, setOpen] = useState(false);
 	const [submenuPos, setSubmenuPos] = useState<{ left: number; top: number } | null>(null);
+	// Intent-delay close timer.  Without this, the parent wrapper's
+	// `onMouseLeave` fires the instant the cursor crosses out of its
+	// rect — including when the user is moving INTO the submenu,
+	// which is portaled to document.body and therefore not a DOM
+	// descendant of the wrapper.  The submenu unmounts before the
+	// click can land on an item, the user thinks "nothing happened",
+	// and the bulk-notify action (and every other submenu action)
+	// never fires.  Verified empirically by inspecting nginx logs:
+	// zero /api/notify-prefs PUTs from the user's IP across 2000+
+	// recent requests despite multiple right-click attempts.
+	//
+	// Fix: defer setOpen(false) by 120ms; re-enter on either the
+	// wrapper OR the portaled submenu cancels it.  120ms is the
+	// shortest delay that's invisible to a fast cursor and reliable
+	// across trackpad/mouse input.
+	const closeTimerRef = useRef<number | null>(null);
+	const cancelClose = () => {
+		if (closeTimerRef.current !== null) {
+			window.clearTimeout(closeTimerRef.current);
+			closeTimerRef.current = null;
+		}
+	};
+	const scheduleClose = () => {
+		cancelClose();
+		closeTimerRef.current = window.setTimeout(() => {
+			setOpen(false);
+			closeTimerRef.current = null;
+		}, 120);
+	};
+	useEffect(() => () => cancelClose(), []);
 
 	const showSubmenu = () => {
 		if (item.disabled) return;
+		cancelClose();
 		const rect = ref.current?.getBoundingClientRect();
 		if (!rect) return;
 		// Anchor to the right edge; flip to the left when there isn't
@@ -230,13 +274,17 @@ function SubmenuRow({
 		<div
 			ref={ref}
 			onMouseEnter={showSubmenu}
-			onMouseLeave={() => setOpen(false)}
+			onMouseLeave={scheduleClose}
 			className="relative"
 		>
 			<button
 				type="button"
 				role="menuitem"
 				disabled={item.disabled}
+				// Click on the trigger ALSO opens the submenu — the
+				// hover-only path was unreliable on trackpad gestures
+				// and inaccessible to touch input.
+				onClick={() => { if (!open) showSubmenu(); }}
 				className={cn(
 					"w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors",
 					item.disabled
@@ -256,14 +304,20 @@ function SubmenuRow({
 			{open && submenuPos && createPortal(
 				<div
 					role="menu"
+					// `data-submenu-portal` so the parent ContextMenu's
+					// outside-mousedown handler can detect clicks INTO
+					// us as inside-the-menu and not slam itself shut
+					// before our items' click handlers fire.  See the
+					// onDown comment in ContextMenu above.
+					data-submenu-portal="true"
 					style={{ position: "fixed", left: submenuPos.left, top: submenuPos.top, zIndex: 71 }}
 					className={cn(
 						"min-w-[13.75rem] rounded-md border border-border bg-popover text-popover-foreground shadow-md",
 						"py-1 text-sm",
 					)}
 					onContextMenu={(e) => e.preventDefault()}
-					onMouseEnter={() => setOpen(true)}
-					onMouseLeave={() => setOpen(false)}
+					onMouseEnter={cancelClose}
+					onMouseLeave={scheduleClose}
 				>
 					{item.items.map((sub, idx) => (
 						<MenuRow key={idx} item={sub} onCloseRoot={onCloseRoot} />

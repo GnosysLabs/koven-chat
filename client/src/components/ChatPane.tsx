@@ -1023,6 +1023,7 @@ export function ChatPane({
 									!m.isSelf && !!viewerUserId && messageMentionsUser(m, viewerUserId)
 								}
 								onMentionClick={(userId) => onOpenProfile?.(userId)}
+								onOpenSenderProfile={(userId) => onOpenProfile?.(userId)}
 								botMxids={botMxids}
 								pollAggregate={pollsByMessage?.get(m.id)}
 								viewerUserId={viewerUserId}
@@ -1414,6 +1415,7 @@ function MessageRow({
 	isDm, receiptsVersion, memberAvatars, memberNames, mentionsViewer, onMentionClick, botMxids,
 	pollAggregate, viewerUserId, onPollVote, onPollEnd,
 	roomId, onQuote, onSendDmToSender, onBlockSender,
+	onOpenSenderProfile,
 }: {
 	message: Message;
 	avatarMxc: string | undefined;
@@ -1500,6 +1502,13 @@ function MessageRow({
 	onQuote?(text: string): void;
 	onSendDmToSender?(): void;
 	onBlockSender?(): void;
+	// Click handler for the sender's avatar + display name in the
+	// row header.  Opens the sender's profile sheet.  Wired from
+	// ChatPane down to App.tsx's onOpenProfile so the same sheet
+	// the mention pills + member list use is reused here.  Optional
+	// because some embedding contexts (e.g. read-only previews) may
+	// not want clickable identities.
+	onOpenSenderProfile?(userId: UserId): void;
 }) {
 	const [flagDialogOpen, setFlagDialogOpen] = useState(false);
 	// Right-click context menu state.  Cursor-positioned, dismissed
@@ -1599,7 +1608,13 @@ function MessageRow({
 				data-message-id={message.id}
 				className={cn("flex gap-3 items-start", rowPadding, mentionHighlight)}
 			>
-				<AvatarSlot mxc={avatarMxc} seed={message.sender} hidden={continuesGroup} isBot={isBot} />
+				<AvatarSlot
+				mxc={avatarMxc}
+				seed={message.sender}
+				hidden={continuesGroup}
+				isBot={isBot}
+				onClick={onOpenSenderProfile ? () => onOpenSenderProfile(message.sender as UserId) : undefined}
+			/>
 				<div className="flex-1 min-w-0 pt-1 text-sm italic text-muted-foreground flex items-center gap-2">
 					{isCollapsed ? (
 						<CollapsedBubble collapse={collapse!} onExpand={() => setExpanded(true)} />
@@ -1657,14 +1672,31 @@ function MessageRow({
 				setCtxMenuPos({ x: e.clientX, y: e.clientY });
 			}}
 		>
-			<AvatarSlot mxc={avatarMxc} seed={message.sender} hidden={continuesGroup} isBot={isBot} />
+			<AvatarSlot
+				mxc={avatarMxc}
+				seed={message.sender}
+				hidden={continuesGroup}
+				isBot={isBot}
+				onClick={onOpenSenderProfile ? () => onOpenSenderProfile(message.sender as UserId) : undefined}
+			/>
 			<div className="flex-1 min-w-0">
 				{!continuesGroup && (
 					<div className={cn(
 						"text-xs font-medium mb-1.5 flex items-baseline gap-1.5",
 						message.isSelf ? "text-primary" : "text-foreground"
 					)}>
-						<span>{message.senderDisplayName}</span>
+						{onOpenSenderProfile ? (
+							<button
+								type="button"
+								onClick={() => onOpenSenderProfile(message.sender as UserId)}
+								className="hover:underline focus:outline-none focus-visible:underline cursor-pointer"
+								aria-label={`View ${message.senderDisplayName}'s profile`}
+							>
+								{message.senderDisplayName}
+							</button>
+						) : (
+							<span>{message.senderDisplayName}</span>
+						)}
 						{isBot && <BotBadge />}
 						{(() => {
 							// Founder badge inline next to the name —
@@ -1920,18 +1952,39 @@ function ReplyQuote({ replyTo }: { replyTo: NonNullable<Message["replyTo"]> }) {
 	);
 }
 
-function AvatarSlot({ mxc, seed, hidden, isBot }: { mxc?: string; seed: string; hidden: boolean; isBot: boolean }) {
+function AvatarSlot({ mxc, seed, hidden, isBot, onClick }: {
+	mxc?: string;
+	seed: string;
+	hidden: boolean;
+	isBot: boolean;
+	// Click handler — opens the sender's profile sheet.  Optional;
+	// when omitted, the avatar renders as a non-interactive image
+	// (preserves backward-compat for any caller that doesn't have a
+	// profile-open callback to pass).
+	onClick?(): void;
+}) {
 	// Reserve the avatar gutter even when collapsed so subsequent
 	// messages line up under the avatar above.  Saves a layout shift
 	// and gives a clean indented column for grouped runs.
 	if (hidden) return <div className="w-8 shrink-0" />;
-	return (
+	const avatar = (
 		<MatrixAvatar
 			mxc={mxc}
 			seed={seed}
 			kind={isBot ? "bot" : "user"}
 			className="h-8 w-8 mt-0.5"
 		/>
+	);
+	if (!onClick) return avatar;
+	return (
+		<button
+			type="button"
+			onClick={onClick}
+			className="shrink-0 rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-primary hover:opacity-90 transition-opacity"
+			aria-label="View profile"
+		>
+			{avatar}
+		</button>
 	);
 }
 
