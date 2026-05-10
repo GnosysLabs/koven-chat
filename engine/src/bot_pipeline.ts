@@ -287,9 +287,15 @@ async function runToolLoop(
 			title: `Koven (${bot.display_name})`,
 			tools: toolsForCall,
 			// Per-reply token cap.  bot.max_tokens_per_reply = 0
-			// means "let the provider decide" (same as not passing
-			// the field); a positive value clamps each LLM call.
-			maxTokens: bot.max_tokens_per_reply > 0 ? bot.max_tokens_per_reply : undefined,
+			// means "let the provider decide".  A positive value is
+			// passed with 1.6× headroom: the system prompt already
+			// tells the model how long to be (see lengthHint), so
+			// max_tokens is a runaway-cost safety net rather than a
+			// content shaper — the headroom lets the model finish a
+			// sentence cleanly instead of getting hard-cut.
+			maxTokens: bot.max_tokens_per_reply > 0
+				? Math.ceil(bot.max_tokens_per_reply * 1.6)
+				: undefined,
 		});
 
 		if (!result.ok) {
@@ -309,21 +315,13 @@ async function runToolLoop(
 
 		// No tool calls → final text reply, post it and stop.
 		if (result.tool_calls.length === 0) {
-			// Defensive hard cap on the visible reply: some providers
-			// (notably OpenRouter routes for Gemini Flash variants)
-			// silently ignore max_tokens or apply a much higher
-			// internal floor.  When the bot owner has chosen a
-			// per-reply token budget we honour it on OUR side too —
-			// trim the rendered message to ~4 chars per token, which
-			// matches average English encoding for both gpt and
-			// gemini tokenisers within ±15%.  Without this the
-			// dropdown selection would be advisory rather than
-			// enforced, which is exactly the bug report.
-			const charBudget =
-				bot.max_tokens_per_reply > 0
-					? Math.min(MAX_REPLY_CHARS, bot.max_tokens_per_reply * 4)
-					: MAX_REPLY_CHARS;
-			const reply = truncate(result.content.trimEnd(), charBudget);
+			// Per-bot length is enforced via the system-prompt hint
+			// (lengthHint) plus a generous max_tokens, so the model
+			// stops at a sentence boundary rather than mid-word.  Here
+			// we only enforce the global MAX_REPLY_CHARS safety net
+			// that protects against a misbehaving model dumping 30k
+			// chars of garbage into a chat bubble.
+			const reply = truncate(result.content.trimEnd(), MAX_REPLY_CHARS);
 			console.log(
 				`bot ${bot.mxid}: ← LLM done iter=${iter}`
 					+ ` prompt=${promptTokensTotal} completion=${completionTokensTotal}`
@@ -348,11 +346,7 @@ async function runToolLoop(
 				`bot ${bot.mxid}: model still requested tools on final iter; aborting loop and posting partial text`,
 			);
 			bumpBotUsage(bot.id, promptTokensTotal, completionTokensTotal);
-			const partialBudget =
-				bot.max_tokens_per_reply > 0
-					? Math.min(MAX_REPLY_CHARS, bot.max_tokens_per_reply * 4)
-					: MAX_REPLY_CHARS;
-			const reply = truncate(result.content.trimEnd(), partialBudget) || "(bot exceeded tool-use budget)";
+			const reply = truncate(result.content.trimEnd(), MAX_REPLY_CHARS) || "(bot exceeded tool-use budget)";
 			await progress.finalise(reply);
 			return;
 		}
@@ -616,6 +610,13 @@ function buildContext(bot: BotRow, room: SdkRoom, _trigger: MatrixEvent): ChatMe
 	if (bot.system_prompt && bot.system_prompt.trim().length > 0) {
 		promptParts.push(bot.system_prompt);
 	}
+	// Length instruction goes LAST so it's the freshest thing in the
+	// model's working context when it starts writing.  Behaves as a
+	// soft prompt-level cap; the `max_tokens` we pass to the API is a
+	// generous safety net above this target so the model can finish
+	// its thought instead of getting hard-cut mid-word.
+	const lh = lengthHint(bot.max_tokens_per_reply);
+	if (lh) promptParts.push(lh);
 	if (promptParts.length > 0) {
 		out.push({ role: "system", content: promptParts.join("\n\n") });
 	}
@@ -662,6 +663,32 @@ async function postPlain(client: MatrixClient, roomId: string, body: string): Pr
 
 function truncate(s: string, n: number): string {
 	return s.length > n ? `${s.slice(0, n)}…` : s;
+}
+
+/**
+ * Map the bot's per-reply token budget to a natural-language length
+ * instruction that gets appended to the system prompt.
+ *
+ * Why a prompt hint instead of relying on `max_tokens` alone:
+ * `max_tokens` is a HARD cap — the model writes until it hits the
+ * ceiling and then stops mid-word.  That looks broken in chat.  A
+ * prompt hint lets the model self-limit at sentence/paragraph
+ * boundaries; the (generous) `max_tokens` becomes a runaway-cost
+ * safety net rather than a content shaper.
+ *
+ * Buckets are calibrated against observed chat-reply token counts on
+ * gpt-4o-mini / gemini-flash class models — real replies waste
+ * tokens on formatting, hedging, and lead-ins, so a sentence runs
+ * 25-35 tokens not the textbook 15.
+ */
+function lengthHint(maxTokens: number): string | null {
+	if (maxTokens <= 0) return null;
+	if (maxTokens <= 60)   return "Keep your reply to a single sentence.";
+	if (maxTokens <= 130)  return "Keep your reply to 2-3 sentences. Do not write multiple paragraphs.";
+	if (maxTokens <= 250)  return "Keep your reply to a single short paragraph.";
+	if (maxTokens <= 500)  return "Keep your reply to 2-3 paragraphs at most.";
+	if (maxTokens <= 1000) return "Be reasonably concise — up to about half a page.";
+	return "Longer-form replies are fine, but stay focused and avoid filler.";
 }
 
 /**

@@ -179,20 +179,22 @@ interface LimitOption {
 }
 
 // Per-reply token cap.  Sized for chat — quick reactions, normal
-// conversational replies, and the occasional explainer.  At ~4
-// chars/token, 100 ≈ a sentence, 250 ≈ a short paragraph, 500 ≈
-// a few paragraphs, 1000 ≈ a long-form answer.  Anything past
-// ~1500 starts being "the bot is monologuing", which doesn't
-// belong in a chat thread regardless of model capacity.  Power
-// users who really want longer can edit the underlying number
+// conversational replies, and the occasional explainer.  Labels are
+// calibrated against what real bot replies actually produce on
+// gpt-4o-mini / gemini-flash class models, NOT against the textbook
+// "1 token ≈ 0.75 words" math (real chat replies waste tokens on
+// formatting, hedging, and lead-ins, so a sentence usually burns
+// ~30 tokens not 15).  Anything past ~1000 is the bot monologuing —
+// that doesn't belong in a chat thread regardless of model capacity.
+// Power users who really want longer can edit the underlying number
 // via the engine API; the dropdown is the curated set.
 const MAX_REPLY_OPTIONS: LimitOption[] = [
 	{ value: "",     label: "Unlimited" },
-	{ value: "100",  label: "Snappy (~1 sentence)" },
-	{ value: "175",  label: "Brief (~2-3 sentences)" },
-	{ value: "250",  label: "Short (~1 paragraph)" },
-	{ value: "500",  label: "Medium (~few paragraphs)" },
-	{ value: "1000", label: "Long (~half page)" },
+	{ value: "40",   label: "Snappy (~1 sentence)" },
+	{ value: "100",  label: "Brief (~2-3 sentences)" },
+	{ value: "200",  label: "Short (~1 paragraph)" },
+	{ value: "400",  label: "Medium (~2-3 paragraphs)" },
+	{ value: "800",  label: "Long (~half page)" },
 	{ value: "1500", label: "Detailed (~full page)" },
 ];
 
