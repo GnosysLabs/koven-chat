@@ -1216,17 +1216,38 @@ export default function App() {
 				const parents = await fetchRoomParents(resolvedId);
 				if (parents.length > 0) {
 					const parentId = parents[0]!;
-					// If the user is ALREADY in the parent space,
-					// fast-navigate to the room itself (the engine
-					// cascade should have pulled them in; if it
-					// didn't, the room still opens with a possibly-
-					// empty timeline and matrix-js-sdk will join via
-					// the restricted-rule path on first view).
+					// User is in the parent space but somehow missing
+					// from THIS room (engine cascade dropped them, or
+					// the room was created in a state that bypassed
+					// the cascade).  Quietly run the join here so the
+					// click actually lands them inside the room
+					// instead of dispatching set_active_room on a
+					// non-member room (which renders as a stuck
+					// "joining..." state and looks like the sheet
+					// flashed and closed).  Restricted-rule rooms
+					// accept the join because the user is already a
+					// member of the parent space; public rooms
+					// accept unconditionally.  Errors fall through to
+					// the confirm sheet so the user can see what went
+					// wrong.
 					const parentSpace = spacesRef.current.find(s => s.id === parentId);
 					if (parentSpace) {
-						setPendingJoin(null);
-						navigateToTarget(resolvedId, false);
-						clearShareUrl();
+						setPendingJoin(p => p && p.intent === intent ? { ...p, joining: true } : p);
+						try {
+							await transport.joinRoomById(resolvedId);
+							setPendingJoin(null);
+							navigateToTarget(resolvedId, false);
+							clearShareUrl();
+						} catch (err) {
+							const msg = err instanceof Error ? err.message : String(err);
+							setPendingJoin(p => p && p.intent === intent ? {
+								...p,
+								preview,
+								loading: false,
+								joining: false,
+								error: msg,
+							} : p);
+						}
 						return;
 					}
 					// Not in the parent space yet — fetch its

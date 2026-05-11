@@ -58,8 +58,27 @@ export function ModLogSheet({ open, onOpenChange, roomId, transport }: ModLogShe
 		return () => { cancelled = true; };
 	}, [open, roomId]);
 
+	// Don't pop the Dialog open until the mod-log fetch lands.  The
+	// older "open immediately, show Loading… inside" path produced
+	// a jarring two-frame transition: the empty sheet sliding in
+	// from the bottom with a placeholder, then the body filling in.
+	// Latching `hasMounted` ON after the first ready means a fast
+	// scroll-jiggle inside the sheet doesn't flicker the visibility
+	// while React is still committing renders.  Matches the
+	// ProfileSheet gating pattern.
+	const ready = entries !== null;
+	const [hasMounted, setHasMounted] = useState(false);
+	useEffect(() => {
+		if (!open) {
+			setHasMounted(false);
+		} else if (ready && !hasMounted) {
+			setHasMounted(true);
+		}
+	}, [open, ready, hasMounted]);
+	const dialogOpen = open && (ready || hasMounted);
+
 	return (
-		<Dialog open={open} onOpenChange={onOpenChange}>
+		<Dialog open={dialogOpen} onOpenChange={onOpenChange}>
 			<DialogContent className="sm:max-w-2xl max-h-[80vh] flex flex-col">
 				<DialogHeader>
 					<DialogTitle>Mod log</DialogTitle>
@@ -70,9 +89,7 @@ export function ModLogSheet({ open, onOpenChange, roomId, transport }: ModLogShe
 
 				<TransportContext.Provider value={transport ?? null}>
 					<div className="flex-1 overflow-y-auto -mx-6 px-6">
-						{entries === null ? (
-							<div className="text-sm text-muted-foreground py-6 text-center">Loading…</div>
-						) : entries.length === 0 ? (
+						{entries === null ? null : entries.length === 0 ? (
 							<div className="text-sm text-muted-foreground italic py-6 text-center border border-dashed border-border rounded">
 								No moderation events recorded in this room yet.
 							</div>
