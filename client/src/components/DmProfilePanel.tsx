@@ -13,8 +13,19 @@ import { fetchUserBio } from "@/lib/profile";
 import { formatMxid, serverOf } from "@/lib/mxid";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
-import { Ban, Trash2, UserCheck } from "lucide-react";
+import { AlertTriangle, Ban, Trash2, UserCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+
+export type DeleteProgressPhase = "paginating" | "redacting" | "kicking" | "cleanup";
 
 export interface DmProfilePanelProps {
 	otherUserId: UserId;
@@ -25,10 +36,13 @@ export interface DmProfilePanelProps {
 	// Click handler for the row, so the user can still open the full
 	// profile dialog if they want.
 	onOpenProfile(userId: UserId): void;
-	// Delete this DM (leave + forget + clear m.direct).  Matrix-native
-	// "delete for me" — the other party's copy is unaffected.  After
-	// success, the parent should navigate away from the now-gone room.
-	onDeleteDm(): Promise<void>;
+	// Delete this DM for BOTH parties: redact every message, kick the
+	// other participant, then leave + forget + clear m.direct on our
+	// side.  The optional progress callback lets the parent forward
+	// per-phase updates so this panel's confirmation modal can show
+	// "Deleting 142 / 5000" instead of a blank spinner on long
+	// conversations.
+	onDeleteDm(onProgress?: (phase: DeleteProgressPhase, done: number, total: number) => void): Promise<void>;
 	// Whether the other user is a registered bot — drives the BOT
 	// pill rendered next to their name and suppresses the reputation
 	// block (bots don't accrue rep).
@@ -47,11 +61,22 @@ export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenPro
 		homeserver: string;
 	} | null>(null);
 	const [bio, setBio] = useState("");
-	// Two-click confirm for delete: first click reveals Confirm + Cancel,
-	// second click executes.  Inline rather than a modal because it's a
-	// terminal action that benefits from staying in context.
-	const [confirmingDelete, setConfirmingDelete] = useState(false);
+	// Confirmation modal state.  The button on the panel opens the
+	// dialog; the dialog owns its own Confirm + Cancel buttons.  A
+	// modal rather than inline because bilateral deletion is a
+	// genuinely-irreversible action (every message redacted for the
+	// other party, they get kicked) and the extra context of a
+	// dedicated surface is worth the click.
+	const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 	const [deleting, setDeleting] = useState(false);
+	// Progress reported from transport.deleteDm so the modal can show
+	// the current phase + counter instead of a blind spinner on a
+	// thousand-message DM.  Null while idle.
+	const [deleteProgress, setDeleteProgress] = useState<{
+		phase: DeleteProgressPhase;
+		done: number;
+		total: number;
+	} | null>(null);
 	const [blocking, setBlocking] = useState(false);
 	const [blockError, setBlockError] = useState<string | null>(null);
 	const isBlocked = ignoredUsers.has(otherUserId);
@@ -91,20 +116,25 @@ export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenPro
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [otherUserId, transport]);
 
-	// Reset the confirm state when the DM target changes — switching to
+	// Reset the dialog state when the DM target changes, switching to
 	// a different DM should never inherit a half-armed delete.
 	useEffect(() => {
-		setConfirmingDelete(false);
+		setDeleteDialogOpen(false);
 		setDeleting(false);
+		setDeleteProgress(null);
 	}, [otherUserId]);
 
 	async function doDelete() {
 		setDeleting(true);
+		setDeleteProgress({ phase: "paginating", done: 0, total: 0 });
 		try {
-			await onDeleteDm();
+			await onDeleteDm((phase, done, total) => {
+				setDeleteProgress({ phase, done, total });
+			});
 		} finally {
 			setDeleting(false);
-			setConfirmingDelete(false);
+			setDeleteProgress(null);
+			setDeleteDialogOpen(false);
 		}
 	}
 
@@ -214,48 +244,32 @@ export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenPro
 				</div>
 
 				<div className="mt-2">
-					{!confirmingDelete ? (
-						<button
-							type="button"
-							onClick={() => setConfirmingDelete(true)}
-							className={cn(
-								"w-full flex items-center justify-center gap-2 px-2 py-1.5 rounded text-xs",
-								"text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors",
-							)}
-						>
-							<Trash2 className="h-3.5 w-3.5" />
-							Delete conversation
-						</button>
-					) : (
-						<div className="space-y-2">
-							<p className="text-[11px] text-muted-foreground leading-snug">
-								Removes this DM from your sidebar. Their copy is unaffected — if they message you again, it'll arrive as a new conversation.
-							</p>
-							<div className="flex gap-2">
-								<button
-									type="button"
-									onClick={doDelete}
-									disabled={deleting}
-									className={cn(
-										"flex-1 px-2 py-1.5 rounded text-xs font-medium",
-										"bg-destructive/15 text-destructive hover:bg-destructive/25 transition-colors",
-										"disabled:opacity-50 disabled:cursor-not-allowed",
-									)}
-								>
-									{deleting ? "Deleting…" : "Confirm delete"}
-								</button>
-								<button
-									type="button"
-									onClick={() => setConfirmingDelete(false)}
-									disabled={deleting}
-									className="flex-1 px-2 py-1.5 rounded text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-50"
-								>
-									Cancel
-								</button>
-							</div>
-						</div>
-					)}
+					<button
+						type="button"
+						onClick={() => setDeleteDialogOpen(true)}
+						className={cn(
+							"w-full flex items-center justify-center gap-2 px-2 py-1.5 rounded text-xs",
+							"text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors",
+						)}
+					>
+						<Trash2 className="h-3.5 w-3.5" />
+						Delete conversation
+					</button>
 				</div>
+
+				<DeleteConversationDialog
+					open={deleteDialogOpen}
+					onOpenChange={(o) => {
+						// Don't let the user close mid-delete.  Cleanup in
+						// doDelete's finally clears the dialog itself.
+						if (!o && deleting) return;
+						setDeleteDialogOpen(o);
+					}}
+					otherDisplayName={profile?.displayName ?? otherUserId}
+					deleting={deleting}
+					progress={deleteProgress}
+					onConfirm={doDelete}
+				/>
 				</>)}
 			</div>
 		</aside>
@@ -316,6 +330,93 @@ function LevelTicks({ filled, total, tickClass }: { filled: number; total: numbe
 				/>
 			))}
 		</span>
+	);
+}
+
+function DeleteConversationDialog({
+	open,
+	onOpenChange,
+	otherDisplayName,
+	deleting,
+	progress,
+	onConfirm,
+}: {
+	open: boolean;
+	onOpenChange(open: boolean): void;
+	otherDisplayName: string;
+	deleting: boolean;
+	progress: { phase: DeleteProgressPhase; done: number; total: number } | null;
+	onConfirm(): void | Promise<void>;
+}) {
+	// Phase-aware status line.  The redacting phase is the one that
+	// can actually run long, so it gets a counter; the others get
+	// short verbs because they typically resolve in well under a
+	// second and a counter would just flash and disappear.
+	let statusLine: string | null = null;
+	if (progress) {
+		switch (progress.phase) {
+			case "paginating":
+				statusLine = `Loading message history… (${progress.done} loaded)`;
+				break;
+			case "redacting":
+				statusLine = progress.total > 0
+					? `Deleting messages ${progress.done} / ${progress.total}…`
+					: "No messages to delete.";
+				break;
+			case "kicking":
+				statusLine = "Removing the other participant…";
+				break;
+			case "cleanup":
+				statusLine = "Finishing up…";
+				break;
+		}
+	}
+
+	return (
+		<Dialog open={open} onOpenChange={onOpenChange}>
+			<DialogContent className="sm:max-w-md">
+				<DialogHeader>
+					<DialogTitle className="flex items-center gap-2">
+						<AlertTriangle className="h-4 w-4 text-destructive" />
+						Delete this conversation?
+					</DialogTitle>
+					<DialogDescription>
+						This deletes the conversation for BOTH you and {otherDisplayName}.
+					</DialogDescription>
+				</DialogHeader>
+
+				<ul className="text-xs text-muted-foreground space-y-1.5 list-disc list-inside leading-relaxed">
+					<li>Every message in this DM is redacted on the server.  Their content is wiped from both sides.</li>
+					<li>{otherDisplayName} is removed from the conversation.  It disappears from their conversation list too.</li>
+					<li>This <strong className="text-foreground">cannot be undone</strong>.  Sent media is unrecoverable once redacted.</li>
+				</ul>
+
+				{statusLine && (
+					<div className="text-xs text-muted-foreground border border-border rounded-md px-3 py-2 bg-muted/40">
+						{statusLine}
+					</div>
+				)}
+
+				<DialogFooter>
+					<Button
+						type="button"
+						variant="ghost"
+						onClick={() => onOpenChange(false)}
+						disabled={deleting}
+					>
+						Cancel
+					</Button>
+					<Button
+						type="button"
+						variant="destructive"
+						onClick={onConfirm}
+						disabled={deleting}
+					>
+						{deleting ? "Deleting…" : "Delete for both"}
+					</Button>
+				</DialogFooter>
+			</DialogContent>
+		</Dialog>
 	);
 }
 

@@ -2608,10 +2608,10 @@ export default function App() {
 							ignoredUsers={ignoredUsers}
 							isBot={botMxids.has(activeRoom.dmUserId as UserId)}
 							onOpenProfile={(userId) => setViewedUserId(userId)}
-							onDeleteDm={async () => {
+							onDeleteDm={async (onProgress) => {
 								if (!transport || !state.activeRoomId) return;
 								try {
-									await transport.deleteDm(state.activeRoomId);
+									await transport.deleteDm(state.activeRoomId, onProgress);
 									dispatch({ type: "set_active_room", roomId: null });
 								} catch (e) {
 									dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
