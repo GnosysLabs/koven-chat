@@ -312,11 +312,30 @@ pub fn run() {
 	// We pick a port once at process start (rather than letting the
 	// localhost plugin pick on its own) so the value is reachable from
 	// both the navigation handler and the webview URL builder without
-	// having to thread it through closures.  portpicker hands us a
-	// random free port between 49152-65535 — collision-resistant
-	// across simultaneously-running Koven installs (each gets its own
-	// number) and across whatever else the user has running.
-	let local_port = portpicker::pick_unused_port().expect("no free local port available");
+	// having to thread it through closures.
+	//
+	// CRITICAL: the port must be STABLE across launches.  WKWebView
+	// (and every other browser) keys localStorage / IndexedDB by
+	// ORIGIN — `http://localhost:51420` and `http://localhost:51421`
+	// are different origins, so a port that changes per launch wipes
+	// the user's auth (and matrix-js-sdk's crypto store) every time
+	// the app reopens — most visible after an updater-triggered
+	// relaunch ("why does it make me sign in every update?").
+	//
+	// Strategy: try a deterministic high port first (51420 is well
+	// above the typical user-app range, unlikely to collide).  If
+	// it's already taken (other Koven install running on the same
+	// machine, port shadow from a recent crash, etc.), fall back to
+	// portpicker — that launch will lose its localStorage but at
+	// least the app starts.  In practice the deterministic port
+	// works for the lifetime of the user's install.
+	const STABLE_LOCAL_PORT: u16 = 51420;
+	let local_port: u16 = if portpicker::is_free(STABLE_LOCAL_PORT) {
+		STABLE_LOCAL_PORT
+	} else {
+		eprintln!("koven-desktop: stable port {STABLE_LOCAL_PORT} busy, falling back to random — this launch will lose localStorage");
+		portpicker::pick_unused_port().expect("no free local port available")
+	};
 
 	tauri::Builder::default()
 		// Keep one window per machine — second `koven-desktop` launch
