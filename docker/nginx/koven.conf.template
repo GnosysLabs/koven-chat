@@ -25,6 +25,21 @@ server {
     root /opt/koven-web/client/dist;
     index index.html;
 
+    # Apple App-Site Association — Universal Links for the Koven
+    # Desktop bundle.  When the OS sees the
+    # com.apple.developer.associated-domains entitlement on Koven
+    # (applinks:${KOVEN_HOSTNAME}), it fetches this file via
+    # Apple's CDN once at install + periodic refresh.  A successful
+    # AppID match means clicks on
+    # https://${KOVEN_HOSTNAME}/invite/* and /r/* anywhere in the
+    # OS open Koven Desktop directly instead of going to a browser
+    # tab.  Apple requires application/json with NO redirect on
+    # this exact URL, and NO .json extension on the path itself.
+    location = /.well-known/apple-app-site-association {
+        default_type application/json;
+        return 200 '{"applinks":{"details":[{"appIDs":["4PDUNTF69S.chat.koven.desktop"],"components":[{"/":"/invite/*","comment":"Room and space invites"},{"/":"/r/*","comment":"Message permalinks"}]}]}}';
+    }
+
     # Match Synapse's max_upload_size for media uploads.
     client_max_body_size 50M;
 
