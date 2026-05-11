@@ -32,7 +32,7 @@ import { MediaContextMenu } from "@/components/MediaContextMenu";
 import { MessageContextMenu } from "@/components/MessageContextMenu";
 import { firstLink, linkify } from "@/lib/linkify";
 import { renderWithMentions } from "@/lib/mentionRender";
-import { buildMessageUrl } from "@/lib/inviteLink";
+import { buildMessageUrl, parseShareLinkUrl } from "@/lib/inviteLink";
 import { findYouTubeMatches, isYouTubeUrl, stripYouTubeUrls } from "@/lib/youtube";
 import { YouTubeEmbed } from "@/components/YouTubeEmbed";
 import { GifPicker } from "@/components/GifPicker";
@@ -2794,11 +2794,20 @@ function PendingAttachmentThumb({
 function UrlPreviewSlot({ text }: { text: string }) {
 	const url = firstLink(text);
 	const firstUrlIsYouTube = !!url && isYouTubeUrl(url);
-	// Pass null to useUrlPreview when YouTube wins the slot so we
-	// don't spend a Synapse OG-preview round-trip we'd just discard.
-	const preview = useUrlPreview(firstUrlIsYouTube ? null : url);
+	// Skip the OG card for share URLs the message body already
+	// rendered as an inline room-mention pill.  The pill conveys
+	// the target's name + scope, an extra card showing "Koven /
+	// CLIENT.KOVEN.CHAT / Welcome to Koven" beneath is just visual
+	// noise (and a redundant Synapse OG round-trip).  We treat any
+	// URL the share-link parser recognises as "already pilled" and
+	// suppress the preview slot entirely.
+	const firstUrlIsShareLink = !!url && parseShareLinkUrl(url) !== null;
+	// Pass null to useUrlPreview when YouTube or our own share link
+	// wins the slot so we don't spend a Synapse OG-preview round-
+	// trip we'd just discard.
+	const preview = useUrlPreview(firstUrlIsYouTube || firstUrlIsShareLink ? null : url);
 	const imageUrl = useMatrixMedia(preview?.imageMxc);
-	if (!url || firstUrlIsYouTube || !preview) return null;
+	if (!url || firstUrlIsYouTube || firstUrlIsShareLink || !preview) return null;
 
 	const host = (() => {
 		try { return new URL(preview.url).hostname.replace(/^www\./, ""); }
