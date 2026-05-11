@@ -2080,6 +2080,13 @@ export class MatrixTransport {
 		// the default-on behavior.  The creator can flip the flag
 		// later via RoomEditSheet.
 		liveEnabled?: boolean;
+		// Optional emoji icon for the room — stamped at create time
+		// as the `chat.koven.room_icon` state event, same as
+		// RoomEditSheet's iconEmoji path.  Trimmed and capped at
+		// 16 chars so a malformed paste can't dump an essay into
+		// the state event.  Empty / missing → no icon, MatrixAvatar
+		// falls back to the generated tile or uploaded image.
+		iconEmoji?: string;
 		// Optional avatar uploaded + set as the room's m.room.avatar
 		// state event after creation.  Best-effort; failure doesn't
 		// roll back the room.
@@ -2177,6 +2184,18 @@ export class MatrixTransport {
 				type: "chat.koven.live",
 				state_key: "",
 				content: { enabled: false },
+			});
+		}
+		// Room icon emoji.  Same chat.koven.room_icon state event
+		// the edit-room flow writes; stamping at create time so a
+		// fresh room can land with a chosen emoji in one round trip
+		// instead of needing a follow-up state-event call.
+		const iconEmojiTrimmed = opts.iconEmoji?.trim().slice(0, 16);
+		if (iconEmojiTrimmed) {
+			initialState.push({
+				type: "chat.koven.room_icon",
+				state_key: "",
+				content: { emoji: iconEmojiTrimmed },
 			});
 		}
 		// IMPORTANT: don't pass the full inviteList as the `invite`

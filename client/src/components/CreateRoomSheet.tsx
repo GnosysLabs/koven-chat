@@ -1,4 +1,10 @@
-// Create-room dialog — name + topic + avatar.
+// Create-room dialog — name + topic + avatar + emoji + Live toggle.
+//
+// Layout mirrors RoomEditSheet so the create + edit flows feel like
+// the same form in two states (one with empty fields, one with the
+// current room's state preloaded).  Narrow `sm:max-w-md` dialog,
+// 14×14 avatar tile on the left, action column on the right with
+// Upload / Set Emoji / Remove buttons, name + topic inputs below.
 //
 // Discord-style invariant: the new room ALWAYS lives inside the
 // currently active space, and silently inherits the space's
@@ -30,8 +36,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { EmojiPicker } from "@/components/EmojiPicker";
 import { cn } from "@/lib/utils";
-import { Camera, Trash2, Video } from "lucide-react";
+import { Camera, Smile, Trash2, Video } from "lucide-react";
 
 export interface CreateRoomSheetProps {
 	open: boolean;
@@ -42,6 +49,9 @@ export interface CreateRoomSheetProps {
 		// Mirrors CreateSpaceSheet — when set, the file gets uploaded
 		// + written as m.room.avatar after createRoom returns.
 		avatarFile?: File;
+		// Optional emoji icon — stamped as chat.koven.room_icon at
+		// create time.  Empty string means "no emoji."
+		iconEmoji: string;
 		// Whether the new room exposes the Live (voice / video /
 		// screen-share) bar.  Defaults to true; only passed as
 		// false when the creator explicitly turns it off, so the
@@ -61,6 +71,7 @@ export function CreateRoomSheet({
 }: CreateRoomSheetProps) {
 	const [name, setName] = useState("");
 	const [topic, setTopic] = useState("");
+	const [iconEmoji, setIconEmoji] = useState("");
 	// Live channel defaults to on — matches the default in
 	// RoomEditSheet + readKovenLiveEnabled (missing state event
 	// is treated as enabled).  Creator can turn it off here for
@@ -68,7 +79,6 @@ export function CreateRoomSheet({
 	const [liveEnabled, setLiveEnabled] = useState(true);
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
-	// Avatar pick state — same pattern as CreateSpaceSheet.
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
 	const [avatarFile, setAvatarFile] = useState<File | undefined>(undefined);
 	const [avatarPreview, setAvatarPreview] = useState<string | undefined>(undefined);
@@ -76,6 +86,7 @@ export function CreateRoomSheet({
 	function reset() {
 		setName("");
 		setTopic("");
+		setIconEmoji("");
 		setLiveEnabled(true);
 		setAvatarFile(undefined);
 		setAvatarPreview(undefined);
@@ -105,6 +116,7 @@ export function CreateRoomSheet({
 				name: trimmed,
 				topic: topic.trim(),
 				avatarFile,
+				iconEmoji: iconEmoji.trim(),
 				liveEnabled,
 			});
 			reset();
@@ -117,7 +129,7 @@ export function CreateRoomSheet({
 
 	return (
 		<Dialog open={open} onOpenChange={(o) => { if (!o) reset(); onOpenChange(o); }}>
-			<DialogContent className="sm:max-w-2xl">
+			<DialogContent className="sm:max-w-md">
 				<DialogHeader>
 					<DialogTitle>Create a room in {parentSpaceName}</DialogTitle>
 					<DialogDescription>
@@ -126,70 +138,104 @@ export function CreateRoomSheet({
 				</DialogHeader>
 
 				<form onSubmit={submit} className="space-y-4">
-					{/* Avatar + name on the same row — mirrors
-					    CreateSpaceSheet for visual consistency. */}
-					<div className="flex items-start gap-4">
+					{/* Avatar tile + action column — mirrors RoomEditSheet's
+					    layout so the create + edit dialogs feel like one
+					    form in two states.  Emoji takes priority over
+					    uploaded image in the preview, same as the
+					    rendered avatar everywhere else in the SPA. */}
+					<div className="flex items-center gap-3">
 						<button
 							type="button"
 							onClick={() => fileInputRef.current?.click()}
 							className={cn(
-								"h-20 w-20 rounded-lg border border-border flex items-center justify-center overflow-hidden shrink-0",
-								"hover:border-primary/60 transition-colors",
-								avatarPreview ? "" : "bg-muted text-muted-foreground",
+								"h-14 w-14 rounded-md border border-border flex items-center justify-center overflow-hidden",
+								"hover:border-primary/60 transition-colors shrink-0",
+								avatarPreview ? "" : "bg-muted",
 							)}
 							aria-label="Upload avatar"
 							title="Upload avatar"
 						>
-							{avatarPreview ? (
+							{iconEmoji.trim() ? (
+								// Emoji preview: render at the same size as
+								// MatrixAvatar's emoji variant elsewhere.
+								<span className="text-2xl leading-none">{iconEmoji.trim()}</span>
+							) : avatarPreview ? (
 								<img src={avatarPreview} alt="" className="h-full w-full object-cover" />
 							) : (
-								<Camera className="h-6 w-6" />
+								<Camera className="h-5 w-5 text-muted-foreground" />
 							)}
 						</button>
-						<div className="flex-1 space-y-3 min-w-0">
-							<div className="space-y-1.5">
-								<Label htmlFor="room-name">Name</Label>
-								<Input
-									id="room-name"
-									type="text"
-									value={name}
-									onChange={(e) => setName(e.target.value)}
-									placeholder="general"
-									autoFocus
-									required
-									maxLength={20}
+						<div className="flex flex-col items-start gap-1.5">
+							<Button
+								type="button"
+								variant="outline"
+								size="sm"
+								onClick={() => fileInputRef.current?.click()}
+							>
+								<Camera className="h-3.5 w-3.5 mr-1.5" />
+								{avatarPreview ? "Change avatar" : "Upload avatar"}
+							</Button>
+							<div className="flex items-center gap-1.5">
+								<EmojiPicker
+									value={iconEmoji}
+									onChange={setIconEmoji}
+									trigger={
+										<Button type="button" variant="outline" size="sm">
+											<Smile className="h-3.5 w-3.5 mr-1.5" />
+											{iconEmoji ? "Change emoji" : "Set an emoji"}
+										</Button>
+									}
 								/>
-							</div>
-							<div className="flex items-center gap-2">
-								<Button
-									type="button"
-									variant="outline"
-									size="sm"
-									onClick={() => fileInputRef.current?.click()}
-								>
-									<Camera className="h-3.5 w-3.5 mr-1.5" />
-									{avatarPreview ? "Change avatar" : "Upload avatar"}
-								</Button>
-								{avatarPreview && (
+								{iconEmoji && (
 									<Button
 										type="button"
 										variant="ghost"
 										size="sm"
-										onClick={() => pickAvatar(undefined)}
-										className="text-muted-foreground hover:text-destructive"
+										onClick={() => setIconEmoji("")}
+										className="text-muted-foreground hover:text-destructive h-7"
+										title="Remove emoji"
 									>
-										<Trash2 className="h-3.5 w-3.5 mr-1" /> Remove
+										<Trash2 className="h-3 w-3" />
 									</Button>
 								)}
 							</div>
-							<input
-								ref={fileInputRef}
-								type="file"
-								accept="image/*"
-								className="hidden"
-								onChange={(e) => pickAvatar(e.target.files?.[0])}
-							/>
+							{avatarPreview && (
+								<Button
+									type="button"
+									variant="ghost"
+									size="sm"
+									onClick={() => pickAvatar(undefined)}
+									className="text-muted-foreground hover:text-destructive h-7"
+								>
+									<Trash2 className="h-3 w-3 mr-1" /> Remove
+								</Button>
+							)}
 						</div>
+						<input
+							ref={fileInputRef}
+							type="file"
+							accept="image/*"
+							className="hidden"
+							onChange={(e) => {
+								const file = e.target.files?.[0];
+								if (file) pickAvatar(file);
+								e.target.value = "";
+							}}
+						/>
+					</div>
+
+					<div className="space-y-1.5">
+						<Label htmlFor="room-name">Name</Label>
+						<Input
+							id="room-name"
+							type="text"
+							value={name}
+							onChange={(e) => setName(e.target.value)}
+							placeholder="general"
+							autoFocus
+							required
+							maxLength={50}
+						/>
 					</div>
 
 					<div className="space-y-1.5">
@@ -200,7 +246,7 @@ export function CreateRoomSheet({
 							value={topic}
 							onChange={(e) => setTopic(e.target.value)}
 							placeholder="What this room is about"
-							maxLength={200}
+							maxLength={300}
 						/>
 					</div>
 
