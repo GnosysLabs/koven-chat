@@ -2071,6 +2071,15 @@ export class MatrixTransport {
 		// confusing moderation surface (some rooms flag-able, some
 		// not) that was hard to communicate to users.
 		parentSpaceId: SpaceId;
+		// Whether the new room exposes a Live channel (voice /
+		// video / screen-share bar).  Stamped at create time as
+		// `chat.koven.live` state event with `{ enabled: bool }`;
+		// readers (RoomVoiceBar / ChatPane) default to ENABLED when
+		// the state event is missing.  Pass `false` here to start
+		// the room with calls turned off; omit (or `true`) to leave
+		// the default-on behavior.  The creator can flip the flag
+		// later via RoomEditSheet.
+		liveEnabled?: boolean;
 		// Optional avatar uploaded + set as the room's m.room.avatar
 		// state event after creation.  Best-effort; failure doesn't
 		// roll back the room.
@@ -2155,6 +2164,19 @@ export class MatrixTransport {
 				type: "chat.koven.nsfw",
 				state_key: "",
 				content: { enabled: true },
+			});
+		}
+		// Live-channel toggle.  Only stamp the state event when the
+		// caller wants something OTHER than the default-on behavior
+		// — `chat.koven.live` missing IS "Live enabled" per the
+		// readKovenLiveEnabled fallback.  Writing the event only
+		// when explicitly disabled keeps room state lean for the
+		// 99% case where Live is on.
+		if (opts.liveEnabled === false) {
+			initialState.push({
+				type: "chat.koven.live",
+				state_key: "",
+				content: { enabled: false },
 			});
 		}
 		// IMPORTANT: don't pass the full inviteList as the `invite`

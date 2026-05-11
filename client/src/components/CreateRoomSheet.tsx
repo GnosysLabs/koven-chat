@@ -29,8 +29,9 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
-import { Camera, Trash2 } from "lucide-react";
+import { Camera, Trash2, Video } from "lucide-react";
 
 export interface CreateRoomSheetProps {
 	open: boolean;
@@ -41,6 +42,12 @@ export interface CreateRoomSheetProps {
 		// Mirrors CreateSpaceSheet — when set, the file gets uploaded
 		// + written as m.room.avatar after createRoom returns.
 		avatarFile?: File;
+		// Whether the new room exposes the Live (voice / video /
+		// screen-share) bar.  Defaults to true; only passed as
+		// false when the creator explicitly turns it off, so the
+		// state event is only stamped on rooms that differ from
+		// the global default.
+		liveEnabled: boolean;
 	}): Promise<void>;
 	// Parent space context — used for the dialog's "in <space>"
 	// description.  Encryption + visibility are inherited by
@@ -54,6 +61,11 @@ export function CreateRoomSheet({
 }: CreateRoomSheetProps) {
 	const [name, setName] = useState("");
 	const [topic, setTopic] = useState("");
+	// Live channel defaults to on — matches the default in
+	// RoomEditSheet + readKovenLiveEnabled (missing state event
+	// is treated as enabled).  Creator can turn it off here for
+	// rooms where a call surface doesn't make sense.
+	const [liveEnabled, setLiveEnabled] = useState(true);
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	// Avatar pick state — same pattern as CreateSpaceSheet.
@@ -64,6 +76,7 @@ export function CreateRoomSheet({
 	function reset() {
 		setName("");
 		setTopic("");
+		setLiveEnabled(true);
 		setAvatarFile(undefined);
 		setAvatarPreview(undefined);
 		setError(null);
@@ -92,6 +105,7 @@ export function CreateRoomSheet({
 				name: trimmed,
 				topic: topic.trim(),
 				avatarFile,
+				liveEnabled,
 			});
 			reset();
 			onOpenChange(false);
@@ -187,6 +201,27 @@ export function CreateRoomSheet({
 							onChange={(e) => setTopic(e.target.value)}
 							placeholder="What this room is about"
 							maxLength={200}
+						/>
+					</div>
+
+					{/* Live channel — voice / video / screen-share bar
+					    at the top of the room.  Defaults on; turn off
+					    for rooms where dropping in a call doesn't make
+					    sense.  Reversible from RoomEditSheet later. */}
+					<div className="flex items-start justify-between gap-3 rounded-md border border-border p-3">
+						<div className="space-y-0.5 flex-1 min-w-0">
+							<Label htmlFor="room-live" className="cursor-pointer flex items-center gap-1.5">
+								<Video className="h-3.5 w-3.5" />
+								Enable Live channel
+							</Label>
+							<p className="text-xs text-muted-foreground leading-relaxed">
+								Adds a voice / video / screen-share bar at the top of the room. Turn off for rooms where dropping in a call doesn&rsquo;t make sense &mdash; you can flip this back on later.
+							</p>
+						</div>
+						<Switch
+							id="room-live"
+							checked={liveEnabled}
+							onCheckedChange={setLiveEnabled}
 						/>
 					</div>
 
