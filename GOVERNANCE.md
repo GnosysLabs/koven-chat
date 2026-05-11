@@ -251,7 +251,7 @@ Room **founders** have one additional, narrow carve-out beyond what regular memb
 
 Koven enforces a hard rule on room creation and editing:
 
-- **DMs are always encrypted.** They're 1:1 conversations; no consensus moderation applies and the engine has no business reading the content.
+- **DMs are always encrypted at the chat layer.** They're 1:1 conversations; no consensus moderation applies and the engine has no business reading the content. (Live call media is a separate layer — see *Live calls* below — and is not E2EE.)
 - **Private rooms can opt into encryption.** Trusted invite-only spaces can choose privacy over moderation reach. Flags submitted there pile up visually but don't trigger collapses or floor-violation review (the engine can't read what was reported).
 - **Public rooms cannot be encrypted.** A public-but-encrypted room would be open to anyone yet invisible to the engine and to admins, which means consensus moderation, the public mod log, and floor-violation review all go silent. That contradicts the platform's premise (public speech needs public accountability), so the toggle is disabled in the create-room and room-settings UI, and the transport refuses the request as defense in depth.
 
@@ -260,6 +260,24 @@ Matrix doesn't support disabling encryption on a room once enabled, so a private
 The flag, mod-log, and floor-violation affordances are also hidden in encrypted rooms client-side. Better to surface no affordance than to let users believe they took an action that won't produce a real review.
 
 URL link previews are likewise disabled in encrypted rooms. Generating a preview means asking Synapse's `/_matrix/media/v3/preview_url` endpoint to fetch the URL, which leaks the URL to the homeserver in plaintext even though the message body is end-to-end encrypted. Since DMs and any private encrypted room are exactly the contexts where users expect the homeserver not to see content, the preview card is hidden. Links remain clickable; they just don't get a card. (A future setting could let users opt back in per-room if they trust their homeserver with that metadata.)
+
+## Live calls
+
+Koven supports voice, video, and screen-share calls in any room. Each room has a Live channel toggle in room settings; when off, the call affordances disappear from that room and existing call sessions can't be rejoined. DMs always have calls available — there's no off switch on a 1:1 conversation. The decision to enable or disable a Live channel sits with the room founder, alongside the existing founder authority to kick or ban a bot from the room.
+
+Calls run on Cloudflare RealtimeKit as the selective forwarding unit. Media (audio, video, screen-share) is **not end-to-end encrypted**: tracks are routed through Cloudflare's edge for the duration of the session, where they could in principle be observed by the SFU operator. The chat layer (Matrix events) and the call layer (Cloudflare media) are separate transports, governed by separate guarantees. A DM has E2EE chat and unencrypted call media. A space room has neither.
+
+The UI surfaces this gap honestly. The Live bar inside a DM reads "voice · video · screen share · not encrypted," so a user entering a DM call can't reasonably believe the call inherits the DM's chat-layer privacy guarantee. In space rooms the "not encrypted" suffix is omitted: nothing in a space room is E2EE in the first place, so flagging only the call would falsely imply the room messages are.
+
+Calls intentionally do not interact with the consensus moderation pipeline:
+
+- A call session has no persistent message log. There's nothing for the engine to record, nothing for the room to flag, nothing for an admin to deactivate.
+- A user excluded from a room (kicked or banned at the Matrix layer) loses access to that room's calls as a side effect, since join is gated on room membership. The exclusion happens through whatever pipeline got them out of the room, not a separate call-pipeline.
+- A user the community has flagged into suspension (`pending_review` state) can still join a Live channel. Suspension blocks compose, DM creation, and room/space creation — text speech and persistent structures — but not real-time voice. Calls are ephemeral; the consensus tools target persisted speech.
+
+DM calls ring once per outgoing call. The caller's join sends a `chat.koven.call.ring` event to the DM timeline; the recipient's client renders an Incoming Call sheet (with ringtone) for 30 seconds or until the recipient accepts, declines, or the caller cancels. Decline dismisses the recipient's sheet but doesn't block the caller from trying again. There's no missed-call counter and no auto-retry.
+
+Cloudflare retains operational call metadata (session durations, participant ids the engine assigned) per their standard service contract. Koven does not record call sessions to the per-room mod log. Calls are real-time interactions, not a moderation surface.
 
 ## Federation
 
@@ -282,5 +300,7 @@ Encrypted DMs that cross federation boundaries lose the engine's visibility. The
 - False `floor_violation` reports landing the target in suspended state until an admin reviews. The author can't post during the review window. The false-flag punishment described above is the deterrent.
 - Admins acting against an individual user via the floor-violation pipeline. Confirming a floor case and deactivating an account is a real power held by a single person. The check on this power is that the action is in the public mod log forever.
 - A small window of exposure between when an offensive room is published and when consensus or floor-flag collapse fires. The publish-rate cap shrinks this window for low-reputation flooders to a handful of rooms; for an established account abusing reputation it can be longer. The repeat-collapse accumulator catches sustained patterns but not one-off acts of an established user.
+- The Live calls SFU operator (Cloudflare) reading the audio/video/screen-share streams that pass through their edge. Call media is not E2EE; the *Live calls* section says so explicitly and the in-app DM call surface labels it. Users who need fully-private real-time voice should treat the call layer as out-of-scope for the chat-layer encryption guarantees and pick a different tool.
+- Real-time abuse during a Live call. Calls produce no message log for the consensus pipeline to work on, and the audio/video stream isn't a moderation surface. A Live participant who's harassing the room can be removed by the room kicking them at the Matrix layer (which drops them from the call as a side effect), or by other participants leaving and reconvening; floor-violation reports do not apply to call audio.
 
 Koven is not utopian. It moves moderation power from individual mods to a documented, decaying, community-driven process for ordinary speech, and it confines unilateral admin action to a single narrow category (confirmed floor violations) where the action is permanently visible. It does not solve human disagreement.
