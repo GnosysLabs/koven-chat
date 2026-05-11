@@ -17,7 +17,17 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import { DesktopTitleBar } from "./components/DesktopTitleBar";
 import { CallProvider } from "./lib/call-context";
+import { tryDeepLinkBounce } from "./lib/deepLinkBounce";
 import "./index.css";
+
+// Deep-link bounce: if the browser loaded /invite/<id> or /r/<id>/<eid>
+// in a plain browser (Brave/Chrome don't honor Universal Links on
+// macOS at all; Safari only auto-opens for cross-origin clicks), try
+// to hand the URL off to the registered `koven://` scheme so the
+// desktop app actually opens.  No-op inside the Tauri shell.  Fires
+// before React mounts so the OS confirmation dialog pops as soon as
+// the bundle starts, no perceptible SPA flash before the handoff.
+tryDeepLinkBounce();
 
 // macOS desktop only: round the NSWindow corners via cloudworxx's
 // plugin, then immediately hide the native traffic lights it
