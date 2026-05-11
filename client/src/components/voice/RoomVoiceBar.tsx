@@ -169,7 +169,7 @@ export function RoomVoiceBar({ roomId, roomName, accessToken, isDm }: RoomVoiceB
 							: "Live channel"}
 					</span>
 					<span className="text-[11px] text-muted-foreground">
-						voice · video · screen share
+						voice · video · screen share · <span className="text-amber-600 dark:text-amber-500">not encrypted</span>
 					</span>
 				</div>
 			</div>

@@ -411,25 +411,45 @@ export function ChatPane({
 		// content for a few frames after.  A single scrollTop
 		// assignment lands at "current bottom," which becomes
 		// "above the new bottom" the moment another asset loads.
-		// The ResizeObserver re-snaps on every growth, but for the
-		// first few hundred ms after a room change there's a
-		// race where the snap hasn't bound yet (effect bind order)
-		// or has bound but missed the first growth.  Three snaps
-		// (now / rAF / 200ms) cover all of those windows for ~zero
-		// runtime cost.  Safe to over-snap because the
-		// followBottomRef gate at the top means we only re-snap
-		// while the user is at-or-near the bottom anyway.
+		//
+		// Extra wrinkle on initial load: the FIRST snap usually
+		// undershoots because messages haven't fully decoded.  As
+		// more content loads, the browser fires `scroll` events
+		// (the assignment + content growth combo).  onScroll then
+		// reads `distance > 100` and flips followBottomRef = false
+		// EVEN THOUGH the user hasn't touched anything — at which
+		// point ResizeObserver-driven re-snaps stop firing (they're
+		// gated on followBottomRef) and the user is left stranded
+		// somewhere mid-history.
+		//
+		// Counter: during the initial-snap window (first ~1500ms
+		// after a room change / call-view exit), force
+		// followBottomRef back to true before each snap.  The user
+		// hasn't actually scrolled — any drift is content growth
+		// under them — so "stay pinned to the bottom" is the
+		// correct interpretation.  After the window expires, the
+		// onScroll handler can do its normal job.
 		const snap = () => {
-			if (followBottomRef.current && scrollRef.current) {
-				scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-			}
+			if (!scrollRef.current) return;
+			followBottomRef.current = true;
+			scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
 		};
 		snap();
 		const raf = requestAnimationFrame(snap);
-		const t = window.setTimeout(snap, 200);
+		// Stagger snaps across the typical late-load window
+		// (avatars, images, embed posters all decode within ~1s
+		// on a fast machine; slow connections take longer but the
+		// ResizeObserver picks those up).
+		const t1 = window.setTimeout(snap, 100);
+		const t2 = window.setTimeout(snap, 300);
+		const t3 = window.setTimeout(snap, 600);
+		const t4 = window.setTimeout(snap, 1200);
 		return () => {
 			cancelAnimationFrame(raf);
-			window.clearTimeout(t);
+			window.clearTimeout(t1);
+			window.clearTimeout(t2);
+			window.clearTimeout(t3);
+			window.clearTimeout(t4);
 		};
 	}, [messages.length, room?.id, isInActiveCallRoom]);
 

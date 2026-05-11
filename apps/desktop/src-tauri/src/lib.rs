@@ -631,6 +631,44 @@ pub fn run() {
 				builder = builder.decorations(false);
 			}
 
+			// Override the WebView user-agent so feature-detection
+			// libraries that gate on UA strings (Cloudflare RealtimeKit
+			// SDK is the immediate offender — it throws
+			// "[ERR0001] {Client} Failed to initialize. device not
+			// supported" because Tauri's stock WKWebView UA omits the
+			// "Version/X Safari/..." tokens that the SDK keys off of)
+			// see a recognizably-Safari UA.  WKWebView IS Safari's
+			// engine, so any feature the SDK needs from "real Safari"
+			// is present here too — it's a string-mismatch problem,
+			// not a capability problem.  We pick a recent Safari UA
+			// that the SDK is known to accept; bump this every couple
+			// of years so it doesn't get flagged as "outdated browser"
+			// by other libraries.  iris-rs uses the same trick.
+			#[cfg(target_os = "macos")]
+			{
+				builder = builder.user_agent(
+					"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+				);
+			}
+			#[cfg(target_os = "windows")]
+			{
+				// Edge / WebView2 already includes "Chrome/..." so the
+				// SDK's UA check passes there; we still pin a value so
+				// the behavior is reproducible across WebView2 updates.
+				builder = builder.user_agent(
+					"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0"
+				);
+			}
+			#[cfg(target_os = "linux")]
+			{
+				// WebKitGTK ships with "Safari/" already, but the older
+				// "Version/" token is missing on some distros — pin a
+				// known-good string so RealtimeKit doesn't reject.
+				builder = builder.user_agent(
+					"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+				);
+			}
+
 			// Enable DevTools in production builds.  Tauri release
 			// builds disable inspector by default, which leaves users
 			// (and us) with NO way to see console errors when the SPA
