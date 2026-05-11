@@ -169,7 +169,14 @@ export function RoomVoiceBar({ roomId, roomName, accessToken, isDm }: RoomVoiceB
 							: "Live channel"}
 					</span>
 					<span className="text-[11px] text-muted-foreground">
-						voice · video · screen share · <span className="text-amber-600 dark:text-amber-500">not encrypted</span>
+						voice · video · screen share
+						{/* Only flag "not encrypted" inside DMs.  In a DM
+						    the chat IS E2EE, so the call is the odd one
+						    out and the warning is meaningful.  In a
+						    space room nothing is E2EE, so labeling
+						    only the call would IMPLY the room messages
+						    are encrypted — worse than saying nothing. */}
+						{isDm && <> · <span className="text-amber-600 dark:text-amber-500">not encrypted</span></>}
 					</span>
 				</div>
 			</div>
