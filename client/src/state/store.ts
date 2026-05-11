@@ -127,7 +127,11 @@ export const initialState: AppState = {
 	pollVotesIndex: new Map(),
 	receiptsVersionByRoom: new Map(),
 	activeRoomId: null,
-	activeSpace: { kind: "spaces_overview" },
+	// Land on DMs after login.  Spaces overview made the post-login
+	// experience disorienting (you'd see a grid of servers but no
+	// chat thread); DMs is closer to "what most users do first" and
+	// matches Discord's default landing.
+	activeSpace: { kind: "dms" },
 	error: null,
 };
 
