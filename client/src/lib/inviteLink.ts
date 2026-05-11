@@ -133,21 +133,29 @@ export function parseShareIntent(input: string | URL | Location = window.locatio
 }
 
 /** Matrix id / alias regex shapes used by `findInlineRoomMentions`
- * below.  Two patterns: `!id:server.tld` (room/space ids) and
- * `#alias:server.tld` (canonical aliases).
+ * below.  Two patterns: `!id:server` (room/space ids) and
+ * `#alias:server` (canonical aliases).
  *
  * Constraints:
  *   - Localpart accepts the Matrix-spec character class plus `+` /
  *     `/` / `_` / `=` / `.` / `-` (matches MENTION_RE in
  *     mentionRender.tsx for symmetry).
- *   - Server part requires AT LEAST one dot — `!abc:foo` without
- *     a TLD doesn't match.  This is the false-positive guard for
- *     things like exclamation-pointed sentences ("really!:O").
- *   - Word boundary on both sides via the `\b`-equivalent
- *     pre/post-class so mid-word matches don't fire.
+ *   - Server part is one-or-more dot-separated alphanumeric+dash
+ *     components, requiring AT LEAST one dot.  Matches domain
+ *     hostnames ("koven.chat", "matrix.example.org") AND IPv4
+ *     addresses ("100.76.239.128") since Matrix's server-name
+ *     spec allows both.  Rejects single-token server names like
+ *     ":localhost" — those are rare in real-world pastes and
+ *     ambiguous against natural-language colons.
+ *   - Optional `:port` tail after the server so federated
+ *     ids with explicit ports ("example.com:8448") aren't
+ *     truncated.
+ *   - Word boundary on both sides via the `(^|[^A-Za-z0-9_])`
+ *     pre-class so mid-word matches don't fire on things like
+ *     "ssh!user:host".
  */
 const MATRIX_ID_INLINE_RE =
-	/(^|[^A-Za-z0-9_])([!#][A-Za-z0-9._=\-/+]+:[A-Za-z0-9.-]+\.[A-Za-z]{2,})/g;
+	/(^|[^A-Za-z0-9_])([!#][A-Za-z0-9._=\-/+]+:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::[0-9]+)?)/g;
 
 /** Hostnames matrix.to share URLs can use.  matrix.to is the
  * universal Matrix landing page; older Element invites + a lot of

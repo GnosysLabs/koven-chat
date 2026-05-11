@@ -26,7 +26,10 @@
 //     icon.  No remote preview fetch — that happens on click via
 //     previewTarget inside the JoinConfirmSheet flow.
 
+import { useEffect } from "react";
 import { useShareIntent } from "@/lib/shareIntentContext";
+import { useTransport } from "@/lib/transportContext";
+import { fetchRoomPreview, useRoomPreview } from "@/lib/roomPreviewCache";
 import type { ShareIntent } from "@/lib/inviteLink";
 import { cn } from "@/lib/utils";
 import { EyeOff, Globe, Hash, Lock } from "lucide-react";
@@ -49,52 +52,70 @@ export interface RoomMentionPillProps {
 
 export function RoomMentionPill({ intent, original, tone = "other" }: RoomMentionPillProps) {
 	const ctx = useShareIntent();
+	const transport = useTransport();
 	const target = intent.kind === "invite" ? intent.target : intent.roomId;
 
-	// Local resolution — pure read from the provided rooms/spaces
-	// snapshot.  No network.
+	// Tier 1: viewer is already a member.  Pure read from the
+	// snapshot threaded through context.  Cheapest; no fetch, no
+	// re-render churn.
 	const localRoom = ctx?.rooms.find(r => r.id === target);
 	const localSpace = ctx?.spaces.find(s => s.id === target);
 
-	const isSpace = !!localSpace;
+	// Tier 2: cached preview from a previous fetch (or a
+	// JoinConfirmSheet preview we never invalidated).  Used when
+	// the user isn't a member of the target.  useRoomPreview
+	// subscribes to per-id cache changes so the pill auto-upgrades
+	// from skeleton/id to name+avatar when the fetch resolves.
+	const cachedPreview = useRoomPreview(localRoom || localSpace ? null : target);
+
+	// Tier 3: kick off the fetch if we're in the not-a-member +
+	// not-cached state.  fetchRoomPreview is no-op when already
+	// cached / in-flight, so this is safe to call on every render
+	// (the effect just shields us from running during SSR or when
+	// transport hasn't been provided yet).
+	useEffect(() => {
+		if (!transport) return;
+		if (localRoom || localSpace) return;        // local data wins
+		if (cachedPreview !== undefined) return;    // cache already resolved (or null)
+		void fetchRoomPreview(transport, target);
+	}, [transport, target, localRoom, localSpace, cachedPreview]);
+
+	const isSpace = !!localSpace || cachedPreview?.isSpace === true;
 	const isPrivateSpace = localSpace?.kind === "private";
 	const isEncrypted = !!localRoom?.encrypted;
 	const isDm = localRoom?.kind === "dm";
 
-	// Display name — local data first, then a sensible fallback.
-	// Aliases ("#general:server") render as "#general" (drop the
-	// server portion); ids stay verbatim so the user knows they
-	// referenced something the local instance can't resolve.
+	// Display name resolution.  Try in order: local Room/Space,
+	// then cached preview, then a graceful fallback derived from
+	// the target itself (strip server suffix on aliases so a long
+	// federated alias doesn't dominate the pill).  Bare ids
+	// without a resolved name keep their original form truncated
+	// — the click flow will fetch and surface the real name in
+	// the JoinConfirmSheet.
 	const label = (() => {
 		if (localSpace) return localSpace.name;
 		if (localRoom) return localRoom.name;
-		// Unknown target.  Strip the server suffix on aliases so
-		// the pill reads cleaner; ids keep their full form because
-		// the localpart of an id is opaque without a server context.
+		if (cachedPreview && cachedPreview !== null && cachedPreview.name) return cachedPreview.name;
 		if (target.startsWith("#")) {
 			const colon = target.indexOf(":");
 			return colon > 0 ? target.slice(0, colon) : target;
 		}
-		// For message permalinks, the room id is also opaque — show
-		// "Message" as a hint, the underlying URL holds the real ids
-		// for click resolution.
 		if (intent.kind === "message") return "Message";
-		// Bare id — truncate aggressively if very long so a malformed
-		// or wantonly long id doesn't break out of the bubble.
 		return target.length > 24 ? `${target.slice(0, 21)}…` : target;
 	})();
 
 	// Icon selection.  Encryption → Lock, private space → EyeOff,
-	// public space → Globe, room → Hash.  DMs in the local list
-	// fall back to # since DM links shouldn't normally appear
-	// inline; if they do (someone pasted a DM permalink) we render
-	// generically rather than leak the other party's name as the
-	// pill's primary label.
+	// public space → Globe, room → Hash.  Cached previews give us
+	// isSpace + nsfw but no public/private signal, so cached
+	// spaces fall back to Globe rather than guessing.  DMs render
+	// generically (Hash) so a DM permalink doesn't leak the
+	// counterparty's identity into the pill label.
 	const Icon = (() => {
 		if (isEncrypted) return Lock;
 		if (isSpace) return isPrivateSpace ? EyeOff : Globe;
 		return Hash;
 	})();
+
 
 	function onClick(e: React.MouseEvent<HTMLAnchorElement>) {
 		// No share-intent provider — fall through to the anchor's

@@ -133,7 +133,7 @@ export function CreateRoomSheet({
 				<DialogHeader>
 					<DialogTitle>Create a room in {parentSpaceName}</DialogTitle>
 					<DialogDescription>
-						Rooms are channels inside this space. They inherit the space&rsquo;s privacy and NSFW posture &mdash; no per-room toggles to drift out of sync.
+						Rooms are channels inside this space. They inherit the space&rsquo;s privacy posture &mdash; no per-room toggles to drift out of sync.
 					</DialogDescription>
 				</DialogHeader>
 
