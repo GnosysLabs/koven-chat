@@ -126,7 +126,7 @@ function PickerState({
 					<h3 className="font-medium">No bots yet</h3>
 					<p className="text-sm text-muted-foreground">
 						Create a bot with your own LLM API key (OpenRouter or any
-						OpenAI-compatible endpoint), invite it to a room, and
+						OpenAI-compatible endpoint), invite it to a space, and
 						mention it by name to get a reply.
 					</p>
 				</div>

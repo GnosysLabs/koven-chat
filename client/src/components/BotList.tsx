@@ -53,7 +53,7 @@ export function BotList({
 }: BotListProps) {
 	return (
 		<aside className="w-60 shrink-0 bg-card border-r border-border flex flex-col">
-			<div className="h-12 px-3 flex items-center justify-between border-b border-border">
+			<div className="h-12 px-4 flex items-center justify-between border-b border-border">
 				<span className="text-sm font-semibold">Bots</span>
 				<button
 					type="button"
@@ -72,7 +72,7 @@ export function BotList({
 				</button>
 			</div>
 
-			<div className="flex-1 overflow-y-auto py-1">
+			<div className="flex-1 overflow-y-auto p-2 space-y-0.5">
 				{bots === null || loading ? (
 					// Pre-load: render an empty body rather than a
 					// "Loading…" string OR the "No bots yet" CTA.
@@ -81,9 +81,9 @@ export function BotList({
 					// to the real list.
 					null
 				) : error ? (
-					<div className="px-3 py-3 text-xs text-destructive">{error}</div>
+					<div className="px-2 py-4 text-xs text-destructive leading-relaxed">{error}</div>
 				) : bots.length === 0 ? (
-					<div className="px-3 py-3 text-xs text-muted-foreground leading-relaxed">
+					<div className="px-2 py-4 text-xs text-muted-foreground leading-relaxed">
 						No bots yet. Click <span className="font-medium text-foreground">+</span> to create one with your own LLM API key.
 					</div>
 				) : (

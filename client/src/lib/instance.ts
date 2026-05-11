@@ -209,6 +209,32 @@ export async function fetchPublishQuota(
 	return (await r.json()) as PublishQuota;
 }
 
+/**
+ * Look up which space(s) a given room declares as its parent via
+ * `m.space.parent` state events.  Used by the deep-link confirm
+ * flow to rewrite "join this room" intents to "join this room's
+ * parent space" — Koven's Discord-style invariant says rooms are
+ * joined through their space, not directly.
+ *
+ * Returns [] when the room has no parents (orphan, or
+ * state-unreadable on the engine side).  The caller treats an
+ * empty list as "fall back to room-direct join."
+ */
+export async function fetchRoomParents(roomId: string): Promise<string[]> {
+	try {
+		const r = await fetch(
+			`${ENGINE_URL}/api/rooms/${encodeURIComponent(roomId)}/parents`,
+		);
+		if (!r.ok) return [];
+		const body = (await r.json()) as { parents?: unknown };
+		if (!Array.isArray(body.parents)) return [];
+		return body.parents.filter((p): p is string => typeof p === "string");
+	} catch (err) {
+		console.warn("fetchRoomParents threw", err);
+		return [];
+	}
+}
+
 // ─── Admin: floor-violation review queue ─────────────────────────────
 
 export interface PendingSuspension {

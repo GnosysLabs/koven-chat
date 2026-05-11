@@ -52,7 +52,7 @@ import { EncryptionUnlockSheet } from "@/components/EncryptionUnlockSheet";
 import { SuspendedBanner } from "@/components/SuspendedBanner";
 import { ModLogSheet } from "@/components/ModLogSheet";
 import { FloorReviewSheet } from "@/components/FloorReviewSheet";
-import { botKickBan, deleteOwnMessage, fetchAdminStatus, fetchFloorQueue, fetchMyStatus, flagRoom, type SuspensionSummary } from "@/lib/instance";
+import { botKickBan, deleteOwnMessage, fetchAdminStatus, fetchFloorQueue, fetchMyStatus, fetchRoomParents, flagRoom, type SuspensionSummary } from "@/lib/instance";
 import { fetchIntegrationsStatus } from "@/lib/giphy";
 import { ENGINE_URL } from "@/lib/urls";
 import { setAppBadge } from "@/lib/appBadge";
@@ -1185,7 +1185,7 @@ export default function App() {
 			error: null,
 		});
 		try {
-			const preview = await transport.previewTarget(target);
+			let preview = await transport.previewTarget(target);
 			// Alias case: previewTarget resolved an alias to a real
 			// roomId; re-check membership using the resolved id so
 			// pre-joined aliases don't surface the confirm card.
@@ -1197,6 +1197,50 @@ export default function App() {
 					setPendingJoin(null);
 					navigateToTarget(resolvedId, preview.isSpace);
 					clearShareUrl();
+					return;
+				}
+			}
+			// Discord-style invariant: rooms are joined through
+			// their parent space, never directly.  If the resolved
+			// target is a ROOM (not a space) with at least one
+			// declared parent, rewrite the intent to point at the
+			// first parent space.  The user joins the SPACE, and the
+			// engine cascade pulls them into every joinable child
+			// (including the room they originally clicked).
+			//
+			// Falls through to the existing room-target behavior when:
+			//   - the target IS a space (already correct)
+			//   - the target is a room with no parents (orphan; legacy)
+			//   - the parent-fetch errors (engine unreachable, etc.)
+			if (preview && !preview.isSpace) {
+				const parents = await fetchRoomParents(resolvedId);
+				if (parents.length > 0) {
+					const parentId = parents[0]!;
+					// If the user is ALREADY in the parent space,
+					// fast-navigate to the room itself (the engine
+					// cascade should have pulled them in; if it
+					// didn't, the room still opens with a possibly-
+					// empty timeline and matrix-js-sdk will join via
+					// the restricted-rule path on first view).
+					const parentSpace = spacesRef.current.find(s => s.id === parentId);
+					if (parentSpace) {
+						setPendingJoin(null);
+						navigateToTarget(resolvedId, false);
+						clearShareUrl();
+						return;
+					}
+					// Not in the parent space yet — fetch its
+					// preview and surface the confirm sheet for it.
+					// The user sees "Join {space name}?" not "Join
+					// {room name}?", which is the right mental model.
+					const parentPreview = await transport.previewTarget(parentId);
+					setPendingJoin(p => p && p.intent === intent ? {
+						...p,
+						intent: { kind: "invite", target: parentId },
+						fallbackId: parentId,
+						preview: parentPreview,
+						loading: false,
+					} : p);
 					return;
 				}
 			}
@@ -2044,6 +2088,22 @@ export default function App() {
 					}}
 					onAddExistingRoomToSpace={(id) => setAddExistingRoomTo(id)}
 					onLeaveSpace={(id) => {
+						// Bounce out of the space we're about to leave so
+						// the user doesn't sit on a now-gone space's view
+						// until they click elsewhere.  Doing this BEFORE
+						// the leave call is safe — set_active_space is a
+						// local-state dispatch; the network round-trip
+						// for leaveRoom happens after.  Symmetric with
+						// SpaceEditSheet's onLeave handler below.
+						if (state.activeSpace?.kind === "space" && state.activeSpace.id === id) {
+							// Land on DMs after leave — matches the
+							// post-login default and the empty-state we
+							// already use for "no active selection."  The
+							// Spaces overview page exists but is sparse;
+							// shipping users there after a leave reads
+							// like a dead end.
+							dispatch({ type: "set_active_space", space: { kind: "dms" } });
+						}
 						transport?.leaveRoom(id).catch(err => {
 							dispatch({ type: "error", message: err instanceof Error ? err.message : String(err) });
 						});
@@ -2053,6 +2113,15 @@ export default function App() {
 						// proper space tombstoning is a Synapse-admin
 						// path that requires extra plumbing.  Founder-
 						// only via the right-click gate.
+						if (state.activeSpace?.kind === "space" && state.activeSpace.id === id) {
+							// Land on DMs after leave — matches the
+							// post-login default and the empty-state we
+							// already use for "no active selection."  The
+							// Spaces overview page exists but is sparse;
+							// shipping users there after a leave reads
+							// like a dead end.
+							dispatch({ type: "set_active_space", space: { kind: "dms" } });
+						}
 						transport?.leaveRoom(id).catch(err => {
 							dispatch({ type: "error", message: err instanceof Error ? err.message : String(err) });
 						});
@@ -2756,11 +2825,11 @@ export default function App() {
 					// all channels" counterpart.
 					await transport.leaveSpaceWithChildren(spaceId as SpaceId);
 					// Close the sheet + bounce out of the now-gone
-					// space.  Rooms tile is the safest landing place
-					// since it always exists and never depends on a
-					// specific space membership.
+					// space.  Landing on DMs matches the post-login
+					// default — the Spaces overview is sparse and
+					// reads like a dead end after leaving.
 					setEditingSpaceId(null);
-					dispatch({ type: "set_active_space", space: { kind: "spaces_overview" } });
+					dispatch({ type: "set_active_space", space: { kind: "dms" } });
 				}}
 				onDelete={async (spaceId, childIds) => {
 					if (!transport) throw new Error("Not connected");

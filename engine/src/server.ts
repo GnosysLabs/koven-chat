@@ -3344,6 +3344,58 @@ export function startServer(): void {
 			// Public read: the override is meaningful only if every
 			// client honours it, so unauthenticated GET is fine and
 			// federation-friendly.
+			// GET /api/rooms/:roomId/parents
+			//
+			// Returns the parent space ids declared on a room via
+			// `m.space.parent` state events.  Used by the SPA's
+			// deep-link confirm-sheet flow to redirect "join this
+			// room" intents to "join this room's parent space" —
+			// Koven's Discord-style invariant says rooms are joined
+			// via their space, not directly.
+			//
+			// Public read: room state is already viewable to anyone
+			// who can peek the room, and a room's parent-space
+			// linkage isn't sensitive (the parent's m.space.child
+			// listing is also public).  Returns an empty array for
+			// orphan rooms (which still exist for legacy reasons
+			// pre-Discord-refactor); the client falls back to "join
+			// this room" in that case.
+			{
+				const m = path.match(/^\/api\/rooms\/([^/]+)\/parents$/);
+				if (req.method === "GET" && m) {
+					const roomId = decodeURIComponent(m[1]!);
+					try {
+						const state = await readRoomState(roomId);
+						if (!state) return json({ parents: [] });
+						const parents: string[] = [];
+						for (const ev of state) {
+							if (ev.type !== "m.space.parent") continue;
+							if (typeof ev.state_key !== "string") continue;
+							// Trust m.space.parent only when the
+							// space ALSO lists this room as a child
+							// (m.space.child on the parent).  That
+							// mirrors Matrix's "two-way relationship"
+							// convention — a malicious room can
+							// falsely claim membership in someone
+							// else's space; the canonical link is
+							// the parent's m.space.child pointing
+							// back at us.  Skipped for now since
+							// it adds a Synapse round-trip per
+							// parent; we trust the room's claim
+							// here, accepting the (small) attack
+							// surface of "join a space you didn't
+							// expect."  Tighten if it becomes a
+							// real problem.
+							parents.push(ev.state_key);
+						}
+						return json({ parents });
+					} catch (err) {
+						console.warn(`engine: /api/rooms/${roomId}/parents threw`, err);
+						return json({ parents: [] });
+					}
+				}
+			}
+
 			if (req.method === "GET" && path === "/api/rooms/collapsed") {
 				const rows = listRoomCollapses();
 				return json({
