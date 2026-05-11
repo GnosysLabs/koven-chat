@@ -2056,15 +2056,20 @@ export class MatrixTransport {
 	async createRoom(opts: {
 		name: string;
 		topic?: string;
-		encrypted: boolean;
 		// REQUIRED.  The new room is added as a child of this space
 		// immediately after creation (m.space.child on the space +
-		// m.space.parent on the room).  Visibility + NSFW are NOT
-		// passed in — they're read from the parent space's state at
-		// create time so a room can never drift out of sync with its
-		// space's privacy posture.  Public space → public room;
-		// private space → restricted-join (in-space members only);
-		// NSFW space → chat.koven.nsfw stamped onto the room.
+		// m.space.parent on the room).  Visibility + NSFW +
+		// ENCRYPTION are NOT passed in — they're all read from the
+		// parent space's state at create time so a room can never
+		// drift out of sync with its space's posture.
+		//   public space          → public, unencrypted room
+		//   private space         → restricted-join (in-space) room
+		//   private + e2ee space  → encrypted private room
+		//   NSFW space            → chat.koven.nsfw on the room
+		// Per-room toggles were removed deliberately: mixing
+		// encrypted + unencrypted rooms inside one space produced a
+		// confusing moderation surface (some rooms flag-able, some
+		// not) that was hard to communicate to users.
 		parentSpaceId: SpaceId;
 		// Optional avatar uploaded + set as the room's m.room.avatar
 		// state event after creation.  Best-effort; failure doesn't
@@ -2096,28 +2101,18 @@ export class MatrixTransport {
 			(spaceRoom?.currentState
 				.getStateEvents("chat.koven.nsfw", "")
 				?.getContent() as { enabled?: boolean } | undefined)?.enabled === true;
-		// Public + encrypted is forbidden by Koven's governance model:
-		// public rooms must stay readable so the engine can run
-		// consensus moderation.  CreateRoomSheet's UI gate already
-		// disables the encryption toggle for public spaces; this is
-		// defense-in-depth.
-		if (inheritedVisibility === "public" && opts.encrypted) {
-			throw new Error("Public spaces can't host encrypted rooms — moderation requires the engine to see content.");
-		}
-		// E2EE-required policy on the parent space: every child room
-		// MUST be encrypted, regardless of what the caller passed.
-		// CreateRoomSheet's UI gate forces the toggle on + disabled
-		// when this is set; this branch is the belt-and-suspenders
-		// path that catches API callers (or a tampered SPA) that
-		// would otherwise create an unencrypted room and silently
-		// violate the space's policy.  A space marked e2ee_required
-		// is necessarily private (see createSpace), so the public-
-		// + encrypted guard above can't fire here.
+		// Encryption is inherited from the parent space's
+		// chat.koven.space.config state event.  The room create
+		// dialog no longer exposes a per-room toggle: encryption
+		// is a space-level decision and every child room shares
+		// the same posture.  e2ee_required can only be set on
+		// private spaces (see createSpace), so an e2ee_required
+		// space is necessarily private — no public + encrypted
+		// risk to guard against here.
 		const spaceConfig = spaceRoom?.currentState
 			.getStateEvents("chat.koven.space.config", "")
 			?.getContent() as { e2ee_required?: boolean } | undefined;
-		const parentE2eeRequired = spaceConfig?.e2ee_required === true;
-		const encrypted = parentE2eeRequired ? true : opts.encrypted;
+		const encrypted = spaceConfig?.e2ee_required === true;
 		const initialState: any[] = [];
 		if (encrypted) {
 			initialState.push({

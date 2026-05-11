@@ -1,19 +1,21 @@
-// Create-room dialog — name + topic + avatar + encryption.
+// Create-room dialog — name + topic + avatar.
 //
 // Discord-style invariant: the new room ALWAYS lives inside the
 // currently active space, and silently inherits the space's
-// privacy + NSFW posture.  No room-level visibility toggle, no
-// room-level NSFW toggle, no read-only "inherits from" panel —
-// the inheritance is implicit.  Public space → public rooms;
-// private space → restricted-join in-space rooms; NSFW space →
-// NSFW rooms.  The dialog only needs `parentSpaceKind` to gate
-// the encryption switch.
+// privacy + NSFW + encryption posture.  No room-level visibility
+// toggle, no room-level NSFW toggle, no room-level encryption
+// toggle — the inheritance is implicit.  Public space → public
+// not-encrypted rooms; private space → restricted-join in-space
+// rooms; private space with the e2ee_required policy → every room
+// is encrypted; NSFW space → NSFW rooms.
 //
-// Encryption stays a per-room choice because it's a technical
-// axis (megolm sessions, key backup, blind moderation) rather
-// than governance.  We force it off when the parent space is
-// public (encrypted public rooms can't be moderated by the engine,
-// which is Koven's whole consensus story).
+// The encryption decision is made once at space creation and
+// applied to every child room.  Per-room opt-in was removed
+// because mixing encrypted and unencrypted rooms inside the same
+// space created an inconsistent moderation surface (some rooms
+// flag-able, some not) that was hard to communicate to users.
+// The whole-space decision is simpler to reason about and matches
+// the "this space is or isn't moderated" mental model.
 
 import { useRef, useState } from "react";
 import {
@@ -27,7 +29,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { Camera, Trash2 } from "lucide-react";
 
@@ -37,43 +38,22 @@ export interface CreateRoomSheetProps {
 	onCreate(opts: {
 		name: string;
 		topic: string;
-		encrypted: boolean;
 		// Mirrors CreateSpaceSheet — when set, the file gets uploaded
 		// + written as m.room.avatar after createRoom returns.
 		avatarFile?: File;
 	}): Promise<void>;
-	// Parent space context — the room inherits these.  Drives the
-	// "Inherits from <space>" copy + the encryption gate (encryption
-	// only allowed when the parent is private).  Required because
-	// the dialog can no longer be opened without an active space.
+	// Parent space context — used for the dialog's "in <space>"
+	// description.  Encryption + visibility are inherited by
+	// matrix.ts's createRoom from the parent space's state at
+	// create time; the dialog itself no longer exposes either.
 	parentSpaceName: string;
-	parentSpaceKind: "public" | "private";
-	// True when the parent space was created with the "all child
-	// rooms must be E2EE" policy.  Forces the encryption switch
-	// ON and read-only — the user can't opt out of the space's
-	// policy on a per-room basis.  matrix.ts's createRoom also
-	// enforces this server-side; the UI gate is just for clarity.
-	parentSpaceE2eeRequired?: boolean;
 }
 
 export function CreateRoomSheet({
-	open, onOpenChange, onCreate,
-	parentSpaceName, parentSpaceKind, parentSpaceE2eeRequired,
+	open, onOpenChange, onCreate, parentSpaceName,
 }: CreateRoomSheetProps) {
 	const [name, setName] = useState("");
 	const [topic, setTopic] = useState("");
-	const [encrypted, setEncrypted] = useState(false);
-	// Encryption is only sensible inside a private space.  Public
-	// spaces can't host encrypted rooms because the engine needs to
-	// see content to run consensus moderation.
-	const canEncrypt = parentSpaceKind === "private";
-	// When the parent space's policy requires E2EE, the switch is
-	// forced on regardless of the local state.  The local `encrypted`
-	// state is kept so the rendered switch shows the right "checked"
-	// position; we just override the effective value.
-	const effectiveEncrypted = parentSpaceE2eeRequired
-		? true
-		: (canEncrypt && encrypted);
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	// Avatar pick state — same pattern as CreateSpaceSheet.
@@ -84,7 +64,6 @@ export function CreateRoomSheet({
 	function reset() {
 		setName("");
 		setTopic("");
-		setEncrypted(false);
 		setAvatarFile(undefined);
 		setAvatarPreview(undefined);
 		setError(null);
@@ -112,7 +91,6 @@ export function CreateRoomSheet({
 			await onCreate({
 				name: trimmed,
 				topic: topic.trim(),
-				encrypted: effectiveEncrypted,
 				avatarFile,
 			});
 			reset();
@@ -209,36 +187,6 @@ export function CreateRoomSheet({
 							onChange={(e) => setTopic(e.target.value)}
 							placeholder="What this room is about"
 							maxLength={200}
-						/>
-					</div>
-
-					<div className={cn(
-						"flex items-start justify-between gap-3 rounded-md border border-border p-3",
-						!canEncrypt && "opacity-60",
-					)}>
-						<div className="space-y-0.5 flex-1 min-w-0">
-							<Label htmlFor="room-encrypted" className="cursor-pointer">End-to-end encryption</Label>
-							<p className="text-xs text-muted-foreground leading-relaxed">
-								{parentSpaceE2eeRequired ? (
-									<>
-										<strong className="text-foreground">Required by this space.</strong> {parentSpaceName} was created with end-to-end encryption locked on, so every room in it must be encrypted.
-									</>
-								) : canEncrypt ? (
-									<>
-										Encrypted rooms are unreadable by the server. <strong className="text-foreground">Koven moderation cannot apply</strong> &mdash; flags, collapse, and the mod log go silent. Use only when you trust everyone in the space.
-									</>
-								) : (
-									<>
-										Encryption is only available inside a private space. {parentSpaceName} is public, so rooms must stay readable for consensus moderation to work.
-									</>
-								)}
-							</p>
-						</div>
-						<Switch
-							id="room-encrypted"
-							checked={effectiveEncrypted}
-							onCheckedChange={setEncrypted}
-							disabled={!canEncrypt || parentSpaceE2eeRequired === true}
 						/>
 					</div>
 
