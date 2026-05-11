@@ -203,7 +203,7 @@ export function reduce(state: AppState, action: Action): AppState {
 		case "message_arrived": {
 			const next = new Map(state.messagesByRoom);
 			const existing = next.get(action.message.roomId) ?? [];
-			// Update-or-append.  An event id can show up twice for two
+			// Update-or-insert.  An event id can show up twice for two
 			// distinct reasons:
 			//
 			//   1. Echo of a send we just made — same id, same content,
@@ -223,10 +223,43 @@ export function reduce(state: AppState, action: Action): AppState {
 				updated[dupIndex] = action.message;
 				next.set(action.message.roomId, updated);
 			} else {
-				// Preserve chronological order — push live events at the
-				// end, historical pages are loaded as a single array
-				// (above).
-				next.set(action.message.roomId, [...existing, action.message]);
+				// Insert in chronological order based on timestamp.
+				//
+				// For plaintext rooms, messages arrive live in the
+				// correct order and the insertion point is always the
+				// end — the while-loop exits immediately on its first
+				// comparison.
+				//
+				// For encrypted rooms, messages arrive at DECRYPT
+				// time, and decryption resolves in any order the rust
+				// crypto SDK happens to finish keys in.  An older
+				// message that takes 800 ms to decrypt would be
+				// appended AFTER a newer message that decrypted in
+				// 50 ms — the visible timeline ends up scrambled and
+				// then re-arranges itself as the late-decrypts land
+				// in the wrong slot.  Appending by send-time instead
+				// of decrypt-time pins each message to its real
+				// chronological position regardless of decrypt order.
+				//
+				// Walking from the tail is O(k) where k is the
+				// number of newer-than-this messages already in the
+				// list.  Live arrivals are O(1); historical
+				// backfills + slow decrypts walk further but it's
+				// still bounded by the room's local message count
+				// (the SDK paginates older history; we only sort the
+				// in-memory snapshot).  Ties broken by event id so
+				// same-millisecond arrivals are deterministic.
+				const updated = existing.slice();
+				const incomingTs = action.message.timestamp;
+				let i = updated.length - 1;
+				while (i >= 0) {
+					const cur = updated[i]!;
+					if (cur.timestamp < incomingTs) break;
+					if (cur.timestamp === incomingTs && cur.id < action.message.id) break;
+					i--;
+				}
+				updated.splice(i + 1, 0, action.message);
+				next.set(action.message.roomId, updated);
 			}
 			return { ...state, messagesByRoom: next };
 		}

@@ -2319,6 +2319,11 @@ export class MatrixTransport {
 		// "private" — encrypted public rooms are forbidden by
 		// governance, so an encrypted space implies private.
 		e2eeRequired?: boolean;
+		// Optional emoji icon — same `chat.koven.room_icon` state
+		// event the room create flow writes.  Stamped after create
+		// so the space lands with the chosen emoji in one round
+		// trip rather than needing a follow-up updateSpace call.
+		iconEmoji?: string;
 	}): Promise<SpaceId> {
 		const c = this.requireClient();
 
@@ -2396,6 +2401,24 @@ export class MatrixTransport {
 				);
 			} catch (err) {
 				console.warn("createSpace: failed to set nsfw flag", err);
+			}
+		}
+		// Optional emoji icon — same chat.koven.room_icon state
+		// event that powers room emojis, just on a space's m.space-
+		// typed room.  Best-effort: a failure leaves the space
+		// without an emoji and the user can re-set it from
+		// SpaceEditSheet.
+		const spaceIconEmoji = opts.iconEmoji?.trim().slice(0, 16);
+		if (spaceIconEmoji) {
+			try {
+				await c.sendStateEvent(
+					spaceId,
+					"chat.koven.room_icon" as any,
+					{ emoji: spaceIconEmoji },
+					"",
+				);
+			} catch (err) {
+				console.warn("createSpace: failed to set emoji", err);
 			}
 		}
 		// E2EE-required policy: write the space-config state event.

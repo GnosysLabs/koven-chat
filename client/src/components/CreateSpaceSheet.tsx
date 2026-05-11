@@ -1,12 +1,12 @@
-// Create-space dialog — name + topic + visibility + avatar + NSFW.
+// Create-space dialog — name + topic + avatar + emoji + visibility
+// + encryption + NSFW.
 //
-// Same modal pattern as CreateRoomSheet so the two creation flows
-// feel like siblings.  Replaces the popover-anchored SpaceCreateMenu
-// — the popover put the form in a tight 320px column and split it
-// across two stages (visibility pick → details), which made the
-// flow feel more involved than it actually was.  A single modal
-// matches the room flow and gives the avatar + visibility cards
-// room to breathe side-by-side.
+// Layout mirrors CreateRoomSheet (which itself mirrors
+// RoomEditSheet / SpaceEditSheet): narrow `sm:max-w-md` dialog,
+// 14×14 avatar tile on the left with action column on the right
+// (Upload / Set Emoji / Remove), name + topic inputs, then the
+// space-specific knobs (visibility, encryption, NSFW) below.
+// The create + edit flows now read as the same form in two states.
 
 import { useRef, useState } from "react";
 import {
@@ -21,8 +21,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { EmojiPicker } from "@/components/EmojiPicker";
 import { cn } from "@/lib/utils";
-import { Camera, EyeOff, Globe, Lock, Trash2 } from "lucide-react";
+import { Camera, EyeOff, Globe, Lock, Smile, Trash2 } from "lucide-react";
 
 export interface CreateSpaceSheetProps {
 	open: boolean;
@@ -32,6 +33,9 @@ export interface CreateSpaceSheetProps {
 		topic: string;
 		visibility: "public" | "private";
 		avatarFile?: File;
+		// Optional emoji icon — stamped as chat.koven.room_icon on
+		// the space's m.space-typed room after create.
+		iconEmoji: string;
 		nsfw: boolean;
 		e2eeRequired: boolean;
 	}): Promise<void>;
@@ -43,6 +47,7 @@ export interface CreateSpaceSheetProps {
 export function CreateSpaceSheet({ open, onOpenChange, onCreate, showNsfw }: CreateSpaceSheetProps) {
 	const [name, setName] = useState("");
 	const [topic, setTopic] = useState("");
+	const [iconEmoji, setIconEmoji] = useState("");
 	const [visibility, setVisibility] = useState<"public" | "private">("public");
 	const [nsfw, setNsfw] = useState(false);
 	const [e2eeRequired, setE2eeRequired] = useState(false);
@@ -62,6 +67,7 @@ export function CreateSpaceSheet({ open, onOpenChange, onCreate, showNsfw }: Cre
 	function reset() {
 		setName("");
 		setTopic("");
+		setIconEmoji("");
 		setVisibility("public");
 		setNsfw(false);
 		setE2eeRequired(false);
@@ -94,6 +100,7 @@ export function CreateSpaceSheet({ open, onOpenChange, onCreate, showNsfw }: Cre
 				topic: topic.trim(),
 				visibility,
 				avatarFile,
+				iconEmoji: iconEmoji.trim(),
 				nsfw,
 				e2eeRequired: effectiveE2eeRequired,
 			});
@@ -107,84 +114,108 @@ export function CreateSpaceSheet({ open, onOpenChange, onCreate, showNsfw }: Cre
 
 	return (
 		<Dialog open={open} onOpenChange={(o) => { if (!o) reset(); onOpenChange(o); }}>
-			{/* Wider sm:max-w-2xl so the visibility cards + avatar
-			    block can sit comfortably without feeling cramped.
-			    Matches CreateRoomSheet's footprint exactly. */}
-			<DialogContent className="sm:max-w-2xl">
+			<DialogContent className="sm:max-w-md">
 				<DialogHeader>
 					<DialogTitle>Create a space</DialogTitle>
 					<DialogDescription>
-						Spaces are containers for related rooms — a community, a team, a project. You&rsquo;ll be the founder; you can add rooms after.
+						Spaces are containers for related rooms &mdash; a community, a team, a project. You&rsquo;ll be the founder; you can add rooms after.
 					</DialogDescription>
 				</DialogHeader>
 
 				<form onSubmit={submit} className="space-y-4">
-					{/* Avatar + name on the same row.  Avatar is a square
-					    swatch on the left, name + topic stack on the
-					    right, mirroring the SpaceBar tile layout the
-					    user will see after creation. */}
-					<div className="flex items-start gap-4">
+					{/* Avatar tile + action column — mirrors CreateRoomSheet
+					    so the two create flows feel like one form. */}
+					<div className="flex items-center gap-3">
 						<button
 							type="button"
 							onClick={() => fileInputRef.current?.click()}
 							className={cn(
-								"h-20 w-20 rounded-lg border border-border flex items-center justify-center overflow-hidden shrink-0",
-								"hover:border-primary/60 transition-colors",
-								avatarPreview ? "" : "bg-muted text-muted-foreground"
+								"h-14 w-14 rounded-md border border-border flex items-center justify-center overflow-hidden",
+								"hover:border-primary/60 transition-colors shrink-0",
+								avatarPreview ? "" : "bg-muted",
 							)}
 							aria-label="Upload avatar"
 							title="Upload avatar"
 						>
-							{avatarPreview ? (
+							{iconEmoji.trim() ? (
+								<span className="text-2xl leading-none">{iconEmoji.trim()}</span>
+							) : avatarPreview ? (
 								<img src={avatarPreview} alt="" className="h-full w-full object-cover" />
 							) : (
-								<Camera className="h-6 w-6" />
+								<Camera className="h-5 w-5 text-muted-foreground" />
 							)}
 						</button>
-						<div className="flex-1 space-y-3 min-w-0">
-							<div className="space-y-1.5">
-								<Label htmlFor="space-name">Name</Label>
-								<Input
-									id="space-name"
-									type="text"
-									value={name}
-									onChange={(e) => setName(e.target.value)}
-									placeholder="My space"
-									autoFocus
-									required
-									maxLength={20}
+						<div className="flex flex-col items-start gap-1.5">
+							<Button
+								type="button"
+								variant="outline"
+								size="sm"
+								onClick={() => fileInputRef.current?.click()}
+							>
+								<Camera className="h-3.5 w-3.5 mr-1.5" />
+								{avatarPreview ? "Change avatar" : "Upload avatar"}
+							</Button>
+							<div className="flex items-center gap-1.5">
+								<EmojiPicker
+									value={iconEmoji}
+									onChange={setIconEmoji}
+									trigger={
+										<Button type="button" variant="outline" size="sm">
+											<Smile className="h-3.5 w-3.5 mr-1.5" />
+											{iconEmoji ? "Change emoji" : "Set an emoji"}
+										</Button>
+									}
 								/>
-							</div>
-							<div className="flex items-center gap-2">
-								<Button
-									type="button"
-									variant="outline"
-									size="sm"
-									onClick={() => fileInputRef.current?.click()}
-								>
-									<Camera className="h-3.5 w-3.5 mr-1.5" />
-									{avatarPreview ? "Change avatar" : "Upload avatar"}
-								</Button>
-								{avatarPreview && (
+								{iconEmoji && (
 									<Button
 										type="button"
 										variant="ghost"
 										size="sm"
-										onClick={() => pickAvatar(undefined)}
-										className="text-muted-foreground hover:text-destructive"
+										onClick={() => setIconEmoji("")}
+										className="text-muted-foreground hover:text-destructive h-7"
+										title="Remove emoji"
 									>
-										<Trash2 className="h-3.5 w-3.5 mr-1" /> Remove
+										<Trash2 className="h-3 w-3" />
 									</Button>
 								)}
 							</div>
-							<input
-								ref={fileInputRef}
-								type="file"
-								accept="image/*"
-								className="hidden"
-								onChange={(e) => pickAvatar(e.target.files?.[0])}
-							/>
+							{avatarPreview && (
+								<Button
+									type="button"
+									variant="ghost"
+									size="sm"
+									onClick={() => pickAvatar(undefined)}
+									className="text-muted-foreground hover:text-destructive h-7"
+								>
+									<Trash2 className="h-3 w-3 mr-1" /> Remove
+								</Button>
+							)}
 						</div>
+						<input
+							ref={fileInputRef}
+							type="file"
+							accept="image/*"
+							className="hidden"
+							onChange={(e) => {
+								const file = e.target.files?.[0];
+								if (file) pickAvatar(file);
+								e.target.value = "";
+							}}
+						/>
+					</div>
+
+					<div className="space-y-1.5">
+						<Label htmlFor="space-name">Name</Label>
+						<Input
+							id="space-name"
+							type="text"
+							value={name}
+							onChange={(e) => setName(e.target.value)}
+							placeholder="My space"
+							autoFocus
+							required
+							maxLength={50}
+						/>
 					</div>
 
 					<div className="space-y-1.5">
@@ -195,7 +226,7 @@ export function CreateSpaceSheet({ open, onOpenChange, onCreate, showNsfw }: Cre
 							value={topic}
 							onChange={(e) => setTopic(e.target.value)}
 							placeholder="What this space is about"
-							maxLength={200}
+							maxLength={300}
 						/>
 					</div>
 
@@ -261,7 +292,7 @@ export function CreateSpaceSheet({ open, onOpenChange, onCreate, showNsfw }: Cre
 							<div className="space-y-0.5 flex-1 min-w-0">
 								<Label htmlFor="space-nsfw" className="cursor-pointer">Mark as NSFW</Label>
 								<p className="text-xs text-muted-foreground leading-relaxed">
-									Hides the space from Explore for users who haven&rsquo;t opted into NSFW content. <strong className="text-foreground">This can&rsquo;t be reversed</strong> — once marked, the space stays marked.
+									Hides the space from Explore for users who haven&rsquo;t opted into NSFW content. <strong className="text-foreground">This can&rsquo;t be reversed</strong> &mdash; once marked, the space stays marked.
 								</p>
 							</div>
 							<Switch
@@ -307,7 +338,7 @@ function VisibilityCard({
 			onClick={onClick}
 			className={cn(
 				"text-left rounded-md border p-3 transition-colors",
-				selected ? "border-primary bg-primary/5" : "border-border hover:bg-accent"
+				selected ? "border-primary bg-primary/5" : "border-border hover:bg-accent",
 			)}
 		>
 			<div className="flex items-center gap-2 mb-1">
