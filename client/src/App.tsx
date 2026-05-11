@@ -1356,12 +1356,18 @@ export default function App() {
 	// the moment one binds, so the SPA picks up an URL that arrived
 	// before React mounted.
 	//
-	// Dynamic import + window.__TAURI__ guard keeps this code path
+	// Dynamic import + __KOVEN_DESKTOP__ guard keeps this code path
 	// dead in the web build (the @tauri-apps/api/event module would
-	// throw on subscribe in a plain browser).
+	// throw on subscribe in a plain browser).  We check our own
+	// injected flag instead of `__TAURI__` because the Tauri 2
+	// migration renamed that global to `__TAURI_INTERNALS__`, and
+	// gating on the old name silently disables the listener inside
+	// the desktop bundle: every koven:// click would open the app
+	// but no navigation would fire.
 	useEffect(() => {
 		if (!transport || !creds) return;
-		if (typeof window === "undefined" || !("__TAURI__" in window)) return;
+		if (typeof window === "undefined") return;
+		if (!(window as { __KOVEN_DESKTOP__?: unknown }).__KOVEN_DESKTOP__) return;
 		let unsubscribe: (() => void) | null = null;
 		let cancelled = false;
 		void (async () => {
