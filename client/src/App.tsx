@@ -2537,6 +2537,11 @@ export default function App() {
 					if (!a || a.kind !== "space") return "private";
 					return state.spaces.find(s => s.id === a.id)?.kind ?? "private";
 				})()}
+				parentSpaceE2eeRequired={(() => {
+					const a = state.activeSpace;
+					if (!a || a.kind !== "space") return false;
+					return state.spaces.find(s => s.id === a.id)?.e2eeRequired === true;
+				})()}
 				onCreate={async (opts) => {
 					if (!transport) throw new Error("Not connected");
 					// Discord-style invariant: room MUST belong to a

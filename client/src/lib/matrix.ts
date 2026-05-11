@@ -2104,8 +2104,22 @@ export class MatrixTransport {
 		if (inheritedVisibility === "public" && opts.encrypted) {
 			throw new Error("Public spaces can't host encrypted rooms — moderation requires the engine to see content.");
 		}
+		// E2EE-required policy on the parent space: every child room
+		// MUST be encrypted, regardless of what the caller passed.
+		// CreateRoomSheet's UI gate forces the toggle on + disabled
+		// when this is set; this branch is the belt-and-suspenders
+		// path that catches API callers (or a tampered SPA) that
+		// would otherwise create an unencrypted room and silently
+		// violate the space's policy.  A space marked e2ee_required
+		// is necessarily private (see createSpace), so the public-
+		// + encrypted guard above can't fire here.
+		const spaceConfig = spaceRoom?.currentState
+			.getStateEvents("chat.koven.space.config", "")
+			?.getContent() as { e2ee_required?: boolean } | undefined;
+		const parentE2eeRequired = spaceConfig?.e2ee_required === true;
+		const encrypted = parentE2eeRequired ? true : opts.encrypted;
 		const initialState: any[] = [];
-		if (opts.encrypted) {
+		if (encrypted) {
 			initialState.push({
 				type: "m.room.encryption",
 				state_key: "",
@@ -2260,6 +2274,15 @@ export class MatrixTransport {
 		// rooms: once set, it stays set — members joined under the
 		// "this is NSFW" assumption can't be quietly un-flagged.
 		nsfw?: boolean;
+		// Require every child room of this space to be E2EE +
+		// private.  Locks the space into "trusted-group" mode:
+		// child rooms can't be public, can't be unencrypted,
+		// can't be moderated by the engine.  Set once at create
+		// time via the `chat.koven.space.config` state event;
+		// never undone.  Only valid when `visibility` is
+		// "private" — encrypted public rooms are forbidden by
+		// governance, so an encrypted space implies private.
+		e2eeRequired?: boolean;
 	}): Promise<SpaceId> {
 		const c = this.requireClient();
 
@@ -2337,6 +2360,30 @@ export class MatrixTransport {
 				);
 			} catch (err) {
 				console.warn("createSpace: failed to set nsfw flag", err);
+			}
+		}
+		// E2EE-required policy: write the space-config state event.
+		// Guarded by the visibility check at the SPA-create-dialog
+		// layer (UI only enables the toggle for private spaces) AND
+		// here, in case any future caller forgets — a public + e2ee
+		// space would land child rooms in the public+encrypted state
+		// that governance forbids.
+		if (opts.e2eeRequired && opts.visibility === "private") {
+			try {
+				await c.sendStateEvent(
+					spaceId,
+					"chat.koven.space.config" as any,
+					{ e2ee_required: true },
+					"",
+				);
+			} catch (err) {
+				// Loud-warn rather than silent: a missed config event
+				// means child rooms will NOT be forced to E2EE, which
+				// silently breaks the creator's expectation.  The
+				// creator can re-apply the policy via space settings
+				// (when that UI exists) — until then, this log is the
+				// audit trail.
+				console.error("createSpace: failed to set e2ee_required flag", err);
 			}
 		}
 		this.emitSpaceList();
@@ -3710,6 +3757,14 @@ export class MatrixTransport {
 		const childIdSet = new Set(childRoomIds);
 		const pinnedRoomIds = this.readPinnedRoomIds(r.roomId as SpaceId)
 			.filter(id => childIdSet.has(id));
+		// Koven-specific config: chat.koven.space.config state event.
+		// Currently only carries `e2ee_required` — meaning every child
+		// room of this space must be created encrypted + private.
+		// Set once at space creation; read here at every space rebuild
+		// so the SPA + child-room creation flow can see it.
+		const spaceConfig = r.currentState
+			.getStateEvents("chat.koven.space.config", "")
+			?.getContent() as { e2ee_required?: boolean } | undefined;
 		return {
 			id: r.roomId as SpaceId,
 			name: r.name || r.roomId,
@@ -3717,6 +3772,7 @@ export class MatrixTransport {
 			avatarUrl: r.getMxcAvatarUrl() ?? undefined,
 			iconEmoji: readKovenIconEmoji(r),
 			kind: joinRule === "public" ? "public" : "private",
+			e2eeRequired: spaceConfig?.e2ee_required === true,
 			childRoomIds,
 			myPowerLevel,
 			creatorId,

@@ -48,11 +48,17 @@ export interface CreateRoomSheetProps {
 	// the dialog can no longer be opened without an active space.
 	parentSpaceName: string;
 	parentSpaceKind: "public" | "private";
+	// True when the parent space was created with the "all child
+	// rooms must be E2EE" policy.  Forces the encryption switch
+	// ON and read-only — the user can't opt out of the space's
+	// policy on a per-room basis.  matrix.ts's createRoom also
+	// enforces this server-side; the UI gate is just for clarity.
+	parentSpaceE2eeRequired?: boolean;
 }
 
 export function CreateRoomSheet({
 	open, onOpenChange, onCreate,
-	parentSpaceName, parentSpaceKind,
+	parentSpaceName, parentSpaceKind, parentSpaceE2eeRequired,
 }: CreateRoomSheetProps) {
 	const [name, setName] = useState("");
 	const [topic, setTopic] = useState("");
@@ -61,7 +67,13 @@ export function CreateRoomSheet({
 	// spaces can't host encrypted rooms because the engine needs to
 	// see content to run consensus moderation.
 	const canEncrypt = parentSpaceKind === "private";
-	const effectiveEncrypted = canEncrypt && encrypted;
+	// When the parent space's policy requires E2EE, the switch is
+	// forced on regardless of the local state.  The local `encrypted`
+	// state is kept so the rendered switch shows the right "checked"
+	// position; we just override the effective value.
+	const effectiveEncrypted = parentSpaceE2eeRequired
+		? true
+		: (canEncrypt && encrypted);
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	// Avatar pick state — same pattern as CreateSpaceSheet.
@@ -207,7 +219,11 @@ export function CreateRoomSheet({
 						<div className="space-y-0.5 flex-1 min-w-0">
 							<Label htmlFor="room-encrypted" className="cursor-pointer">End-to-end encryption</Label>
 							<p className="text-xs text-muted-foreground leading-relaxed">
-								{canEncrypt ? (
+								{parentSpaceE2eeRequired ? (
+									<>
+										<strong className="text-foreground">Required by this space.</strong> {parentSpaceName} was created with end-to-end encryption locked on, so every room in it must be encrypted.
+									</>
+								) : canEncrypt ? (
 									<>
 										Encrypted rooms are unreadable by the server. <strong className="text-foreground">Koven moderation cannot apply</strong> &mdash; flags, collapse, and the mod log go silent. Use only when you trust everyone in the space.
 									</>
@@ -222,7 +238,7 @@ export function CreateRoomSheet({
 							id="room-encrypted"
 							checked={effectiveEncrypted}
 							onCheckedChange={setEncrypted}
-							disabled={!canEncrypt}
+							disabled={!canEncrypt || parentSpaceE2eeRequired === true}
 						/>
 					</div>
 

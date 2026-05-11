@@ -100,6 +100,15 @@ export interface Space {
 	// rooms with `type: m.space`.
 	iconEmoji?: string;
 	kind: "public" | "private";
+	// True when the space was created with the "all rooms must be
+	// E2EE" policy (chat.koven.space.config state event with
+	// e2ee_required=true).  Set once at space creation, never
+	// unset — Matrix can't disable encryption on a room once on,
+	// so loosening this policy retroactively would create a mixed
+	// state.  Implies kind="private" (encrypted public rooms are
+	// forbidden by governance — see GOVERNANCE.md).  Child-room
+	// creation forces encryption + private on every new room.
+	e2eeRequired?: boolean;
 	// Room ids declared as children via m.space.child.  Source of truth
 	// for "rooms in this space" — rooms also list their parents via
 	// m.space.parent, but the canonical hierarchy lives on the space.
