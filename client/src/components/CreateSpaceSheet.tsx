@@ -250,42 +250,32 @@ export function CreateSpaceSheet({ open, onOpenChange, onCreate, showNsfw }: Cre
 						</div>
 					</div>
 
-					{/* End-to-end encryption — only valid for private
-					    spaces.  When on, every child room created under
-					    this space is forced to be encrypted + private,
-					    permanently.  Matrix can't disable encryption on
-					    a room once it's on, so this flag is a one-way
-					    switch.  Surfaced disabled (with explanatory copy)
-					    when visibility is public so the user understands
-					    why they can't combine the two. */}
-					<div className={cn(
-						"flex items-start justify-between gap-3 rounded-md border border-border p-3",
-						!canEncrypt && "opacity-60",
-					)}>
-						<div className="space-y-0.5 flex-1 min-w-0">
-							<Label htmlFor="space-e2ee" className="cursor-pointer flex items-center gap-1.5">
-								<Lock className="h-3.5 w-3.5 text-muted-foreground" />
-								End-to-end encryption
-							</Label>
-							<p className="text-xs text-muted-foreground leading-relaxed">
-								{canEncrypt ? (
-									<>
-										Forces every room in this space to be encrypted &amp; private. <strong className="text-foreground">Koven moderation can&rsquo;t apply</strong> &mdash; flags, collapse, and the mod log go silent in every child room. <strong className="text-foreground">This can&rsquo;t be reversed.</strong>
-									</>
-								) : (
-									<>
-										Encryption is only available on private spaces. Public rooms must stay readable for consensus moderation to work.
-									</>
-								)}
-							</p>
+					{/* End-to-end encryption: only meaningful on private
+					    spaces.  When on, every child room is forced
+					    encrypted + private, permanently (Matrix can't
+					    disable encryption on a room once on).  The
+					    whole section is hidden when visibility is
+					    public: showing the same control disabled was
+					    just noise that pushed the Create button below
+					    the fold without offering anything actionable. */}
+					{canEncrypt && (
+						<div className="flex items-start justify-between gap-3 rounded-md border border-border p-3">
+							<div className="space-y-0.5 flex-1 min-w-0">
+								<Label htmlFor="space-e2ee" className="cursor-pointer flex items-center gap-1.5">
+									<Lock className="h-3.5 w-3.5 text-muted-foreground" />
+									End-to-end encryption
+								</Label>
+								<p className="text-xs text-muted-foreground leading-relaxed">
+									Forces every room in this space to be encrypted &amp; private. <strong className="text-foreground">Koven moderation can&rsquo;t apply</strong>, flags, collapse, and the mod log go silent in every child room. <strong className="text-foreground">This can&rsquo;t be reversed.</strong>
+								</p>
+							</div>
+							<Switch
+								id="space-e2ee"
+								checked={effectiveE2eeRequired}
+								onCheckedChange={setE2eeRequired}
+							/>
 						</div>
-						<Switch
-							id="space-e2ee"
-							checked={effectiveE2eeRequired}
-							onCheckedChange={setE2eeRequired}
-							disabled={!canEncrypt}
-						/>
-					</div>
+					)}
 
 					{showNsfw && (
 						<div className="flex items-start justify-between gap-3 rounded-md border border-border p-3">

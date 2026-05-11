@@ -159,6 +159,18 @@ export default function App() {
 		void setAppBadge(creds ? notifications.unreadCount : 0);
 	}, [creds, notifications.unreadCount]);
 
+	// Hide non-DM invite entries from the bell.  Space and room
+	// invites have their own dedicated surface (PendingInvitesPill +
+	// PendingInvitesSheet); double-listing them in the bell was
+	// noise.  Engine stopped emitting these on the same deploy, but
+	// the filter also catches rows still sitting in the DB from
+	// before the engine change.  DM invites stay (kind="dm") since
+	// they're the inbox surface for "someone started a chat."
+	const visibleNotifications = useMemo(() => ({
+		...notifications,
+		entries: notifications.entries.filter(e => e.kind !== "invite"),
+	}), [notifications]);
+
 	// Click handler shared by both bell instances (mobile topbar
 	// icon + desktop FAB).  Two responsibilities:
 	//
@@ -257,7 +269,9 @@ export default function App() {
 	const [nsfwGate, setNsfwGate] = useState<{
 		mode: "invite" | "space-children";
 		roomId: RoomId;
-		subjectName: string;
+		// Undefined when we don't have a name to show; the dialog
+		// renders a generic "This room/space" fallback in that case.
+		subjectName?: string;
 		isSpace: boolean;
 		skippedNsfwCount?: number;
 		// Deferred accept handler — only set in "invite" mode.  Runs
@@ -1631,7 +1645,13 @@ export default function App() {
 		if (!transport) return null;
 		const info = transport.getInviteInfo(roomId);
 		const room = state.rooms.find(r => r.id === roomId);
-		const subjectName = room?.name ?? "this room";
+		// Spaces come from a separate slice; check both so the gate
+		// dialog can render a real name for space invites.  Falls
+		// through to undefined when neither slice has the target,
+		// which lets the dialog use its "This room/space" fallback
+		// instead of the old '"this room"' literal.
+		const spaceInvite = state.spaceInvites.find(s => s.id === roomId);
+		const subjectName = room?.name ?? spaceInvite?.name;
 		const nsfwPref = !!settings.showNsfw;
 		// Path 1: pre-accept gate.
 		if (info?.isNsfw && !nsfwPref) {
@@ -2062,7 +2082,7 @@ export default function App() {
 					}
 					rightSlot={
 						<NotificationBell
-							notifications={notifications}
+							notifications={visibleNotifications}
 							onOpenRoom={openRoomFromNotification}
 							resolveDisplayName={(userId) => {
 								// Best-effort: scan rooms for a member
@@ -2131,12 +2151,12 @@ export default function App() {
 						// Bounce out of the space we're about to leave so
 						// the user doesn't sit on a now-gone space's view
 						// until they click elsewhere.  Doing this BEFORE
-						// the leave call is safe — set_active_space is a
+						// the leave call is safe: set_active_space is a
 						// local-state dispatch; the network round-trip
-						// for leaveRoom happens after.  Symmetric with
+						// happens after.  Symmetric with
 						// SpaceEditSheet's onLeave handler below.
 						if (state.activeSpace?.kind === "space" && state.activeSpace.id === id) {
-							// Land on DMs after leave — matches the
+							// Land on DMs after leave to match the
 							// post-login default and the empty-state we
 							// already use for "no active selection."  The
 							// Spaces overview page exists but is sparse;
@@ -2144,25 +2164,30 @@ export default function App() {
 							// like a dead end.
 							dispatch({ type: "set_active_space", space: { kind: "dms" } });
 						}
-						transport?.leaveRoom(id).catch(err => {
+						// Discord-style: leaving a space must also leave
+						// every child room reached through it, otherwise
+						// the user vanishes from their own UI but still
+						// shows up as a joined member in those child
+						// rooms to everyone else.  leaveSpaceWithChildren
+						// handles the cascade plus the "shared with
+						// another joined space" protection so a room
+						// reachable through two parents isn't dropped.
+						transport?.leaveSpaceWithChildren(id as SpaceId).catch(err => {
 							dispatch({ type: "error", message: err instanceof Error ? err.message : String(err) });
 						});
 					}}
 					onDeleteSpace={(id) => {
-						// "Delete" semantics: same as leave for now —
+						// "Delete" semantics: same as leave for now,
 						// proper space tombstoning is a Synapse-admin
 						// path that requires extra plumbing.  Founder-
 						// only via the right-click gate.
 						if (state.activeSpace?.kind === "space" && state.activeSpace.id === id) {
-							// Land on DMs after leave — matches the
-							// post-login default and the empty-state we
-							// already use for "no active selection."  The
-							// Spaces overview page exists but is sparse;
-							// shipping users there after a leave reads
-							// like a dead end.
 							dispatch({ type: "set_active_space", space: { kind: "dms" } });
 						}
-						transport?.leaveRoom(id).catch(err => {
+						// Same cascade as onLeaveSpace: a "delete" that
+						// only left the space-shaped parent would strand
+						// the user in the child rooms.
+						transport?.leaveSpaceWithChildren(id as SpaceId).catch(err => {
 							dispatch({ type: "error", message: err instanceof Error ? err.message : String(err) });
 						});
 					}}
@@ -2761,7 +2786,7 @@ export default function App() {
 			{!isMobileShell && (
 				<NotificationBell
 					variant="fab"
-					notifications={notifications}
+					notifications={visibleNotifications}
 					onOpenRoom={openRoomFromNotification}
 					resolveDisplayName={(userId) => {
 						if (!transport) return null;
@@ -3038,7 +3063,7 @@ export default function App() {
 				open={!!nsfwGate}
 				onOpenChange={(o) => { if (!o) setNsfwGate(null); }}
 				mode={nsfwGate?.mode ?? "invite"}
-				subjectName={nsfwGate?.subjectName ?? ""}
+				subjectName={nsfwGate?.subjectName}
 				isSpace={nsfwGate?.isSpace}
 				skippedNsfwCount={nsfwGate?.skippedNsfwCount}
 				onConfirm={async () => {

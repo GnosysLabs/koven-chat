@@ -273,8 +273,7 @@ export function NotificationBell({
 						</p>
 					) : (
 						<p className="text-xs text-muted-foreground/70 max-w-[260px] leading-snug">
-							DMs, @-mentions, replies to your messages, and room invites
-							will show up here.
+							DMs, @-mentions, and replies to your messages will show up here.
 						</p>
 					)}
 				</div>
@@ -357,7 +356,7 @@ export function NotificationBell({
 						<DialogHeader className="sr-only">
 							<DialogTitle>Notifications</DialogTitle>
 							<DialogDescription>
-								Recent mentions, replies, DMs, and invites.
+								Recent mentions, replies, and DMs.
 							</DialogDescription>
 						</DialogHeader>
 						{panelBody}

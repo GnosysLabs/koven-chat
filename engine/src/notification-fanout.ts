@@ -392,16 +392,25 @@ export function fanOutMember(ev: MatrixEvent): void {
 
 	const isDirect = content?.is_direct === true;
 
+	// DM invites still ring the bell, they're the inbox surface for
+	// "someone started a chat with you" and there's no dedicated DM-
+	// invites banner.  Room and space invites are deliberately NOT
+	// emitted as notifications: the PendingInvitesPill banner at the
+	// top of the SPA is the canonical surface for those, and
+	// double-surfacing was just noise (bell red-dot + banner pill for
+	// the same event).
+	if (!isDirect) return;
+
 	insertNotification({
 		userId: ev.state_key,
 		eventId: ev.event_id,
 		roomId: ev.room_id,
-		kind: isDirect ? "dm" : "invite",
+		kind: "dm",
 		sender: ev.sender,
-		// Snippet is null for both flavours — the client renders
-		// sender / room name it knows about live.  An engine-side
-		// room name lookup would be a per-event Synapse round-trip
-		// and the client already has it from /sync.
+		// Snippet is null: the client renders sender / room name it
+		// knows about live.  An engine-side room name lookup would
+		// be a per-event Synapse round-trip and the client already
+		// has it from /sync.
 		snippet: null,
 		createdAt: ev.origin_server_ts,
 	});

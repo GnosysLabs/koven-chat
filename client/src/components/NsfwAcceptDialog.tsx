@@ -30,9 +30,12 @@ export interface NsfwAcceptDialogProps {
 	open: boolean;
 	onOpenChange(open: boolean): void;
 	mode: "invite" | "space-children";
-	// Display name for the room or space at hand — used in the body
+	// Display name for the room or space at hand, used in the body
 	// copy so the user can tell which thing they're confirming for.
-	subjectName: string;
+	// Optional: when omitted (or empty), the body copy falls back to
+	// "This room/space" capitalised and unquoted instead of dropping
+	// stray '"this room"' fallback strings into the user's face.
+	subjectName?: string;
 	// True when the subject is a space (vs. a room).  Just affects
 	// the wording — "this room" vs. "this space".
 	isSpace?: boolean;
@@ -55,10 +58,25 @@ export function NsfwAcceptDialog({
 		mode === "invite"
 			? `This ${subject} contains adult content`
 			: "This space contains NSFW rooms";
+	// Body copy switches between named ("Foo Space") and unnamed
+	// (fallback "This room/space") cases.  In the unnamed case we
+	// capitalise the leading word and skip the curly quotes; in the
+	// named case we keep the typographic quotes so the room/space
+	// name reads as a quoted title rather than running into the
+	// surrounding prose.
+	const hasName = !!subjectName && subjectName.length > 0;
+	const namedRef = `“${subjectName}”`;
+	const fallbackRef = isSpace ? "This space" : "This room";
+	const inviteRef = hasName ? namedRef : fallbackRef;
+	const childrenLabel = skippedNsfwCount === 1
+		? "1 child room"
+		: `${skippedNsfwCount ?? 0} child rooms`;
 	const body =
 		mode === "invite"
-			? `“${subjectName}” is flagged as NSFW. Accepting will enable adult content on your account so you can see it — you can turn this off later in Settings.`
-			: `You joined “${subjectName}”, but ${skippedNsfwCount === 1 ? "1 child room" : `${skippedNsfwCount ?? 0} child rooms`} were skipped because they're flagged NSFW. Enable adult content to auto-join them?`;
+			? `${inviteRef} is flagged as NSFW. Accepting will enable adult content on your account so you can see it. You can turn this off later in Settings.`
+			: hasName
+				? `You joined ${namedRef}, but ${childrenLabel} were skipped because they're flagged NSFW. Enable adult content to auto-join them?`
+				: `You joined this space, but ${childrenLabel} were skipped because they're flagged NSFW. Enable adult content to auto-join them?`;
 	const confirmLabel = mode === "invite" ? "Enable NSFW & accept" : "Enable NSFW";
 	const declineLabel = mode === "invite" ? "Cancel" : "Keep them hidden";
 	return (

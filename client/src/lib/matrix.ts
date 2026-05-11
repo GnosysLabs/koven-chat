@@ -3939,19 +3939,33 @@ export class MatrixTransport {
 
 	private sdkRoomToSpaceInvite(r: SdkRoom): SpaceInvite {
 		const inviter = r.getDMInviter() ?? undefined;
-		// Member count for invites: matrix-js-sdk's getJoinedMemberCount
-		// reads `m.joined_member_count` from invite_state when present.
-		// Falls back to counting joined members the SDK has seen, which
-		// may be 0 for pre-accept invites where Synapse forwards only a
-		// minimal slice of state.  `undefined` lets the UI omit the
-		// member-count line entirely rather than showing a misleading 0.
-		const memberCount = r.getJoinedMemberCount();
+		// Walk the m.room.member state events directly and count the
+		// ones with membership=join.  matrix-js-sdk's
+		// getJoinedMemberCount() reads `m.joined_member_count` from
+		// the room summary, which Synapse populates inconsistently
+		// for invite_state rooms (a fresh 1-person room came back as
+		// 2 because the invitee's own invite event was bumping the
+		// count).  Counting state events ourselves matches the
+		// authoritative Matrix semantics: the count is whoever has a
+		// current join membership event, no more, no less.
+		const memberEvents = r.currentState.getStateEvents("m.room.member") ?? [];
+		let joinedCount = 0;
+		for (const ev of memberEvents) {
+			if ((ev.getContent() as { membership?: string }).membership === "join") {
+				joinedCount++;
+			}
+		}
 		return {
 			id: r.roomId as SpaceId,
 			name: r.name || (r.roomId as string),
 			topic: r.currentState.getStateEvents("m.room.topic", "")?.getContent().topic as string | undefined,
 			avatarUrl: r.getMxcAvatarUrl() ?? undefined,
-			memberCount: memberCount > 0 ? memberCount : undefined,
+			// 0 means the SDK hasn't seen any join-membership state
+			// for this room yet (rare, but possible if Synapse
+			// forwards a sparse invite_state slice).  Surface that
+			// as undefined rather than "0 members," which would be
+			// misleading: someone joined or there'd be no invite.
+			memberCount: joinedCount > 0 ? joinedCount : undefined,
 			inviter: inviter as UserId | undefined,
 			isNsfw: readKovenNsfw(r),
 		};
@@ -4595,18 +4609,73 @@ export class MatrixTransport {
 		return msgs;
 	}
 
-	/** All reaction events currently in a room's timeline, oldest first. */
+	/** All reaction events currently visible for a room, oldest first.
+	 *
+	 * Two sources, merged + deduped because matrix-js-sdk stores
+	 * reactions differently depending on how they arrived:
+	 *
+	 *   1. Live reactions (`m.reaction` events received via /sync
+	 *      while we were in the room) land in the timeline as
+	 *      standalone events.  Walking `getLiveTimeline().getEvents()`
+	 *      finds them.
+	 *
+	 *   2. Backfilled or bundled reactions (paginated in via
+	 *      /messages, or attached as `unsigned.m.relations` on a
+	 *      parent message that landed during initial sync for a
+	 *      newly-joined room) DO NOT appear in the timeline.  The
+	 *      SDK aggregates them into `room.relations` (a
+	 *      RelationsContainer) via `aggregateNonLiveRelation` but
+	 *      never inserts them as standalone events.  The user-
+	 *      visible symptom: an account that joined the room AFTER
+	 *      reactions were posted sees zero reactions on those
+	 *      messages, while an account that was present when the
+	 *      reactions arrived live sees everything normally.
+	 *
+	 * We walk both sources and dedupe by reaction event id.  Order
+	 * is rebuilt from `origin_server_ts` so live + backfilled
+	 * reactions interleave correctly. */
 	getRoomReactions(roomId: RoomId): ReactionEvent[] {
 		const room = this.client?.getRoom(roomId);
 		if (!room) return [];
-		const out: ReactionEvent[] = [];
-		for (const event of room.getLiveTimeline().getEvents()) {
-			if (event.getType() !== "m.reaction") continue;
-			if (event.isRedacted()) continue;
+		const byEventId = new Map<string, { ts: number; r: ReactionEvent }>();
+		const visit = (event: MatrixEvent) => {
+			if (event.getType() !== "m.reaction") return;
+			if (event.isRedacted()) return;
+			const id = event.getId();
+			if (!id || byEventId.has(id)) return;
 			const r = this.eventToReaction(event, room);
-			if (r) out.push(r);
+			if (!r) return;
+			byEventId.set(id, { ts: event.getTs(), r });
+		};
+
+		// Pass 1: standalone events in the live timeline.
+		for (const event of room.getLiveTimeline().getEvents()) {
+			visit(event);
 		}
-		return out;
+
+		// Pass 2: bundled / backfilled reactions hanging off each
+		// parent message.  Walk only message-shaped events so we
+		// don't pay a relations lookup for every state event.
+		const relationsContainer = room.getUnfilteredTimelineSet().relations;
+		for (const event of room.getLiveTimeline().getEvents()) {
+			const type = event.getType();
+			if (type !== "m.room.message" && type !== "m.room.encrypted") continue;
+			const parentId = event.getId();
+			if (!parentId) continue;
+			const rel = relationsContainer.getChildEventsForEvent(
+				parentId,
+				"m.annotation" as any,
+				"m.reaction" as any,
+			);
+			if (!rel) continue;
+			for (const child of rel.getRelations()) {
+				visit(child);
+			}
+		}
+
+		return [...byEventId.values()]
+			.sort((a, b) => a.ts - b.ts)
+			.map(v => v.r);
 	}
 
 	/** All flag events currently in a room's timeline, oldest first. */
