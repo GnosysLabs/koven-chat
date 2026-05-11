@@ -943,7 +943,7 @@ export function ChatPane({
 							icon={<Lock className="h-3 w-3" />}
 							label="Encrypted"
 							tone="success"
-							title="End-to-end encrypted. Koven moderation does not apply in this room."
+							title="End-to-end encrypted. The engine can't read these messages, so Koven moderation doesn't apply — flagging, room collapse, and the mod log are silent here. Activity in this room also doesn't contribute to your reputation score, since reputation is built from posts the engine can index."
 						/>
 					)}
 					{room.nsfw && (
