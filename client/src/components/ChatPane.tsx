@@ -1889,6 +1889,7 @@ function MessageRow({
 								viewerUserId={viewerUserId}
 								onPollVote={onPollVote}
 								onPollEnd={onPollEnd}
+								isBot={isBot}
 							/>
 						)}
 						{!isCollapsed && message.kind === "text" && !roomEncrypted && (
@@ -2157,6 +2158,7 @@ function MessageBubble({
 	viewerUserId,
 	onPollVote,
 	onPollEnd,
+	isBot,
 }: {
 	message: Message;
 	memberNames: Map<string, string>;
@@ -2165,7 +2167,18 @@ function MessageBubble({
 	viewerUserId?: UserId;
 	onPollVote?(pollId: EventId, answerIds: string[]): void | Promise<void>;
 	onPollEnd?(pollId: EventId): void | Promise<void>;
+	// Bots stream their replies as a sequence of m.replace edits so the
+	// LLM's tokens land in real-time, which means the resulting message
+	// always carries `edited: true` once the stream completes.  The
+	// "(edited)" badge in that case is noise: it reads as "the bot
+	// went back and changed its message" when nothing of the sort
+	// happened.  Suppress the badge entirely when the sender is a bot.
+	isBot: boolean;
 }) {
+	// Effective edited state for badge rendering: bots are always
+	// "not edited" from the user's perspective even when the SDK
+	// reports `edited: true` thanks to streaming-token replaces.
+	const showEdited = message.edited && !isBot;
 	if (message.kind === "poll" && message.poll) {
 		return (
 			<PollCard
@@ -2271,7 +2284,7 @@ function MessageBubble({
 				<div className={cn(sizeClass, "leading-none break-words")}>
 					{message.text}
 				</div>
-				{message.edited && (
+				{showEdited && (
 					<span className="text-[10px] text-muted-foreground">(edited)</span>
 				)}
 			</div>
@@ -2298,7 +2311,7 @@ function MessageBubble({
 		? stripYouTubeUrls(message.text, youtubeMatches)
 		: message.text;
 	const hasBubbleContent = strippedText.length > 0;
-	const editedBadge = message.edited ? (
+	const editedBadge = showEdited ? (
 		<span className={cn(
 			"ml-1.5 text-[10px]",
 			message.isSelf ? "text-primary-foreground/60" : "text-muted-foreground",
@@ -2337,9 +2350,9 @@ function MessageBubble({
 					startSeconds={m.startSeconds}
 				/>
 			))}
-			{!hasBubbleContent && !isMarkdown && message.edited && (
+			{!hasBubbleContent && !isMarkdown && showEdited && (
 				// All-YouTube body with no surviving text still wants
-				// the (edited) badge somewhere — tuck it under the
+				// the (edited) badge somewhere, tuck it under the
 				// last embed.
 				<span className="text-[10px] text-muted-foreground self-start">
 					(edited)
