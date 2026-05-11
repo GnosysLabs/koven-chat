@@ -3973,6 +3973,16 @@ export function startServer(): void {
 				const events = body.events ?? [];
 				let sawFlag = false;
 				const newSpaceChildren: { spaceId: string; childId: string; sender: string }[] = [];
+				// Newly-joined-a-room events for LOCAL users.  We collect
+				// every `m.room.member` join for a user on our homeserver
+				// here and post-loop filter for the ones that landed in a
+				// space (so non-space joins don't pay an isSpaceRoom
+				// round-trip).  When a user joins a space we cascade
+				// admin-joins to every joinable child room, mirroring
+				// the symmetric "new child → existing members" cascade
+				// in newSpaceChildren below.
+				const newSpaceJoiners: { userId: string; roomId: string }[] = [];
+				const localSuffix = `:${config.homeserverName}`;
 				// Rooms we just learned about and haven't joined yet.
 				// Eager-join @engine to every room with timeline
 				// activity so it's present whenever we later need to
@@ -4005,6 +4015,23 @@ export function startServer(): void {
 								spaceId: ev.room_id,
 								childId: ev.state_key,
 								sender: ev.sender,
+							});
+						}
+						// Collect local-user `m.room.member` joins.  Filter
+						// down to spaces after the loop so we don't burn
+						// an isSpaceRoom round-trip on every chat message's
+						// m.room.member echo.
+						if (
+							ev.type === "m.room.member" &&
+							ev.room_id &&
+							typeof ev.state_key === "string" &&
+							ev.state_key.startsWith("@") &&
+							ev.state_key.endsWith(localSuffix) &&
+							(ev.content as { membership?: string })?.membership === "join"
+						) {
+							newSpaceJoiners.push({
+								userId: ev.state_key,
+								roomId: ev.room_id,
 							});
 						}
 					} catch (err) {
@@ -4090,6 +4117,79 @@ export function startServer(): void {
 							} catch (err) {
 								console.error(
 									`engine: auto-join cascade for child=${childId} parent=${spaceId} failed`,
+									err,
+								);
+							}
+						}
+					})();
+				}
+				// Discord-style: when a local user joins a SPACE (not a
+				// regular room), force-join them to every joinable child
+				// room.  Mirror of the newSpaceChildren cascade above —
+				// that one fanned out "new child → existing members",
+				// this one fans out "new member → existing children".
+				// Together they guarantee that every member of a space
+				// ends up in every joinable child regardless of which
+				// event arrived first, regardless of client-side timing.
+				//
+				// The pre-this-change flow relied on the joining client
+				// to call joinSpaceWithChildren after joining the space.
+				// That worked when the user used Explore (which calls
+				// joinSpaceWithChildren explicitly), but the new deep-
+				// link confirm-sheet path on a private space races the
+				// Synapse membership commit and child-room restricted-
+				// join checks — leaving the user in the space with zero
+				// rooms, which is what the user reported.
+				//
+				// Engine-side cascade is reliable because the m.room.member
+				// event only reaches us after Synapse fully committed
+				// the parent membership, so every subsequent admin-join
+				// to a restricted child succeeds.
+				if (newSpaceJoiners.length > 0) {
+					void (async () => {
+						for (const { userId, roomId } of newSpaceJoiners) {
+							try {
+								// Only cascade for spaces — regular room joins
+								// fall through with no extra work.  Sub-spaces
+								// inside a space are ALSO m.space, so a user
+								// joining a top-level space won't have their
+								// sub-space children auto-cascaded; matches
+								// the joinSpaceWithChildren rule (sub-spaces
+								// stay explicit opt-in).
+								if (!(await isSpaceRoom(roomId))) continue;
+								const childIds = await getSpaceChildRoomIds(roomId);
+								for (const childId of childIds) {
+									try {
+										// Skip sub-spaces — same rule as
+										// newSpaceChildren above.
+										if (await isSpaceRoom(childId)) continue;
+										// Only auto-join rooms with rules
+										// that make sense for a cascade.
+										// Public + knock + restricted all
+										// resolve cleanly via admin-join;
+										// invite-only children stay invite-
+										// gated and require an explicit
+										// invitation.
+										const rule = await getRoomJoinRule(childId);
+										if (rule !== "public" && rule !== "knock" && rule !== "restricted") continue;
+										const result = await adminJoinUserToRoom(userId, childId);
+										if ("error" in result) {
+											console.warn(
+												`engine: space-join cascade ${userId} → ${childId} failed:`,
+												result.error,
+												result.detail ?? "",
+											);
+										}
+									} catch (err) {
+										console.warn(
+											`engine: space-join cascade child=${childId} failed`,
+											err,
+										);
+									}
+								}
+							} catch (err) {
+								console.error(
+									`engine: space-join cascade for user=${userId} space=${roomId} failed`,
 									err,
 								);
 							}

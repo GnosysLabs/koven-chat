@@ -204,7 +204,7 @@ export function RoomList({
 					// before the rooms fan in from the reducer.
 					roomsLoaded ? (
 						<div className="text-xs text-muted-foreground px-2 py-4 leading-relaxed">
-							{emptyHintFor(activeSpace)}
+							{emptyHintFor(activeSpace, canCreateRoomHere)}
 						</div>
 					) : null
 				) : (
@@ -281,7 +281,7 @@ function headerFor(activeSpace: ActiveSpace, spaces: Space[]): string {
 	return space?.name ?? "Space";
 }
 
-function emptyHintFor(activeSpace: ActiveSpace): string {
+function emptyHintFor(activeSpace: ActiveSpace, canCreate: boolean): string {
 	if (!activeSpace) return "";
 	if (activeSpace.kind === "explore") {
 		return "Browse public spaces in the main pane. Joined ones show up in your sidebar.";
@@ -289,7 +289,15 @@ function emptyHintFor(activeSpace: ActiveSpace): string {
 	if (activeSpace.kind === "dms") {
 		return "No direct messages yet. Start a DM with someone and it'll show up here.";
 	}
-	return "No rooms in this space yet. Use the + above to create one.";
+	// In-space empty state.  Only the space creator sees the
+	// "create one" CTA — non-creators can't actually create rooms
+	// (m.space.child linking 403s without PL 100), and telling them
+	// to use a `+` they don't have is confusing.  Show a neutral
+	// "waiting on the founder" message instead.
+	if (canCreate) {
+		return "No rooms in this space yet. Use the + above to create one.";
+	}
+	return "No rooms in this space yet. The founder hasn't added any channels — they'll show up here when they do.";
 }
 
 // Room tile avatar: DiceBear "shapes" fallback for normal rooms, user
