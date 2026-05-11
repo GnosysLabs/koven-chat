@@ -1218,11 +1218,53 @@ export default function App() {
 		// gets a notification row with read_at=null and the bell
 		// rings while the user is staring at the message.
 		apiMarkRoomRead({ accessToken: creds.access_token, roomId: state.activeRoomId }).catch(() => {});
+		// Hydrate the timeline from whatever matrix-js-sdk has cached
+		// for this room.  For rooms the user already had open during
+		// the initial /sync this is the full last-200-events window;
+		// for rooms they JUST joined (cascade-join from accepting a
+		// space invite, freshly added child room, gappy sync) the
+		// live timeline can be empty even though the server has
+		// history.  Two-phase load handles both:
+		//   1. Dispatch synchronously with whatever's cached.  When
+		//      it's non-empty, the UI shows messages immediately
+		//      (zero flicker, the common case).  When it's empty,
+		//      the reducer adds the room to loadedTimelines and the
+		//      "No messages yet." banner would fire — UNLESS we
+		//      catch it on the second phase below.
+		//   2. If the cached read returned 0 messages AND this is
+		//      our first time entering the room (no entry in
+		//      loadedTimelines yet), eagerly call loadMoreHistory
+		//      to backfill from the server.  When it returns
+		//      events, re-dispatch — the bug it fixes is rooms with
+		//      real history flashing "No messages yet." until the
+		//      user refreshed (which forced /sync to backfill).
+		const roomIdAtMount = state.activeRoomId;
+		const initialMessages = transport.getRoomMessages(roomIdAtMount);
 		dispatch({
 			type: "messages_loaded",
-			roomId: state.activeRoomId,
-			messages: transport.getRoomMessages(state.activeRoomId),
+			roomId: roomIdAtMount,
+			messages: initialMessages,
 		});
+		if (initialMessages.length === 0 && !state.loadedTimelines.has(roomIdAtMount)) {
+			void (async () => {
+				try {
+					const grew = await transport.loadMoreHistory(roomIdAtMount, 50);
+					if (!grew) return;
+					// Re-emit so the reducer overwrites the empty array.
+					// Only fire if the user is still in this room — they
+					// may have switched away during the round-trip; an
+					// out-of-room re-dispatch would briefly leak an
+					// older room's messages into the wrong slot.
+					dispatch({
+						type: "messages_loaded",
+						roomId: roomIdAtMount,
+						messages: transport.getRoomMessages(roomIdAtMount),
+					});
+				} catch (err) {
+					console.warn("room-enter backfill failed", err);
+				}
+			})();
+		}
 		dispatch({
 			type: "members_loaded",
 			roomId: state.activeRoomId,
