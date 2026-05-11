@@ -341,6 +341,22 @@ export async function ensureWebhookRegistered(opts: {
 		console.warn("calls: no publicEngineUrl — skipping webhook registration (dev mode)");
 		return;
 	}
+	// Local dev guard: when HOMESERVER_URL points at localhost, this
+	// is a developer's laptop instance, not the prod engine that
+	// owns the webhook.  Re-registering would have Cloudflare update
+	// the existing webhook to point at this dev box (or worse, the
+	// prod URL is already correct and we'd just churn it), and the
+	// participant join/left events would race between dev + prod.
+	// Local dev doesn't need the webhook to test calls — token
+	// minting + WebRTC work without it; the only thing it powers is
+	// the avatar-stack indicator on the room voice bar.  Skip.
+	const isLocalEngine =
+		config.homeserverUrl.includes("localhost") ||
+		config.homeserverUrl.includes("127.0.0.1");
+	if (isLocalEngine) {
+		console.log("calls: local dev engine detected (HOMESERVER_URL is localhost) — skipping webhook registration to avoid clobbering prod's");
+		return;
+	}
 
 	const targetUrl = `${opts.publicEngineUrl.replace(/\/+$/, "")}/api/calls/cf-webhook/${config.cfRealtimeWebhookSecret}`;
 

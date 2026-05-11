@@ -106,3 +106,38 @@ export async function listActiveCallParticipants(opts: {
 		joinedAt: p.joined_at,
 	}));
 }
+
+/** Tell the engine "I just joined this room's call" — fired
+ *  client-side after meeting.joinRoom() resolves.  Self-healing
+ *  presence signal: works in dev (where the Cloudflare webhook
+ *  isn't registered) and acts as a backstop in prod for cases
+ *  where the webhook was missed (foreign meeting id, dropped
+ *  delivery).  Idempotent on the engine side. */
+export async function pingCallPresenceJoined(opts: {
+	accessToken: string;
+	roomId: RoomId;
+}): Promise<void> {
+	await fetch(
+		`${ENGINE_URL}/api/calls/${encodeURIComponent(opts.roomId)}/iam-here`,
+		{
+			method: "POST",
+			headers: { Authorization: `Bearer ${opts.accessToken}` },
+		},
+	).catch(() => { /* best-effort */ });
+}
+
+/** Counterpart of pingCallPresenceJoined — tell the engine "I'm
+ *  out" so the social-signal stack updates immediately on leave
+ *  rather than waiting for a webhook timeout. */
+export async function pingCallPresenceLeft(opts: {
+	accessToken: string;
+	roomId: RoomId;
+}): Promise<void> {
+	await fetch(
+		`${ENGINE_URL}/api/calls/${encodeURIComponent(opts.roomId)}/iam-gone`,
+		{
+			method: "POST",
+			headers: { Authorization: `Bearer ${opts.accessToken}` },
+		},
+	).catch(() => { /* best-effort */ });
+}

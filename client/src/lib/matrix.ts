@@ -1824,6 +1824,81 @@ export class MatrixTransport {
 		return res.event_id as EventId;
 	}
 
+	/** Send a custom (non-`m.room.message`) event to a room.  Used
+	 * by the call-ringing system: the caller fires
+	 * `chat.koven.call.ring` after joining a DM call, and the
+	 * recipient listens for it via the timeline.  Cancel + decline
+	 * events use the same path.  Returns the event id so the
+	 * caller can reference it later (e.g. cancel referencing the
+	 * ring's eventId so the recipient knows which ring to dismiss). */
+	async sendCustomEvent(
+		roomId: RoomId,
+		eventType: string,
+		content: Record<string, unknown>,
+	): Promise<EventId> {
+		const c = this.requireClient();
+		const res = await c.sendEvent(roomId, eventType as any, content as any);
+		return res.event_id as EventId;
+	}
+
+	/** Subscribe to live timeline events of a given type across all
+	 *  joined rooms.  Used by the ring listener (which watches for
+	 *  `chat.koven.call.ring` / `cancel` / `decline` in any DM).
+	 *  Returns an unsubscribe function for the React effect cleanup
+	 *  pattern.
+	 *
+	 *  Only fires for LIVE events (not backfill / pagination /
+	 *  redactions), and ignores events the user themselves sent
+	 *  (no echo).  Encrypted events that haven't yet been
+	 *  decrypted are skipped — the caller would re-read them via
+	 *  the matching MatrixEvent.Decrypted path if needed; for
+	 *  call-ring purposes we just want the cleartext live ones. */
+	onCallEvent(
+		callback: (info: {
+			roomId: RoomId;
+			eventType: string;
+			eventId: EventId;
+			senderId: UserId;
+			content: Record<string, unknown>;
+			timestamp: number;
+		}) => void,
+	): () => void {
+		const client = this.client;
+		if (!client) return () => { /* no-op */ };
+		const myUserId = this.creds?.user_id;
+		const handler = (
+			event: MatrixEvent,
+			room: SdkRoom | undefined,
+			toStartOfTimeline: boolean | undefined,
+			removed: boolean,
+			data: IRoomTimelineData,
+		) => {
+			if (!room || toStartOfTimeline || removed || !data?.liveEvent) return;
+			const t = event.getType();
+			if (!t.startsWith("chat.koven.call.")) return;
+			const sender = event.getSender();
+			if (!sender || sender === myUserId) return; // skip our own echoes
+			const eventId = event.getId();
+			if (!eventId) return;
+			callback({
+				roomId: room.roomId as RoomId,
+				eventType: t,
+				eventId: eventId as EventId,
+				senderId: sender as UserId,
+				content: (event.getContent() as Record<string, unknown>) ?? {},
+				timestamp: event.getTs(),
+			});
+		};
+		client.on(RoomEvent.Timeline, handler);
+		return () => {
+			try {
+				client.off(RoomEvent.Timeline, handler);
+			} catch {
+				// SDK already torn down — fine.
+			}
+		};
+	}
+
 	/** Send a plain text message to a room. */
 	async sendText(roomId: RoomId, body: string): Promise<EventId> {
 		const c = this.requireClient();
@@ -2374,28 +2449,9 @@ export class MatrixTransport {
 		return roomId;
 	}
 
-	/**
-	 * Place an outbound 1:1 voice or video call into a room.  Returns
-	 * the live MatrixCall so the caller can attach state listeners.
-	 *
-	 * Voice and video are the same protocol on the wire (m.call.invite
-	 * with SDP offer); the only difference is whether we request a
-	 * camera track from the user's device.  Either flavor uses WebRTC
-	 * peer-to-peer with Synapse acting only as the signaling channel
-	 * — no media touches the server.  Encrypted rooms work the same
-	 * way; signaling rides through the encrypted timeline.
-	 *
-	 * Returns null if the SDK refuses to create a call (e.g. no room).
-	 * Caller should treat null as a failure and surface a UI error.
-	 */
-	async placeCall(roomId: RoomId, video: boolean): Promise<MatrixCall | null> {
-		const c = this.requireClient();
-		const call = c.createCall(roomId);
-		if (!call) return null;
-		if (video) await call.placeVideoCall();
-		else await call.placeVoiceCall();
-		return call;
-	}
+	// transport.placeCall removed — DM calls go through the
+	// RealtimeKit-backed CallProvider system now (see
+	// RoomVoiceBar's Join button + lib/call-context.tsx).
 
 	/**
 	 * Browse the homeserver's public room directory.  Returns public

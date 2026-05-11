@@ -14,6 +14,9 @@ import { ReactionPills } from "@/components/ReactionPills";
 import { MessageActions } from "@/components/MessageActions";
 import { BotBadge } from "@/components/BotBadge";
 import { RoomVoiceBar } from "@/components/voice/RoomVoiceBar";
+import { InCallPane } from "@/components/voice/InCallPane";
+import { useCall } from "@/lib/call-context";
+import { joinCall as joinCallApi, CallApiError } from "@/lib/calls-api";
 import { FounderBadge } from "@/components/FounderBadge";
 import { getCachedFounderNumber } from "@/lib/founders-cache";
 import {
@@ -99,7 +102,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import { AlertTriangle, BarChart3, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Images, Lock, Network, Paperclip, Phone, Play, Scale, Settings, Video, X } from "lucide-react";
+import { AlertTriangle, BarChart3, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Images, Lock, Network, Paperclip, Play, Scale, Settings, X } from "lucide-react";
 
 export interface ChatPaneProps {
 	room: Room | null;
@@ -121,13 +124,6 @@ export interface ChatPaneProps {
 	onDeclineInvite(roomId: EventId): void | Promise<void>;
 	onInvite(roomId: EventId): void;
 	onEditRoom(roomId: EventId): void;
-	// Place a 1:1 voice or video call into the active room.  Only
-	// surfaced for DMs in the header — the parent decides whether to
-	// pass a no-op (e.g. while another call is already in progress).
-	onPlaceCall(roomId: EventId, video: boolean): void;
-	// True when a call is in progress anywhere in the app — the
-	// header hides the Call buttons so we can't double-place.
-	callInProgress: boolean;
 	// Engine-reported suspension state for the current user.  When
 	// true, the compose row, call buttons, and invite affordance are
 	// disabled.  Read remains allowed.  The full-width banner above
@@ -257,7 +253,7 @@ const MAX_PENDING_ATTACHMENTS = 10;
 export function ChatPane({
 	room, messages, memberAvatars, reactionsByMessage, flagsByMessage, collapsesByMessage,
 	onSendMessage, onSendAttachment, onReact, onUnreact, onFlag, onUnflag, onAcceptInvite, onDeclineInvite, onInvite, onEditRoom,
-	onPlaceCall, callInProgress, isSuspended, onOpenModLog, onFlagRoom, collapsedRoomIds,
+	isSuspended, onOpenModLog, onFlagRoom, collapsedRoomIds,
 	botMxids,
 	myOwnedBotMxids,
 	onDeleteMessage,
@@ -343,6 +339,19 @@ export function ChatPane({
 	}, [draft]);
 	const scrollRef = useRef<HTMLDivElement | null>(null);
 	const scrollContentRef = useRef<HTMLDivElement | null>(null);
+	// Active-call gate.  Discord-style: voice and chat are SEPARATE
+	// views even when they share a room.  We only swap the message
+	// area for the call surface when the user has explicitly
+	// entered the "call view" (true after they hit Join, false
+	// after they click the room name in the sidebar).  When false,
+	// chat renders normally and the floating PIP gives them one-
+	// click access back to the call view.
+	const call = useCall();
+	const isInActiveCallRoom =
+		!!call.activeCall &&
+		call.activeCall.roomId === room?.id &&
+		call.inCallView &&
+		(call.phase === "prejoin" || call.phase === "joined" || call.phase === "connecting");
 	// Cursor position in the compose box.  Tracked separately from
 	// `draft` because keyboard shortcuts (Tab, Enter for send) fire
 	// before React syncs the input's selectionStart.  Updated on
@@ -791,6 +800,13 @@ export function ChatPane({
 		// child shrink below content, so flex-1 + overflow-y-auto
 		// constrain to the available height as intended.
 		<div className="flex-1 flex flex-col min-w-0 min-h-0">
+			{/* Suppress the chat-room header when the call view is on
+			    top — the header relates to the room's chat (name,
+			    settings, mod log, flag) and would just be a tease
+			    while the user's looking at the call surface.  Same
+			    visual rule as hiding the right sidebar in call
+			    view: give the call as much real estate as possible. */}
+			{!isInActiveCallRoom && (
 			<header className="h-12 px-4 flex items-center justify-between gap-3 border-b border-border bg-muted/30">
 				<div className="flex items-center gap-2 min-w-0">
 					<MatrixAvatar
@@ -871,28 +887,11 @@ export function ChatPane({
 							title={`This room is hosted on ${room.homeserver}, not your home server. The local moderation engine does not apply here — flags and reputation are local-only.`}
 						/>
 					)}
-					{room.kind === "dm" && !room.isInvite && !callInProgress && (
-						<>
-							<button
-								type="button"
-								onClick={() => onPlaceCall(room.id as EventId, false)}
-								className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-								title="Voice call"
-								aria-label="Voice call"
-							>
-								<Phone className="h-4 w-4" />
-							</button>
-							<button
-								type="button"
-								onClick={() => onPlaceCall(room.id as EventId, true)}
-								className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-								title="Video call"
-								aria-label="Video call"
-							>
-								<Video className="h-4 w-4" />
-							</button>
-						</>
-					)}
+					{/* Old MatrixCall Phone + Video buttons removed.
+					    DMs now use the same Live channel system as
+					    rooms — see RoomVoiceBar below.  Calling a DM
+					    sends a ring event the recipient picks up
+					    via IncomingRingSheet. */}
 					{/* Per-room invites removed by Discord-style invariant:
 					    membership flows space → cascade → all rooms.  To
 					    add someone, invite them to the parent space (the
@@ -962,25 +961,38 @@ export function ChatPane({
 					)}
 				</div>
 			</header>
+			)}
 
-			{/* Voice channel bar — every group room implicitly has a
-			    voice channel attached.  DMs keep the existing 1:1
-			    MatrixCall flow (separate UX, no need for an SFU).
-			    The bar hides itself when the engine reports
-			    M_NOT_CONFIGURED, so instances without RealtimeKit
-			    creds wired up don't see broken UI.  Per-room
-			    `liveEnabled` lets admins suppress it for rooms
-			    where voice would be noise (#announcements,
-			    #report-a-bug); reader defaults to true so existing
-			    rooms keep the bar without needing to opt in. */}
-			{room.kind !== "dm" && accessToken && room.liveEnabled !== false && (
+			{/* Voice channel bar.  DMs use the same surface as group
+			    rooms now — same Join button, same avatar stack —
+			    with the difference that joining a DM call sends a
+			    ring event the recipient picks up via
+			    IncomingRingSheet.  The bar hides itself when the
+			    engine reports M_NOT_CONFIGURED so instances
+			    without RealtimeKit creds wired up don't see
+			    broken UI.  Per-room `liveEnabled` lets admins
+			    suppress it for non-DM rooms where voice would be
+			    noise (#announcements, #report-a-bug); reader
+			    defaults to true.  DMs ignore `liveEnabled` since
+			    1:1 calls aren't a "channel" the user opts in/out of. */}
+			{accessToken && (room.kind === "dm" || room.liveEnabled !== false) && (
 				<RoomVoiceBar
 					roomId={room.id}
 					roomName={room.name}
 					accessToken={accessToken}
+					isDm={room.kind === "dm"}
 				/>
 			)}
 
+			{isInActiveCallRoom ? (
+				/* In-call view replaces the normal chat surface for
+				   the call's room.  Renders pre-join (camera preview
+				   + device pickers), the connecting spinner, or the
+				   participant grid based on the CallProvider's phase
+				   machine.  Audio + meeting state live at App level
+				   so leaving the room mid-call doesn't drop the call. */
+				<InCallPane roomName={room.name} />
+			) : (<>
 			{/* overflow-anchor: auto is the browser's native scroll-
 			    anchoring behavior — when content is added above the
 			    viewport, the browser keeps the visible content
@@ -1385,6 +1397,7 @@ export function ChatPane({
 				</form>
 			</div>
 			)}
+			</>)}
 
 			{/* Create-poll modal.  Lives outside the form so its dialog
 			    portal isn't trapped under the composer's tab order;

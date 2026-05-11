@@ -16,6 +16,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { DesktopTitleBar } from "./components/DesktopTitleBar";
+import { CallProvider } from "./lib/call-context";
 import "./index.css";
 
 // macOS desktop only: round the NSWindow corners via cloudworxx's
@@ -91,10 +92,12 @@ async function revealApp(): Promise<void> {
 // renders below.
 ReactDOM.createRoot(document.getElementById("root")!).render(
 	<React.StrictMode>
-		<div className="h-full relative">
-			<App />
-			<DesktopTitleBar />
-		</div>
+		<CallProvider>
+			<div className="h-full relative">
+				<App />
+				<DesktopTitleBar />
+			</div>
+		</CallProvider>
 	</React.StrictMode>,
 );
 

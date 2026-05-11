@@ -1,13 +1,13 @@
 // Create-room dialog — name + topic + avatar + encryption.
 //
 // Discord-style invariant: the new room ALWAYS lives inside the
-// currently active space, and inherits the space's privacy + NSFW
-// posture.  No room-level visibility toggle, no room-level NSFW
-// toggle.  Public space → public rooms; private space → private
-// rooms (restricted-join, in-space members only); NSFW space →
-// NSFW rooms.  The caller (App.tsx) wires `parentSpaceKind` and
-// `parentSpaceNsfw` so the dialog can show the user what they're
-// inheriting.
+// currently active space, and silently inherits the space's
+// privacy + NSFW posture.  No room-level visibility toggle, no
+// room-level NSFW toggle, no read-only "inherits from" panel —
+// the inheritance is implicit.  Public space → public rooms;
+// private space → restricted-join in-space rooms; NSFW space →
+// NSFW rooms.  The dialog only needs `parentSpaceKind` to gate
+// the encryption switch.
 //
 // Encryption stays a per-room choice because it's a technical
 // axis (megolm sessions, key backup, blind moderation) rather
@@ -29,7 +29,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
-import { Camera, EyeOff, Globe, Trash2 } from "lucide-react";
+import { Camera, Trash2 } from "lucide-react";
 
 export interface CreateRoomSheetProps {
 	open: boolean;
@@ -48,12 +48,11 @@ export interface CreateRoomSheetProps {
 	// the dialog can no longer be opened without an active space.
 	parentSpaceName: string;
 	parentSpaceKind: "public" | "private";
-	parentSpaceNsfw: boolean;
 }
 
 export function CreateRoomSheet({
 	open, onOpenChange, onCreate,
-	parentSpaceName, parentSpaceKind, parentSpaceNsfw,
+	parentSpaceName, parentSpaceKind,
 }: CreateRoomSheetProps) {
 	const [name, setName] = useState("");
 	const [topic, setTopic] = useState("");
@@ -199,36 +198,6 @@ export function CreateRoomSheet({
 							placeholder="What this room is about"
 							maxLength={200}
 						/>
-					</div>
-
-					{/* Inherited posture readout — read-only summary of what
-					    the new room will look like privacy-wise.  Replaces
-					    the old per-room visibility + NSFW toggles; the
-					    user changes these by editing the SPACE, not the
-					    room. */}
-					<div className="rounded-md border border-border bg-muted/30 p-3 space-y-2">
-						<div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-							Inherits from {parentSpaceName}
-						</div>
-						<div className="flex items-center gap-2 text-sm">
-							{parentSpaceKind === "public" ? (
-								<>
-									<Globe className="h-4 w-4 text-muted-foreground" />
-									<span><strong>Public</strong> &mdash; anyone on the homeserver can find and join.</span>
-								</>
-							) : (
-								<>
-									<EyeOff className="h-4 w-4 text-muted-foreground" />
-									<span><strong>Private</strong> &mdash; only members of the space can see or join.</span>
-								</>
-							)}
-						</div>
-						{parentSpaceNsfw && (
-							<div className="flex items-center gap-2 text-sm">
-								<span className="text-[10px] uppercase tracking-wide text-destructive bg-destructive/10 border border-destructive/30 px-1.5 py-0.5 rounded">NSFW</span>
-								<span>The space is marked adult-content; this room inherits the marker.</span>
-							</div>
-						)}
 					</div>
 
 					<div className={cn(

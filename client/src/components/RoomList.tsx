@@ -9,7 +9,7 @@ import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { COLLAPSED_NAME } from "@/lib/collapsedRooms";
 import type { Room, RoomId, Space, UserId } from "@koven/shared";
-import { BellOff, Check, Copy, EyeOff, Globe, Lock, Pin, Plus, UserX, X } from "lucide-react";
+import { BellOff, Check, Copy, Lock, Pin, Plus, UserX, X } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { RoomRowContextMenu } from "@/components/RoomRowContextMenu";
 import { ContextMenu, type ContextMenuItem } from "@/components/ui/context-menu";
@@ -320,20 +320,15 @@ function RoomAvatar({ room, isBotPeer }: { room: Room; isBotPeer?: boolean }) {
 				kind={isDm ? dmKind : "room"}
 				className={isDm ? "h-7 w-7 rounded-full" : "h-7 w-7 rounded-md"}
 			/>
-			{isDm
-				? <DmPresenceDot presence={room.dmPresence} />
-				: (
-					<span className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-card border border-border flex items-center justify-center text-muted-foreground">
-						<AccessGlyph room={room} className="h-2.5 w-2.5" />
-					</span>
-				)}
+			{/* DMs get a presence dot; rooms get nothing in the
+			    bottom-right corner anymore.  Public/private now
+			    lives on the SPACE tile (see SpaceTileAvatar in
+			    SpaceBar.tsx) since every room in a space inherits
+			    its visibility — duplicating the glyph per-room
+			    just added noise. */}
+			{isDm && <DmPresenceDot presence={room.dmPresence} />}
 		</div>
 	);
-}
-
-function AccessGlyph({ room, className }: { room: Room; className?: string }) {
-	if (room.kind === "private") return <EyeOff className={className} aria-hidden />;
-	return <Globe className={className} aria-hidden />;
 }
 
 /** Small status overlay for DM avatars.  Green when the peer is

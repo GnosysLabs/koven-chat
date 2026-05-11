@@ -47,8 +47,6 @@ import { ProfileSheet } from "@/components/ProfileSheet";
 import { AppSettingsSheet } from "@/components/AppSettingsSheet";
 import { EncryptionSetupSheet } from "@/components/EncryptionSetupSheet";
 import { EncryptionUnlockSheet } from "@/components/EncryptionUnlockSheet";
-import { IncomingCallSheet } from "@/components/IncomingCallSheet";
-import { ActiveCallView } from "@/components/ActiveCallView";
 import { SuspendedBanner } from "@/components/SuspendedBanner";
 import { ModLogSheet } from "@/components/ModLogSheet";
 import { FloorReviewSheet } from "@/components/FloorReviewSheet";
@@ -71,25 +69,11 @@ import type { RoomId, SpaceId } from "@koven/shared";
 import { NotificationBell } from "@/components/NotificationBell";
 import { useNotifications } from "@/state/use-notifications";
 import { markRoomRead as apiMarkRoomRead } from "@/lib/notifications-api";
-
-/**
- * Resolve a call's peer identity from the DM's room data.  Used to
- * paint the right name/avatar in the call overlays immediately,
- * without waiting for MatrixCall.getOpponentMember() to populate
- * (which only happens after the answer arrives).  Returns undefined
- * for non-DM rooms or unknown room ids — caller falls back to SDK
- * getters.
- */
-function peerForCall(roomId: string | undefined, rooms: import("@koven/shared").Room[]) {
-	if (!roomId) return undefined;
-	const room = rooms.find(r => r.id === roomId);
-	if (!room || room.kind !== "dm" || !room.dmUserId) return undefined;
-	return {
-		userId: room.dmUserId,
-		displayName: room.name,
-		avatarMxc: room.avatarUrl,
-	};
-}
+import { CallAudioSinkGate } from "@/components/voice/CallAudioSinkGate";
+import { CallPipPanel } from "@/components/voice/CallPipPanel";
+import { IncomingRingListener } from "@/components/voice/IncomingRingListener";
+import { CallToastListener } from "@/components/voice/CallToastListener";
+import { useCall } from "@/lib/call-context";
 
 // Escape a string for safe interpolation into a RegExp.  Used to
 // build the @localpart mention matcher in the notification path —
@@ -226,6 +210,30 @@ export default function App() {
 		[],
 	);
 	const [transport, setTransport] = useState<MatrixTransport | null>(null);
+	// Live-call gate.  True only when the user is actively LOOKING
+	// at the call (not just in the call's room while reading
+	// chat) — Discord-style: voice and chat are separate views.
+	// When true, the chat pane swaps in the call surface AND the
+	// right sidebar (member list / DM profile) hides so the call
+	// grid + thumbnail strip get the full width.  Same condition
+	// as ChatPane's isInActiveCallRoom so they stay in lockstep.
+	const call = useCall();
+	const isViewingActiveCallRoom =
+		!!call.activeCall &&
+		call.activeCall.roomId === state.activeRoomId &&
+		call.inCallView &&
+		(call.phase === "connecting" || call.phase === "prejoin" || call.phase === "joined");
+	// Wrap room navigation so any sidebar room-click also drops the
+	// "in call view" flag.  Discord rule: clicking a channel name
+	// always shows the channel's chat, never the call view —
+	// regardless of whether you're in voice in that channel or
+	// elsewhere.  To re-enter the call view the user clicks the
+	// PIP, the "Return to call" bar, or any other explicit
+	// affordance that calls call.setInCallView(true).
+	const navigateToRoom = useCallback((roomId: RoomId) => {
+		call.setInCallView(false);
+		dispatch({ type: "set_active_room", roomId });
+	}, [call]);
 	const [bootError, setBootError] = useState<string | null>(null);
 	const [createRoomOpen, setCreateRoomOpen] = useState(false);
 	const [createSpaceOpen, setCreateSpaceOpen] = useState(false);
@@ -343,26 +351,15 @@ export default function App() {
 	// (admin re-saves invalidate it via a refresh — see InstanceAdmin
 	// section).  Drives the GIF picker visibility in the composer.
 	const [giphyEnabled, setGiphyEnabled] = useState(false);
-	// 1:1 call state.  At most one of these is non-null:
-	//   - incomingCall: a remote ringing us; renders the accept/decline sheet
-	//   - activeCall: we're in a call (just-placed outbound, or accepted inbound)
-	// Once a call ends (Hangup/Error/Replaced), the handler clears the
-	// matching slot.  MatrixCall objects are stored as-is so call-state
-	// listeners can attach to them; we keep them out of useReducer so
-	// React doesn't try to memoize them.
-	const [incomingCall, setIncomingCall] = useState<import("matrix-js-sdk/lib/webrtc/call").MatrixCall | null>(null);
-	const [activeCall, setActiveCall] = useState<import("matrix-js-sdk/lib/webrtc/call").MatrixCall | null>(null);
-	// Mirror the call state into refs so the transport's onIncomingCall
-	// closure (captured once per transport boot) reads current values
-	// when deciding whether to auto-reject an overlapping invite.
-	const incomingCallRef = useRef<import("matrix-js-sdk/lib/webrtc/call").MatrixCall | null>(null);
-	const activeCallRef = useRef<import("matrix-js-sdk/lib/webrtc/call").MatrixCall | null>(null);
+	// (Old MatrixCall-based 1:1 call state removed — DM calls now
+	// use the same RealtimeKit-backed flow as group rooms via
+	// CallProvider.  The ringing UI is IncomingRingListener +
+	// IncomingRingSheet, the in-call UI is InCallPane, and the
+	// "you got declined" toast is CallToastListener.)
 	// Holds the UIA password handed back by the engine on login so the
 	// transport can pick it up the moment it's constructed.  See
 	// handleLogin for the rationale.
 	const pendingUiaPasswordRef = useRef<string | null>(null);
-	useEffect(() => { incomingCallRef.current = incomingCall; }, [incomingCall]);
-	useEffect(() => { activeCallRef.current = activeCall; }, [activeCall]);
 
 	// Apply theme on mount and whenever it changes.  Persist on every
 	// settings update.
@@ -749,16 +746,12 @@ export default function App() {
 				dispatch({ type: "receipts_updated", roomId });
 			},
 			onIncomingCall: (call) => {
-				// If we're already in a call, auto-reject overlapping
-				// invites.  Single-call semantics for v1; "call waiting"
-				// is a future-feature concern.  Read from refs because
-				// this closure was captured at transport-boot time and
-				// the state values it sees would otherwise be stale.
-				if (activeCallRef.current || incomingCallRef.current) {
-					call.reject();
-					return;
-				}
-				setIncomingCall(call);
+				// MatrixCall flow has been retired in favor of the
+				// RealtimeKit-backed system.  Reject any incoming
+				// MatrixCall invite (e.g. from a federated client
+				// still using the old flow) so we don't half-answer
+				// a call we have no UI for.
+				try { call.reject(); } catch { /* already-rejected */ }
 			},
 			onSessionLoggedOut: () => {
 				// Server-side session invalidation (token revoked,
@@ -1707,6 +1700,47 @@ export default function App() {
 	return (
 		<TransportContext.Provider value={transport}>
 		<div className="h-full flex flex-col">
+			{/* Hidden audio sinks for every joined remote participant.
+			    Lives at the App level so audio survives navigation
+			    (the participant tiles unmount when you leave the
+			    call's room; this keeps the WebRTC pipeline alive).
+			    The gate component reads the call context internally
+			    so App doesn't have to plumb call state down. */}
+			<CallAudioSinkGate />
+			{/* Draggable picture-in-picture panel.  Floats in the
+			    corner of the viewport when the user has navigated
+			    away from the call's room, showing whichever
+			    participant is spotlit (or self).  Click to jump
+			    back; drag to reposition; mute / leave from a hover
+			    overlay.  Self-hides when there's no joined call or
+			    the user is currently viewing the call room. */}
+			<CallPipPanel
+				currentRoomId={state.activeRoomId}
+				onJumpToCallRoom={(roomId) => dispatch({ type: "set_active_room", roomId })}
+			/>
+			{/* Listens for incoming DM call rings across every joined
+			    DM the user is in.  Surfaces an Accept / Decline
+			    sheet centered in the viewport.  Auto-dismisses on
+			    cancel or after 30s. */}
+			<IncomingRingListener
+				transport={transport}
+				rooms={state.rooms}
+				currentUserId={creds?.user_id as UserId | null}
+				accessToken={creds?.access_token ?? null}
+				// Navigate to the DM room WITHOUT going through
+				// navigateToRoom (which flips inCallView=false).
+				// We just answered a call — keep inCallView=true
+				// so the chat pane renders the pre-join / call
+				// surface, not the chat view.
+				onAcceptedNavigate={(roomId) => {
+					dispatch({ type: "set_active_room", roomId });
+				}}
+			/>
+			{/* Listens for the recipient's chat.koven.call.decline
+			    when WE'RE the caller and shows a toast.  Also tears
+			    down the empty 1:1 meeting on decline so the caller
+			    doesn't hang around alone. */}
+			<CallToastListener transport={transport} />
 			{/* DesktopTitleBar (traffic lights) is rendered absolute-
 			    positioned at the top of main.tsx so it floats over
 			    every screen.  The 40px chrome gutter below — with
@@ -1901,7 +1935,13 @@ export default function App() {
 					rooms={state.rooms}
 					spaces={state.spaces}
 					activeSpace={state.activeSpace}
-					activeRoomId={state.activeRoomId}
+					// When the call view is on top, unhighlight the
+					// underlying room in the sidebar so it reads as
+					// "no chat selected" — the affordance to the user
+					// that clicking the room name takes them to chat
+					// (not back into the call).  The PIP / call
+					// surface remain the way back into the call view.
+					activeRoomId={isViewingActiveCallRoom ? null : state.activeRoomId}
 					currentUserId={creds.user_id}
 					transport={transport}
 					accessToken={creds.access_token}
@@ -1917,7 +1957,7 @@ export default function App() {
 					// suppressed so the sidebar paints clean during
 					// boot.
 					roomsLoaded={state.syncState === "syncing" || state.syncState === "ready"}
-					onSelectRoom={(roomId: RoomId) => dispatch({ type: "set_active_room", roomId })}
+					onSelectRoom={navigateToRoom}
 					onCreateRoom={async () => {
 						// "+" in the list header is context-aware: DMs
 						// opens the start-a-DM dialog, every other view
@@ -2030,7 +2070,7 @@ export default function App() {
 							if (state.activeSpace?.kind === "space") setEditingSpaceId(state.activeSpace.id);
 						}}
 						onStartDm={() => setStartDmOpen(true)}
-						onSelectRoom={(roomId: RoomId) => dispatch({ type: "set_active_room", roomId })}
+						onSelectRoom={navigateToRoom}
 					/>
 				) : (
 				<ChatPane
@@ -2168,26 +2208,10 @@ export default function App() {
 					}}
 					onInvite={(roomId) => setInvitingRoomId(roomId as RoomId)}
 					onEditRoom={(roomId) => setEditingRoomId(roomId as RoomId)}
-					onPlaceCall={async (roomId, video) => {
-						if (!transport) return;
-						try {
-							const call = await transport.placeCall(roomId as RoomId, video);
-							if (call) setActiveCall(call);
-						} catch (err) {
-							// Most placeCall failures are media-access related;
-							// translate DOMException names into something the
-							// user can actually act on instead of dumping
-							// "NotAllowedError" into the banner.
-							const e = err as { name?: string; message?: string };
-							const friendly =
-								e.name === "NotAllowedError"  ? "Microphone or camera access was denied. Allow access in your browser and try again." :
-								e.name === "NotFoundError"    ? "No microphone or camera found on this device." :
-								e.name === "NotReadableError" ? "Another app or tab is using your microphone or camera. Close it and try again." :
-								(e.message ?? "Couldn't start the call.");
-							dispatch({ type: "error", message: friendly });
-						}
-					}}
-					callInProgress={!!activeCall || !!incomingCall}
+					// onPlaceCall + callInProgress props retired
+					// alongside the MatrixCall flow — DM calls now
+					// go through RoomVoiceBar's Join button + the
+					// CallProvider system, same as group rooms.
 					isSuspended={!!suspension}
 					onOpenModLog={(roomId) => setModLogRoomId(roomId as RoomId)}
 					onOpenProfile={(userId) => setViewedUserId(userId as UserId)}
@@ -2248,7 +2272,7 @@ export default function App() {
 				)}
 				</div>
 				<div className="contents" data-mobile-pane="aux">
-				{activeRoom && (
+				{activeRoom && !isViewingActiveCallRoom && (
 					activeRoom.kind === "dm" && activeRoom.dmUserId ? (
 						<DmProfilePanel
 							otherUserId={activeRoom.dmUserId as UserId}
@@ -2463,11 +2487,6 @@ export default function App() {
 					const a = state.activeSpace;
 					if (!a || a.kind !== "space") return "private";
 					return state.spaces.find(s => s.id === a.id)?.kind ?? "private";
-				})()}
-				parentSpaceNsfw={(() => {
-					const a = state.activeSpace;
-					if (!a || a.kind !== "space") return false;
-					return !!state.spaces.find(s => s.id === a.id)?.nsfw;
 				})()}
 				onCreate={async (opts) => {
 					if (!transport) throw new Error("Not connected");
@@ -2757,52 +2776,11 @@ export default function App() {
 					await transport.linkRoomToSpace(addExistingRoomTo, roomId, { nsfw: !!room?.nsfw });
 				}}
 			/>
-			{/* Call overlays — top-level so they survive room navigation.
-			    Peer info is resolved from the DM's known partner data so
-			    the right name/avatar paint immediately, even before the
-			    MatrixCall has populated getOpponentMember() (which only
-			    happens after the answer comes back). */}
-			{incomingCall && (
-				<IncomingCallSheet
-					call={incomingCall}
-					peer={peerForCall(incomingCall.roomId, state.rooms)}
-					onAccept={(call) => {
-						setIncomingCall(null);
-						setActiveCall(call);
-					}}
-					onDismiss={() => setIncomingCall(null)}
-				/>
-			)}
-			{activeCall && (
-				<ActiveCallView
-					call={activeCall}
-					peer={peerForCall(activeCall.roomId, state.rooms)}
-					activeRoomId={state.activeRoomId}
-					onClickThumbnail={(roomId) => {
-						// Navigating into the call's room from the
-						// thumbnail also has to fix activeSpace if
-						// that room lives in a non-current space —
-						// the room won't render in the timeline
-						// otherwise.  Reuses the same resolution
-						// path as openRoomFromNotification.
-						const room = roomsRef.current.find(r => r.id === roomId);
-						if (room) {
-							if (room.kind === "dm") {
-								dispatch({ type: "set_active_space", space: { kind: "dms" } });
-							} else if (room.parentSpaceIds.length > 0) {
-								dispatch({
-									type: "set_active_space",
-									space: { kind: "space", id: room.parentSpaceIds[0] as SpaceId },
-								});
-							} else {
-								dispatch({ type: "set_active_space", space: { kind: "spaces_overview" } });
-							}
-						}
-						dispatch({ type: "set_active_room", roomId });
-					}}
-					onEnded={() => setActiveCall(null)}
-				/>
-			)}
+			{/* Old MatrixCall-based IncomingCallSheet + ActiveCallView
+			    removed.  Replaced by IncomingRingListener (mounted
+			    above) + the inline call view inside ChatPane + the
+			    floating PIP — all driven by the RealtimeKit-backed
+			    CallProvider system. */}
 			{modLogRoomId && (
 				<ModLogSheet
 					open

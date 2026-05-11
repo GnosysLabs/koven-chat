@@ -2138,11 +2138,18 @@ const deleteRoomCallParticipantsByMeetingStmt = db.prepare(`
 	WHERE room_id IN (SELECT room_id FROM room_calls WHERE cf_meeting_id = ?)
 `);
 
+// Dedupe by user_id at read time so a single user who got
+// recorded twice — once from the Cloudflare webhook (real
+// cf_participant_id) and once from the client-side iam-here
+// ping (cf_participant_id = "client:<userId>") — only renders one
+// avatar.  Keeps the earliest joined_at so the order in the
+// social-signal stack is "oldest in" → "newest in" left to right.
 const listRoomCallParticipantsStmt = db.prepare(`
 	SELECT room_id, cf_participant_id, user_id, display_name, avatar_url, joined_at
 	FROM room_call_participants
 	WHERE room_id = ?
-	ORDER BY joined_at ASC
+	GROUP BY user_id
+	ORDER BY MIN(joined_at) ASC
 `);
 
 const listAllActiveCallRoomsStmt = db.prepare(`
@@ -2178,6 +2185,22 @@ export function forgetCallParticipant(cfParticipantId: string): void {
  * is ended via meeting.ended (cleanup catch). */
 export function forgetRoomCallParticipants(roomId: string): void {
 	deleteRoomCallParticipantsStmt.run(roomId);
+}
+
+/** Drop every row for a given (user, room) combo.  Used by the
+ * client-side iam-gone ping — when the SDK fires roomLeft on the
+ * client we tell our own engine immediately so the bar updates
+ * without waiting on the Cloudflare webhook (which may not even
+ * be wired in dev).  Idempotent: a no-op if there's nothing
+ * matching, so duplicate pings are fine. */
+const deleteCallParticipantByUserStmt = db.prepare(`
+	DELETE FROM room_call_participants WHERE room_id = ? AND user_id = ?
+`);
+export function forgetCallParticipantsByUserInRoom(opts: {
+	roomId: string;
+	userId: string;
+}): void {
+	deleteCallParticipantByUserStmt.run(opts.roomId, opts.userId);
 }
 
 /** Drop every participant whose call belongs to a given Cloudflare

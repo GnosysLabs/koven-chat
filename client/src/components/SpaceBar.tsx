@@ -6,7 +6,7 @@
 import { forwardRef, useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
 import type { Room, Space, SpaceId, UserId } from "@koven/shared";
-import { Bot, Compass, Plus, Settings, ShieldAlert, User } from "lucide-react";
+import { Bot, Compass, EyeOff, Globe, Plus, Settings, ShieldAlert, User } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { AccountSwitcher } from "@/components/AccountSwitcher";
 import { SpaceTileContextMenu } from "@/components/SpaceTileContextMenu";
@@ -369,13 +369,25 @@ function IconButton({
 function SpaceTileAvatar({ space }: { space: Space }) {
 	// Spaces fall back to the DiceBear "glass" style — heavier-weight
 	// gradient blobs that read as "container" rather than "person".
+	// Public/private glyph in the bottom-right corner because every
+	// room in this space inherits the visibility — surfacing it on
+	// the space tile (rather than per-room) reads as "this is a
+	// public/private SERVER" the way Discord communicates server
+	// privacy.
 	return (
-		<MatrixAvatar
-			mxc={space.avatarUrl}
-			emoji={space.iconEmoji}
-			seed={space.id}
-			kind="space"
-			className="h-9 w-9 rounded-lg"
-		/>
+		<div className="relative">
+			<MatrixAvatar
+				mxc={space.avatarUrl}
+				emoji={space.iconEmoji}
+				seed={space.id}
+				kind="space"
+				className="h-9 w-9 rounded-lg"
+			/>
+			<span className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-card border border-border flex items-center justify-center text-muted-foreground">
+				{space.kind === "private"
+					? <EyeOff className="h-2.5 w-2.5" aria-hidden />
+					: <Globe className="h-2.5 w-2.5" aria-hidden />}
+			</span>
+		</div>
 	);
 }

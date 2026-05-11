@@ -111,6 +111,8 @@ import {
 	getFounderNumber,
 	listFounders,
 	FOUNDER_CAP_PUBLIC,
+	rememberCallParticipant,
+	forgetCallParticipantsByUserInRoom,
 } from "./db";
 import { evaluateCollapses } from "./collapse";
 import { deliverWebhook } from "./webhooks";
@@ -1497,6 +1499,86 @@ export function startServer(): void {
 						joined_at: r.joined_at,
 					})),
 				});
+			}
+
+			// POST /api/calls/:roomId/iam-here
+			// POST /api/calls/:roomId/iam-gone
+			//
+			// Client-driven presence pings.  The Cloudflare webhook
+			// (cf-webhook/:secret below) is still the primary signal,
+			// but it has two failure modes worth defending against:
+			//   - In dev the webhook is intentionally not registered
+			//     (would clobber prod's), so the local engine never
+			//     learns who joined.  Without these pings the dev
+			//     bar would always show zero participants.
+			//   - In prod, if a meeting was created on a different
+			//     engine instance (or this engine's room_calls cache
+			//     was wiped), the webhook arrives with an unknown
+			//     meeting id and gets discarded.
+			// The client fires iam-here in CallProvider's
+			// `roomJoined` handler and iam-gone in `roomLeft`, so
+			// the engine has a self-healing source of truth that
+			// doesn't depend on the webhook.  Both endpoints are
+			// idempotent — duplicate pings just refresh the
+			// joined_at timestamp.  Auth is the user's normal
+			// access token (membership-gated like /active above).
+			{
+				const m = path.match(/^\/api\/calls\/([^/]+)\/iam-(here|gone)$/);
+				if (req.method === "POST" && m) {
+					const roomId = decodeURIComponent(m[1]!);
+					const verb = m[2]! as "here" | "gone";
+					if (!roomId.startsWith("!") || !roomId.includes(":")) {
+						return json({ errcode: "M_INVALID_PARAM", error: "room_id required in path" }, { status: 400 });
+					}
+					const userId = await whoami(extractToken(req));
+					if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+					// Membership check.  We don't want randos pinging
+					// "I'm in #general" to spoof the social signal.
+					let members: string[] = [];
+					try {
+						members = await getJoinedMembers(roomId);
+					} catch (err) {
+						console.warn(`calls /iam-${verb}: getJoinedMembers(${roomId}) failed`, err);
+						return json({ errcode: "M_UNKNOWN", error: "couldn't verify membership" }, { status: 502 });
+					}
+					if (!members.includes(userId)) {
+						return json({ errcode: "M_FORBIDDEN", error: "not a member" }, { status: 403 });
+					}
+					if (verb === "gone") {
+						forgetCallParticipantsByUserInRoom({ roomId, userId });
+						return json({ ok: true });
+					}
+					// iam-here.  Resolve the user's display name +
+					// avatar from Synapse so the social-signal stack
+					// renders a real face, not the bare mxid.
+					let displayName = userId;
+					let avatarUrl: string | null = null;
+					try {
+						const profileRes = await fetch(
+							`${config.homeserverUrl}/_matrix/client/v3/profile/${encodeURIComponent(userId)}`,
+						);
+						if (profileRes.ok) {
+							const p = await profileRes.json() as { displayname?: string; avatar_url?: string };
+							if (typeof p.displayname === "string" && p.displayname.length > 0) displayName = p.displayname;
+							if (typeof p.avatar_url === "string" && p.avatar_url.length > 0) avatarUrl = p.avatar_url;
+						}
+					} catch {
+						// Best-effort.  Keep the mxid + null avatar.
+					}
+					rememberCallParticipant({
+						roomId,
+						// Distinct namespace from real Cloudflare ids
+						// so the read-side dedupe (GROUP BY user_id)
+						// collapses both rows into one — and a real
+						// webhook arriving later doesn't conflict
+						// with our placeholder.
+						cfParticipantId: `client:${userId}`,
+						userId,
+						displayName,
+						avatarUrl,
+					});
+					return json({ ok: true });
+				}
 			}
 
 			// POST /api/calls/cf-webhook/:secret
