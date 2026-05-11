@@ -2017,7 +2017,7 @@ dependencies = [
 
 [[package]]
 name = "koven-desktop"
-version = "0.19.4"
+version = "0.19.5"
 dependencies = [
  "cocoa",
  "log",

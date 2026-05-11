@@ -75,12 +75,44 @@ export function PreJoinScreen({ roomName, onJoined, onCancel, isDm, isAnsweringR
 	const previewRef = useRef<HTMLVideoElement | null>(null);
 
 	// Initial device + state hydration.  Runs once when the meeting
-	// is available.  Best-effort — getDevices can throw if the user
-	// hasn't granted permission yet, which is fine; the dropdowns
-	// just stay empty until they hit toggle and accept the prompt.
+	// is available.
+	//
+	// Two-step flow because the browser hides device LABELS (and
+	// often the device list entirely) until permission has been
+	// granted at least once in this session:
+	//   1. Fire a one-shot getUserMedia({audio,video}) probe.  This
+	//      pops the OS / browser permission prompt the moment the
+	//      user lands on the prejoin screen, so the camera/mic
+	//      dropdowns populate with REAL names instead of just
+	//      "Default" placeholders.  Stop the tracks the instant
+	//      permission resolves so we don't hold the hardware open
+	//      while the user is still picking devices — the SDK
+	//      acquires its own when they hit the toggles.
+	//   2. Then ask the SDK for its enumerated lists.  By this
+	//      point the browser will return labeled devices.
+	//
+	// If the user denies the prompt, the catch keeps us on the
+	// prejoin screen with empty dropdowns (the existing behavior)
+	// rather than blocking the join — they can still join with no
+	// audio/video and turn things on later.
 	useEffect(() => {
 		let cancelled = false;
 		(async () => {
+			try {
+				const probe = await navigator.mediaDevices.getUserMedia({
+					audio: true,
+					video: true,
+				});
+				probe.getTracks().forEach(t => t.stop());
+			} catch (err) {
+				// User denied OR the device doesn't exist (e.g. a
+				// desktop with a mic but no webcam).  Either way,
+				// fall through to enumerateDevices — partial
+				// permission still labels whichever device they did
+				// grant.
+				console.warn("PreJoinScreen: permission probe failed", err);
+			}
+			if (cancelled) return;
 			try {
 				const [a, v, s, current] = await Promise.all([
 					meeting.self.getAudioDevices(),
