@@ -1501,6 +1501,94 @@ export function startServer(): void {
 				});
 			}
 
+			// POST /api/dm/delete
+			//
+			// Server-side scorched-earth deletion of a DM.  Replaces
+			// the previous client-side "paginate timeline + redact
+			// every event + kick the other party" loop, which on a
+			// DM that had a few past calls in it expanded to
+			// 40+ events and 10+ minutes of throttled /redact calls.
+			//
+			// This endpoint calls Synapse's admin purge API directly,
+			// which deletes EVERY event in the room server-side in
+			// one transaction: messages, redactions, call signaling,
+			// state, the lot.  For in-server DMs (both parties on the
+			// same homeserver) the room is gone for both parties on
+			// their next /sync.  For federated DMs, the local server's
+			// copy is wiped and the other server retains its own
+			// (Matrix-protocol limitation we can't beat).
+			//
+			// Validation:
+			//   - Caller must be a joined member of the room.
+			//   - Room must not be a space (no one accidentally nukes
+			//     a community via this endpoint).
+			//   - Room must have ≤ 2 joined members (DM shape, modulo
+			//     the case where the other party already left).
+			//
+			// The kick + leave + forget the old client-side path did
+			// are unnecessary once the purge runs: the admin API
+			// `block: true, purge: true` body flips every membership
+			// to leave server-side AND deletes the events, so client-
+			// side cleanup is a local cache wipe only.
+			{
+				if (path === "/api/dm/delete" && req.method === "POST") {
+					const userId = await whoami(extractToken(req));
+					if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+					let body: { room_id?: unknown };
+					try {
+						body = (await req.json()) as { room_id?: unknown };
+					} catch {
+						return json({ errcode: "M_BAD_JSON", error: "expected JSON body" }, { status: 400 });
+					}
+					const roomId = typeof body.room_id === "string" ? body.room_id : "";
+					if (!roomId.startsWith("!") || !roomId.includes(":")) {
+						return json({ errcode: "M_INVALID_PARAM", error: "room_id required" }, { status: 400 });
+					}
+					// Refuse on spaces.  A DM is by definition not a
+					// space; this is the cheapest validation against
+					// "user passes a space id and tries to nuke their
+					// whole community."
+					try {
+						if (await isSpaceRoom(roomId)) {
+							return json({ errcode: "M_FORBIDDEN", error: "spaces cannot be deleted via this endpoint" }, { status: 403 });
+						}
+					} catch (err) {
+						console.warn(`/api/dm/delete: isSpaceRoom(${roomId}) failed`, err);
+						return json({ errcode: "M_UNKNOWN", error: "could not verify room type" }, { status: 502 });
+					}
+					// Membership gate.  Caller must be IN the room,
+					// and the room must have at most 2 joined members
+					// (DM shape).  Allowing > 2 would mean someone
+					// could nuke any private group room they happen
+					// to be in.
+					let members: string[] = [];
+					try {
+						members = await getJoinedMembers(roomId);
+					} catch (err) {
+						console.warn(`/api/dm/delete: getJoinedMembers(${roomId}) failed`, err);
+						return json({ errcode: "M_UNKNOWN", error: "could not verify membership" }, { status: 502 });
+					}
+					if (!members.includes(userId)) {
+						return json({ errcode: "M_FORBIDDEN", error: "not a member of this room" }, { status: 403 });
+					}
+					if (members.length > 2) {
+						return json({ errcode: "M_FORBIDDEN", error: "not a DM (more than 2 joined members)" }, { status: 403 });
+					}
+					const result = await adminDeleteRoom({
+						roomId,
+						message: "Conversation deleted by the other party.",
+					});
+					if ("error" in result) {
+						return json({
+							errcode: "M_UNKNOWN",
+							error: result.error,
+							detail: result.detail,
+						}, { status: 502 });
+					}
+					return json({ ok: true });
+				}
+			}
+
 			// POST /api/calls/:roomId/iam-here
 			// POST /api/calls/:roomId/iam-gone
 			//

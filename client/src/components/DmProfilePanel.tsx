@@ -348,28 +348,16 @@ function DeleteConversationDialog({
 	progress: { phase: DeleteProgressPhase; done: number; total: number } | null;
 	onConfirm(): void | Promise<void>;
 }) {
-	// Phase-aware status line.  The redacting phase is the one that
-	// can actually run long, so it gets a counter; the others get
-	// short verbs because they typically resolve in well under a
-	// second and a counter would just flash and disappear.
+	// Status copy.  The work is now a single server-side purge call
+	// (engine /api/dm/delete) instead of a client-side paginate +
+	// per-event redact loop, so a per-event counter would be
+	// meaningless: the round-trip is one HTTP call, the rest is
+	// trivial cache cleanup.  Just narrate the two coarse stages.
 	let statusLine: string | null = null;
 	if (progress) {
-		switch (progress.phase) {
-			case "paginating":
-				statusLine = `Loading message history… (${progress.done} loaded)`;
-				break;
-			case "redacting":
-				statusLine = progress.total > 0
-					? `Deleting messages ${progress.done} / ${progress.total}…`
-					: "No messages to delete.";
-				break;
-			case "kicking":
-				statusLine = "Removing the other participant…";
-				break;
-			case "cleanup":
-				statusLine = "Finishing up…";
-				break;
-		}
+		statusLine = progress.phase === "cleanup"
+			? "Finishing up…"
+			: "Deleting conversation…";
 	}
 
 	return (

@@ -3961,135 +3961,77 @@ export class MatrixTransport {
 	}
 
 	/**
-	 * Delete a DM "for both parties" by stacking Matrix primitives:
+	 * Delete a DM "for both parties" by asking the engine to call
+	 * Synapse's admin purge API server-side.  One HTTP call, atomic,
+	 * deletes every event for every party on the homeserver in a
+	 * single transaction: messages, redactions, call signaling,
+	 * state events, the whole timeline.
 	 *
-	 *   1. Paginate the room's timeline all the way back to the
-	 *      start.  matrix-js-sdk's local view only holds the most
-	 *      recent window; without this walk, we'd miss redacting
-	 *      every message older than the loaded slice.
-	 *   2. Redact every non-state, non-already-redacted event the
-	 *      timeline contains.  Both parties' messages, reactions,
-	 *      stickers, polls, encrypted message wrappers, etc.  Each
-	 *      redaction is its own m.room.redaction event that
-	 *      propagates to the other party's client and instructs it
-	 *      to drop the content fields locally; Synapse also strips
-	 *      the original event's content on apply, so the server-side
-	 *      copy is gone too.
-	 *   3. Kick the other party.  DMs are created with the
-	 *      `trusted_private_chat` preset, which grants both
-	 *      participants PL 100, so this is always permitted.  The
-	 *      other party's client sees a kick state event and the
-	 *      room disappears from their conversation list.
-	 *   4. Strip the room from our `m.direct` account_data.
-	 *   5. Leave + forget on our side.
+	 * Replaces an earlier client-side implementation that paginated
+	 * the room's timeline, redacted every non-state event one by one,
+	 * kicked the other party, then left + forgot.  That worked in
+	 * principle but was O(events) with a 100ms-per-redaction spacer
+	 * to stay under Synapse's rate limit, so a DM with a few past
+	 * calls in it (each call leaves ~5 m.call.* signaling events)
+	 * ballooned to dozens of redactions and tens of minutes of
+	 * wallclock time.  The admin purge is constant-time.
 	 *
-	 * Matrix has no native "delete this room for everyone" primitive;
-	 * this is the strongest equivalent we can build from what the
-	 * protocol does provide.  Privacy-critical, so we redact rather
-	 * than just kick (a kick alone would leave the other party's
-	 * cached message bodies intact in their local store).
+	 * The engine validates: caller must be a joined member, the
+	 * room must not be a space, and the room must have at most two
+	 * joined members so this endpoint can't be repurposed to nuke
+	 * arbitrary group rooms.  See engine/src/server.ts
+	 * `/api/dm/delete`.
 	 *
-	 * Sequential and best-effort: per-event redaction failures (rate-
-	 * limit 429, transient network) are logged and skipped, the rest
-	 * of the operation still completes.  Caller gets a progress
-	 * callback so a long-conversation deletion can show "redacting
-	 * 142 / 5000" instead of a frozen spinner.
+	 * After the server-side purge resolves, the local cleanup is
+	 * trivial: strip m.direct so future DMs to this peer open a
+	 * fresh room, then leave + forget locally so matrix-js-sdk's
+	 * room list drops the now-gone room without waiting for the
+	 * next /sync.  Both calls are best-effort, the room is already
+	 * gone on the server either way.
+	 *
+	 * `onProgress` is retained for API compatibility with the older
+	 * staged version, but only emits two ticks (purge, cleanup)
+	 * because the work isn't paginated anymore.
 	 */
 	async deleteDm(
 		roomId: RoomId,
 		onProgress?: (phase: "paginating" | "redacting" | "kicking" | "cleanup", done: number, total: number) => void,
 	): Promise<void> {
 		const c = this.requireClient();
-		const me = c.getUserId();
-		if (!me) throw new Error("deleteDm: client has no user id");
-		const room = c.getRoom(roomId);
-		if (!room) {
-			// SDK doesn't have the room locally (rare: forgotten in a
-			// previous session, partial state).  Fall back to the
-			// minimal one-sided leave+forget so the call still has
-			// SOME effect; there's nothing else we can do without
-			// local state.
-			await c.leave(roomId).catch(() => {});
-			await c.forget(roomId).catch(() => {});
-			this.emitRoomList();
-			return;
-		}
+		const token = this.creds?.access_token;
+		if (!token) throw new Error("deleteDm: no access token");
 
-		// Phase 1: paginate back until the timeline hits the room
-		// start.  paginateEventTimeline returns false when there are
-		// no more events to fetch.  Bounded to a hard cap so a
-		// pathological room (chunked sync, never-ending pagination
-		// loop) doesn't hang the UI forever.
-		const timeline = room.getLiveTimeline();
-		const PAGINATE_HARD_CAP = 200; // 200 * 100 = 20,000 events max
-		for (let i = 0; i < PAGINATE_HARD_CAP; i++) {
-			onProgress?.("paginating", timeline.getEvents().length, 0);
-			let more = false;
+		// Phase 1: server-side purge.  One round-trip; the engine
+		// validates DM-shape and then asks Synapse to purge the room
+		// entirely.  Reusing the old "redacting" phase tag for the
+		// progress callback so the modal's existing copy still
+		// makes sense ("Deleting messages…") without UI changes.
+		onProgress?.("redacting", 0, 1);
+		const res = await fetch(`${ENGINE_URL}/api/dm/delete`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${token}`,
+			},
+			body: JSON.stringify({ room_id: roomId }),
+		});
+		if (!res.ok) {
+			let detail = "";
 			try {
-				more = await c.paginateEventTimeline(timeline, { backwards: true, limit: 100 });
-			} catch (err) {
-				console.warn("deleteDm: pagination failed", err);
-				break;
+				const body = await res.json() as { error?: string; detail?: string };
+				detail = body.error ? `: ${body.error}${body.detail ? ` (${body.detail})` : ""}` : "";
+			} catch {
+				// fall through with generic message
 			}
-			if (!more) break;
-			// Yield so the SPA's render loop can keep up.
-			await new Promise(r => setTimeout(r, 0));
+			throw new Error(`Server-side delete failed (HTTP ${res.status})${detail}`);
 		}
+		onProgress?.("redacting", 1, 1);
 
-		// Phase 2: collect redactable events.  Skip state events
-		// (their redaction has weird semantics that aren't what the
-		// user means by "delete messages"), skip already-redacted
-		// events, skip prior redaction events themselves (redacting a
-		// redaction is a no-op).
-		const redactable: MatrixEvent[] = [];
-		for (const event of timeline.getEvents()) {
-			if (event.isState()) continue;
-			if (event.isRedacted()) continue;
-			const type = event.getType();
-			if (type === "m.room.redaction") continue;
-			const id = event.getId();
-			if (!id) continue;
-			redactable.push(event);
-		}
-
-		// Phase 2b: redact sequentially.  Synapse rate-limits /redact
-		// (default burst 10, sustained ~5/sec); sequential with a
-		// small spacer stays comfortably inside.  Per-event failures
-		// are logged but don't abort: getting 99% of messages
-		// redacted is strictly better than rolling back to zero.
-		const total = redactable.length;
-		for (let i = 0; i < redactable.length; i++) {
-			onProgress?.("redacting", i, total);
-			const event = redactable[i]!;
-			const id = event.getId()!;
-			try {
-				await c.redactEvent(roomId, id);
-			} catch (err) {
-				console.warn(`deleteDm: redact ${id} failed`, err);
-			}
-			// 100ms spacer: safely under Synapse's default 5/sec
-			// sustained limit, lets the SPA stay responsive.
-			await new Promise(r => setTimeout(r, 100));
-		}
-		onProgress?.("redacting", total, total);
-
-		// Phase 3: kick the other party.  Walk current joined
-		// members; in a healthy DM there's exactly one besides us.
-		// Defensive: handle 0 (other already left) and >1 (someone
-		// invited a third person somehow) gracefully.
-		const others = room.getJoinedMembers().filter(m => m.userId !== me);
-		onProgress?.("kicking", 0, others.length);
-		for (let i = 0; i < others.length; i++) {
-			const member = others[i]!;
-			try {
-				await c.kick(roomId, member.userId, "Conversation deleted by the other party");
-			} catch (err) {
-				console.warn(`deleteDm: kick ${member.userId} failed`, err);
-			}
-			onProgress?.("kicking", i + 1, others.length);
-		}
-
-		// Phase 4: strip m.direct + leave + forget on our side.
+		// Phase 2: local cleanup.  The room is gone server-side, so
+		// these calls just nudge matrix-js-sdk's local cache to drop
+		// it without waiting for the next /sync to settle.  All
+		// best-effort; the server-side delete is the authoritative
+		// step.
 		onProgress?.("cleanup", 0, 1);
 		const directContent = (c.getAccountData("m.direct")?.getContent() ?? {}) as Record<string, string[]>;
 		const next: Record<string, string[]> = {};
@@ -4104,9 +4046,7 @@ export class MatrixTransport {
 				console.warn("deleteDm: setAccountData failed", err);
 			});
 		}
-		await c.leave(roomId).catch(err => {
-			console.warn("deleteDm: leave failed", err);
-		});
+		await c.leave(roomId).catch(() => {/* already gone server-side */});
 		await c.forget(roomId).catch(() => {/* ok if not supported */});
 		onProgress?.("cleanup", 1, 1);
 		this.emitRoomList();
