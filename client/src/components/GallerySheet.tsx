@@ -21,7 +21,6 @@
 //     dedicated request loop; deferred until anyone asks.
 
 import { useMemo, useState, useEffect } from "react";
-import { createPortal } from "react-dom";
 import { ChevronLeft, ChevronRight, Download, Images, Play, X } from "lucide-react";
 import { downloadMediaUrl } from "@/lib/downloadMedia";
 import {
@@ -29,6 +28,7 @@ import {
 	DialogContent,
 	DialogDescription,
 	DialogHeader,
+	DialogPortal,
 	DialogTitle,
 } from "@/components/ui/dialog";
 import { useMatrixAttachment, useMatrixVideoPoster } from "@/lib/useMatrixAttachment";
@@ -263,14 +263,25 @@ function MediaLightbox({
 	// containing block for `position: fixed`, so `inset-0` ends up
 	// pinned to the dialog's 768×85vh footprint instead of the full
 	// viewport.  Net effect was the image getting squeezed into the
-	// dialog's aspect ratio rather than its own.  Portalling out
-	// escapes the transformed ancestor and restores fixed-to-
-	// viewport semantics.
-	return createPortal(
-		// Stacked over the dialog content via a fixed overlay so the
-		// underlying grid stays mounted (preserves scroll position +
-		// thumbnail decode work).  Backdrop blocks pointer events to
-		// the grid so clicks fall through to the close button only.
+	// dialog's aspect ratio rather than its own.
+	//
+	// Use Radix's `DialogPortal` (not a raw `createPortal`) so the
+	// lightbox lives inside the same Dialog scope as DialogContent.
+	// When `modal={true}` (the default), Radix marks every SIBLING
+	// subtree of its portal with `inert` + `aria-hidden` via its
+	// focus-scope library — which means a raw createPortal target
+	// becomes uninteractive: clicks land but the browser swallows
+	// them at the inert boundary.  That's the bug that made the
+	// close / download / chevron buttons appear dead.  DialogPortal
+	// renders to document.body too (same fixed-positioning benefit)
+	// but Radix treats its descendants as part of the dialog so
+	// inert isn't applied.
+	return (
+		<DialogPortal>
+		{/* Stacked over the dialog content via a fixed overlay so the
+		    underlying grid stays mounted (preserves scroll position +
+		    thumbnail decode work).  Backdrop blocks pointer events to
+		    the grid so clicks fall through to the close button only. */}
 		<div
 			className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85"
 			onClick={onClose}
@@ -372,7 +383,7 @@ function MediaLightbox({
 					<span>{new Date(message.timestamp).toLocaleString()}</span>
 				</div>
 			</div>
-		</div>,
-		document.body,
+		</div>
+		</DialogPortal>
 	);
 }
