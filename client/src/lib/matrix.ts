@@ -487,6 +487,22 @@ export class MatrixTransport {
 	// surfaces as bootError on the live transport.
 	private stopped = false;
 
+	// Idle-presence tracking.  Matrix has three presence states
+	// (online / unavailable / offline), but matrix-js-sdk never
+	// reports the user as idle on its own: as long as the sync loop
+	// is hitting Synapse the homeserver sees the user as actively
+	// online forever.  We bridge that gap here by watching for
+	// activity / window focus / tab visibility and calling
+	// setSyncPresence on state changes.  See startIdlePresenceTracking.
+	private idleState: "online" | "unavailable" = "online";
+	private idleTimer: ReturnType<typeof setTimeout> | null = null;
+	private idleListenerCleanup: Array<() => void> = [];
+	// 5 minutes of zero input activity before we flip to unavailable.
+	// Matches the convention most Matrix clients use; long enough
+	// that a quick look-away doesn't bounce people to amber, short
+	// enough that a forgotten-tab actually transitions.
+	private readonly IDLE_AFTER_MS = 5 * 60 * 1000;
+
 	constructor(handlers: MatrixHandlers) {
 		this.handlers = handlers;
 	}
@@ -1121,6 +1137,125 @@ export class MatrixTransport {
 		}).catch(err => {
 			console.warn("matrix: startClient failed", err);
 		});
+		// Kick off idle-presence tracking once the sync loop is alive.
+		// Safe to call multiple times: it's idempotent (early-returns
+		// if listeners are already bound).
+		this.startIdlePresenceTracking();
+	}
+
+	/**
+	 * Watch for user activity, window focus, and tab visibility, and
+	 * flip Matrix presence between `online` and `unavailable` so the
+	 * homeserver actually reports an accurate state.  Without this
+	 * the user shows green forever, because matrix-js-sdk's sync
+	 * loop keeps Synapse seeing requests indefinitely regardless of
+	 * whether the user is actually here.
+	 *
+	 * Three triggers all collapse into the same idle flip:
+	 *
+	 *   1. **Activity timer.**  Five minutes with no mouse / key /
+	 *      touch / scroll input → unavailable.
+	 *   2. **Tab visibility.**  document.visibilityState === "hidden"
+	 *      (user switched tabs, minimised, locked screen) → unavailable
+	 *      immediately.
+	 *   3. **Window blur.**  Window lost focus to another app while
+	 *      still visible (you alt-tabbed, clicked on the dock, etc.)
+	 *      → unavailable immediately.
+	 *
+	 * Any activity or focus event flips back to online.  We only call
+	 * setSyncPresence on transitions, never on every mousemove, so a
+	 * user wiggling their cursor doesn't spam the homeserver.
+	 *
+	 * Idempotent: a second call after listeners are bound returns
+	 * early.  Cleanup happens in stop().
+	 */
+	private startIdlePresenceTracking(): void {
+		if (typeof window === "undefined" || !this.client) return;
+		// Already bound; nothing to do.
+		if (this.idleListenerCleanup.length > 0) return;
+
+		const flipTo = (next: "online" | "unavailable") => {
+			if (this.idleState === next) return;
+			this.idleState = next;
+			const sdkValue = next === "online"
+				? sdk.SetPresence.Online
+				: sdk.SetPresence.Unavailable;
+			this.client?.setSyncPresence(sdkValue).catch(err => {
+				console.warn(`setSyncPresence(${next}) failed`, err);
+			});
+		};
+
+		const armIdleTimer = () => {
+			if (this.idleTimer) clearTimeout(this.idleTimer);
+			this.idleTimer = setTimeout(() => flipTo("unavailable"), this.IDLE_AFTER_MS);
+		};
+
+		// Activity handler: reset the timer (cheap) and flip back to
+		// online if we'd previously gone idle.  Throttling isn't
+		// needed because flipTo is a no-op when the state hasn't
+		// changed and clearing+resetting a timer is essentially free.
+		const onActivity = () => {
+			armIdleTimer();
+			flipTo("online");
+		};
+
+		// Visibility: tab hidden is a hard "user is away" signal,
+		// flip immediately and stop the idle timer (no point waiting
+		// when we have a stronger signal already).  Visible again →
+		// resume the normal timer + flip back.
+		const onVisibility = () => {
+			if (document.visibilityState === "hidden") {
+				if (this.idleTimer) clearTimeout(this.idleTimer);
+				flipTo("unavailable");
+			} else {
+				onActivity();
+			}
+		};
+
+		// Window blur / focus: similar to visibility but catches the
+		// case where the tab is visible (split-screen, side window)
+		// yet not focused, i.e. user clicked another app's window.
+		const onBlur = () => {
+			if (this.idleTimer) clearTimeout(this.idleTimer);
+			flipTo("unavailable");
+		};
+		const onFocus = () => onActivity();
+
+		const activityEvents: Array<keyof WindowEventMap> = [
+			"mousedown", "mousemove", "keydown", "touchstart", "scroll", "wheel",
+		];
+		for (const name of activityEvents) {
+			window.addEventListener(name, onActivity, { passive: true });
+			this.idleListenerCleanup.push(() => window.removeEventListener(name, onActivity));
+		}
+		document.addEventListener("visibilitychange", onVisibility);
+		this.idleListenerCleanup.push(() => document.removeEventListener("visibilitychange", onVisibility));
+		window.addEventListener("blur", onBlur);
+		this.idleListenerCleanup.push(() => window.removeEventListener("blur", onBlur));
+		window.addEventListener("focus", onFocus);
+		this.idleListenerCleanup.push(() => window.removeEventListener("focus", onFocus));
+
+		// Initial timer arm.  If the page loads with the tab hidden
+		// (user came back to a tab they left in the background),
+		// flip straight to unavailable rather than waiting for the
+		// first visibilitychange.
+		if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+			flipTo("unavailable");
+		} else {
+			armIdleTimer();
+		}
+	}
+
+	private stopIdlePresenceTracking(): void {
+		if (this.idleTimer) {
+			clearTimeout(this.idleTimer);
+			this.idleTimer = null;
+		}
+		for (const off of this.idleListenerCleanup) {
+			try { off(); } catch { /* listener already gone, fine */ }
+		}
+		this.idleListenerCleanup = [];
+		this.idleState = "online";
 	}
 
 	/**
@@ -1188,6 +1323,10 @@ export class MatrixTransport {
 	 */
 	async stop(): Promise<void> {
 		this.stopped = true;
+		// Tear down idle-presence watchers BEFORE the client itself,
+		// otherwise an in-flight focus/blur could fire setSyncPresence
+		// against a half-stopped client.
+		this.stopIdlePresenceTracking();
 		// Tear down rust-crypto FIRST so the OlmMachine releases its
 		// IndexedDB handle.  matrix-js-sdk's MatrixClient.stopClient
 		// only stops the /sync loop and event listeners — it does NOT
