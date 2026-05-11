@@ -707,17 +707,26 @@ export function BotEditForm({
 				}
 			}
 
-			// Knowledge follow-up: in create mode any pending picks
-			// queue here.  Walk them sequentially — parallel uploads
-			// would all check the 50 MB total against the same pre-
-			// upload number and let the bot exceed the cap.  Same
-			// fail-soft pattern as the avatar branch above; the bot
-			// is created either way.
+			// Knowledge follow-up: any pending picks (create or edit
+			// mode) flush here.  Walk them sequentially, parallel
+			// uploads would all check the 50 MB total against the
+			// same pre-upload number and let the bot exceed the cap.
+			// Same fail-soft pattern as the avatar branch above; the
+			// bot is saved either way.  Append each upload's returned
+			// metadata into `knowledge` so the existing-files list
+			// stays accurate after save without a re-fetch — without
+			// this the queued row clears (pendingKnowledge emptied)
+			// AND the file is missing from `knowledge` (we never
+			// pushed it), so the UI looks like the just-uploaded file
+			// vanished until the user refreshes the form.
 			if (pendingKnowledge.length > 0) {
 				try {
+					const uploaded: BotKnowledgeFile[] = [];
 					for (const f of pendingKnowledge) {
-						await uploadBotKnowledge(accessToken, saved.id, f);
+						const meta = await uploadBotKnowledge(accessToken, saved.id, f);
+						uploaded.push(meta);
 					}
+					setKnowledge(prev => [...prev, ...uploaded]);
 					setPendingKnowledge([]);
 				} catch (err) {
 					setError(`Saved, but knowledge upload failed: ${err instanceof Error ? err.message : String(err)}`);
