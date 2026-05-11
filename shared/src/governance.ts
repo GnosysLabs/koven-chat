@@ -4,7 +4,7 @@
 // client/server reducers consume internally.
 //
 // Source-of-truth narrative for the rules these types encode:
-//   ../../GOVERNANCE.md
+//   ../../docs/GOVERNANCE.md
 
 export type UserId = string;     // Matrix user id, e.g. "@alice:eclipse.example"
 export type EventId = string;    // Matrix event id, opaque

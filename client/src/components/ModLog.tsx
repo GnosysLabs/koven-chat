@@ -4,7 +4,8 @@
 // stream of governance events in chronological order, never offer
 // edit/delete affordances anywhere in the codebase.
 //
-// Stubbed for now.  See ../../GOVERNANCE.md and ../../NEXT-STEPS.md.
+// Stubbed for now.  See ../../../docs/GOVERNANCE.md for the rules
+// this component will eventually render.
 
 import type { GovernanceEvent } from "@koven/shared";
 

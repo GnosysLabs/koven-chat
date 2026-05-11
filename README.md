@@ -33,7 +33,7 @@ Group chat — spaces, rooms, DMs, voice + video calls, screen share, bots — b
 - **Inline room mentions** — paste a room id, alias, invite URL, or matrix.to link in any message and it renders as a Discord-style pill. Click jumps in.
 - **Federation** — Koven instances federate with each other. The federation gate auto-discovers peer instances via `/.well-known/koven` and refuses vanilla Matrix homeservers.
 
-See [GOVERNANCE.md](GOVERNANCE.md) for the moderation primitives in detail.
+See [docs/GOVERNANCE.md](docs/GOVERNANCE.md) for the moderation primitives in detail. Two end-user-facing guides also live in `docs/`: [koven-user-guide.md](docs/koven-user-guide.md) (everything members see in the product) and [koven-bot-guide.md](docs/koven-bot-guide.md) (the bot platform end-to-end, including MCP + webhooks).
 
 ---
 
