@@ -16,155 +16,197 @@
 
 ---
 
-## Why Koven
+## What Koven is
 
-Discord. Reddit. Twitch. Forums going back twenty years. They share one design choice: a small number of moderators wield unilateral, unappealable power over the speech of everyone else.
+Group chat — spaces, rooms, DMs, voice + video calls, screen share, bots — built on Matrix + a governance layer that makes "kick this person" or "delete that message" a community decision, not a moderator's whim. Discord shape, with one rule that's actually enforced by the protocol: no individual silences another for ordinary speech.
 
-In practice that power gets abused. Warning-free bans for arbitrary reasons. Quiet shadow bans nobody is told about. Selective enforcement based on whether the mod likes you. Personal grudges turned into permanent removals. Rage-quitting moderators nuking communities they helped build. Whole servers held hostage by power-tripping admins who decide one day they don't want you around.
+### Features
 
-This isn't a bad-actor problem you can hire your way out of. The shape of the tool produces this outcome. Hand any group of people a banhammer with no oversight, and over time some fraction of them will swing it for reasons that have nothing to do with community welfare. Every chat platform of the last fifteen years has rediscovered this.
+- **Spaces and rooms** — Discord-style. A space is a server; rooms are channels inside. Joining a space cascade-joins you into its rooms automatically.
+- **Direct messages** — end-to-end encrypted by default (Matrix Megolm). 1:1 only.
+- **Live channels (voice + video + screen-share)** — every room can host group calls. DM calls ring once and connect. Powered by Cloudflare RealtimeKit (the SFU); see the setup notes below.
+- **Encrypted spaces** — private spaces can opt into "every room E2EE forever" at creation. Permanent, trades moderation for privacy. Use for trusted-group / family / small-team installs.
+- **Multi-user bot platform** — anyone with an account can create LLM bots. OpenRouter or any OpenAI-compatible endpoint. MCP servers (stdio sandboxed via bwrap, or HTTP). Inbound + outbound webhooks. You pay for tokens; the platform runs the orchestration.
+- **Consensus moderation** — flagging requires multiple distinct people AND a weighted-score gate that scales with the room's activity. Reputation accumulates with participation and decays with silence. Floor violations (CSAM / credible threats / doxxing) bypass the vote and go to admin review.
+- **Public mod log** — every flag, collapse, suspension is logged forever, append-only, readable by anyone in the room. The only check on collective moderation power is sunlight.
+- **Universal deep links** — `koven://` scheme + `https://client.koven.chat/invite/…` Universal Links open the desktop app directly on macOS, Linux, and Windows. Confirmation card with preview metadata before the user joins.
+- **Inline room mentions** — paste a room id, alias, invite URL, or matrix.to link in any message and it renders as a Discord-style pill. Click jumps in.
+- **Federation** — Koven instances federate with each other. The federation gate auto-discovers peer instances via `/.well-known/koven` and refuses vanilla Matrix homeservers.
 
-Koven removes the banhammer. Every visibility decision is a community vote, weighted by reputation. Every action is logged forever. Reputation comes from contribution, not from being friends with the founder. Sanctions decay automatically. The platform itself does not have moderators.
-
-The community is the moderator.
-
-## How it works
-
-- Anyone can flag any message.
-- Hiding a message requires a community vote, weighted by reputation. The vote is gated by both a minimum count of distinct flaggers and a minimum combined weighted score.
-- A flag in the `floor_violation` category (CSAM, credible threats, doxxing) bypasses the community vote and immediately collapses the message into a non-revealable hidden state. No "click to view" affordance, no way to expand it. This category is reserved for genuinely-illegal content; abuse of it eats into the flagger's reputation when reviewed.
-- Reputation-driven sanctions (slow-mode, off-default-feed, read-only) decay automatically. There is no path from "the community didn't like what you said" to a permanent removal.
-- Every flag, every vote, every action is publicly logged forever, append-only.
-
-Admins exist only to keep the server running and configure instance branding (server name, login background, default space). They have no moderation powers built into the protocol. They cannot ban, hide individual messages, or override a community vote.
-
-See [GOVERNANCE.md](GOVERNANCE.md) for the full mechanics.
+See [GOVERNANCE.md](GOVERNANCE.md) for the moderation primitives in detail.
 
 ---
 
 ## What's in this repo
 
-The web client + server-side governance engine, plus a complete self-hosting bundle (Synapse with our federation gate, Postgres, coturn, and your choice of Caddy with auto-TLS or an existing host nginx + certbot).
+The web client, the desktop app (Tauri), the server-side governance engine, and a complete self-hosting bundle (Synapse with the federation gate, Postgres, coturn, plus a choice of Caddy with auto-TLS or host nginx + certbot).
 
 ```
-┌─────────────────────┐
-│       Caddy         │  TLS + reverse proxy + static SPA host
-└──────────┬──────────┘
-           │
-   ┌───────┼────────┬────────────────┐
-   ▼       ▼        ▼                ▼
-┌─────┐ ┌──────┐ ┌──────┐      ┌─────────┐
-│ SPA │ │engine│ │synapse│ ◄── │ postgres │
-└─────┘ └──────┘ └───────┘      └─────────┘
-                     │
-                     ▼
-                 ┌──────┐
-                 │coturn│  TURN/STUN for WebRTC NAT traversal
-                 └──────┘
+                    ┌────────────────────┐
+                    │  Caddy (or nginx)  │   TLS + reverse proxy + static SPA host
+                    └─────────┬──────────┘
+                              │
+       ┌──────────────────────┼─────────────────────────────┐
+       ▼                      ▼                             ▼
+   ┌───────┐              ┌────────┐                  ┌─────────┐
+   │  SPA  │              │ engine │                  │ synapse │
+   └───┬───┘              └────┬───┘                  └────┬────┘
+       │                       │                           │
+       │ (calls SDK)           │ (custom events,           ▼
+       ▼                       │  appservice)         ┌─────────┐
+  ┌──────────────┐             │                     │postgres │
+  │  Cloudflare  │◄────────────┘                     └─────────┘
+  │  RealtimeKit │   webhook                              ▲
+  │     SFU      │   (call presence)                      │
+  └──────────────┘                                ┌──────────────┐
+                                                  │    coturn    │   STUN/TURN
+                                                  └──────────────┘   for legacy
+                                                                     Matrix VoIP
 ```
 
 | Path                   | Role                                                                                                  |
 |------------------------|-------------------------------------------------------------------------------------------------------|
-| `client/`              | Vite + React + Tailwind web client                                                                    |
-| `engine/`              | Bun service: governance, admin, profiles, instance config                                             |
+| `client/`              | Vite + React + Tailwind web client (the SPA)                                                          |
+| `apps/desktop/`        | Tauri 2 desktop bundle (macOS / Linux / Windows)                                                      |
+| `engine/`              | Bun service: governance, admin, profiles, bots, calls, instance config                                |
 | `shared/`              | TypeScript types shared between client and engine                                                     |
-| `docker/synapse/`      | Synapse Dockerfile + config templates + `koven-federation-gate`                                       |
+| `docker/synapse/`      | Synapse Dockerfile + config templates + `koven-room-gate` + `koven-federation-gate`                   |
 | `docker/coturn/`       | coturn config template                                                                                |
+| `docker/nginx/`        | Optional nginx config template if you're not using the bundled Caddy                                  |
+| `marketing/`           | Static landing site at <https://koven.chat>                                                           |
 | `tools/seed.ts`        | Idempotent seed script. Populates a fresh install with users, spaces, rooms, and chat for development |
 | `bin/koven`            | Install / setup script                                                                                |
+| `bin/deploy-marketing` | rsync the marketing site to the koven.chat VPS                                                        |
 
-## Install
+---
 
-Designed for a Linux VPS with Docker + a hostname pointed at it. Deploys the full stack: Synapse, Postgres, coturn (TURN server for video calls), the Koven engine, and Caddy fronting it all with auto-renewing Let's Encrypt certs.
+## Self-hosting your own instance
+
+Designed for a Linux VPS with Docker + a hostname pointed at it. The full stack — Synapse, Postgres, coturn, the Koven engine, the web client, Caddy fronting it all with auto-renewing Let's Encrypt certs — comes up in three commands once your `.env` is set.
 
 ### Prerequisites
 
-- Docker + Docker Compose (v2)
-- `bun` ≥ 1.1 on the host (used to build the web client during setup)
-- DNS A record(s) pointing at this server's public IP
-- Ports 80, 443, and 3478 (UDP+TCP) reachable from the public internet
+- A VPS (anything from a $5 droplet up; 2 GB RAM is comfortable, 1 GB works for small instances).
+- **Docker** with Docker Compose v2.
+- **`bun` ≥ 1.1** on the host (used to build the web client during setup).
+- A domain name + DNS A record(s) pointing at the server's public IP.
+- Ports **80**, **443**, and **3478** (UDP+TCP) reachable from the internet.
 
-There are three valid hosting layouts. Pick the one that matches your DNS situation.
+Optional but recommended:
+- A **Cloudflare account** if you want voice / video / screen-share — see below.
+- An **SMTP provider** (or Resend) for the passwordless-sign-in emails. The engine works without one in dev but production sign-in needs a working `MAIL_FROM` + provider creds.
 
-### A. Apex-only (everything at `koven.example`)
-
-Web client, Synapse, federation, and `.well-known` discovery are all served from the apex. User IDs are `@alice:koven.example`. Single DNS record, single cert. Cleanest if you want the apex to *be* the chat product.
+### 1. Clone + configure
 
 ```sh
 git clone https://github.com/GnosysLabs/koven-chat
 cd koven-chat
 cp .env.example .env
 $EDITOR .env
-# set:
-#   KOVEN_HOSTNAME=koven.example
-#   SERVER_NAME=koven.example
-#   ADMIN_EMAIL=you@your-email.tld
+```
+
+You'll edit three sections:
+
+#### a) Domain & TLS
+
+There are three valid layouts. Pick the one that matches your DNS situation:
+
+| Layout                       | `.env` values                                                                                  | DNS |
+|------------------------------|------------------------------------------------------------------------------------------------|-----|
+| **Apex-only** — chat lives at `koven.example` | `KOVEN_HOSTNAME=koven.example`<br>`SERVER_NAME=koven.example`<br>`ADMIN_EMAIL=you@…`            | `koven.example  A  <vps-ip>` |
+| **Apex + subdomain** — app at `client.koven.example`, user IDs `@alice:koven.example` | `KOVEN_HOSTNAME=client.koven.example`<br>`SERVER_NAME=koven.example`<br>`ADMIN_EMAIL=you@…`     | Both `koven.example  A  <vps-ip>` AND `client.koven.example  A  <vps-ip>` |
+| **Subdomain-only** — no apex control, user IDs `@alice:client.koven.example` | `KOVEN_HOSTNAME=client.koven.example`<br>`SERVER_NAME=client.koven.example`<br>`ADMIN_EMAIL=you@…` | `client.koven.example  A  <vps-ip>` |
+
+`KOVEN_HOSTNAME` is where the SPA + Synapse actually live. `SERVER_NAME` is what appears after the colon in user IDs. They can be the same (layout 1 + 3) or different (layout 2 — apex serves only `/.well-known/*` plus a redirect).
+
+#### b) Email (passwordless sign-in)
+
+Koven sign-in is passwordless — users get a 6-digit code emailed to them on demand. Configure your provider in `.env`:
+
+```sh
+MAIL_PROVIDER=resend           # or "smtp"
+MAIL_FROM=hello@koven.example
+RESEND_API_KEY=...             # if MAIL_PROVIDER=resend
+# or
+SMTP_HOST=smtp.fastmail.com    # if MAIL_PROVIDER=smtp
+SMTP_PORT=465
+SMTP_USER=...
+SMTP_PASSWORD=...
+```
+
+Without email configured, the engine logs the code to stdout — fine for dev, useless for production.
+
+#### c) Cloudflare RealtimeKit (voice/video/screen-share)
+
+Koven's Live channels (group calls in rooms + DM calls) run on **Cloudflare RealtimeKit** as the selective forwarding unit. Without these credentials the Join Live button is hidden and `/api/calls/*` returns 503 — text + everything else still works, just no calls.
+
+```sh
+CF_REALTIME_ACCOUNT_ID=...      # right sidebar of any Cloudflare account page
+CF_REALTIME_APP_ID=...          # Realtime → RealtimeKit → New App
+CF_REALTIME_TOKEN=...           # Profile → API Tokens → permission "Realtime: Edit"
+CF_REALTIME_WEBHOOK_SECRET=...  # openssl rand -hex 32
+PUBLIC_ENGINE_URL=https://client.koven.example   # your public hostname
+```
+
+Get the first three from the Cloudflare dashboard (free tier works for small instances; check Cloudflare's RealtimeKit pricing for production). The webhook secret is just a long random string the engine uses to authenticate inbound presence webhooks from Cloudflare — generate it yourself.
+
+If you don't want calls at all, leave these blank. Everything else still works.
+
+### 2. Run setup
+
+```sh
 ./bin/koven setup
-docker compose up -d
 ```
 
-DNS: `koven.example A <vps-ip>`.
+This:
 
-### B. Apex + client subdomain
-
-User IDs are `@alice:koven.example` (clean), but the web app and Synapse run on a subdomain like `client.koven.example`. The apex serves only the discovery files (`/.well-known/matrix/*`, `/.well-known/koven`) plus a redirect to the app. Useful if you want the apex available for a marketing or docs site separately, with the chat itself on a subdomain.
-
-```sh
-# in .env:
-KOVEN_HOSTNAME=client.koven.example
-SERVER_NAME=koven.example
-ADMIN_EMAIL=you@your-email.tld
-```
-
-DNS: both `koven.example A <vps-ip>` *and* `client.koven.example A <vps-ip>`. The apex's only job is the discovery files, but it has to be reachable for federation to find your homeserver.
-
-### C. Subdomain only (no apex control)
-
-Use this if you can't or don't want to point the apex at this VPS. User IDs become `@alice:client.koven.example`, slightly less pretty but everything works without apex DNS.
-
-```sh
-# in .env:
-KOVEN_HOSTNAME=client.koven.example
-SERVER_NAME=client.koven.example
-ADMIN_EMAIL=you@your-email.tld
-```
-
-DNS: `client.koven.example A <vps-ip>`.
-
-### After `bin/koven setup`
-
-Whichever layout you pick:
-
-```sh
-docker compose up -d
-```
-
-Caddy fetches Let's Encrypt certs for whichever hostname(s) you used. First user to register on a fresh install becomes the instance admin via the engine's bootstrap.
-
-### What `bin/koven setup` does
-
-1. Generates random secrets (Postgres password, Synapse macaroon/form/registration secrets, engine appservice tokens, TURN shared secret) and writes them back into `.env`. Idempotent: existing values are preserved on re-runs.
-2. On first run, generates Synapse's signing key (`synapse-data/signing.key`). Don't lose this file. Federating servers cache it as your homeserver's identity.
-3. Renders Synapse's `homeserver.yaml`, the engine appservice registration, and the coturn config from templates in `docker/`. Re-run after editing `.env` to propagate changes.
+1. Generates random secrets (Postgres password, Synapse macaroon/form/registration secrets, engine appservice tokens, TURN shared secret, bot-key encryption secret) and writes them back into `.env`. **Idempotent** — existing values are preserved on re-runs.
+2. On first run, generates Synapse's signing key (`synapse-data/signing.key`). **Don't lose this file** — federating peers cache it as your homeserver's identity.
+3. Renders Synapse's `homeserver.yaml`, the engine appservice registration, the coturn config, and (if applicable) the nginx config from templates in `docker/`. Re-run after editing `.env` to propagate changes.
 4. Builds the web client (`bun install && bun run --cwd client build`). Caddy serves the output from `client/dist`.
+5. Renders the Caddyfile (or nginx config, depending on your choice) for your domain layout.
 
-### First admin
+### 3. Bring it up
 
-The first user to register on a fresh install automatically becomes the instance admin. There's no special "create the first admin" step. Sign up through the web client like any other user, and the engine promotes you on your first authenticated request.
+```sh
+docker compose up -d
+```
 
-### Using nginx instead of Caddy
+Caddy fetches Let's Encrypt certs for whichever hostname(s) you set. Synapse boots, the engine connects to Synapse as an appservice and registers its Cloudflare webhook. Postgres + coturn start in the background.
 
-If the host already runs nginx + certbot (e.g. for other services on the same VPS), you can have nginx terminate TLS and proxy to the Koven stack instead of bringing up the bundled Caddy. The bundle ships a compose override and a config template for this.
+Open `https://<your hostname>` and sign up. **The first user to register becomes the instance admin** — no special bootstrap step; the engine promotes you on first authenticated request.
 
-**Activate the override** by adding this line to `.env` so every `docker compose ...` invocation merges it automatically:
+### Verifying it works
+
+- Web client loads at `https://<hostname>`.
+- You can register a second account and DM yourself; messages are E2EE.
+- Live channel button shows in any room (only if Cloudflare credentials are set).
+- `https://<hostname>/.well-known/matrix/server` returns JSON pointing at your Synapse.
+- `https://<hostname>/.well-known/koven` returns Koven's federation-gate handshake.
+
+If any of those fail, `docker compose logs caddy synapse engine` shows what's wrong. The most common gotcha is DNS not propagated yet (Let's Encrypt cert acquisition fails → Caddy keeps retrying every 15 min).
+
+---
+
+## Optional: nginx instead of Caddy
+
+If your host already runs nginx + certbot for other services on the same VPS, you can skip the bundled Caddy.
+
+**Activate the override** in `.env`:
 
 ```sh
 COMPOSE_FILE=docker-compose.yml:docker-compose.nginx.yml
 ```
 
-(or pass `-f docker-compose.yml -f docker-compose.nginx.yml` to every command if you'd rather not set it persistently). The override does two things: skips the Caddy service entirely, and binds Synapse + the engine to `127.0.0.1` so the public internet can't reach them directly — only the host nginx can.
+(or pass `-f docker-compose.yml -f docker-compose.nginx.yml` to every `docker compose` invocation if you'd rather not set it persistently). The override skips the Caddy service and binds Synapse + the engine to `127.0.0.1` so only the host nginx can reach them.
 
-**Render the nginx config** by running `./bin/koven setup` as usual. It produces `docker/nginx/koven.conf` from the template, with your `KOVEN_HOSTNAME`, `SERVER_NAME`, and `ADMIN_EMAIL` filled in.
+**Render the nginx config**:
+
+```sh
+./bin/koven setup
+```
+
+This produces `docker/nginx/koven.conf` from the template, with your `KOVEN_HOSTNAME`, `SERVER_NAME`, and `ADMIN_EMAIL` filled in.
 
 **Install it** into nginx and ask certbot for certs:
 
@@ -176,50 +218,129 @@ sudo certbot --nginx -d $KOVEN_HOSTNAME -d $SERVER_NAME \
   --redirect --agree-tos --email $ADMIN_EMAIL --non-interactive
 ```
 
-(drop the second `-d` flag for layout C — there's no apex hostname to certify.)
+(Drop the second `-d` flag for the subdomain-only layout — there's no apex hostname to certify.)
 
-certbot rewrites `/etc/nginx/sites-available/koven` in place to add TLS listen lines and cert paths. Subsequent `./bin/koven setup` re-runs only re-render the template at `docker/nginx/koven.conf` — they don't touch the live `/etc/nginx/sites-available/koven`, so certbot's edits stick. If you change `.env` or the template and want the live nginx config updated, re-cp it and re-run certbot (certbot is idempotent and will preserve existing certs).
+certbot rewrites `/etc/nginx/sites-available/koven` in place to add TLS listen lines and cert paths. Subsequent `./bin/koven setup` re-runs only re-render `docker/nginx/koven.conf` — they don't touch the live `/etc/nginx/sites-available/koven`, so certbot's edits stick. If you change `.env` and want the live config updated, re-cp + re-run certbot (idempotent).
 
-Bring the Koven stack up the same way as the Caddy path:
+Bring the stack up the same way:
 
 ```sh
 docker compose up -d
 ```
 
-### Updating
-
-```sh
-git pull
-./bin/koven setup
-docker compose build
-docker compose up -d
-```
+---
 
 ## Federation
 
-Koven instances federate **only with other Koven instances**. No manual whitelisting, no admin friction. Synapse's outgoing federation is gated by the `koven-federation-gate` Python module that ships in our Synapse image. On first contact with a new domain, it probes `https://<domain>/.well-known/koven`. A valid Koven response means allowed (and cached for 10 minutes); anything else is denied.
+Koven instances federate **only with other Koven instances**. No manual whitelisting, no admin friction. Synapse's outgoing federation is gated by the `koven-federation-gate` Python module in our Synapse image. On first contact with a new domain it probes `https://<domain>/.well-known/koven`. A valid Koven response means allowed (and cached for 10 minutes); anything else is denied.
 
-This means `@alice:other-koven.chat` works the moment you type it, while vanilla Matrix homeservers are silently isolated. Every Koven instance auto-serves `/.well-known/koven` from its reverse proxy (Caddy or nginx) so peer discovery is symmetric.
+So `@alice:other-koven.chat` works the moment you type it, while vanilla Matrix homeservers are silently isolated. Every Koven instance auto-serves `/.well-known/koven` from its reverse proxy so peer discovery is symmetric.
+
+---
+
+## Updating
+
+```sh
+git pull
+./bin/koven setup            # re-render configs, rebuild the SPA
+docker compose build         # rebuild engine + Synapse images if changed
+docker compose up -d
+```
+
+For SPA-only updates (no engine code change), `bun run --cwd client build` is enough — Caddy/nginx serves the new `client/dist` immediately, no container restart.
+
+---
+
+## Desktop apps
+
+Koven Desktop is a Tauri 2 bundle (WKWebView on macOS, WebView2 on Windows, WebKitGTK on Linux) that wraps the same SPA. Adds:
+
+- Native window chrome + traffic-light controls.
+- OS-level deep links (`koven://` scheme + Apple Universal Links for `https://client.koven.chat/invite/…`).
+- Signed auto-updater pulling from GitHub Releases.
+- Native save-as dialog for file downloads.
+- Native toast notifications via Notification Center / Action Center / libnotify.
+
+Releases live at [github.com/GnosysLabs/koven-chat/releases](https://github.com/GnosysLabs/koven-chat/releases). The macOS arm64 build is the only one we ship signed + notarized today; Linux + Windows builds also publish but you'll see Gatekeeper / SmartScreen warnings on first launch.
+
+Build locally (requires Rust + the platform-specific Tauri prereqs):
+
+```sh
+cd apps/desktop
+bun install
+bun run tauri build
+```
+
+---
+
+## Bots
+
+Anyone with an account can create LLM bots from Settings → Bots → New. Default cap is 30 bots per user (`MAX_BOTS_PER_USER` env var on the engine to raise/lower).
+
+A bot is a Matrix user the engine drives on your behalf using an LLM API key you supply. Triggers on `@-mention` in a group room, or any message in a 1:1 DM with it. Configurable per-bot:
+
+- **Identity** — display name, avatar, bio, "accept DMs from non-owners" gate.
+- **Connection** — OpenRouter or any OpenAI-compatible endpoint (API base, key, model). Keys are encrypted at rest with `BOT_KEY_ENCRYPTION_SECRET`.
+- **Behavior** — system prompt, context window (1–100 recent messages included per call).
+- **Knowledge** — RAG uploads (PDFs, text, markdown). Retrieved per call.
+- **MCP tools** — HTTP MCPs (URL + headers) or stdio MCPs (subprocess, sandboxed via bwrap, env stripped, npm versions auto-pinned).
+- **Webhooks** — LLM-callable outbound HTTP tools (with `{placeholder}` URL templates) + inbound webhook endpoints (auto-detected GitHub / Twilio / generic JSON, optional HMAC signing).
+- **Limits** — per-reply token cap, daily token cap, daily call cap.
+
+Bot governance: the no-individual-silencing rule applies to humans, not bots. Owners can delete their bot's messages; a room's founder can kick or ban a bot from their room without consensus. Logged in the public mod log.
+
+Detailed guide: see `apps/desktop/koven-bot-guide.md` (the version on the developer's desktop) or read `engine/src/bot_pipeline.ts`.
+
+---
 
 ## Dev
 
-For local development on the same machine without the full Docker stack:
+Local development without the full Docker stack:
 
 ```sh
+# Synapse + Postgres still need to be running.  Spin them up via Docker:
+docker compose up -d synapse postgres
+
+# In separate terminals:
 bun install
 bun run dev:engine    # engine on :9000
-bun run dev           # vite dev server on https://localhost:5173
+bun run dev           # vite dev server on https://localhost:1420 (self-signed cert)
 ```
 
-Synapse needs to be running separately. `docker compose up -d synapse postgres` is enough. For E2E testing of an installed-from-scratch flow, see the `bin/koven setup` path documented above.
+Vite uses port **1420** (matches Tauri's convention so `tauri.conf.json`'s `devUrl` stays valid). The dev server uses a self-signed TLS cert because the matrix-rust-sdk WASM crypto module needs a secure context — you'll get a browser warning the first time, accept it once and forget.
+
+For a "fresh install from scratch" E2E test, use the full `./bin/koven setup` + `docker compose up -d` path documented above.
+
+### Seeding test data
+
+The `tools/seed.ts` script populates a fresh dev install with synthetic users, spaces, rooms, and chat history so the empty-state isn't blocking:
+
+```sh
+bun run tools/seed.ts
+```
+
+Idempotent — re-run anytime to top up. Drop the DB to start clean.
+
+---
 
 ## Architecture
 
-- **Wire protocol**: Matrix. Federation, voice/video, threading, file sharing all come from the spec. Koven doesn't reinvent the transport.
-- **Governance layer**: Koven-native. Consensus moderation primitive, public audit log, weighted reputation engine, automatic decay. All built on top of Matrix events as custom event types (`chat.koven.flag.v1`, `chat.koven.collapse.v1`, `chat.koven.censure.v1`).
-- **Encryption**: DMs are end-to-end encrypted by default (Matrix megolm). Encrypted rooms bypass the consensus layer because the engine bot can't observe their content; a federation badge surfaces this in-UI.
+- **Wire protocol**: [Matrix](https://matrix.org/). Federation, file sharing, profiles, E2EE all come from the spec. Koven doesn't reinvent the transport.
+- **Governance layer**: Koven-native. Consensus moderation primitive, public audit log, weighted reputation engine, automatic decay, floor-violation review. Built on top of Matrix events as custom event types (`chat.koven.flag.v1`, `chat.koven.collapse.v1`, `chat.koven.space.config`, …).
+- **Calls**: Cloudflare RealtimeKit as the SFU. The engine mints per-call participant tokens via Cloudflare's API; the client SDK connects directly to Cloudflare's edge. Synapse + coturn handle Matrix-spec 1:1 VoIP for legacy clients only — Koven Desktop / the SPA use RealtimeKit exclusively.
+- **Bots**: matrix-rust-sdk WASM running inside the engine's bun process, one client per bot. OpenAI-shape tool definitions cover both outbound webhooks and MCP attachments; the engine bridges between the two.
+- **Encryption**: DMs are end-to-end encrypted (Megolm) by default. Spaces can be created with the `e2ee_required` policy — every child room inherits encryption automatically, permanently. Encrypted rooms bypass the consensus layer because the engine bot can't observe their content; the SPA hides flag affordances in encrypted rooms and labels them with a `Lock` badge in the chat header.
+- **Federation gate**: a custom Synapse spam-checker module rejects events from non-Koven peers. Symmetric: every Koven instance auto-serves `/.well-known/koven` so discovery is two-way.
 
-See `engine/src/` for the governance primitives in detail.
+See `engine/src/` for the governance primitives in detail. The interesting files:
+
+- `engine/src/weight.ts` — reputation math.
+- `engine/src/aggregate.ts` — event-stream → DB state machine.
+- `engine/src/server.ts` — the engine's HTTP API + appservice transaction handler.
+- `engine/src/bot_pipeline.ts` — bot trigger detection, context gathering, tool-call loop.
+- `engine/src/calls.ts` — Cloudflare RealtimeKit token minting.
+
+---
 
 ## License
 
