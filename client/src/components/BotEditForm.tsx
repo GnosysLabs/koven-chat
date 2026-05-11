@@ -826,29 +826,18 @@ export function BotEditForm({
 		}
 	}
 
-	// Knowledge handlers.  Edit mode uploads/deletes hit the engine
-	// immediately so the user gets instant feedback (no "wait until
-	// you click Save"); create mode queues until the bot exists.
-	async function pickKnowledgeFiles(files: FileList) {
+	// Knowledge handlers.  Picks always queue into `pendingKnowledge`,
+	// even in edit mode, so the user sees a normal "queued, save to
+	// apply" state instead of an instant silent upload.  The actual
+	// upload happens in the save handler (same loop create mode uses).
+	// Deletes of existing files are still instant: they're rare, and
+	// queuing them would mean inventing a "tombstone" UI state for
+	// already-persisted files.
+	function pickKnowledgeFiles(files: FileList) {
 		const arr = Array.from(files);
 		if (arr.length === 0) return;
 		setKnowledgeError(null);
-		if (mode === "create") {
-			setPendingKnowledge(prev => [...prev, ...arr]);
-			return;
-		}
-		if (!accessToken || !bot) return;
-		setKnowledgeBusy(true);
-		try {
-			for (const f of arr) {
-				const meta = await uploadBotKnowledge(accessToken, bot.id, f);
-				setKnowledge(prev => [...prev, meta]);
-			}
-		} catch (err) {
-			setKnowledgeError(err instanceof Error ? err.message : String(err));
-		} finally {
-			setKnowledgeBusy(false);
-		}
+		setPendingKnowledge(prev => [...prev, ...arr]);
 	}
 
 	async function removeKnowledgeFile(fileId: number) {
@@ -1551,7 +1540,7 @@ export function BotEditForm({
 						className="gap-1.5"
 					>
 						<Upload className="h-4 w-4" />
-						{knowledgeBusy ? "Uploading…" : "Upload files"}
+						{knowledgeBusy ? "Working…" : "Upload files"}
 					</Button>
 					<p className="text-xs text-muted-foreground mt-1.5">
 						Plain text (.txt, .md), Word (.docx), or Apple/RTF (.rtf). Up to 10&nbsp;MB per file, 50&nbsp;MB total per bot.
