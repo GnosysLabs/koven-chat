@@ -48,23 +48,18 @@ export interface FlagRef {
 //   - "space":   a real Matrix space the user joined or created
 // `null` is the brief pre-sync state before we pick a default.
 //
-// `spaces_overview` is mobile-only: when the bottom-tab "Spaces"
-// tab is selected and no specific space is active, we land on a
-// vertical list of every joined space (the iOS-native equivalent
-// of the desktop SpaceBar).  Tapping a space transitions to
-// `{ kind: "space", id }`; the back arrow on the chat header
-// returns here.  Desktop never enters this state — the SpaceBar
-// is always visible there.
-//
-// The legacy `{ kind: "rooms" }` (orphan rooms pseudo-space) was
-// removed when the Discord-style invariant landed: every group
-// room belongs to a space, so there are no orphans to display.
+// The legacy `{ kind: "rooms" }` (orphan rooms pseudo-space) and the
+// short-lived `{ kind: "spaces_overview" }` are both gone: every
+// group room belongs to a space (Discord-style invariant), and the
+// spaces-list landing was a dead-end empty page users complained
+// about getting dumped on.  Mobile users pick spaces from the rail;
+// every navigation now lands on a populated surface (dms / a
+// specific space / explore).
 export type ActiveSpace =
 	| { kind: "explore" }
 	| { kind: "dms" }
 	| { kind: "bots" }
 	| { kind: "space"; id: SpaceId }
-	| { kind: "spaces_overview" }
 	| null;
 
 export interface AppState {

@@ -24,7 +24,6 @@ import { SpaceBar } from "@/components/SpaceBar";
 import { RoomList } from "@/components/RoomList";
 import { MobileTopBar } from "@/components/MobileTopBar";
 import { MobileTabBar, type MobileTab } from "@/components/MobileTabBar";
-import { MobileSpacesList } from "@/components/MobileSpacesList";
 import { MobileMeScreen } from "@/components/MobileMeScreen";
 import { isMobileShell } from "@/lib/mobile";
 import { parseShareIntent, clearShareUrl, type ShareIntent } from "@/lib/inviteLink";
@@ -205,14 +204,13 @@ export default function App() {
 						space: { kind: "space", id: room.parentSpaceIds[0] as SpaceId },
 					});
 				} else {
-					// Orphan non-DM room — lives in the "Rooms" bucket.
-					// Without this branch, clicking a notification while
-					// on Explore (or any other virtual space) would
-					// silently leave the active space alone, the
-					// timeline would never render, and the user would
-					// just stare at Explore wondering where their room
-					// went.
-					dispatch({ type: "set_active_space", space: { kind: "spaces_overview" } });
+					// Orphan non-DM room (no parent space).  Land on DMs
+					// so the SPA doesn't strand the user on the previous
+					// virtual surface (Explore, Bots) while the room
+					// they wanted opens off-screen.  Orphan rooms still
+					// render via the room id selection itself; only the
+					// active-space picker needs a sensible fallback.
+					dispatch({ type: "set_active_space", space: { kind: "dms" } });
 				}
 			}
 			setMobileMeOpen(false);
@@ -1141,11 +1139,11 @@ export default function App() {
 	//   - target is a SPACE id: select it as activeSpace, don't set
 	//     activeRoom (SpaceLanding renders).
 	//   - target is a ROOM id we're a member of: select its parent
-	//     space (or DMs / spaces_overview) AND select the room.
+	//     space (or DMs) AND select the room.
 	//   - target is a ROOM id we just joined: the Room object may
 	//     not be in roomsRef yet (matrix-js-sdk takes a sync round
 	//     trip to populate); we set activeRoom anyway so the SPA
-	//     remembers the intent — once the room lands in the sidebar
+	//     remembers the intent.  Once the room lands in the sidebar
 	//     it'll already be selected.
 	const navigateToTarget = useCallback((targetId: string, isSpace: boolean) => {
 		if (isSpace) {
@@ -1162,7 +1160,11 @@ export default function App() {
 					space: { kind: "space", id: room.parentSpaceIds[0] as SpaceId },
 				});
 			} else {
-				dispatch({ type: "set_active_space", space: { kind: "spaces_overview" } });
+				// Orphan room with no parent space.  Land on DMs so the
+				// rail has somewhere meaningful to highlight; the room
+				// itself still selects via the set_active_room dispatch
+				// below.
+				dispatch({ type: "set_active_space", space: { kind: "dms" } });
 			}
 		}
 		dispatch({ type: "set_active_room", roomId: targetId as RoomId });
@@ -1828,9 +1830,6 @@ export default function App() {
 		if (!state.activeSpace) return null;
 		if (state.activeSpace.kind === "explore") return null;
 		if (state.activeSpace.kind === "bots") return null;
-		// Mobile-only "Spaces" tab landing — no synthetic Space
-		// object; the MobileSpacesList renders its own UI.
-		if (state.activeSpace.kind === "spaces_overview") return null;
 		if (state.activeSpace.kind === "dms") {
 			return {
 				id: "__dms__",
@@ -1851,7 +1850,6 @@ export default function App() {
 		if (state.activeSpace.kind === "explore") return [];
 		if (state.activeSpace.kind === "bots") return [];
 		if (state.activeSpace.kind === "dms") return state.rooms.filter(r => r.kind === "dm");
-		if (state.activeSpace.kind === "spaces_overview") return [];
 		const id = state.activeSpace.id;
 		return state.rooms.filter(r => r.parentSpaceIds.includes(id));
 	}, [state.activeSpace, state.rooms]);
@@ -2217,20 +2215,6 @@ export default function App() {
 					/>
 					</div>
 				) : null}
-				{state.activeSpace?.kind === "spaces_overview" ? (
-					<div className="contents" data-mobile-pane="list">
-						<MobileSpacesList
-							spaces={state.spaces}
-							rooms={state.rooms}
-							onSelectSpace={(id) =>
-								dispatch({ type: "set_active_space", space: { kind: "space", id: id as SpaceId } })
-							}
-							onSelectExplore={() =>
-								dispatch({ type: "set_active_space", space: { kind: "explore" } })
-							}
-						/>
-					</div>
-				) : null}
 				{/* Explore on mobile.  The main pane is hidden in
 				    mobile-view="rooms" (no active room) so we render
 				    ExplorePane into the list pane instead — same
@@ -2256,8 +2240,7 @@ export default function App() {
 					</div>
 				) : null}
 				{state.activeSpace?.kind !== "explore"
-					&& state.activeSpace?.kind !== "bots"
-					&& state.activeSpace?.kind !== "spaces_overview" && (
+					&& state.activeSpace?.kind !== "bots" && (
 				<div className="contents" data-mobile-pane="list">
 				<RoomList
 					rooms={state.rooms}
@@ -2739,10 +2722,7 @@ export default function App() {
 							? "me"
 							: state.activeSpace?.kind === "explore"
 								? "explore"
-								: state.activeSpace?.kind === "space"
-									|| state.activeSpace?.kind === "spaces_overview"
-									? "spaces"
-									: "chats"
+								: "chats"
 					}
 					onChange={(tab: MobileTab) => {
 						// Switching tabs always clears the Me overlay
@@ -2753,13 +2733,6 @@ export default function App() {
 						dispatch({ type: "set_active_room", roomId: null });
 						if (tab === "chats") {
 							dispatch({ type: "set_active_space", space: { kind: "dms" } });
-						} else if (tab === "spaces") {
-							// Stay in the current space if we already
-							// have one selected — only drop into the
-							// overview when the tab is "fresh".
-							if (state.activeSpace?.kind !== "space") {
-								dispatch({ type: "set_active_space", space: { kind: "spaces_overview" } });
-							}
 						} else if (tab === "explore") {
 							dispatch({ type: "set_active_space", space: { kind: "explore" } });
 						}
@@ -2767,11 +2740,6 @@ export default function App() {
 					unreadByTab={{
 						chats: state.rooms.filter(
 							r => r.kind === "dm" && !r.isInvite && r.unreadCount > 0,
-						).length,
-						spaces: state.rooms.filter(
-							r => r.parentSpaceIds.length > 0
-								&& !r.isInvite
-								&& r.unreadCount > 0,
 						).length,
 					}}
 				/>
@@ -2898,10 +2866,18 @@ export default function App() {
 				}}
 				onDelete={async (spaceId, childIds) => {
 					if (!transport) throw new Error("Not connected");
-					await transport.deleteSpace(spaceId as RoomId, childIds as RoomId[]);
+					// Close the sheet + bounce out of the space BEFORE
+					// the deletion fires.  Without this, the user
+					// watches a settings panel for the space they're
+					// in the middle of nuking sit there for several
+					// seconds while the redaction + leave round-trips
+					// run, which reads as "did the click even
+					// register?"  Errors from deleteSpace still
+					// surface via the global error toast.
 					setEditingSpaceId(null);
-					dispatch({ type: "set_active_space", space: { kind: "spaces_overview" } });
 					dispatch({ type: "set_active_room", roomId: null });
+					dispatch({ type: "set_active_space", space: { kind: "dms" } });
+					await transport.deleteSpace(spaceId as RoomId, childIds as RoomId[]);
 				}}
 				lookupChildName={(roomId) => {
 					// Resolve via the SPA's room cache.  Falls back to

@@ -266,7 +266,6 @@ function filterRooms(rooms: Room[], activeSpace: ActiveSpace): Room[] {
 	if (activeSpace.kind === "explore") return [];
 	if (activeSpace.kind === "bots") return [];
 	if (activeSpace.kind === "dms") return rooms.filter(r => r.kind === "dm");
-	if (activeSpace.kind === "spaces_overview") return [];
 	const id = activeSpace.id;
 	return rooms.filter(r => r.parentSpaceIds.includes(id));
 }
@@ -276,7 +275,6 @@ function headerFor(activeSpace: ActiveSpace, spaces: Space[]): string {
 	if (activeSpace.kind === "explore") return "Explore";
 	if (activeSpace.kind === "bots") return "Bots";
 	if (activeSpace.kind === "dms") return "Direct messages";
-	if (activeSpace.kind === "spaces_overview") return "Spaces";
 	const space = spaces.find(s => s.id === activeSpace.id);
 	return space?.name ?? "Space";
 }
