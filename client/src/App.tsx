@@ -27,7 +27,7 @@ import { MobileTabBar, type MobileTab } from "@/components/MobileTabBar";
 import { MobileSpacesList } from "@/components/MobileSpacesList";
 import { MobileMeScreen } from "@/components/MobileMeScreen";
 import { isMobileShell } from "@/lib/mobile";
-import { parseShareIntent, clearShareUrl } from "@/lib/inviteLink";
+import { parseShareIntent, clearShareUrl, type ShareIntent } from "@/lib/inviteLink";
 import { ChatPane } from "@/components/ChatPane";
 import { SpaceLanding } from "@/components/SpaceLanding";
 import { ExplorePane } from "@/components/ExplorePane";
@@ -1078,6 +1078,48 @@ export default function App() {
 	// so a refresh doesn't repeat the auto-navigate (which would be
 	// confusing if the user has since left the room or routed away).
 	const shareIntentConsumedRef = useRef(false);
+	// Consume a parsed share intent: join the room (idempotent for
+	// already-joined ones), pick the right active space so the room
+	// shows in the sidebar, then activate it.  Extracted so both
+	// the on-mount cold path (URL the SPA loaded with) and the
+	// running-app warm path (Tauri `deep-link` event) feed the same
+	// pipeline.
+	const consumeShareIntent = useCallback(async (intent: ShareIntent) => {
+		if (!transport) return;
+		try {
+			let roomId: string;
+			if (intent.kind === "invite") {
+				// joinRoomById is idempotent — already-joined rooms
+				// resolve immediately to their roomId.  Aliases get
+				// resolved server-side as part of the join.
+				roomId = await transport.joinRoomById(intent.target);
+			} else {
+				roomId = intent.roomId;
+			}
+			// Pick the right "active space" so the room actually
+			// shows up in the rendered list.  Reuses the same
+			// resolution logic as openRoomFromNotification.
+			const room = roomsRef.current.find(r => r.id === roomId);
+			if (room) {
+				if (room.kind === "dm") {
+					dispatch({ type: "set_active_space", space: { kind: "dms" } });
+				} else if (room.parentSpaceIds.length > 0) {
+					dispatch({
+						type: "set_active_space",
+						space: { kind: "space", id: room.parentSpaceIds[0] as SpaceId },
+					});
+				} else {
+					dispatch({ type: "set_active_space", space: { kind: "spaces_overview" } });
+				}
+			}
+			dispatch({ type: "set_active_room", roomId: roomId as RoomId });
+		} catch (err) {
+			console.warn("share-intent: failed to consume", intent, err);
+		} finally {
+			clearShareUrl();
+		}
+	}, [transport]);
+
 	useEffect(() => {
 		if (shareIntentConsumedRef.current) return;
 		if (!transport || !creds) return;
@@ -1092,41 +1134,48 @@ export default function App() {
 			return;
 		}
 		shareIntentConsumedRef.current = true;
+		void consumeShareIntent(intent);
+	}, [transport, creds, state.syncState, consumeShareIntent]);
+
+	// Tauri deep-link warm path.  When the OS hands us a `koven://...`
+	// URL while the app is already running (Mail click, Messages
+	// click, terminal `open koven://invite/foo`, etc.) the Rust
+	// shell re-emits it on the `deep-link` window event.  Subscribe
+	// once per session — the listener stays alive for the lifetime
+	// of the app.  Cold-launch deep-links also flow through this
+	// path: tauri-plugin-deep-link replays queued URLs to listeners
+	// the moment one binds, so the SPA picks up an URL that arrived
+	// before React mounted.
+	//
+	// Dynamic import + window.__TAURI__ guard keeps this code path
+	// dead in the web build (the @tauri-apps/api/event module would
+	// throw on subscribe in a plain browser).
+	useEffect(() => {
+		if (!transport || !creds) return;
+		if (typeof window === "undefined" || !("__TAURI__" in window)) return;
+		let unsubscribe: (() => void) | null = null;
+		let cancelled = false;
 		void (async () => {
 			try {
-				let roomId: string;
-				if (intent.kind === "invite") {
-					// joinRoomById is idempotent — already-joined rooms
-					// resolve immediately to their roomId.  Aliases get
-					// resolved server-side as part of the join.
-					roomId = await transport.joinRoomById(intent.target);
-				} else {
-					roomId = intent.roomId;
-				}
-				// Pick the right "active space" so the room actually
-				// shows up in the rendered list.  Reuses the same
-				// resolution logic as openRoomFromNotification.
-				const room = roomsRef.current.find(r => r.id === roomId);
-				if (room) {
-					if (room.kind === "dm") {
-						dispatch({ type: "set_active_space", space: { kind: "dms" } });
-					} else if (room.parentSpaceIds.length > 0) {
-						dispatch({
-							type: "set_active_space",
-							space: { kind: "space", id: room.parentSpaceIds[0] as SpaceId },
-						});
-					} else {
-						dispatch({ type: "set_active_space", space: { kind: "spaces_overview" } });
-					}
-				}
-				dispatch({ type: "set_active_room", roomId: roomId as RoomId });
+				const { listen } = await import("@tauri-apps/api/event");
+				const unlisten = await listen<string>("deep-link", evt => {
+					const url = evt.payload;
+					if (typeof url !== "string" || !url) return;
+					const intent = parseShareIntent(url);
+					if (!intent) return;
+					void consumeShareIntent(intent);
+				});
+				if (cancelled) { unlisten(); return; }
+				unsubscribe = unlisten;
 			} catch (err) {
-				console.warn("share-intent: failed to consume", intent, err);
-			} finally {
-				clearShareUrl();
+				console.warn("deep-link listener failed to bind", err);
 			}
 		})();
-	}, [transport, creds, state.syncState]);
+		return () => {
+			cancelled = true;
+			if (unsubscribe) unsubscribe();
+		};
+	}, [transport, creds, consumeShareIntent]);
 
 	// Session-view persistence intentionally removed.  Every login
 	// + page reload now lands on DMs (the initialState default) so

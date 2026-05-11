@@ -25,5 +25,30 @@
 	<string>Koven uses your microphone for voice and video calls.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Koven uses your camera for video calls.</string>
+	<!--
+		Register the `koven://` URL scheme with macOS so a click on
+		`koven://invite/<id>` or `koven://r/<roomId>/<eventId>` in
+		any other app (Mail, Messages, a browser) launches or
+		focuses Koven Desktop and hands off the URL.  The Rust
+		handler in lib.rs receives the payload via
+		tauri-plugin-deep-link and forwards it to the SPA via a
+		`deep-link` window event.  Apple Launch Services keys the
+		association on the CFBundleURLName (the role-stable id)
+		while CFBundleURLSchemes is the actual scheme list, so any
+		future scheme additions just append to the array.
+	-->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>chat.koven.deeplink</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>koven</string>
+			</array>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+		</dict>
+	</array>
 </dict>
 </plist>

@@ -75,7 +75,20 @@ export function parseShareIntent(input: string | URL | Location = window.locatio
 	try {
 		if (typeof input === "string") {
 			// Allow callers to pass either a full URL or just a path.
-			if (input.startsWith("http") || input.startsWith("/")) {
+			if (input.startsWith("koven://")) {
+				// Custom-scheme deep links arriving from the Tauri
+				// shell.  `koven://invite/abc` parses as host=invite,
+				// pathname=/abc — reassemble into the same path shape
+				// the SHARE_HOSTS branch produces so the downstream
+				// splitter handles both transports identically.
+				// Treat as trusted: only the OS hands us koven://
+				// URLs (the scheme is registered to our bundle id);
+				// no untrusted caller can synthesize one inside the
+				// SPA without first traversing the OS handler.
+				const u = new URL(input);
+				pathname = `/${u.host}${u.pathname}`;
+				hostname = null;
+			} else if (input.startsWith("http") || input.startsWith("/")) {
 				const u = new URL(input, SHARE_HOST);
 				pathname = u.pathname;
 				// Treat absolute /paths as same-origin (no hostname

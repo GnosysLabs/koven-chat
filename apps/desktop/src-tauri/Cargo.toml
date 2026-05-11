@@ -1,6 +1,6 @@
 [package]
 name = "koven-desktop"
-version = "0.19.5"
+version = "0.19.6"
 description = "Koven desktop shell — Tauri WebView wrapping client.koven.chat with native window chrome, OS-routed external links, and a minisign-signed in-app updater."
 authors = ["Gnosys Labs"]
 edition = "2021"
@@ -53,6 +53,22 @@ tauri-plugin-dialog = "2"
 # trustworthy" origin per the Secure Contexts spec, so embeds treat
 # it the same as a real https site and just work.
 tauri-plugin-localhost = "2"
+# Custom-scheme deep links.  Registers `koven://` with the OS so a
+# click on `koven://invite/<id>` or `koven://r/<roomId>/<eventId>`
+# in another app (Mail, Messages, Slack, a browser) launches or
+# focuses Koven Desktop and hands off the URL.  The Rust handler
+# forwards the payload to the SPA via a `deep-link` window event;
+# the SPA pumps it through the existing `parseShareIntent` pipeline.
+#
+# Scheme is registered through the OS's normal channels:
+#   - macOS: CFBundleURLTypes entry in Info.macOS.plist
+#   - Windows: registry key written at install time (NSIS/MSI)
+#   - Linux: AppData XML in the .desktop file
+#
+# The plugin handles the "warm" path itself — if the app is already
+# running, the OS hands the URL to the existing instance via the
+# single-instance plugin's argv callback (already wired up below).
+tauri-plugin-deep-link = "2"
 # Random port pinning helper — the localhost plugin needs a port
 # that's free at app start; portpicker grabs one without us having to
 # hardcode (which would clash on machines already using the port).

@@ -9,8 +9,9 @@
 // dispatch, native notifications, single-instance focus, signed
 // auto-update).
 
-use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 use tauri::webview::DownloadEvent;
+use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 
@@ -342,12 +343,42 @@ pub fn run() {
 		// (or a `koven://` deep-link click) focuses the existing one
 		// instead of spawning a duplicate.  Required before any other
 		// plugin so the focus message is dispatched first.
-		.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+		.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
 			if let Some(window) = app.get_webview_window("main") {
 				let _ = window.unminimize();
 				let _ = window.set_focus();
 			}
+			// Linux + Windows cold-warm path: when the OS launches a
+			// second instance with a `koven://...` URL in argv (a
+			// deep-link click while we're already running), the
+			// single-instance plugin diverts that launch into THIS
+			// callback so we can forward the URL to the existing
+			// window.  macOS doesn't take this path — Cocoa calls
+			// our `on_open_url` handler in setup() instead — but it
+			// runs the same emit so the SPA side has exactly one
+			// event to subscribe to.  Scan argv for any token that
+			// looks like a `koven://` URL and emit each one.  Most
+			// clicks will be a single URL; a multi-URL launch is
+			// theoretically possible (rare, harmless if it happens).
+			for arg in argv.iter() {
+				if arg.starts_with("koven://") {
+					if let Err(err) = app.emit("deep-link", arg.clone()) {
+						log::warn!("deep-link emit failed for {arg}: {err}");
+					}
+				}
+			}
 		}))
+		// Custom-scheme deep links.  Registers `koven://` with the OS
+		// (via CFBundleURLTypes on macOS, a registry key on Windows,
+		// AppData XML on Linux).  When the OS opens us with a URL,
+		// either at cold start or while running, the handler below
+		// fires and re-emits the URL on the `deep-link` window event
+		// so the SPA can consume it through its existing share-intent
+		// pipeline.  Plugin must register before setup() so its
+		// internal subscriber is alive when the first URL arrives —
+		// macOS Cocoa can fire `application:openURLs:` during launch
+		// before our setup callback runs.
+		.plugin(tauri_plugin_deep_link::init())
 		// Embedded HTTP server serving the bundled SPA from
 		// http://localhost:<local_port>/.  See the comment on
 		// tauri-plugin-localhost in Cargo.toml for the full rationale
@@ -863,6 +894,33 @@ pub fn run() {
 					log::warn!("window.show failed: {err}");
 				}
 			}
+
+			// macOS deep-link handler.  Cocoa delivers `koven://...`
+			// URLs (both at cold launch and while running) through
+			// the `application:openURLs:` AppDelegate callback, which
+			// tauri-plugin-deep-link surfaces as `on_open_url`.  Re-
+			// emit each URL on the `deep-link` window event so the
+			// SPA's share-intent listener can consume it through the
+			// same pipeline as web `/invite/<id>` links.  Linux +
+			// Windows take the single-instance path above instead,
+			// since the OS hands the URL via argv to a second
+			// process launch — single_instance is what catches that.
+			//
+			// Cold-launch flow: macOS may fire `application:openURLs:`
+			// before the WebviewWindow is fully loaded.  The plugin
+			// queues the URLs internally and replays them once a
+			// listener is registered, so emitting here is safe even
+			// if the SPA's listener hasn't bound yet (it'll subscribe
+			// during boot and pick up the queued event on connect).
+			let deep_link_app = app.handle().clone();
+			app.deep_link().on_open_url(move |event| {
+				for url in event.urls() {
+					let url_str = url.to_string();
+					if let Err(err) = deep_link_app.emit("deep-link", url_str.clone()) {
+						log::warn!("deep-link emit failed for {url_str}: {err}");
+					}
+				}
+			});
 
 			// Kick off an update check after the window is up.
 			// Best-effort — failures (no network, no new release,

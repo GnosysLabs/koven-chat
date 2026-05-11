@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Koven",
-  "version": "0.19.5",
+  "version": "0.19.6",
   "identifier": "chat.koven.desktop",
   "build": {
     "beforeBuildCommand": "bun install && bun run --cwd ../../client build",
@@ -57,6 +57,12 @@
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcwRjAxNTk2RDMxOTlEOTIKUldTU25SblRsaFh3Y0R2Q1YzOTdDWEZLZysyVzJFZEpMZ0ZoQWVERjBQdmFMT010MElOczhxUEwK",
       "windows": {
         "installMode": "passive"
+      }
+    },
+    "deep-link": {
+      "mobile": [],
+      "desktop": {
+        "schemes": ["koven"]
       }
     }
   }
