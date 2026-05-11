@@ -29,7 +29,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
-import { AlertTriangle, Globe, Lock, Users } from "lucide-react";
+import { AlertTriangle, Globe, Hash, Users } from "lucide-react";
 
 export interface JoinConfirmSheetProps {
 	open: boolean;
@@ -125,7 +125,7 @@ export function JoinConfirmSheet({
 									{isSpace ? (
 										<><Globe className="h-3 w-3" /> Space</>
 									) : (
-										<><Lock className="h-3 w-3" /> Room</>
+										<><Hash className="h-3 w-3" /> Room</>
 									)}
 									{typeof preview?.memberCount === "number" && (
 										<>

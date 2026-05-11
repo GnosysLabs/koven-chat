@@ -2735,9 +2735,12 @@ export class MatrixTransport {
 				nsfw: readKovenNsfw(local),
 			};
 		}
-		// Path 2 — MSC3266 summary.  Synapse implements this; matrix-
-		// js-sdk wraps it as `getRoomSummary`.  Errors fall through
-		// (some servers / cross-instance scenarios don't support it).
+		// Path 2 — MSC3266 summary.  Synapse implements this behind
+		// `experimental_features.msc3266_enabled` and matrix-js-sdk
+		// wraps it as `getRoomSummary`.  Many Synapse installs ship
+		// with the flag OFF by default, so we attempt it but cleanly
+		// fall through to the spec'd hierarchy endpoint when the
+		// server returns M_UNRECOGNIZED.
 		try {
 			const summary = await c.getRoomSummary(idOrAlias);
 			return {
@@ -2750,7 +2753,38 @@ export class MatrixTransport {
 				// No NSFW signal from MSC3266 — leave undefined.
 			};
 		} catch (err) {
-			console.warn("previewTarget: getRoomSummary failed", err);
+			// Don't return yet — fall through to path 3.  Log so the
+			// reason is observable in DevTools without spamming when
+			// path 3 succeeds.
+			console.info("previewTarget: getRoomSummary unavailable, trying hierarchy", err);
+		}
+
+		// Path 3 — /rooms/{roomId}/hierarchy (Matrix v1.4 spec,
+		// originally MSC2946).  Universally supported by Synapse,
+		// works for any room/space the viewer can peek (public
+		// rooms / spaces, plus rooms they're already a member of).
+		// Returns the root room's metadata as its first chunk entry,
+		// which is all we need for the pill preview.  Won't work
+		// for fully-private rooms the user isn't invited to — Matrix
+		// has no spec for previewing those without a peek session.
+		//
+		// limit=1 + suggestedOnly=true keeps the response minimal —
+		// we only need the root, not the whole subtree.  Wrapped in
+		// its own try/catch so a failure here returns null cleanly.
+		try {
+			const hier = await c.getRoomHierarchy(idOrAlias, 1, 0, false);
+			const root = hier.rooms?.[0];
+			if (!root) return null;
+			return {
+				roomId: (root.room_id ?? idOrAlias) as RoomId,
+				name: root.name ?? idOrAlias,
+				topic: root.topic,
+				avatarUrl: root.avatar_url ?? undefined,
+				memberCount: root.num_joined_members,
+				isSpace: root.room_type === "m.space",
+			};
+		} catch (err) {
+			console.warn("previewTarget: hierarchy fallback also failed", err);
 			return null;
 		}
 	}
