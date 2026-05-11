@@ -178,24 +178,32 @@ jobs:
       # log a warning and continue — the build still completes but the
       # resulting bundle won't launch on installs that don't already
       # trust the entitlement.  Set the secret to ship working builds.
+      # Runs on ALL platforms, not just macOS — tauri.conf.json's
+      # bundle.macOS.files map references embedded.provisionprofile,
+      # and Tauri's build validates that source paths exist before it
+      # decides which platform-specific bundle to actually produce.
+      # On Linux + Windows runners the file just needs to exist
+      # (empty is fine; the macOS bundler is never invoked there);
+      # on macOS we decode the real profile from the secret if set.
       - name: Decode macOS provisioning profile
-        if: matrix.platform == 'macos-latest'
         env:
           APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
+        shell: bash
         run: |
-          if [ -n "$APPLE_PROVISIONING_PROFILE_BASE64" ]; then
+          if [ -n "$APPLE_PROVISIONING_PROFILE_BASE64" ] && [ "${{ matrix.platform }}" = "macos-latest" ]; then
+            # macOS decoder.  Use base64 -D (BSD) since the runner is macOS.
             echo "$APPLE_PROVISIONING_PROFILE_BASE64" | base64 -D > apps/desktop/src-tauri/embedded.provisionprofile
             size=$(wc -c < apps/desktop/src-tauri/embedded.provisionprofile)
             echo "Wrote embedded.provisionprofile (${size} bytes)"
           else
-            echo "::warning::APPLE_PROVISIONING_PROFILE_BASE64 not set — building without embedded provisioning profile. Restricted entitlements (Associated Domains, …) will be silently rejected at launch on installs that don't already trust them."
-            # tauri-bundler will fail the build if the path in
-            # tauri.conf.json points at a missing file, so create an
-            # empty placeholder when the secret is missing.  An empty
-            # file makes the bundle still launch (no restricted
-            # entitlements), just without Universal Links.  (Better
-            # half-working than not-building.)
+            # Empty stub: keeps tauri-bundler happy on Linux/Windows
+            # (where the macOS bundle is never produced) and on macOS
+            # runs without the secret set (build still completes but
+            # restricted entitlements won't validate at app-launch).
             : > apps/desktop/src-tauri/embedded.provisionprofile
+            if [ "${{ matrix.platform }}" = "macos-latest" ]; then
+              echo "::warning::APPLE_PROVISIONING_PROFILE_BASE64 not set — building without embedded provisioning profile. Restricted entitlements (Associated Domains, …) will be silently rejected at launch."
+            fi
           fi
 
       - name: Install JS deps (root + apps/desktop)
