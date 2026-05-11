@@ -37,5 +37,28 @@
 	<true/>
 	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
 	<true/>
+	<!--
+		Associated Domains — Universal Links for client.koven.chat.
+		When Apple's launch services see this entitlement, they fetch
+		https://client.koven.chat/.well-known/apple-app-site-association
+		once at install and periodically thereafter; a match between
+		the AppID in that file (4PDUNTF69S.chat.koven.desktop) and the
+		entitled-domain here means clicks on
+		https://client.koven.chat/invite/* and /r/* anywhere in the
+		OS open Koven Desktop directly instead of going to a browser
+		tab.  The applinks: prefix scopes the entitlement to Universal
+		Links specifically (vs. shared web credentials, etc.).
+
+		IMPORTANT: This entitlement requires the "Associated Domains"
+		capability to be enabled on the App ID at developer.apple.com.
+		The signing identity must be issued for an App ID that lists
+		Associated Domains; otherwise codesign succeeds but Apple's
+		runtime rejects the entitlement silently and Universal Links
+		never fire (you'll just keep getting browser-tab routing).
+	-->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:client.koven.chat</string>
+	</array>
 </dict>
 </plist>

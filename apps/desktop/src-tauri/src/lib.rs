@@ -895,23 +895,12 @@ pub fn run() {
 				}
 			}
 
-			// macOS deep-link handler.  Cocoa delivers `koven://...`
-			// URLs (both at cold launch and while running) through
-			// the `application:openURLs:` AppDelegate callback, which
-			// tauri-plugin-deep-link surfaces as `on_open_url`.  Re-
-			// emit each URL on the `deep-link` window event so the
-			// SPA's share-intent listener can consume it through the
-			// same pipeline as web `/invite/<id>` links.  Linux +
-			// Windows take the single-instance path above instead,
-			// since the OS hands the URL via argv to a second
-			// process launch — single_instance is what catches that.
-			//
-			// Cold-launch flow: macOS may fire `application:openURLs:`
-			// before the WebviewWindow is fully loaded.  The plugin
-			// queues the URLs internally and replays them once a
-			// listener is registered, so emitting here is safe even
-			// if the SPA's listener hasn't bound yet (it'll subscribe
-			// during boot and pick up the queued event on connect).
+			// Linux + Windows COLD-START deep-link handler.  The
+			// tauri-plugin-deep-link plugin parses argv at boot and
+			// fires `on_open_url` for any URL that matches a
+			// configured scheme.  Required because the plugin
+			// explicitly does NOT hook macOS Cocoa events — for
+			// macOS see the `run` callback below.
 			let deep_link_app = app.handle().clone();
 			app.deep_link().on_open_url(move |event| {
 				for url in event.urls() {
@@ -935,8 +924,46 @@ pub fn run() {
 
 			Ok(())
 		})
-		.run(tauri::generate_context!())
-		.expect("error while running koven-desktop");
+		// macOS deep-link + Universal Link handler.  Cocoa delivers
+		// custom-scheme URLs (koven://...) through
+		// `application:openURLs:`, and Universal Links
+		// (https://client.koven.chat/invite/...) through
+		// `application:continueUserActivity:restorationHandler:`.
+		// Tauri's `tao` backend hooks BOTH AppDelegate methods and
+		// routes them through the same `RunEvent::Opened { urls }`
+		// event — which is only accessible if we go through
+		// `build()?.run(callback)` instead of the `run()` shorthand
+		// that hides the event loop.
+		//
+		// The tauri-plugin-deep-link plugin we use for Linux/Windows
+		// explicitly does not hook macOS Cocoa events, so without
+		// this `RunEvent::Opened` interception every koven:// click
+		// AND every Universal Link click on macOS would be silently
+		// dropped.  All three OSes funnel into the same `deep-link`
+		// emit so the SPA only has one event to listen for.
+		//
+		// Cold-launch caveat: Cocoa may deliver the URL before the
+		// SPA listener binds.  The SPA's deep-link useEffect is
+		// gated on `transport` + `creds`, which means it can't fire
+		// until after sign-in.  A cold-launch URL that arrives
+		// pre-auth gets dropped today; the user lands on the SPA
+		// without the room they wanted opened.  Fix is a Mutex-backed
+		// pending-URL queue + a tauri command the SPA calls on bind
+		// to drain it — punted for now since most real-world clicks
+		// happen while the app is already running and signed in.
+		.build(tauri::generate_context!())
+		.expect("error while building koven-desktop")
+		.run(|app_handle, event| {
+			if let tauri::RunEvent::Opened { urls } = event {
+				for url in urls {
+					let url_str = url.to_string();
+					log::info!("RunEvent::Opened — {url_str}");
+					if let Err(err) = app_handle.emit("deep-link", url_str.clone()) {
+						log::warn!("deep-link emit failed for {url_str}: {err}");
+					}
+				}
+			}
+		});
 }
 
 /// Async update check: fetch the manifest, prompt-and-install if a

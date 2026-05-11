@@ -37,6 +37,22 @@
 		header Content-Type application/json
 		header Access-Control-Allow-Origin "*"
 	}
+	# Apple App-Site Association — Universal Links for the Koven
+	# Desktop bundle.  When the OS sees the
+	# com.apple.developer.associated-domains entitlement on Koven
+	# (applinks:{$KOVEN_HOSTNAME}), it fetches this file once at
+	# install + refreshes periodically.  A successful match means
+	# any click on https://{$KOVEN_HOSTNAME}/invite/* or /r/* in
+	# Mail / Messages / Safari etc. opens Koven Desktop directly
+	# instead of routing through a browser tab.  AppIDs format is
+	# <TeamID>.<bundleId>; paths are glob-matched against the URL
+	# path.  The file MUST be served as application/json with no
+	# .json extension on the URL path itself.  See:
+	# https://developer.apple.com/documentation/xcode/supporting-associated-domains
+	handle /.well-known/apple-app-site-association {
+		respond `{"applinks":{"details":[{"appIDs":["4PDUNTF69S.chat.koven.desktop"],"components":[{"/":"/invite/*","comment":"Room and space invites"},{"/":"/r/*","comment":"Message permalinks"}]}]}}` 200
+		header Content-Type application/json
+	}
 
 	# Engine API + uploads.  Order matters: more specific paths
 	# before the SPA fallback below.
