@@ -159,6 +159,45 @@ jobs:
           fi
           echo "All six Apple notarization prerequisites are populated."
 
+      # Restricted entitlements (Associated Domains, Push Notifications,
+      # Apple Pay, …) are checked by amfid at app-launch time against a
+      # provisioning profile embedded inside the bundle.  Without the
+      # profile, amfid kills the process with "No matching profile
+      # found" and the user sees "Application can't be opened."
+      #
+      # The profile is a `.provisionprofile` file we generated at
+      # developer.apple.com (Profiles → Developer ID for chat.koven.desktop
+      # with Associated Domains in its capabilities list) and stored as
+      # a base64-encoded GitHub Actions secret.  Decode it here, before
+      # tauri-action runs, into apps/desktop/src-tauri/embedded.provisionprofile
+      # — Tauri's bundler reads bundle.macOS.provisioningProfile in
+      # tauri.conf.json (pointing at that filename) and copies the
+      # profile to Contents/embedded.provisionprofile during sign.
+      #
+      # Failing soft: if APPLE_PROVISIONING_PROFILE_BASE64 isn't set we
+      # log a warning and continue — the build still completes but the
+      # resulting bundle won't launch on installs that don't already
+      # trust the entitlement.  Set the secret to ship working builds.
+      - name: Decode macOS provisioning profile
+        if: matrix.platform == 'macos-latest'
+        env:
+          APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          if [ -n "$APPLE_PROVISIONING_PROFILE_BASE64" ]; then
+            echo "$APPLE_PROVISIONING_PROFILE_BASE64" | base64 -D > apps/desktop/src-tauri/embedded.provisionprofile
+            size=$(wc -c < apps/desktop/src-tauri/embedded.provisionprofile)
+            echo "Wrote embedded.provisionprofile (${size} bytes)"
+          else
+            echo "::warning::APPLE_PROVISIONING_PROFILE_BASE64 not set — building without embedded provisioning profile. Restricted entitlements (Associated Domains, …) will be silently rejected at launch on installs that don't already trust them."
+            # tauri-bundler will fail the build if the path in
+            # tauri.conf.json points at a missing file, so create an
+            # empty placeholder when the secret is missing.  An empty
+            # file makes the bundle still launch (no restricted
+            # entitlements), just without Universal Links.  (Better
+            # half-working than not-building.)
+            : > apps/desktop/src-tauri/embedded.provisionprofile
+          fi
+
       - name: Install JS deps (root + apps/desktop)
         run: |
           bun install

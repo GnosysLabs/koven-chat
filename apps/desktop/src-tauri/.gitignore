@@ -1,3 +1,10 @@
 # Tauri build artifacts.
 target/
 gen/
+
+# macOS provisioning profile.  Materialised by CI from the
+# APPLE_PROVISIONING_PROFILE_BASE64 secret.  Local dev builds without
+# restricted entitlements can run without one; committing this file
+# would either bake an individual dev's profile into the repo (bad)
+# or expose its serial number unnecessarily.
+embedded.provisionprofile

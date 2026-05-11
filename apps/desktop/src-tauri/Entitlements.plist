@@ -46,15 +46,14 @@
 		entitled-domain here means clicks on
 		https://client.koven.chat/invite/* and /r/* anywhere in the
 		OS open Koven Desktop directly instead of going to a browser
-		tab.  The applinks: prefix scopes the entitlement to Universal
-		Links specifically (vs. shared web credentials, etc.).
+		tab.
 
 		IMPORTANT: This entitlement requires the "Associated Domains"
 		capability to be enabled on the App ID at developer.apple.com.
-		The signing identity must be issued for an App ID that lists
-		Associated Domains; otherwise codesign succeeds but Apple's
-		runtime rejects the entitlement silently and Universal Links
-		never fire (you'll just keep getting browser-tab routing).
+		Without it, amfid rejects the launch with SIGKILL ("The
+		application Koven can't be opened.").  We hit this with the
+		first 0.20.x cut and recovered by enabling the capability +
+		re-shipping.
 	-->
 	<key>com.apple.developer.associated-domains</key>
 	<array>
