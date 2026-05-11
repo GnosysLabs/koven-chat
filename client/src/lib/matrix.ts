@@ -4446,12 +4446,42 @@ export class MatrixTransport {
 		return this.client;
 	}
 
+	// emitRoomList / emitSpaceList are called from dozens of Matrix
+	// event handlers (timeline, decryption, membership, sync-state,
+	// notifications, …).  During the initial-sync burst those fire
+	// in tight bursts as Synapse streams rooms in — emitting on every
+	// one of them produces a visible cascade where the sidebar pops a
+	// room in, then another sorts above it, then another, until the
+	// list settles seconds later.  Especially bad for DMs since the
+	// "most recent first" sort means every late-arriving room jumps
+	// the queue.
+	//
+	// Fix: rAF-batched debounce.  All emits within a single animation
+	// frame collapse into one onRoomsUpdated call.  During steady-state
+	// (user is typing, one event comes in) this is effectively zero
+	// added latency — one frame, ~16ms.  During the sync burst it's
+	// the difference between visible thrash and a clean single pop.
+	//
+	// Why not setTimeout / a longer debounce window?  Longer waits add
+	// perceptible lag to "I just sent a message and the room order
+	// updates."  rAF is the lightest possible throttle that still
+	// solves the burst-thrash case.
+	private roomListEmitPending: number | null = null;
+	private spaceListEmitPending: number | null = null;
 	private emitRoomList(): void {
-		this.handlers.onRoomsUpdated(this.getRooms());
+		if (this.roomListEmitPending !== null) return;
+		this.roomListEmitPending = requestAnimationFrame(() => {
+			this.roomListEmitPending = null;
+			this.handlers.onRoomsUpdated(this.getRooms());
+		});
 	}
 
 	private emitSpaceList(): void {
-		this.handlers.onSpacesUpdated(this.getSpaces());
+		if (this.spaceListEmitPending !== null) return;
+		this.spaceListEmitPending = requestAnimationFrame(() => {
+			this.spaceListEmitPending = null;
+			this.handlers.onSpacesUpdated(this.getSpaces());
+		});
 	}
 
 	private sdkRoomToRoom(r: SdkRoom): Room {
