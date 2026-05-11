@@ -953,12 +953,20 @@ pub fn run() {
 		// happen while the app is already running and signed in.
 		.build(tauri::generate_context!())
 		.expect("error while building koven-desktop")
-		.run(|app_handle, event| {
-			if let tauri::RunEvent::Opened { urls } = event {
+		.run(|_app_handle, _event| {
+			// `RunEvent::Opened` only exists on macOS — Tauri's
+			// enum gates the variant behind a cfg, so on Linux /
+			// Windows the match would be a "variant not found"
+			// compile error.  Wrap the body in a macos cfg.
+			// Linux + Windows funnel deep links through the
+			// single-instance plugin's argv callback (above), so
+			// this branch isn't needed there anyway.
+			#[cfg(target_os = "macos")]
+			if let tauri::RunEvent::Opened { urls } = _event {
 				for url in urls {
 					let url_str = url.to_string();
 					log::info!("RunEvent::Opened — {url_str}");
-					if let Err(err) = app_handle.emit("deep-link", url_str.clone()) {
+					if let Err(err) = _app_handle.emit("deep-link", url_str.clone()) {
 						log::warn!("deep-link emit failed for {url_str}: {err}");
 					}
 				}
