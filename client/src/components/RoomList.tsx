@@ -14,7 +14,6 @@ import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { RoomRowContextMenu } from "@/components/RoomRowContextMenu";
 import { ContextMenu, type ContextMenuItem } from "@/components/ui/context-menu";
 import { getRoomNotifyLevel, onNotifyPrefsChanged } from "@/lib/notifyPrefs";
-import { buildInviteUrl } from "@/lib/inviteLink";
 import type { ActiveSpace } from "@/state/store";
 import type { MatrixTransport } from "@/lib/matrix";
 
@@ -134,11 +133,11 @@ export function RoomList({
 	// space, so `m.space.child` linking would 403 and produce an
 	// orphan room — better to hide the button entirely than to let
 	// people create rooms that silently fail to land in the space.
-	// `dms` and `rooms` (orphans pseudo-space) keep the + because
-	// they aren't bound to a parent space at all.
+	// Discord-style invariant: rooms can only be born inside a
+	// space.  The Rooms tile (orphans pseudo-space) loses its +
+	// entirely.  DMs keep the + because they bypass the rule.
 	const canCreateRoomHere =
 		activeSpace?.kind === "dms"
-		|| activeSpace?.kind === "rooms"
 		|| (activeSpace?.kind === "space"
 			&& activeSpaceObj?.creatorId === currentUserId);
 
@@ -267,11 +266,6 @@ function filterRooms(rooms: Room[], activeSpace: ActiveSpace): Room[] {
 	if (activeSpace.kind === "explore") return [];
 	if (activeSpace.kind === "bots") return [];
 	if (activeSpace.kind === "dms") return rooms.filter(r => r.kind === "dm");
-	if (activeSpace.kind === "rooms") {
-		// Orphans pseudo-space: every joined room not assigned to any
-		// space, excluding DMs (which live in their own tile).
-		return rooms.filter(r => r.kind !== "dm" && r.parentSpaceIds.length === 0);
-	}
 	if (activeSpace.kind === "spaces_overview") return [];
 	const id = activeSpace.id;
 	return rooms.filter(r => r.parentSpaceIds.includes(id));
@@ -282,7 +276,6 @@ function headerFor(activeSpace: ActiveSpace, spaces: Space[]): string {
 	if (activeSpace.kind === "explore") return "Explore";
 	if (activeSpace.kind === "bots") return "Bots";
 	if (activeSpace.kind === "dms") return "Direct messages";
-	if (activeSpace.kind === "rooms") return "Rooms";
 	if (activeSpace.kind === "spaces_overview") return "Spaces";
 	const space = spaces.find(s => s.id === activeSpace.id);
 	return space?.name ?? "Space";
@@ -291,13 +284,10 @@ function headerFor(activeSpace: ActiveSpace, spaces: Space[]): string {
 function emptyHintFor(activeSpace: ActiveSpace): string {
 	if (!activeSpace) return "";
 	if (activeSpace.kind === "explore") {
-		return "Browse public spaces and rooms in the main pane. Joined ones show up under Rooms / Spaces.";
+		return "Browse public spaces in the main pane. Joined ones show up in your sidebar.";
 	}
 	if (activeSpace.kind === "dms") {
 		return "No direct messages yet. Start a DM with someone and it'll show up here.";
-	}
-	if (activeSpace.kind === "rooms") {
-		return "No unsorted rooms. Create one or join one and it'll show up here.";
 	}
 	return "No rooms in this space yet. Use the + above to create one.";
 }
@@ -568,11 +558,6 @@ function RoomRow({
 					onCopyId={() => {
 						void navigator.clipboard.writeText(room.id).catch(err => {
 							console.warn("RoomRow: copy room id failed", err);
-						});
-					}}
-					onCopyInviteLink={() => {
-						void navigator.clipboard.writeText(buildInviteUrl(room.id)).catch(err => {
-							console.warn("RoomRow: copy invite link failed", err);
 						});
 					}}
 					onEdit={onEditRoom ? () => onEditRoom(room.id) : undefined}

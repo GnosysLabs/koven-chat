@@ -100,9 +100,15 @@ export function SpaceLanding({
 							{showAddRoom && (
 								<div className="flex items-center gap-1.5">
 									<HeaderAction icon={<Plus className="h-4 w-4" />} label="Add new room" onClick={onAddRoom} />
-									{onAddExistingRoom && (
-										<HeaderAction icon={<Plus className="h-4 w-4" />} label="Add existing room" onClick={onAddExistingRoom} />
-									)}
+									{/* "Add existing room" intentionally absent.
+									    Under the Discord-style invariant every
+									    room is born inside a space and stays
+									    there; re-parenting an orphan is dead
+									    semantics (no orphans exist).  The
+									    prop + dialog plumbing is left wired
+									    but unreached — kept for now in case
+									    we reuse it for cross-space room
+									    moves later. */}
 								</div>
 							)}
 						</div>

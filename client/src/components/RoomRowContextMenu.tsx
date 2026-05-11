@@ -41,7 +41,6 @@ export interface RoomRowContextMenuProps {
 	onMarkRead(): void;
 	onMarkUnread(): void;
 	onCopyId(): void;
-	onCopyInviteLink(): void;
 	onEdit?(): void;
 	onPin?(): void;
 	onUnpin?(): void;
@@ -56,7 +55,7 @@ export interface RoomRowContextMenuProps {
 export function RoomRowContextMenu({
 	x, y, room, currentUserId: _currentUserId, accessToken, activeSpaceId,
 	isPinned, canManagePins, isFounder, canEdit,
-	onMarkRead, onMarkUnread, onCopyId, onCopyInviteLink,
+	onMarkRead, onMarkUnread, onCopyId,
 	onEdit, onPin, onUnpin, onLeave, onDelete,
 	onOpenProfile, onBlockDmUser,
 	onClose,
@@ -171,13 +170,10 @@ export function RoomRowContextMenu({
 			icon: <Copy className="h-4 w-4" />,
 			onClick: onCopyId,
 		});
-		if (!isDm) {
-			out.push({
-				label: "Copy invite link",
-				icon: <Copy className="h-4 w-4" />,
-				onClick: onCopyInviteLink,
-			});
-		}
+		// "Copy invite link" intentionally absent for rooms — invite
+		// links are space-only (Discord-style invariant: you invite
+		// people to the server, not to a single channel).  The space
+		// tile context menu retains its own "Copy invite link" entry.
 
 		// Pin / Unpin — only meaningful inside a real space, only
 		// available to users with manage-pins PL.
@@ -243,7 +239,7 @@ export function RoomRowContextMenu({
 	}, [
 		hasUnread, currentLevel, isDm, activeSpaceId, isPinned, canManagePins,
 		isFounder, canEdit,
-		onMarkRead, onMarkUnread, onCopyId, onCopyInviteLink,
+		onMarkRead, onMarkUnread, onCopyId,
 		onEdit, onPin, onUnpin, onLeave, onDelete,
 		onOpenProfile, onBlockDmUser,
 		room.id, accessToken,

@@ -6,7 +6,7 @@
 import { forwardRef, useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
 import type { Room, Space, SpaceId, UserId } from "@koven/shared";
-import { Bot, Compass, Hash, Plus, Settings, ShieldAlert, User } from "lucide-react";
+import { Bot, Compass, Plus, Settings, ShieldAlert, User } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { AccountSwitcher } from "@/components/AccountSwitcher";
 import { SpaceTileContextMenu } from "@/components/SpaceTileContextMenu";
@@ -41,7 +41,6 @@ export interface SpaceBarProps {
 	onSelectExplore(): void;
 	onSelectDms(): void;
 	onSelectBots(): void;
-	onSelectRooms(): void;
 	onSelectSpace(spaceId: string): void;
 	/** Open the create-space modal.  Pre-flight rate-limit check is
 	 * the parent's responsibility — this fires unconditionally on
@@ -80,7 +79,6 @@ export function SpaceBar({
 	onSelectExplore,
 	onSelectDms,
 	onSelectBots,
-	onSelectRooms,
 	onSelectSpace,
 	onOpenCreateSpace,
 	onOpenProfile,
@@ -104,7 +102,6 @@ export function SpaceBar({
 	const exploreActive = activeSpace?.kind === "explore";
 	const dmsActive = activeSpace?.kind === "dms";
 	const botsActive = activeSpace?.kind === "bots";
-	const roomsActive = activeSpace?.kind === "rooms";
 
 	// Per-tile attention indicators.  A "dot" surfaces on a tile when
 	// something inside wants the user's attention — pending invite or
@@ -114,14 +111,6 @@ export function SpaceBar({
 		if (dmsActive) return false;
 		return rooms.some(r => r.kind === "dm" && (r.isInvite || r.unreadCount > 0 || r.highlightCount > 0));
 	}, [rooms, dmsActive]);
-	const roomsAttention = useMemo(() => {
-		if (roomsActive) return false;
-		return rooms.some(r =>
-			r.kind !== "dm" &&
-			r.parentSpaceIds.length === 0 &&
-			(r.isInvite || r.unreadCount > 0 || r.highlightCount > 0),
-		);
-	}, [rooms, roomsActive]);
 	return (
 		<aside className="w-[68px] shrink-0 bg-card border-r border-border flex flex-col items-center py-2 gap-2">
 			{showSwitcher ? (
@@ -183,16 +172,6 @@ export function SpaceBar({
 				ariaLabel="Bots"
 			>
 				<Bot className="h-5 w-5" />
-			</TileButton>
-
-			<TileButton
-				active={roomsActive}
-				onClick={onSelectRooms}
-				title="Rooms — joined rooms not in any space"
-				ariaLabel="Rooms"
-				dot={roomsAttention}
-			>
-				<Hash className="h-5 w-5" />
 			</TileButton>
 
 			<div className="flex-1 w-full overflow-y-auto flex flex-col items-center gap-2">

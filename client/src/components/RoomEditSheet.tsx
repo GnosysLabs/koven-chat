@@ -21,7 +21,7 @@ import { Switch } from "@/components/ui/switch";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { cn } from "@/lib/utils";
 import { EmojiPicker } from "@/components/EmojiPicker";
-import { Camera, DoorOpen, EyeOff, Globe, Smile, Trash2, Video } from "lucide-react";
+import { Camera, DoorOpen, Smile, Trash2, Video } from "lucide-react";
 import type { Room } from "@koven/shared";
 
 export interface RoomEditSheetProps {
@@ -35,15 +35,8 @@ export interface RoomEditSheetProps {
 		avatarFile?: File;
 		clearAvatar?: boolean;
 		iconEmoji?: string;
-		visibility?: "public" | "private";
-		nsfw?: boolean;
 		liveEnabled?: boolean;
 	}): Promise<void>;
-	// Drives visibility of the NSFW toggle.  Hidden unless the
-	// viewer has the "Show NSFW rooms" preference on, OR the room is
-	// already NSFW (so a founder who toggled their pref off can
-	// still untoggle the room).
-	showNsfw: boolean;
 	// Membership exit handlers.  The dialog shows EXACTLY ONE of
 	// these based on whether the viewer is the room's creator:
 	//
@@ -60,15 +53,13 @@ export interface RoomEditSheetProps {
 	onDelete?(roomId: string): Promise<void>;
 }
 
-export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, onDelete, showNsfw }: RoomEditSheetProps) {
+export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, onDelete }: RoomEditSheetProps) {
 	const [name, setName] = useState("");
 	const [topic, setTopic] = useState("");
-	const [visibility, setVisibility] = useState<"public" | "private">("public");
 	const [avatarFile, setAvatarFile] = useState<File | undefined>(undefined);
 	const [avatarPreview, setAvatarPreview] = useState<string | undefined>(undefined);
 	const [clearAvatar, setClearAvatar] = useState(false);
 	const [iconEmoji, setIconEmoji] = useState("");
-	const [nsfw, setNsfw] = useState(false);
 	const [liveEnabled, setLiveEnabled] = useState(true);
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
@@ -97,12 +88,10 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 		if (!room) return;
 		setName(room.name ?? "");
 		setTopic(room.topic ?? "");
-		setVisibility(room.kind === "public" ? "public" : "private");
 		setAvatarFile(undefined);
 		setAvatarPreview(undefined);
 		setClearAvatar(false);
 		setIconEmoji(room.iconEmoji ?? "");
-		setNsfw(!!room.nsfw);
 		// liveEnabled defaults to true when the state event is missing,
 		// so an undefined here also means "on".
 		setLiveEnabled(room.liveEnabled !== false);
@@ -171,13 +160,10 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 		const opts: Parameters<typeof onSave>[0] = { roomId: room.id };
 		if (trimmedName !== (room.name ?? "")) opts.name = trimmedName;
 		if (topic.trim() !== (room.topic ?? "")) opts.topic = topic.trim();
-		const currentVisibility = room.kind === "public" ? "public" : "private";
-		if (visibility !== currentVisibility) opts.visibility = visibility;
 		if (avatarFile) opts.avatarFile = avatarFile;
 		else if (clearAvatar) opts.clearAvatar = true;
 		const trimmedEmoji = iconEmoji.trim();
 		if (trimmedEmoji !== (room.iconEmoji ?? "")) opts.iconEmoji = trimmedEmoji;
-		if (nsfw !== !!room.nsfw) opts.nsfw = nsfw;
 		const currentLiveEnabled = room.liveEnabled !== false;
 		if (liveEnabled !== currentLiveEnabled) opts.liveEnabled = liveEnabled;
 
@@ -185,11 +171,9 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 		const hasChanges =
 			opts.name !== undefined ||
 			opts.topic !== undefined ||
-			opts.visibility !== undefined ||
 			opts.avatarFile !== undefined ||
 			opts.clearAvatar ||
 			opts.iconEmoji !== undefined ||
-			opts.nsfw !== undefined ||
 			opts.liveEnabled !== undefined;
 		if (!hasChanges) {
 			onClose();
@@ -429,39 +413,6 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 						/>
 					</div>
 
-					<div className="space-y-2">
-						<Label>Visibility</Label>
-						<div className="grid grid-cols-2 gap-2">
-							<VisibilityCard
-								selected={visibility === "public"}
-								onClick={() => {
-									// Encrypted rooms can't go public — Matrix
-									// doesn't support disabling encryption
-									// once enabled, and a public-but-
-									// encrypted room is unmoderatable.  Block
-									// the toggle and surface the reason.
-									if (room?.encrypted) return;
-									setVisibility("public");
-								}}
-								disabled={!!room?.encrypted}
-								icon={<Globe className="h-4 w-4" />}
-								title="Public"
-								description={
-									room?.encrypted
-										? "Encrypted rooms can't be public."
-										: "Anyone on the homeserver can find and join."
-								}
-							/>
-							<VisibilityCard
-								selected={visibility === "private"}
-								onClick={() => setVisibility("private")}
-								icon={<EyeOff className="h-4 w-4" />}
-								title="Private"
-								description="Invite-only. Won't appear in the directory."
-							/>
-						</div>
-					</div>
-
 					{/* Live channel toggle — every room gets a per-room
 					    voice/video channel by default.  Admins can flip
 					    this off for rooms where voice would be noise
@@ -485,45 +436,6 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 								id="room-edit-live"
 								checked={liveEnabled}
 								onCheckedChange={setLiveEnabled}
-							/>
-						</div>
-					)}
-
-					{/* NSFW marker — one-way by design.  Once a room is
-					    flagged, the toggle disappears and the marker
-					    becomes a permanent informational pill.  Members
-					    joined under the "this is NSFW" assumption and
-					    quietly flipping it off would catch them out-
-					    of-band.  Branching:
-					      * room.nsfw === true → locked status pill,
-					        visible to anyone (not just creators).
-					      * room.nsfw === false + creator + viewer has
-					        "Show NSFW rooms" on → toggle to mark.
-					      * otherwise → nothing rendered. */}
-					{room?.nsfw ? (
-						<div className="flex items-start justify-between gap-3 rounded-md border border-border p-3">
-							<div className="space-y-0.5 flex-1 min-w-0">
-								<div className="text-sm font-medium">Marked NSFW</div>
-								<p className="text-xs text-muted-foreground leading-relaxed">
-									This marker is permanent. Hides the room from Explore for users who haven&rsquo;t opted into NSFW content; existing members keep their access.
-								</p>
-							</div>
-							<span className="text-[10px] uppercase tracking-wide text-destructive bg-destructive/10 border border-destructive/30 px-1.5 py-0.5 rounded shrink-0 mt-0.5">
-								NSFW
-							</span>
-						</div>
-					) : isCreator && showNsfw && (
-						<div className="flex items-start justify-between gap-3 rounded-md border border-border p-3">
-							<div className="space-y-0.5 flex-1 min-w-0">
-								<Label htmlFor="room-edit-nsfw" className="cursor-pointer">Mark as NSFW</Label>
-								<p className="text-xs text-muted-foreground leading-relaxed">
-									Hides the room from Explore for users who haven&rsquo;t opted into NSFW content. <strong className="text-foreground">This can&rsquo;t be reversed</strong> — once marked, the room stays marked.
-								</p>
-							</div>
-							<Switch
-								id="room-edit-nsfw"
-								checked={nsfw}
-								onCheckedChange={setNsfw}
 							/>
 						</div>
 					)}
@@ -586,32 +498,3 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 	);
 }
 
-function VisibilityCard({
-	selected, onClick, icon, title, description, disabled,
-}: {
-	selected: boolean;
-	onClick(): void;
-	icon: React.ReactNode;
-	title: string;
-	description: string;
-	disabled?: boolean;
-}) {
-	return (
-		<button
-			type="button"
-			onClick={onClick}
-			disabled={disabled}
-			className={cn(
-				"text-left rounded-md border p-3 transition-colors",
-				selected ? "border-primary bg-primary/5" : "border-border hover:bg-accent",
-				disabled && "opacity-50 cursor-not-allowed hover:bg-transparent",
-			)}
-		>
-			<div className="flex items-center gap-2 mb-1">
-				{icon}
-				<span className="font-medium text-sm">{title}</span>
-			</div>
-			<div className="text-xs text-muted-foreground leading-snug">{description}</div>
-		</button>
-	);
-}

@@ -32,7 +32,6 @@ import {
 	collapsesForRoom,
 	countBotsByOwner,
 	countFalseFlagsByUser,
-	countRoomCreationsByUser,
 	createBot,
 	createSuspension,
 	deleteAllNotifications,
@@ -123,6 +122,7 @@ import {
 } from "./calls";
 import {
 	adminCreateUser,
+	adminDeleteRoom,
 	adminJoinUserToRoom,
 	adminResetPassword,
 	adminSetUserEmail,
@@ -139,7 +139,10 @@ import {
 	isSpaceRoom,
 	kickOrBanAs,
 	joinRoomIfNeeded,
+	listAllRooms,
 	loginAsUser,
+	pickStateContent,
+	readRoomState,
 	registerAppserviceUser,
 	repairRoomInvitePL,
 	redactEventAs,
@@ -397,6 +400,84 @@ function json(body: unknown, init: ResponseInit = {}): Response {
 		...init,
 		headers: { "Content-Type": "application/json", ...corsHeaders(), ...(init.headers ?? {}) },
 	});
+}
+
+/** JSON body parser used by the orphan-room admin endpoints + a few
+ * others.  Returns `{}` on malformed bodies so callers can compare
+ * fields without a separate try/catch.  Caller still needs to validate
+ * the shape of what they pull out. */
+async function readJson(req: Request): Promise<Record<string, unknown>> {
+	try {
+		return (await req.json()) as Record<string, unknown>;
+	} catch {
+		return {};
+	}
+}
+
+/**
+ * Find every group room on the homeserver that violates the
+ * Discord-style invariant: no m.space.parent state event, not a
+ * Matrix space itself (rooms with `type: m.space`), not a 1:1 DM.
+ *
+ * DM detection uses two signals because m.direct lives on user
+ * account_data (not visible to the engine without a Matrix client per
+ * user): (1) the room's m.room.create has `is_direct: true`, OR (2)
+ * the room has exactly two joined members AND no name set.  Either
+ * is a strong "this looks like a DM" signal; we err on the side of
+ * NOT classifying as orphan to avoid nuking conversations.
+ *
+ * Returns one entry per orphan with the fields the operator needs to
+ * eyeball the list before pulling the trigger.
+ */
+async function findOrphanRooms(): Promise<Array<{
+	roomId: string;
+	name: string | null;
+	memberCount: number;
+	creator: string | null;
+	encryption: string | null;
+	joinRule: string | null;
+}>> {
+	const all = await listAllRooms();
+	const orphans: Array<{
+		roomId: string;
+		name: string | null;
+		memberCount: number;
+		creator: string | null;
+		encryption: string | null;
+		joinRule: string | null;
+	}> = [];
+	for (const r of all) {
+		// Skip Matrix spaces themselves — the invariant is about the
+		// rooms INSIDE spaces, not the spaces themselves.
+		if (r.roomType === "m.space") continue;
+		// Read the state once and use it for the orphan + DM checks.
+		const state = await readRoomState(r.roomId);
+		if (!state) continue; // unreadable; skip rather than risk a wrong delete
+		// DM signal #1: m.room.create.is_direct.
+		const create = pickStateContent(state, "m.room.create") as { is_direct?: boolean } | null;
+		if (create?.is_direct === true) continue;
+		// DM signal #2: two-member room with no name.  Catches DMs
+		// created via legacy clients that didn't set is_direct.
+		if (r.memberCount === 2 && (r.name === null || r.name === "")) continue;
+		// Has m.space.parent → not an orphan.  Any non-empty parent
+		// counts; the conditional handles state arrays with multiple
+		// (legacy) parent events.
+		const hasParent = state.some(ev =>
+			ev.type === "m.space.parent" &&
+			typeof ev.state_key === "string" &&
+			ev.state_key.length > 0,
+		);
+		if (hasParent) continue;
+		orphans.push({
+			roomId: r.roomId,
+			name: r.name,
+			memberCount: r.memberCount,
+			creator: r.creator,
+			encryption: r.encryption,
+			joinRule: r.joinRule,
+		});
+	}
+	return orphans;
 }
 
 // Loose email validation: well-formed enough to be worth sending.
@@ -1084,57 +1165,16 @@ export function startServer(): void {
 					return json({ allowed: false, reason: "suspended" });
 				}
 
-				// Determine whether this publish is for a regular room
-				// or a Matrix space.  Both ladder through the same
-				// per-reputation-tier daily cap, but the counters are
-				// independent — creating a server doesn't eat the
-				// channel quota and vice versa.  Read failure falls
-				// through to "treat as room" (the conservative default)
-				// rather than allowing through unchecked.
-				const roomId = typeof body.room_id === "string" ? body.room_id : "";
-				let kind: "room" | "space" = "room";
-				if (roomId) {
-					try {
-						if (await isSpaceRoom(roomId)) kind = "space";
-					} catch (err) {
-						console.warn("can-publish-room: isSpaceRoom check failed", err);
-					}
-				}
-
-				// Reputation-tiered rate limit per rolling 24h window.
-				// Default-weight users (0.5, the floor for new accounts)
-				// get the strictest cap; bumps to 3 then 10 as their
-				// reputation rises.  Offensive-name floods land entirely
-				// in the bottom tier so the cap at 1/24h here is the
-				// load-bearing rule.  Spaces use the same threshold
-				// ladder against their own counter — same defense, parallel
-				// budget.
-				const w = readWeight(userId);
-				const weight = w?.weight ?? 1.0;
-				const threshold =
-					weight >= 2.0 ? 10
-					: weight >= 1.5 ? 3
-					: 1;
-				const windowMs = 24 * 60 * 60 * 1000;
-				const sinceTs = Date.now() - windowMs;
-				const recentCount = countRoomCreationsByUser(userId, sinceTs, kind);
-				if (recentCount >= threshold) {
-					return json({
-						allowed: false,
-						reason: "rate_limited",
-						kind,
-						count: recentCount,
-						threshold,
-						retry_after_sec: Math.ceil(windowMs / 1000),
-					});
-				}
-				return json({
-					allowed: true,
-					kind,
-					weight,
-					count: recentCount,
-					threshold,
-				});
+				// Discord-style: no rate-limit on room or space creation.
+				// The earlier reputation-tiered cap was justified by fear
+				// of Explore being flooded with garbage rooms, but under
+				// the Discord-style invariant every room lives inside a
+				// space and never appears in Explore directly — only
+				// spaces do.  Creators still ramp up their reputation
+				// for OTHER actions; we just don't punish them for
+				// shaping their own server.  Admin + suspended checks
+				// (above) still apply.
+				return json({ allowed: true });
 			}
 
 			// POST /api/auth/uia-password
@@ -1531,67 +1571,22 @@ export function startServer(): void {
 
 			// GET /api/me/publish-quota?kind=room|space
 			//
-			// User-facing version of the internal can-publish-room
-			// gate.  The client calls this BEFORE opening the
-			// "Create room" / "Create space" dialog so a rate-limited
-			// user sees an explanatory popup instead of filling in a
-			// form for nothing and getting denied at submit.
-			//
-			// Same threshold ladder as the internal gate — they have
-			// to agree, otherwise the precheck would lie and the
-			// real submit would still fail.  Returns
-			// { allowed, count, threshold, retry_after_sec, weight }
-			// so the modal can show "X / Y today, next slot in Zh."
+			// Vestigial endpoint.  The Discord-style invariant removed
+			// the per-tier daily-creation cap (rooms now live inside a
+			// space's privacy boundary, so flooding Explore is no
+			// longer a vector — the only thing in Explore is spaces
+			// the founder explicitly published).  We keep the route
+			// alive so older client builds don't break, but it just
+			// returns `allowed: true` for everyone except suspended
+			// accounts.  Safe to delete once every shipped client is
+			// past the cutover.
 			if (req.method === "GET" && path === "/api/me/publish-quota") {
 				const userId = await whoami(extractToken(req));
 				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
-				const kindParam = url.searchParams.get("kind");
-				const kind: "room" | "space" = kindParam === "space" ? "space" : "room";
-				if (isAdmin(userId)) {
-					return json({
-						allowed: true,
-						kind,
-						reason: "admin",
-						count: 0,
-						threshold: Number.MAX_SAFE_INTEGER,
-					});
-				}
 				if (getActiveSuspension(userId)) {
-					return json({
-						allowed: false,
-						kind,
-						reason: "suspended",
-						count: 0,
-						threshold: 0,
-					});
+					return json({ allowed: false, reason: "suspended" });
 				}
-				const w = readWeight(userId);
-				const weight = w?.weight ?? 1.0;
-				const threshold =
-					weight >= 2.0 ? 10
-					: weight >= 1.5 ? 3
-					: 1;
-				const windowMs = 24 * 60 * 60 * 1000;
-				const sinceTs = Date.now() - windowMs;
-				const recentCount = countRoomCreationsByUser(userId, sinceTs, kind);
-				if (recentCount >= threshold) {
-					return json({
-						allowed: false,
-						kind,
-						reason: "rate_limited",
-						weight,
-						count: recentCount,
-						threshold,
-						retry_after_sec: Math.ceil(windowMs / 1000),
-					});
-				}
-				return json({
-					allowed: true,
-					kind,
-					weight,
-					count: recentCount,
-					threshold,
-				});
+				return json({ allowed: true });
 			}
 
 			// GET /api/bots/all-mxids
@@ -2618,6 +2613,59 @@ export function startServer(): void {
 						skipped,
 					});
 				}
+			}
+
+			// ─── Admin: orphan-room cleanup ──────────────────────────
+			// Discord-style invariant: every group room MUST belong to
+			// a space.  These endpoints drive the one-time cleanup of
+			// pre-invariant orphan rooms (rooms with no m.space.parent
+			// that aren't DMs and aren't spaces themselves).
+			//
+			// GET  /api/admin/orphan-rooms          → dry-run candidate list
+			// POST /api/admin/orphan-rooms/delete   → delete the listed candidates
+			//
+			// The POST gate requires `{ confirm: "DELETE_<count>" }` in
+			// the body where <count> matches the number of rooms the
+			// caller intends to delete (which must equal what the dry-
+			// run last returned).  Two-keys-on-the-launcher: easy to
+			// curl, hard to fat-finger.
+			if (req.method === "GET" && path === "/api/admin/orphan-rooms") {
+				const auth = await requireAdmin(req);
+				if (auth instanceof Response) return auth;
+				const candidates = await findOrphanRooms();
+				return json({
+					count: candidates.length,
+					rooms: candidates,
+				});
+			}
+			if (req.method === "POST" && path === "/api/admin/orphan-rooms/delete") {
+				const auth = await requireAdmin(req);
+				if (auth instanceof Response) return auth;
+				const body = await readJson(req);
+				const candidates = await findOrphanRooms();
+				const expected = `DELETE_${candidates.length}`;
+				if (body?.confirm !== expected) {
+					return json({
+						errcode: "M_FORBIDDEN",
+						error: `confirm must equal ${JSON.stringify(expected)} (got ${JSON.stringify(body?.confirm ?? null)}); refresh the dry-run if the count drifted`,
+					}, { status: 400 });
+				}
+				const results: Array<{ roomId: string; ok: boolean; detail?: string }> = [];
+				for (const c of candidates) {
+					const r = await adminDeleteRoom({ roomId: c.roomId });
+					if ("error" in r) {
+						results.push({ roomId: c.roomId, ok: false, detail: `${r.error}: ${r.detail ?? ""}` });
+					} else {
+						results.push({ roomId: c.roomId, ok: true });
+					}
+				}
+				const okCount = results.filter(r => r.ok).length;
+				console.log(`engine: orphan-rooms delete by ${auth.userId}: ${okCount}/${candidates.length} succeeded`);
+				return json({
+					attempted: candidates.length,
+					succeeded: okCount,
+					results,
+				});
 			}
 
 			// ─── Admin: floor-violation review queue ─────────────────

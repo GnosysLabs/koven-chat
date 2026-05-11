@@ -431,6 +431,115 @@ export async function makeUserRoomAdmin(
 }
 
 /**
+ * List every room on the homeserver via the Synapse admin API,
+ * paginating through all pages.  Returns a flat array with the
+ * fields the orphan-deleter needs (id, name, member count, type,
+ * creator, encryption flag).  Synapse's admin/v1/rooms returns up
+ * to `limit` rooms per page (default 100, capped at 500); this
+ * helper walks `next_token` until exhausted.  At Koven's scale
+ * (hundreds of rooms) this is a handful of round-trips.
+ */
+export async function listAllRooms(): Promise<Array<{
+	roomId: string;
+	name: string | null;
+	roomType: string | null;
+	memberCount: number;
+	creator: string | null;
+	encryption: string | null;
+	joinRule: string | null;
+}>> {
+	const out: Array<{
+		roomId: string;
+		name: string | null;
+		roomType: string | null;
+		memberCount: number;
+		creator: string | null;
+		encryption: string | null;
+		joinRule: string | null;
+	}> = [];
+	let from = 0;
+	const limit = 500;
+	for (let i = 0; i < 200; i++) {
+		// `order_by=name` is stable, `dir=f` is forward; we use `from`
+		// (offset) since `next_token` is just an offset string in
+		// admin/v1/rooms.  Each page returns `total_rooms` so we know
+		// when we've covered everything.
+		const path = `/_synapse/admin/v1/rooms?from=${from}&limit=${limit}`;
+		const r = await adminFetch(path);
+		if (!r.ok) {
+			const txt = await r.text().catch(() => "");
+			console.warn(`engine: listAllRooms page from=${from} → ${r.status} ${txt.slice(0, 200)}`);
+			break;
+		}
+		const body = (await r.json().catch(() => null)) as {
+			rooms?: Array<{
+				room_id: string;
+				name: string | null;
+				room_type: string | null;
+				joined_members: number;
+				creator: string | null;
+				encryption: string | null;
+				join_rules: string | null;
+			}>;
+			next_batch?: number;
+			total_rooms?: number;
+		} | null;
+		if (!body?.rooms || body.rooms.length === 0) break;
+		for (const r of body.rooms) {
+			out.push({
+				roomId: r.room_id,
+				name: r.name ?? null,
+				roomType: r.room_type ?? null,
+				memberCount: r.joined_members ?? 0,
+				creator: r.creator ?? null,
+				encryption: r.encryption ?? null,
+				joinRule: r.join_rules ?? null,
+			});
+		}
+		if (typeof body.next_batch !== "number") break;
+		from = body.next_batch;
+	}
+	return out;
+}
+
+/**
+ * Hard-delete a room via Synapse's admin DELETE endpoint.  Kicks
+ * every member, blocks future joins, and (when `purge: true`)
+ * removes the room's history from the database.  Used by the
+ * one-time orphan-room cleanup that runs after the Discord-style
+ * invariant ships — every room without an m.space.parent (and not
+ * a DM, not a space itself) gets purged.
+ *
+ * Synapse runs the delete as a background task and returns a
+ * delete_id immediately; this helper just kicks it off and trusts
+ * Synapse to finish.  For our cleanup we don't need to poll the
+ * status because the job is idempotent (re-running on a
+ * partially-deleted room is fine) and the next listAllRooms()
+ * call will reflect the new state once Synapse catches up.
+ */
+export async function adminDeleteRoom(opts: {
+	roomId: string;
+	message?: string;
+}): Promise<{ ok: true; deleteId?: string } | { error: string; detail?: string }> {
+	const path = `/_synapse/admin/v2/rooms/${encodeURIComponent(opts.roomId)}`;
+	const r = await adminFetch(path, {
+		method: "DELETE",
+		body: JSON.stringify({
+			block: true,
+			purge: true,
+			message: opts.message ?? "Room removed by Koven cleanup (orphan rooms are no longer permitted; rejoin via the parent space).",
+		}),
+	});
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		console.warn(`engine: adminDeleteRoom ${opts.roomId} → ${r.status} ${txt.slice(0, 200)}`);
+		return { error: `synapse_${r.status}`, detail: txt.slice(0, 300) };
+	}
+	const body = (await r.json().catch(() => ({}))) as { delete_id?: string };
+	return { ok: true, deleteId: body.delete_id };
+}
+
+/**
  * Repair a room's m.room.power_levels so any member can issue
  * invites — the invariant Koven's createRoom has always meant to
  * apply but historically wrote as a follow-up sendStateEvent that

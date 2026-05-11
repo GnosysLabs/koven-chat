@@ -99,7 +99,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import { AlertTriangle, BarChart3, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Images, Lock, Network, Paperclip, Phone, Play, Scale, Settings, UserPlus, Video, X } from "lucide-react";
+import { AlertTriangle, BarChart3, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Images, Lock, Network, Paperclip, Phone, Play, Scale, Settings, Video, X } from "lucide-react";
 
 export interface ChatPaneProps {
 	room: Room | null;
@@ -893,17 +893,12 @@ export function ChatPane({
 							</button>
 						</>
 					)}
-					{room.kind !== "dm" && !room.isInvite && (
-						<button
-							type="button"
-							onClick={() => onInvite(room.id as EventId)}
-							className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-							title="Invite people"
-							aria-label="Invite people"
-						>
-							<UserPlus className="h-4 w-4" />
-						</button>
-					)}
+					{/* Per-room invites removed by Discord-style invariant:
+					    membership flows space → cascade → all rooms.  To
+					    add someone, invite them to the parent space (the
+					    space invite link / right-click menu).  Keeping
+					    the prop wired so DM-startup gestures elsewhere
+					    that reuse the InviteSheet still work. */}
 					{!room.isInvite && (
 						// Media gallery — DM-friendly + encrypted-friendly
 						// (unlike mod log + flag, which need the engine

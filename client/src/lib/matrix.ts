@@ -1970,42 +1970,65 @@ export class MatrixTransport {
 		await c.redactEvent(roomId, reactionEventId);
 	}
 
-	/** Create a new room.  Returns the new room id. */
+	/** Create a new room.  Returns the new room id.
+	 *
+	 * Discord-style invariant: every group room MUST belong to a
+	 * space.  Orphan rooms are forbidden (the engine has its own
+	 * defence for federated cases; this is the client-side gate).
+	 * DMs use `createDm` instead of this method, so they bypass the
+	 * gate naturally.  Calling without a parentSpaceId throws.
+	 */
 	async createRoom(opts: {
 		name: string;
 		topic?: string;
-		visibility: "public" | "private";
 		encrypted: boolean;
-		// If set, the room is added as a child of this space immediately
-		// after creation (m.space.child on the space + m.space.parent on
-		// the room).  Both are needed for proper Matrix semantics.
-		// Additionally, when set:
-		//   - All current members of the space are invited to the new
-		//     room so they get an immediate notification.
-		//   - For private rooms, the join rule is upgraded to
-		//     "restricted" with the parent space as the allow-list, so
-		//     space members can re-join without invitation if they
-		//     ever leave the room (Discord-channel-like semantics).
-		parentSpaceId?: SpaceId;
-		// Mark the new room as NSFW via the `chat.koven.nsfw` state
-		// event.  Hides the room from Explore for users who haven't
-		// opted into NSFW discovery; doesn't affect existing members.
-		nsfw?: boolean;
+		// REQUIRED.  The new room is added as a child of this space
+		// immediately after creation (m.space.child on the space +
+		// m.space.parent on the room).  Visibility + NSFW are NOT
+		// passed in — they're read from the parent space's state at
+		// create time so a room can never drift out of sync with its
+		// space's privacy posture.  Public space → public room;
+		// private space → restricted-join (in-space members only);
+		// NSFW space → chat.koven.nsfw stamped onto the room.
+		parentSpaceId: SpaceId;
 		// Optional avatar uploaded + set as the room's m.room.avatar
-		// state event after creation.  Same shape as createSpace —
-		// failure is best-effort and doesn't roll back the room.
+		// state event after creation.  Best-effort; failure doesn't
+		// roll back the room.
 		avatarFile?: File;
 	}): Promise<RoomId> {
 		const c = this.requireClient();
+		// Discord-style: a non-DM room MUST live inside a space.  The
+		// UI never opens CreateRoomSheet without a space context, but
+		// belt-and-suspenders — any API caller that forgets falls
+		// through to this guard rather than producing an orphan room
+		// that's invisible to the rest of the app.
+		if (!opts.parentSpaceId) {
+			throw new Error("Rooms must be created inside a space. Use createDm for 1:1 conversations.");
+		}
+		// Inherit privacy + NSFW from the parent space.  Reading the
+		// space's state at create time keeps the two in lockstep
+		// without baking a secondary state machine on the room side.
+		// Defaults to public + not-nsfw if the space's state isn't
+		// resolvable client-side (extremely rare; the user is in the
+		// space they're creating in, so currentState is populated).
+		const spaceRoom = c.getRoom(opts.parentSpaceId);
+		const spaceJoinRule = (spaceRoom?.currentState
+			.getStateEvents("m.room.join_rules", "")
+			?.getContent() as { join_rule?: string } | undefined)?.join_rule;
+		const inheritedVisibility: "public" | "private" =
+			spaceJoinRule === "public" ? "public" : "private";
+		const inheritedNsfw =
+			(spaceRoom?.currentState
+				.getStateEvents("chat.koven.nsfw", "")
+				?.getContent() as { enabled?: boolean } | undefined)?.enabled === true;
 		// Public + encrypted is forbidden by Koven's governance model:
 		// public rooms must stay readable so the engine can run
-		// consensus moderation, and encryption blinds the engine.
-		// The CreateRoomSheet UI already gates this; this is the
-		// defense-in-depth check for any stale caller.
-		if (opts.visibility === "public" && opts.encrypted) {
-			throw new Error("Public rooms can't be encrypted — moderation requires the engine to see content.");
+		// consensus moderation.  CreateRoomSheet's UI gate already
+		// disables the encryption toggle for public spaces; this is
+		// defense-in-depth.
+		if (inheritedVisibility === "public" && opts.encrypted) {
+			throw new Error("Public spaces can't host encrypted rooms — moderation requires the engine to see content.");
 		}
-		const myUserId = this.creds?.user_id;
 		const initialState: any[] = [];
 		if (opts.encrypted) {
 			initialState.push({
@@ -2014,32 +2037,41 @@ export class MatrixTransport {
 				content: { algorithm: "m.megolm.v1.aes-sha2" },
 			});
 		}
-		// Restricted-join state for private-in-space rooms.  Belt-and-
-		// suspenders alongside the engine's force-join cascade: the
-		// engine pulls every local member of the parent space into
+		// m.space.parent + (for private spaces) restricted join rule.
+		// Belt-and-suspenders alongside the engine's force-join cascade:
+		// the engine pulls every local member of the parent space into
 		// this new room when it sees the m.space.child event below
 		// (see engine/src/server.ts), but the restricted rule also
 		// lets anyone in the parent space join on their own from
 		// federated servers or from clients that connect later.
-		if (opts.parentSpaceId) {
+		initialState.push({
+			type: "m.space.parent",
+			state_key: opts.parentSpaceId,
+			content: { canonical: true, via: [this.serverName()] },
+		});
+		if (inheritedVisibility === "private") {
 			initialState.push({
-				type: "m.space.parent",
-				state_key: opts.parentSpaceId,
-				content: { canonical: true, via: [this.serverName()] },
+				type: "m.room.join_rules",
+				state_key: "",
+				content: {
+					join_rule: "restricted",
+					allow: [{
+						type: "m.room_membership",
+						room_id: opts.parentSpaceId,
+					}],
+				},
 			});
-			if (opts.visibility === "private") {
-				initialState.push({
-					type: "m.room.join_rules",
-					state_key: "",
-					content: {
-						join_rule: "restricted",
-						allow: [{
-							type: "m.room_membership",
-							room_id: opts.parentSpaceId,
-						}],
-					},
-				});
-			}
+		}
+		// Inherit NSFW from the parent space.  Stamping at create
+		// time keeps Explore + the join cascade consistent with the
+		// space's posture, so a single NSFW space can never accidentally
+		// host a non-NSFW room (or vice versa).
+		if (inheritedNsfw) {
+			initialState.push({
+				type: "chat.koven.nsfw",
+				state_key: "",
+				content: { enabled: true },
+			});
 		}
 		// IMPORTANT: don't pass the full inviteList as the `invite`
 		// param — Synapse caps it at `rc_invites_per_room.burst_count`
@@ -2097,8 +2129,8 @@ export class MatrixTransport {
 		const res = await c.createRoom({
 			name: opts.name,
 			topic: opts.topic,
-			visibility: opts.visibility as any,
-			preset: (opts.visibility === "public" ? "public_chat" : "private_chat") as any,
+			visibility: inheritedVisibility as any,
+			preset: (inheritedVisibility === "public" ? "public_chat" : "private_chat") as any,
 			initial_state: initialState.length ? initialState : undefined,
 			power_level_content_override: powerLevelContentOverride as any,
 		});
@@ -2120,26 +2152,9 @@ export class MatrixTransport {
 			}
 		}
 
-		if (opts.parentSpaceId) {
-			await this.linkRoomToSpace(opts.parentSpaceId, newRoomId, { nsfw: !!opts.nsfw }).catch(err => {
-				console.warn("createRoom: failed to link to parent space", err);
-			});
-		}
-		if (opts.nsfw) {
-			// Best-effort NSFW marker.  Failure here just leaves the
-			// room un-flagged — the founder can fix it later via
-			// RoomEditSheet.  No reason to abort room creation over it.
-			try {
-				await c.sendStateEvent(
-					newRoomId,
-					"chat.koven.nsfw" as any,
-					{ enabled: true },
-					"",
-				);
-			} catch (err) {
-				console.warn("createRoom: failed to set nsfw flag", err);
-			}
-		}
+		await this.linkRoomToSpace(opts.parentSpaceId, newRoomId, { nsfw: inheritedNsfw }).catch(err => {
+			console.warn("createRoom: failed to link to parent space", err);
+		});
 		this.emitRoomList();
 		this.emitSpaceList();
 
@@ -2560,12 +2575,16 @@ export class MatrixTransport {
 			join_rule?: string;
 		}>;
 
-		// Best-effort parallel join of every joinable child.  Skip the
-		// space itself, sub-spaces (let the user opt-in by clicking
-		// them in Explore), anything not public/knock (invite-only
-		// children bounce back with M_FORBIDDEN), and — when the
-		// viewer hasn't opted into NSFW — anything flagged NSFW on
-		// the parent's m.space.child content.
+		// Best-effort parallel join of every joinable child.  Skip
+		// the space itself + sub-spaces (let the user opt-in by
+		// clicking them in Explore).  Discord-style invariant: every
+		// room in the space should auto-join, so we accept "public",
+		// "knock", AND "restricted" — restricted is the join rule we
+		// stamp onto private-in-space rooms at create time, and it
+		// resolves to "in the parent space → /join succeeds."
+		// Anything else (invite-only, custom rules) is genuinely
+		// unjoinable from here and gets skipped.  When the viewer
+		// hasn't opted into NSFW, NSFW children skip too.
 		let joined = 0;
 		let skipped = 0;
 		let skippedNsfw = 0;
@@ -2573,7 +2592,7 @@ export class MatrixTransport {
 			if (r.room_id === spaceId) return;
 			if (r.room_type === "m.space") { skipped++; return; }
 			const rule = r.join_rule ?? "public";
-			if (rule !== "public" && rule !== "knock") { skipped++; return; }
+			if (rule !== "public" && rule !== "knock" && rule !== "restricted") { skipped++; return; }
 			if (!nsfwPref && childNsfwById.get(r.room_id) === true) {
 				skippedNsfw++;
 				return;
@@ -2718,26 +2737,12 @@ export class MatrixTransport {
 		clearAvatar?: boolean;
 		// See updateSpace.iconEmoji — same semantics, same state event.
 		iconEmoji?: string;
-		visibility?: "public" | "private";
-		// See updateSpace.nsfw — same semantics, same state event.
-		nsfw?: boolean;
 		// Per-room "Live channel" toggle.  Writes the
 		// `chat.koven.live` state event with `{ enabled: bool }`;
-		// absent state event = enabled (the default).  Unlike NSFW
-		// this IS reversible.
+		// absent state event = enabled (the default).
 		liveEnabled?: boolean;
 	}): Promise<void> {
 		const c = this.requireClient();
-		// Defense-in-depth: refuse to flip an encrypted room to public.
-		// Matrix doesn't support disabling encryption once enabled, so
-		// the resulting room would be public-yet-unmoderatable.  UI
-		// already disables the toggle; this catches anyone bypassing it.
-		if (opts.visibility === "public") {
-			const room = c.getRoom(opts.roomId);
-			if (room && (room as any).hasEncryptionStateEvent?.() === true) {
-				throw new Error("Encrypted rooms can't be made public — moderation requires readable content.");
-			}
-		}
 		if (opts.name !== undefined) {
 			await c.sendStateEvent(opts.roomId, "m.room.name" as any, { name: opts.name }, "");
 		}
@@ -2760,33 +2765,6 @@ export class MatrixTransport {
 				trimmed ? { emoji: trimmed } : {},
 				"",
 			);
-		}
-		if (opts.visibility !== undefined) {
-			const rule = opts.visibility === "public" ? "public" : "invite";
-			await c.sendStateEvent(opts.roomId, "m.room.join_rules" as any, { join_rule: rule }, "");
-			try {
-				await c.setRoomDirectoryVisibility(opts.roomId, opts.visibility as any);
-			} catch (err) {
-				console.warn("updateRoom: directory visibility update failed", err);
-			}
-		}
-		if (opts.nsfw !== undefined) {
-			// See updateSpace — NSFW is one-way.
-			const room = c.getRoom(opts.roomId);
-			const currentNsfw = room?.currentState
-				.getStateEvents("chat.koven.nsfw", "")
-				?.getContent()?.enabled === true;
-			if (currentNsfw && !opts.nsfw) {
-				throw new Error("NSFW marker is permanent and can't be reversed.");
-			}
-			if (opts.nsfw) {
-				await c.sendStateEvent(
-					opts.roomId,
-					"chat.koven.nsfw" as any,
-					{ enabled: true },
-					"",
-				);
-			}
 		}
 		if (opts.liveEnabled !== undefined) {
 			// Write the state event with the explicit bool.  The reader
@@ -4168,6 +4146,7 @@ export class MatrixTransport {
 		const c = this.client;
 		const room = c?.getRoom(roomId);
 		if (!c || !room) return [];
+		const myUserId = this.creds?.user_id;
 		const joined = room.getMembersWithMembership("join");
 		return joined.map(m => {
 			// Synapse presence is best-effort; getUser() may return
@@ -4189,6 +4168,18 @@ export class MatrixTransport {
 				} else if (u.presence === "offline") {
 					presence = "offline";
 				}
+			}
+			// Self always renders as online.  Synapse doesn't push
+			// your own presence back through /sync the way it pushes
+			// other users', so getUser(self) often returns a User
+			// with the default "offline" until something triggers a
+			// refresh — which made the viewer show up greyed-out in
+			// their own member list until they clicked around.  By
+			// definition you're connected if you're rendering this,
+			// so force it.  Mirrors the bot override above (in
+			// MemberList: bots also always read as online).
+			if (myUserId && m.userId === myUserId) {
+				presence = "online";
 			}
 			return {
 				userId: m.userId as UserId,

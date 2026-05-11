@@ -37,8 +37,6 @@ interface PublicEntry {
 	nsfw?: boolean;
 }
 
-type Filter = "all" | "spaces" | "rooms";
-
 export interface ExplorePaneProps {
 	transport: MatrixTransport | null;
 	rooms: Room[];      // joined rooms — used to mark "Joined" rows
@@ -69,7 +67,6 @@ export function ExplorePane({
 	const [query, setQuery] = useState("");
 	const [results, setResults] = useState<PublicEntry[]>([]);
 	const [loading, setLoading] = useState(true);
-	const [filter, setFilter] = useState<Filter>("all");
 	const [joining, setJoining] = useState<string | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	const [flagDialog, setFlagDialog] = useState<PublicEntry | null>(null);
@@ -157,16 +154,13 @@ export function ExplorePane({
 		if (!showNsfw) {
 			liveResults = liveResults.filter(r => !r.nsfw);
 		}
-		if (filter === "spaces") return liveResults.filter(r => r.isSpace);
-		if (filter === "rooms") return liveResults.filter(r => !r.isSpace);
-		return liveResults;
-	}, [results, filter, collapsedRoomIds, showNsfw]);
-
-	const counts = useMemo(() => ({
-		all: results.length,
-		spaces: results.filter(r => r.isSpace).length,
-		rooms: results.filter(r => !r.isSpace).length,
-	}), [results]);
+		// Discord-style: Explore only surfaces SPACES (servers).  Rooms
+		// live inside their parent space and inherit its visibility, so
+		// listing them as separate Explore entries duplicates the space
+		// and confuses discovery.  The filter chips that used to let
+		// users toggle this view are gone for the same reason.
+		return liveResults.filter(r => r.isSpace);
+	}, [results, collapsedRoomIds, showNsfw]);
 
 	async function handleJoin(entry: PublicEntry) {
 		if (!transport) return;
@@ -212,12 +206,6 @@ export function ExplorePane({
 						autoFocus
 						className="pl-9"
 					/>
-				</div>
-
-				<div className="flex items-center gap-1.5">
-					<FilterChip active={filter === "all"}    onClick={() => setFilter("all")}>All · {counts.all}</FilterChip>
-					<FilterChip active={filter === "spaces"} onClick={() => setFilter("spaces")}>Spaces · {counts.spaces}</FilterChip>
-					<FilterChip active={filter === "rooms"}  onClick={() => setFilter("rooms")}>Rooms · {counts.rooms}</FilterChip>
 				</div>
 
 				{error && (
@@ -272,22 +260,6 @@ export function ExplorePane({
 	);
 }
 
-function FilterChip({ active, onClick, children }: { active: boolean; onClick(): void; children: React.ReactNode }) {
-	return (
-		<button
-			type="button"
-			onClick={onClick}
-			className={cn(
-				"px-3 py-1 rounded-full text-xs font-medium border transition-colors",
-				active
-					? "bg-primary text-primary-foreground border-primary"
-					: "bg-background text-muted-foreground border-border hover:bg-accent hover:text-foreground",
-			)}
-		>
-			{children}
-		</button>
-	);
-}
 
 function EntryRow({
 	entry, joined, joining, onJoin, onFlag,

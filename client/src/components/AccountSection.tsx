@@ -132,14 +132,14 @@ export function AccountSection({ accessToken, transport, ignoredUsers, onSignedO
 				<div>
 					<div className="text-sm font-medium">Content</div>
 					<p className="text-xs text-muted-foreground leading-snug mt-0.5">
-						Choose what's discoverable in Explore. These don't affect rooms you've already joined — once you're in, you're in.
+						Choose what's discoverable in Explore. This doesn't affect spaces you've already joined — once you're in, you're in.
 					</p>
 				</div>
 				<div className="flex items-start justify-between gap-4 px-3 py-3 rounded-md border border-border bg-muted/30">
 					<div className="flex-1 min-w-0">
-						<div className="text-sm font-medium">Show NSFW rooms</div>
+						<div className="text-sm font-medium">Show NSFW spaces</div>
 						<p className="text-xs text-muted-foreground leading-snug mt-0.5">
-							Adult-content rooms and spaces stay hidden from search and browse until you turn this on.
+							Adult-content spaces stay hidden from search and browse until you turn this on.
 						</p>
 					</div>
 					<Switch

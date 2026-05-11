@@ -132,13 +132,12 @@ export function SpaceTileContextMenu({
 					onClick: onAddRoom,
 				});
 			}
-			if (onAddExistingRoom) {
-				out.push({
-					label: "Add existing room…",
-					icon: <Plus className="h-4 w-4" />,
-					onClick: onAddExistingRoom,
-				});
-			}
+			// "Add existing room…" intentionally absent — under the
+			// Discord-style invariant rooms are born inside their
+			// space and stay there; re-parenting an orphan is dead
+			// semantics (no orphans exist).  The prop is left in the
+			// interface unused; can rewire later if cross-space room
+			// moves become a feature.
 		}
 
 		out.push({ kind: "divider" });

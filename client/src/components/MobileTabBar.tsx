@@ -25,10 +25,10 @@
 // know we changed style.
 
 import type { ReactNode } from "react";
-import { MessageSquare, Compass, Hash, LayoutGrid, User } from "lucide-react";
+import { MessageSquare, Compass, LayoutGrid, User } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export type MobileTab = "chats" | "rooms" | "spaces" | "explore" | "me";
+export type MobileTab = "chats" | "spaces" | "explore" | "me";
 
 interface MobileTabBarProps {
 	active: MobileTab;
@@ -46,7 +46,6 @@ interface TabDef {
 
 const TABS: TabDef[] = [
 	{ key: "chats",   label: "Chats",   icon: <MessageSquare className="h-[18px] w-[18px]" strokeWidth={2.2} /> },
-	{ key: "rooms",   label: "Rooms",   icon: <Hash          className="h-[18px] w-[18px]" strokeWidth={2.2} /> },
 	{ key: "spaces",  label: "Spaces",  icon: <LayoutGrid    className="h-[18px] w-[18px]" strokeWidth={2.2} /> },
 	{ key: "explore", label: "Explore", icon: <Compass       className="h-[18px] w-[18px]" strokeWidth={2.2} /> },
 	{ key: "me",      label: "Me",      icon: <User          className="h-[18px] w-[18px]" strokeWidth={2.2} /> },

@@ -53,11 +53,10 @@ import { ActiveCallView } from "@/components/ActiveCallView";
 import { SuspendedBanner } from "@/components/SuspendedBanner";
 import { ModLogSheet } from "@/components/ModLogSheet";
 import { FloorReviewSheet } from "@/components/FloorReviewSheet";
-import { botKickBan, deleteOwnMessage, fetchAdminStatus, fetchFloorQueue, fetchMyStatus, fetchPublishQuota, flagRoom, type PublishQuota, type SuspensionSummary } from "@/lib/instance";
+import { botKickBan, deleteOwnMessage, fetchAdminStatus, fetchFloorQueue, fetchMyStatus, flagRoom, type SuspensionSummary } from "@/lib/instance";
 import { fetchIntegrationsStatus } from "@/lib/giphy";
 import { ENGINE_URL } from "@/lib/urls";
 import { setAppBadge } from "@/lib/appBadge";
-import { PublishLimitDialog } from "@/components/PublishLimitDialog";
 import { NsfwAcceptDialog } from "@/components/NsfwAcceptDialog";
 import { AddExistingRoomDialog } from "@/components/AddExistingRoomDialog";
 import { useCollapsedRooms } from "@/lib/collapsedRooms";
@@ -214,7 +213,7 @@ export default function App() {
 					// timeline would never render, and the user would
 					// just stare at Explore wondering where their room
 					// went.
-					dispatch({ type: "set_active_space", space: { kind: "rooms" } });
+					dispatch({ type: "set_active_space", space: { kind: "spaces_overview" } });
 				}
 			}
 			setMobileMeOpen(false);
@@ -231,13 +230,6 @@ export default function App() {
 	const [bootError, setBootError] = useState<string | null>(null);
 	const [createRoomOpen, setCreateRoomOpen] = useState(false);
 	const [createSpaceOpen, setCreateSpaceOpen] = useState(false);
-	// Surfaced when the user clicks Create room / Create space but
-	// the engine's pre-flight publish-quota check returns
-	// `allowed: false`.  Holds the quota payload (count, threshold,
-	// retry-after) so the dialog can render the per-tier ladder
-	// with the user's row highlighted.  Cleared by closing the
-	// dialog.
-	const [publishLimitInfo, setPublishLimitInfo] = useState<PublishQuota | null>(null);
 	// SpaceLanding's "Add existing room" affordance opens a picker
 	// dialog scoped to the space whose id is held here.  Cleared on
 	// dialog close.  Distinct from the createRoom path because we're
@@ -1132,7 +1124,7 @@ export default function App() {
 							space: { kind: "space", id: room.parentSpaceIds[0] as SpaceId },
 						});
 					} else {
-						dispatch({ type: "set_active_space", space: { kind: "rooms" } });
+						dispatch({ type: "set_active_space", space: { kind: "spaces_overview" } });
 					}
 				}
 				dispatch({ type: "set_active_room", roomId: roomId as RoomId });
@@ -1325,15 +1317,24 @@ export default function App() {
 	// proceed and hit a real engine error at submit than block them
 	// on a transient health blip.
 	const openCreateRoomGated = useCallback(async () => {
-		if (creds?.access_token) {
-			const quota = await fetchPublishQuota(creds.access_token, "room");
-			if (quota && !quota.allowed && quota.reason === "rate_limited") {
-				setPublishLimitInfo(quota);
-				return;
-			}
+		// Discord-style invariant: rooms can only be created inside a
+		// space.  Every entry point already routes through here, so
+		// gating once covers the lot — if no space is active, refuse
+		// rather than open a sheet that would throw on submit.  The
+		// "+" button on the (now-removed) Rooms tile no longer
+		// exists, so this path should be unreachable from the UI;
+		// treat it as a belt-and-suspenders no-op.
+		if (state.activeSpace?.kind !== "space") {
+			console.warn("openCreateRoomGated: no active space; refusing to open CreateRoomSheet");
+			return;
 		}
+		// No publish-quota check — Discord doesn't limit channel
+		// creation, and under the invariant every room is contained
+		// inside the space's privacy boundary, so there's no risk of
+		// flooding Explore.  Suspended-account blocks still happen
+		// server-side via the engine's can-publish-room hook.
 		setCreateRoomOpen(true);
-	}, [creds?.access_token]);
+	}, [state.activeSpace]);
 
 	// Centralised invite-accept with NSFW gate.  Three paths:
 	//   1. Room/space is flagged NSFW + user hasn't opted in →
@@ -1545,18 +1546,6 @@ export default function App() {
 				nsfw: false,
 			};
 		}
-		if (state.activeSpace.kind === "rooms") {
-			return {
-				id: "__rooms__",
-				name: "Rooms",
-				topic: "Joined rooms not assigned to any space.",
-				avatarUrl: undefined,
-				kind: "public" as const,
-				childRoomIds: [],
-				pinnedRoomIds: [],
-				nsfw: false,
-			};
-		}
 		const id = state.activeSpace.id;
 		return state.spaces.find(s => s.id === id) ?? null;
 	}, [state.activeSpace, state.spaces]);
@@ -1565,16 +1554,12 @@ export default function App() {
 		if (state.activeSpace.kind === "explore") return [];
 		if (state.activeSpace.kind === "bots") return [];
 		if (state.activeSpace.kind === "dms") return state.rooms.filter(r => r.kind === "dm");
-		if (state.activeSpace.kind === "rooms") {
-			return state.rooms.filter(r => r.kind !== "dm" && r.parentSpaceIds.length === 0);
-		}
 		if (state.activeSpace.kind === "spaces_overview") return [];
 		const id = state.activeSpace.id;
 		return state.rooms.filter(r => r.parentSpaceIds.includes(id));
 	}, [state.activeSpace, state.rooms]);
-	const landingVariant: "real" | "dms" | "rooms" =
+	const landingVariant: "real" | "dms" =
 		state.activeSpace?.kind === "dms" ? "dms"
-		: state.activeSpace?.kind === "rooms" ? "rooms"
 		: "real";
 	const showSpaceLanding = !!activeSpaceObj && !activeRoom;
 
@@ -1794,27 +1779,13 @@ export default function App() {
 					onSelectExplore={() => dispatch({ type: "set_active_space", space: { kind: "explore" } })}
 					onSelectDms={() => dispatch({ type: "set_active_space", space: { kind: "dms" } })}
 					onSelectBots={() => dispatch({ type: "set_active_space", space: { kind: "bots" } })}
-					onSelectRooms={() => dispatch({ type: "set_active_space", space: { kind: "rooms" } })}
 					onSelectSpace={(id: SpaceId) => dispatch({ type: "set_active_space", space: { kind: "space", id } })}
-					onOpenCreateSpace={async () => {
-						// Pre-flight rate-limit check before the create-
-						// space modal opens.  See onCreateRoom upstream
-						// for the same pattern + rationale.  Soft-fail
-						// on quota fetch errors so a transient engine
-						// blip doesn't block creation.
-						if (!creds?.access_token) {
-							setCreateSpaceOpen(true);
-							return;
-						}
-						try {
-							const quota = await fetchPublishQuota(creds.access_token, "space");
-							if (quota && !quota.allowed && quota.reason === "rate_limited") {
-								setPublishLimitInfo(quota);
-								return;
-							}
-						} catch {
-							/* ignore — open the modal anyway */
-						}
+					onOpenCreateSpace={() => {
+						// No publish-quota check — Discord doesn't limit
+						// server / channel creation, and rate-limit tiers
+						// just confused users who'd hit "1/day" silently.
+						// Suspended-account blocks still happen server-
+						// side via the engine's can-publish-room hook.
 						setCreateSpaceOpen(true);
 					}}
 					onOpenProfile={() => setViewedUserId(creds.user_id as UserId)}
@@ -2408,9 +2379,7 @@ export default function App() {
 								: state.activeSpace?.kind === "space"
 									|| state.activeSpace?.kind === "spaces_overview"
 									? "spaces"
-									: state.activeSpace?.kind === "rooms"
-										? "rooms"
-										: "chats"
+									: "chats"
 					}
 					onChange={(tab: MobileTab) => {
 						// Switching tabs always clears the Me overlay
@@ -2421,8 +2390,6 @@ export default function App() {
 						dispatch({ type: "set_active_room", roomId: null });
 						if (tab === "chats") {
 							dispatch({ type: "set_active_space", space: { kind: "dms" } });
-						} else if (tab === "rooms") {
-							dispatch({ type: "set_active_space", space: { kind: "rooms" } });
 						} else if (tab === "spaces") {
 							// Stay in the current space if we already
 							// have one selected — only drop into the
@@ -2437,12 +2404,6 @@ export default function App() {
 					unreadByTab={{
 						chats: state.rooms.filter(
 							r => r.kind === "dm" && !r.isInvite && r.unreadCount > 0,
-						).length,
-						rooms: state.rooms.filter(
-							r => r.kind !== "dm"
-								&& r.parentSpaceIds.length === 0
-								&& !r.isInvite
-								&& r.unreadCount > 0,
 						).length,
 						spaces: state.rooms.filter(
 							r => r.parentSpaceIds.length > 0
@@ -2482,15 +2443,31 @@ export default function App() {
 			<CreateRoomSheet
 				open={createRoomOpen}
 				onOpenChange={setCreateRoomOpen}
-				showNsfw={!!settings.showNsfw}
+				parentSpaceName={(() => {
+					const a = state.activeSpace;
+					if (!a || a.kind !== "space") return "this space";
+					return state.spaces.find(s => s.id === a.id)?.name ?? "this space";
+				})()}
+				parentSpaceKind={(() => {
+					const a = state.activeSpace;
+					if (!a || a.kind !== "space") return "private";
+					return state.spaces.find(s => s.id === a.id)?.kind ?? "private";
+				})()}
+				parentSpaceNsfw={(() => {
+					const a = state.activeSpace;
+					if (!a || a.kind !== "space") return false;
+					return !!state.spaces.find(s => s.id === a.id)?.nsfw;
+				})()}
 				onCreate={async (opts) => {
 					if (!transport) throw new Error("Not connected");
-					// If a space is currently selected, the new room joins
-					// it automatically — saves an extra step that almost
-					// always immediately follows room creation.
-					const parentSpaceId = state.activeSpace?.kind === "space"
-						? state.activeSpace.id
-						: undefined;
+					// Discord-style invariant: room MUST belong to a
+					// space.  openCreateRoomGated refuses to open the
+					// sheet without a space context, so this is the
+					// belt-and-suspenders gate at submit time.
+					if (state.activeSpace?.kind !== "space") {
+						throw new Error("Pick a space first — rooms live inside spaces.");
+					}
+					const parentSpaceId = state.activeSpace.id;
 					const roomId = await transport.createRoom({ ...opts, parentSpaceId });
 					dispatch({ type: "set_active_room", roomId });
 				}}
@@ -2548,13 +2525,13 @@ export default function App() {
 					// since it always exists and never depends on a
 					// specific space membership.
 					setEditingSpaceId(null);
-					dispatch({ type: "set_active_space", space: { kind: "rooms" } });
+					dispatch({ type: "set_active_space", space: { kind: "spaces_overview" } });
 				}}
 				onDelete={async (spaceId, childIds) => {
 					if (!transport) throw new Error("Not connected");
 					await transport.deleteSpace(spaceId as RoomId, childIds as RoomId[]);
 					setEditingSpaceId(null);
-					dispatch({ type: "set_active_space", space: { kind: "rooms" } });
+					dispatch({ type: "set_active_space", space: { kind: "spaces_overview" } });
 					dispatch({ type: "set_active_room", roomId: null });
 				}}
 				lookupChildName={(roomId) => {
@@ -2569,7 +2546,6 @@ export default function App() {
 			<RoomEditSheet
 				room={editingRoomId ? state.rooms.find(r => r.id === editingRoomId) ?? null : null}
 				currentUserId={creds.user_id}
-				showNsfw={!!settings.showNsfw}
 				onClose={() => setEditingRoomId(null)}
 				onSave={async (opts) => {
 					if (!transport) throw new Error("Not connected");
@@ -2580,8 +2556,6 @@ export default function App() {
 						avatarFile: opts.avatarFile,
 						clearAvatar: opts.clearAvatar,
 						iconEmoji: opts.iconEmoji,
-						visibility: opts.visibility,
-						nsfw: opts.nsfw,
 						liveEnabled: opts.liveEnabled,
 					});
 				}}
@@ -2716,11 +2690,6 @@ export default function App() {
 				ignoredUsers={ignoredUsers}
 				onSignedOut={handleSignOut}
 			/>
-			<PublishLimitDialog
-				open={!!publishLimitInfo}
-				onOpenChange={(o) => { if (!o) setPublishLimitInfo(null); }}
-				quota={publishLimitInfo}
-			/>
 			<NsfwAcceptDialog
 				open={!!nsfwGate}
 				onOpenChange={(o) => { if (!o) setNsfwGate(null); }}
@@ -2815,7 +2784,7 @@ export default function App() {
 									space: { kind: "space", id: room.parentSpaceIds[0] as SpaceId },
 								});
 							} else {
-								dispatch({ type: "set_active_space", space: { kind: "rooms" } });
+								dispatch({ type: "set_active_space", space: { kind: "spaces_overview" } });
 							}
 						}
 						dispatch({ type: "set_active_room", roomId });

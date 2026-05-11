@@ -45,7 +45,6 @@ export interface FlagRef {
 //   - "bots":    the user's bot management view (under DMs in the
 //                rail).  Custom AI bots they created — list + create
 //                + edit + delete.
-//   - "rooms":   every joined room not assigned to any space
 //   - "space":   a real Matrix space the user joined or created
 // `null` is the brief pre-sync state before we pick a default.
 //
@@ -56,11 +55,14 @@ export interface FlagRef {
 // `{ kind: "space", id }`; the back arrow on the chat header
 // returns here.  Desktop never enters this state — the SpaceBar
 // is always visible there.
+//
+// The legacy `{ kind: "rooms" }` (orphan rooms pseudo-space) was
+// removed when the Discord-style invariant landed: every group
+// room belongs to a space, so there are no orphans to display.
 export type ActiveSpace =
 	| { kind: "explore" }
 	| { kind: "dms" }
 	| { kind: "bots" }
-	| { kind: "rooms" }
 	| { kind: "space"; id: SpaceId }
 	| { kind: "spaces_overview" }
 	| null;
@@ -125,7 +127,7 @@ export const initialState: AppState = {
 	pollVotesIndex: new Map(),
 	receiptsVersionByRoom: new Map(),
 	activeRoomId: null,
-	activeSpace: { kind: "rooms" },
+	activeSpace: { kind: "spaces_overview" },
 	error: null,
 };
 

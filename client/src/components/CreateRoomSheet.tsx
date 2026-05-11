@@ -1,9 +1,19 @@
-// Create-room dialog — name + topic + privacy + encryption toggle.
+// Create-room dialog — name + topic + avatar + encryption.
 //
-// The encryption choice is governance-relevant: encrypted rooms can't
-// be moderated by Koven's engine because the engine can't read their
-// content.  We surface that explicitly so the user makes a deliberate
-// choice rather than a default click-through.
+// Discord-style invariant: the new room ALWAYS lives inside the
+// currently active space, and inherits the space's privacy + NSFW
+// posture.  No room-level visibility toggle, no room-level NSFW
+// toggle.  Public space → public rooms; private space → private
+// rooms (restricted-join, in-space members only); NSFW space →
+// NSFW rooms.  The caller (App.tsx) wires `parentSpaceKind` and
+// `parentSpaceNsfw` so the dialog can show the user what they're
+// inheriting.
+//
+// Encryption stays a per-room choice because it's a technical
+// axis (megolm sessions, key backup, blind moderation) rather
+// than governance.  We force it off when the parent space is
+// public (encrypted public rooms can't be moderated by the engine,
+// which is Koven's whole consensus story).
 
 import { useRef, useState } from "react";
 import {
@@ -27,41 +37,35 @@ export interface CreateRoomSheetProps {
 	onCreate(opts: {
 		name: string;
 		topic: string;
-		visibility: "public" | "private";
 		encrypted: boolean;
-		nsfw: boolean;
 		// Mirrors CreateSpaceSheet — when set, the file gets uploaded
 		// + written as m.room.avatar after createRoom returns.
 		avatarFile?: File;
 	}): Promise<void>;
-	// True iff the viewer has the "Show NSFW rooms" preference on.
-	// Gates visibility of the NSFW toggle: you can only create an
-	// adult-content room if you've opted into seeing them yourself.
-	// Stops "I marked the room NSFW without realizing what that
-	// means" — explicit opt-in upstream.
-	showNsfw: boolean;
+	// Parent space context — the room inherits these.  Drives the
+	// "Inherits from <space>" copy + the encryption gate (encryption
+	// only allowed when the parent is private).  Required because
+	// the dialog can no longer be opened without an active space.
+	parentSpaceName: string;
+	parentSpaceKind: "public" | "private";
+	parentSpaceNsfw: boolean;
 }
 
-export function CreateRoomSheet({ open, onOpenChange, onCreate, showNsfw }: CreateRoomSheetProps) {
+export function CreateRoomSheet({
+	open, onOpenChange, onCreate,
+	parentSpaceName, parentSpaceKind, parentSpaceNsfw,
+}: CreateRoomSheetProps) {
 	const [name, setName] = useState("");
 	const [topic, setTopic] = useState("");
-	const [visibility, setVisibility] = useState<"public" | "private">("public");
 	const [encrypted, setEncrypted] = useState(false);
-	const [nsfw, setNsfw] = useState(false);
-	// Public + encrypted is a contradiction in Koven: the room is open
-	// to anyone but the engine + admins can't see content, so consensus
-	// moderation can't run.  When the user flips to public, we force
-	// encryption off; the toggle below is also disabled in that mode.
-	const canEncrypt = visibility === "private";
+	// Encryption is only sensible inside a private space.  Public
+	// spaces can't host encrypted rooms because the engine needs to
+	// see content to run consensus moderation.
+	const canEncrypt = parentSpaceKind === "private";
 	const effectiveEncrypted = canEncrypt && encrypted;
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
-	// Avatar pick state — mirrors CreateSpaceSheet exactly so the two
-	// dialogs feel like the same control.  `avatarFile` is the raw
-	// File the user chose; `avatarPreview` is a data-URL we render
-	// in the swatch as immediate visual feedback.  The actual upload
-	// + m.room.avatar set happens in transport.createRoom after the
-	// room id is known.
+	// Avatar pick state — same pattern as CreateSpaceSheet.
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
 	const [avatarFile, setAvatarFile] = useState<File | undefined>(undefined);
 	const [avatarPreview, setAvatarPreview] = useState<string | undefined>(undefined);
@@ -69,9 +73,7 @@ export function CreateRoomSheet({ open, onOpenChange, onCreate, showNsfw }: Crea
 	function reset() {
 		setName("");
 		setTopic("");
-		setVisibility("public");
 		setEncrypted(false);
-		setNsfw(false);
 		setAvatarFile(undefined);
 		setAvatarPreview(undefined);
 		setError(null);
@@ -99,9 +101,7 @@ export function CreateRoomSheet({ open, onOpenChange, onCreate, showNsfw }: Crea
 			await onCreate({
 				name: trimmed,
 				topic: topic.trim(),
-				visibility,
 				encrypted: effectiveEncrypted,
-				nsfw,
 				avatarFile,
 			});
 			reset();
@@ -114,26 +114,17 @@ export function CreateRoomSheet({ open, onOpenChange, onCreate, showNsfw }: Crea
 
 	return (
 		<Dialog open={open} onOpenChange={(o) => { if (!o) reset(); onOpenChange(o); }}>
-			{/* Wider than the default sm:max-w-md so the encryption +
-			    NSFW toggle blocks (each a paragraph of explanatory copy)
-			    can sit side-by-side without forcing the dialog to
-			    scroll.  Falls back to default mobile sizing under sm. */}
 			<DialogContent className="sm:max-w-2xl">
 				<DialogHeader>
-					<DialogTitle>Create a room</DialogTitle>
+					<DialogTitle>Create a room in {parentSpaceName}</DialogTitle>
 					<DialogDescription>
-						Rooms are where conversation happens. You&rsquo;ll be the founder; channel governance settings are tunable later.
+						Rooms are channels inside this space. They inherit the space&rsquo;s privacy and NSFW posture &mdash; no per-room toggles to drift out of sync.
 					</DialogDescription>
 				</DialogHeader>
 
 				<form onSubmit={submit} className="space-y-4">
 					{/* Avatar + name on the same row — mirrors
-					    CreateSpaceSheet so the two creation flows feel
-					    like the same control.  Avatar swatch on the
-					    left (click anywhere on it to pick a file),
-					    name + Upload/Remove buttons stack on the
-					    right.  Topic moves below as a full-width
-					    field. */}
+					    CreateSpaceSheet for visual consistency. */}
 					<div className="flex items-start gap-4">
 						<button
 							type="button"
@@ -210,73 +201,60 @@ export function CreateRoomSheet({ open, onOpenChange, onCreate, showNsfw }: Crea
 						/>
 					</div>
 
-					<div className="space-y-2">
-						<Label>Visibility</Label>
-						<div className="grid grid-cols-2 gap-2">
-							<VisibilityCard
-								selected={visibility === "public"}
-								onClick={() => setVisibility("public")}
-								icon={<Globe className="h-4 w-4" />}
-								title="Public"
-								description="Anyone on the homeserver can find and join."
-							/>
-							<VisibilityCard
-								selected={visibility === "private"}
-								onClick={() => setVisibility("private")}
-								icon={<EyeOff className="h-4 w-4" />}
-								title="Private"
-								description="Invite-only. Won't appear in directories."
-							/>
+					{/* Inherited posture readout — read-only summary of what
+					    the new room will look like privacy-wise.  Replaces
+					    the old per-room visibility + NSFW toggles; the
+					    user changes these by editing the SPACE, not the
+					    room. */}
+					<div className="rounded-md border border-border bg-muted/30 p-3 space-y-2">
+						<div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+							Inherits from {parentSpaceName}
 						</div>
-					</div>
-
-					{/* Toggle row: encryption is always present, NSFW is
-					    conditional.  Lay out side-by-side when both are
-					    visible so the dialog doesn't grow tall enough
-					    to need scrolling — falls back to single-column
-					    when NSFW is hidden. */}
-					<div className={cn("grid gap-3", showNsfw ? "grid-cols-2" : "grid-cols-1")}>
-						<div className={cn(
-							"flex items-start justify-between gap-3 rounded-md border border-border p-3",
-							!canEncrypt && "opacity-60",
-						)}>
-							<div className="space-y-0.5 flex-1 min-w-0">
-								<Label htmlFor="room-encrypted" className="cursor-pointer">End-to-end encryption</Label>
-								<p className="text-xs text-muted-foreground leading-relaxed">
-									{canEncrypt ? (
-										<>
-											Encrypted rooms are unreadable by the server. <strong className="text-foreground">Koven moderation cannot apply</strong> &mdash; flags, collapse, and the mod log go silent. Use only for trusted private spaces.
-										</>
-									) : (
-										<>
-											Encryption is only available on private rooms. Public rooms must stay readable so consensus moderation can work.
-										</>
-									)}
-								</p>
-							</div>
-							<Switch
-								id="room-encrypted"
-								checked={effectiveEncrypted}
-								onCheckedChange={setEncrypted}
-								disabled={!canEncrypt}
-							/>
+						<div className="flex items-center gap-2 text-sm">
+							{parentSpaceKind === "public" ? (
+								<>
+									<Globe className="h-4 w-4 text-muted-foreground" />
+									<span><strong>Public</strong> &mdash; anyone on the homeserver can find and join.</span>
+								</>
+							) : (
+								<>
+									<EyeOff className="h-4 w-4 text-muted-foreground" />
+									<span><strong>Private</strong> &mdash; only members of the space can see or join.</span>
+								</>
+							)}
 						</div>
-
-						{showNsfw && (
-							<div className="flex items-start justify-between gap-3 rounded-md border border-border p-3">
-								<div className="space-y-0.5 flex-1 min-w-0">
-									<Label htmlFor="room-nsfw" className="cursor-pointer">Mark as NSFW</Label>
-									<p className="text-xs text-muted-foreground leading-relaxed">
-										Hides the room from Explore for users who haven&rsquo;t opted into NSFW content. <strong className="text-foreground">This can&rsquo;t be reversed</strong> — once marked, the room stays marked.
-									</p>
-								</div>
-								<Switch
-									id="room-nsfw"
-									checked={nsfw}
-									onCheckedChange={setNsfw}
-								/>
+						{parentSpaceNsfw && (
+							<div className="flex items-center gap-2 text-sm">
+								<span className="text-[10px] uppercase tracking-wide text-destructive bg-destructive/10 border border-destructive/30 px-1.5 py-0.5 rounded">NSFW</span>
+								<span>The space is marked adult-content; this room inherits the marker.</span>
 							</div>
 						)}
+					</div>
+
+					<div className={cn(
+						"flex items-start justify-between gap-3 rounded-md border border-border p-3",
+						!canEncrypt && "opacity-60",
+					)}>
+						<div className="space-y-0.5 flex-1 min-w-0">
+							<Label htmlFor="room-encrypted" className="cursor-pointer">End-to-end encryption</Label>
+							<p className="text-xs text-muted-foreground leading-relaxed">
+								{canEncrypt ? (
+									<>
+										Encrypted rooms are unreadable by the server. <strong className="text-foreground">Koven moderation cannot apply</strong> &mdash; flags, collapse, and the mod log go silent. Use only when you trust everyone in the space.
+									</>
+								) : (
+									<>
+										Encryption is only available inside a private space. {parentSpaceName} is public, so rooms must stay readable for consensus moderation to work.
+									</>
+								)}
+							</p>
+						</div>
+						<Switch
+							id="room-encrypted"
+							checked={effectiveEncrypted}
+							onCheckedChange={setEncrypted}
+							disabled={!canEncrypt}
+						/>
 					</div>
 
 					{error && (
@@ -296,32 +274,5 @@ export function CreateRoomSheet({ open, onOpenChange, onCreate, showNsfw }: Crea
 				</form>
 			</DialogContent>
 		</Dialog>
-	);
-}
-
-function VisibilityCard({
-	selected, onClick, icon, title, description,
-}: {
-	selected: boolean;
-	onClick(): void;
-	icon: React.ReactNode;
-	title: string;
-	description: string;
-}) {
-	return (
-		<button
-			type="button"
-			onClick={onClick}
-			className={cn(
-				"text-left rounded-md border p-3 transition-colors",
-				selected ? "border-primary bg-primary/5" : "border-border hover:bg-accent"
-			)}
-		>
-			<div className="flex items-center gap-2 mb-1">
-				{icon}
-				<span className="font-medium text-sm">{title}</span>
-			</div>
-			<div className="text-xs text-muted-foreground leading-snug">{description}</div>
-		</button>
 	);
 }
