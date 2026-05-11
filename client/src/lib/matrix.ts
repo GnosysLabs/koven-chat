@@ -2680,6 +2680,82 @@ export class MatrixTransport {
 	}
 
 	/**
+	 * Best-effort preview of a room or space the user may not yet be a
+	 * member of.  Used by the deep-link "Join this {space|room}?"
+	 * confirmation card to show the target's name, avatar, member
+	 * count, and NSFW flag before the user commits to joining.
+	 *
+	 * Three sources, tried in order:
+	 *   1. A local Room object — when the user was Matrix-invited
+	 *      first, the SDK already has the room with name + avatar +
+	 *      member list populated.
+	 *   2. MSC3266 `getRoomSummary` — Synapse-supported preview API
+	 *      that works for any room the local server can see (public
+	 *      rooms anywhere, plus invited rooms).
+	 *   3. Null — we have nothing.  The caller falls back to showing
+	 *      just the id.  Private rooms on remote servers we can't see
+	 *      into land here; the user has to join blind.
+	 *
+	 * The third path is rare in practice: a share link minted on a
+	 * Koven instance points at a room ON THAT INSTANCE, and Synapse
+	 * always returns summaries for its own rooms.  We'd hit the null
+	 * case only for cross-instance / federated invites the local
+	 * server hasn't synced state for yet.
+	 */
+	async previewTarget(idOrAlias: string): Promise<{
+		roomId: RoomId;
+		name: string;
+		topic?: string;
+		avatarUrl?: string;
+		memberCount?: number;
+		isSpace: boolean;
+		// NSFW from chat.koven.nsfw — only readable from a local
+		// Room (case 1).  getRoomSummary doesn't surface custom
+		// state events, so MSC3266-only previews have nsfw=undefined.
+		// The caller treats undefined as "unknown, fall back to no-
+		// warn"; if the room turns out to be NSFW after join the
+		// space-children NSFW gate catches it.
+		nsfw?: boolean;
+	} | null> {
+		const c = this.requireClient();
+		// Path 1 — Room is already in the SDK store (invited / partial
+		// join / previously left + remembered).  Cheapest path; reads
+		// directly from local state, no network.
+		const local = c.getRoom(idOrAlias);
+		if (local) {
+			const create = local.currentState.getStateEvents("m.room.create", "");
+			const isSpace = create?.getContent()?.type === "m.space";
+			return {
+				roomId: local.roomId as RoomId,
+				name: local.name || local.roomId,
+				topic: local.currentState.getStateEvents("m.room.topic", "")?.getContent().topic,
+				avatarUrl: local.getMxcAvatarUrl() ?? undefined,
+				memberCount: local.getJoinedMemberCount(),
+				isSpace,
+				nsfw: readKovenNsfw(local),
+			};
+		}
+		// Path 2 — MSC3266 summary.  Synapse implements this; matrix-
+		// js-sdk wraps it as `getRoomSummary`.  Errors fall through
+		// (some servers / cross-instance scenarios don't support it).
+		try {
+			const summary = await c.getRoomSummary(idOrAlias);
+			return {
+				roomId: (summary.room_id ?? idOrAlias) as RoomId,
+				name: summary.name ?? idOrAlias,
+				topic: summary.topic,
+				avatarUrl: summary.avatar_url ?? undefined,
+				memberCount: summary.num_joined_members,
+				isSpace: summary.room_type === "m.space",
+				// No NSFW signal from MSC3266 — leave undefined.
+			};
+		} catch (err) {
+			console.warn("previewTarget: getRoomSummary failed", err);
+			return null;
+		}
+	}
+
+	/**
 	 * Join a space along with every public/joinable child room it
 	 * declares — Discord-style "join the server, get all channels".
 	 * Uses Matrix's hierarchy API (MSC2946) to enumerate children

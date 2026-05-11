@@ -21,6 +21,8 @@
 import React from "react";
 import type { ReactElement, ReactNode } from "react";
 import { linkify } from "./linkify";
+import { findInlineRoomMentions } from "./inviteLink";
+import { RoomMentionPill } from "@/components/RoomMentionPill";
 import { cn } from "./utils";
 
 /** Plaintext mention regex.  Matches:
@@ -69,10 +71,19 @@ export function renderWithMentions(opts: RenderOpts): ReactNode[] {
 	let cursor = 0;
 	let key = 0;
 	const pushSegment = (segment: string) => {
-		// Run linkify on each non-mention segment so URLs inside the
-		// surrounding text still become anchors.  linkify returns
-		// React nodes already; reuse them directly with fresh keys.
-		const linked = linkify(segment);
+		// Each non-@-mention segment gets two passes:
+		//   1. findInlineRoomMentions tokenises Matrix room/space
+		//      ids, aliases, and our share URLs (including matrix.to)
+		//      into ranges.  Those ranges become RoomMentionPill
+		//      components.
+		//   2. Whatever's LEFT between mentions runs through linkify
+		//      so generic URLs (https://example.com, www.foo.bar, …)
+		//      still become regular anchors.
+		// Order matters: a `https://client.koven.chat/invite/!abc:s`
+		// must render as a room pill, not as a plain link, so room-
+		// mention detection runs first and consumes its byte range
+		// before linkify ever sees that substring.
+		const linked = linkifyWithRoomMentions(segment, tone);
 		for (const piece of linked) {
 			if (typeof piece === "string") {
 				parts.push(<React.Fragment key={key++}>{piece}</React.Fragment>);
@@ -126,12 +137,60 @@ export function renderWithMentions(opts: RenderOpts): ReactNode[] {
 	if (cursor < text.length) {
 		pushSegment(text.slice(cursor));
 	} else if (parts.length === 0) {
-		// No mentions found at all — fall through to plain linkify
-		// so the original behaviour is preserved bit-for-bit.
-		return linkify(text);
+		// No @-mentions found at all — still run the room-mention
+		// pipeline so a message that's just a pasted invite URL
+		// renders as a pill instead of a raw anchor.
+		return linkifyWithRoomMentions(text, tone);
 	}
 
 	return parts;
+}
+
+/** Inner helper: run room-mention tokenisation first, then linkify
+ * the gaps.  Exported only for tests / preview surfaces that want
+ * the same transform without the @-mention overlay (e.g. URL-
+ * preview cards reusing the same render style). */
+export function linkifyWithRoomMentions(text: string, tone: "self" | "other"): ReactNode[] {
+	const mentions = findInlineRoomMentions(text);
+	if (mentions.length === 0) return linkify(text);
+	const out: ReactNode[] = [];
+	let cursor = 0;
+	let key = 0;
+	for (const m of mentions) {
+		if (m.start > cursor) {
+			// Gap before the mention — linkify it so generic URLs
+			// in that range still get anchors.
+			const linked = linkify(text.slice(cursor, m.start));
+			for (const piece of linked) {
+				if (typeof piece === "string") {
+					out.push(<React.Fragment key={key++}>{piece}</React.Fragment>);
+				} else {
+					out.push(React.cloneElement(piece as ReactElement, { key: key++ }));
+				}
+			}
+		}
+		out.push(
+			<RoomMentionPill
+				key={key++}
+				intent={m.intent}
+				original={m.original}
+				tone={tone}
+			/>,
+		);
+		cursor = m.end;
+	}
+	// Tail after the last mention.
+	if (cursor < text.length) {
+		const linked = linkify(text.slice(cursor));
+		for (const piece of linked) {
+			if (typeof piece === "string") {
+				out.push(<React.Fragment key={key++}>{piece}</React.Fragment>);
+			} else {
+				out.push(React.cloneElement(piece as ReactElement, { key: key++ }));
+			}
+		}
+	}
+	return out;
 }
 
 function MentionPill({

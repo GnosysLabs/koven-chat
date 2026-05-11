@@ -132,6 +132,165 @@ export function parseShareIntent(input: string | URL | Location = window.locatio
 	return null;
 }
 
+/** Matrix id / alias regex shapes used by `findInlineRoomMentions`
+ * below.  Two patterns: `!id:server.tld` (room/space ids) and
+ * `#alias:server.tld` (canonical aliases).
+ *
+ * Constraints:
+ *   - Localpart accepts the Matrix-spec character class plus `+` /
+ *     `/` / `_` / `=` / `.` / `-` (matches MENTION_RE in
+ *     mentionRender.tsx for symmetry).
+ *   - Server part requires AT LEAST one dot — `!abc:foo` without
+ *     a TLD doesn't match.  This is the false-positive guard for
+ *     things like exclamation-pointed sentences ("really!:O").
+ *   - Word boundary on both sides via the `\b`-equivalent
+ *     pre/post-class so mid-word matches don't fire.
+ */
+const MATRIX_ID_INLINE_RE =
+	/(^|[^A-Za-z0-9_])([!#][A-Za-z0-9._=\-/+]+:[A-Za-z0-9.-]+\.[A-Za-z]{2,})/g;
+
+/** Hostnames matrix.to share URLs can use.  matrix.to is the
+ * universal Matrix landing page; older Element invites + a lot of
+ * federated clients still emit these.  Treated as equivalent to a
+ * koven invite URL when the path segment is a Matrix id or alias. */
+const MATRIX_TO_HOSTS: ReadonlySet<string> = new Set([
+	"matrix.to",
+	"www.matrix.to",
+]);
+
+/** Try to extract a ShareIntent from an arbitrary URL string —
+ * differs from `parseShareIntent` (which is keyed on our own host)
+ * by also recognising matrix.to and koven:// shapes pasted INTO
+ * message bodies.  Used by `findInlineRoomMentions` to spot share
+ * URLs the message-renderer should re-render as room pills.
+ *
+ * Returns null for URLs that aren't a Matrix-shaped invite. */
+export function parseShareLinkUrl(href: string): ShareIntent | null {
+	// koven://invite/... and koven://r/.../...
+	if (href.startsWith("koven://")) {
+		// parseShareIntent already handles this shape.  Reuse it
+		// instead of duplicating the parsing.
+		return parseShareIntent(href);
+	}
+	// HTTPS shapes.  Tolerate http:// for localhost dev environments
+	// (the desktop bundle runs the SPA from http://localhost:51420).
+	let u: URL;
+	try {
+		u = new URL(href);
+	} catch {
+		return null;
+	}
+	if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+
+	// Path 1: Our own host's /invite/* + /r/*/* — defers to
+	// parseShareIntent which already enforces the SHARE_HOSTS allow-
+	// list and parses the path shape.
+	if (SHARE_HOSTS.has(u.hostname)) {
+		return parseShareIntent(href);
+	}
+
+	// Path 2: matrix.to.  Format is
+	//   https://matrix.to/#/<id-or-alias>[/<eventId>]
+	// Note the `#` — matrix.to uses fragment-based routing, so we
+	// have to parse `u.hash` (which includes the leading `#`),
+	// strip the `#`, and walk path segments.
+	if (MATRIX_TO_HOSTS.has(u.hostname)) {
+		const frag = (u.hash.startsWith("#") ? u.hash.slice(1) : u.hash).replace(/^\/+|\/+$/g, "");
+		if (!frag) return null;
+		const segs = frag.split("/").map(s => decodeURIComponent(s));
+		// matrix.to URL-encodes the leading `!` / `#` as `%21` /
+		// `%23`; decodeURIComponent restores them.
+		const head = segs[0];
+		if (!head || !(head.startsWith("!") || head.startsWith("#") || head.startsWith("@"))) return null;
+		// We only handle room/space targets here — `@user`-shaped
+		// matrix.to URLs are user profiles, rendered as mentions by
+		// renderWithMentions, not as room pills.
+		if (head.startsWith("@")) return null;
+		const eventSeg = segs[1];
+		if (eventSeg && eventSeg.startsWith("$")) {
+			return { kind: "message", roomId: head, eventId: eventSeg };
+		}
+		return { kind: "invite", target: head };
+	}
+
+	return null;
+}
+
+/** Find every Matrix room/space mention inside a plaintext message
+ * body — both bare `!id:server` / `#alias:server` forms AND URLs
+ * pointing at our share routes / matrix.to.  Returns each match's
+ * byte range + ShareIntent so the renderer can splice in pills
+ * without re-running the regex.
+ *
+ * The output is sorted by start offset and is non-overlapping
+ * (matches consume their range so subsequent matches start after).
+ *
+ * Privacy note: this function ONLY tokenises.  It does NOT fetch
+ * preview metadata.  Auto-fetching arbitrary ids from message
+ * bodies would fan out HTTP requests to potentially-hostile
+ * federated servers; preview fetching happens lazily on click via
+ * the existing previewTarget path, not eagerly at render time.
+ */
+export interface InlineRoomMention {
+	start: number;
+	end: number;
+	intent: ShareIntent;
+	/** The exact substring that matched — preserved so the rendered
+	 * pill can fall back to this verbatim text if no preview is
+	 * available, and so the underlying `<a href>` keeps the original
+	 * URL for copy/right-click parity. */
+	original: string;
+}
+
+export function findInlineRoomMentions(text: string): InlineRoomMention[] {
+	const out: InlineRoomMention[] = [];
+
+	// Pass 1: URLs.  Match common share-URL shapes with a single
+	// regex so we don't have to call linkify-it twice.  The pattern
+	// is intentionally loose on the host (alphanum + dots + dashes)
+	// and trims trailing punctuation that's clearly sentence-end.
+	const URL_RE = /\b(https?:\/\/[A-Za-z0-9.-]+(?::\d+)?\/[^\s<>"]+|koven:\/\/[^\s<>"]+)/g;
+	let m: RegExpExecArray | null;
+	while ((m = URL_RE.exec(text)) !== null) {
+		let raw = m[1]!;
+		// Strip a single trailing closer if it looks like sentence
+		// punctuation — `https://foo/bar.` shouldn't include the
+		// period, `https://foo/bar)` shouldn't include the paren.
+		// Conservative; keeps interior punctuation intact.
+		const tail = /[.,;:)\]}>!?]$/.exec(raw);
+		if (tail) raw = raw.slice(0, -1);
+		const intent = parseShareLinkUrl(raw);
+		if (!intent) continue;
+		const start = m.index;
+		out.push({ start, end: start + raw.length, intent, original: raw });
+	}
+
+	// Pass 2: bare ids / aliases.  Skip ranges already consumed by
+	// pass 1 so a URL containing a matrix id (e.g. matrix.to URLs
+	// the URL regex caught) doesn't double-match.
+	const taken = new Set<number>();
+	for (const m of out) {
+		for (let i = m.start; i < m.end; i++) taken.add(i);
+	}
+	MATRIX_ID_INLINE_RE.lastIndex = 0;
+	while ((m = MATRIX_ID_INLINE_RE.exec(text)) !== null) {
+		const lead = m[1] ?? "";
+		const id = m[2]!;
+		const start = m.index + lead.length;
+		const end = start + id.length;
+		if (taken.has(start)) continue;
+		out.push({
+			start,
+			end,
+			intent: { kind: "invite", target: id },
+			original: id,
+		});
+	}
+
+	out.sort((a, b) => a.start - b.start);
+	return out;
+}
+
 /** Replace the current URL with the app root, without a navigation.
  * Used after a share link is consumed so a refresh doesn't re-trigger
  * the join + auto-navigate (which would be confusing if the user has

@@ -193,7 +193,7 @@ export function ExplorePane({
 					</div>
 					<h1 className="text-2xl font-semibold">Explore</h1>
 					<p className="text-sm text-muted-foreground mt-1 max-w-md">
-						Browse public spaces and rooms anyone can join on this server.
+						Browse public spaces anyone can join on this server.
 					</p>
 				</header>
 

@@ -37,6 +37,8 @@ import { listMyBots, deleteBot as apiDeleteBot, type BotSummary } from "@/lib/bo
 import { MemberList } from "@/components/MemberList";
 import { DmProfilePanel } from "@/components/DmProfilePanel";
 import { CreateRoomSheet } from "@/components/CreateRoomSheet";
+import { JoinConfirmSheet } from "@/components/JoinConfirmSheet";
+import { ShareIntentProvider } from "@/lib/shareIntentContext";
 import { CreateSpaceSheet } from "@/components/CreateSpaceSheet";
 import { MobileBlockScreen } from "@/components/MobileBlockScreen";
 import { StartDmSheet } from "@/components/StartDmSheet";
@@ -62,7 +64,7 @@ import { startFoundersRosterRefresh } from "@/lib/founders-cache";
 import { fetchUiaPassword } from "@/lib/auth";
 import { TransportContext } from "@/lib/transportContext";
 import { applyTheme, loadSettings, saveSettings, type Settings } from "@/state/settings";
-import type { Room, UserId } from "@koven/shared";
+import type { Room, Space, UserId } from "@koven/shared";
 import { ensureNotificationPermission, notify } from "@/lib/notifications";
 import { initialState, reduce } from "@/state/store";
 import type { RoomId, SpaceId } from "@koven/shared";
@@ -1002,6 +1004,16 @@ export default function App() {
 		roomsRef.current = state.rooms;
 	}, [state.rooms]);
 
+	// Same pattern for spaces — the share-intent membership check
+	// (deep links → confirmJoin) needs to know whether the user is
+	// already in the target space without going through React's
+	// closure-of-the-render-cycle, since the lookup happens inside
+	// async callbacks that may outlive the render that opened them.
+	const spacesRef = useRef<Space[]>([]);
+	useEffect(() => {
+		spacesRef.current = state.spaces;
+	}, [state.spaces]);
+
 	// Reader for the per-room notification level cache.  Lazy-loaded
 	// via dynamic import the first time a notification fires (avoids
 	// pulling notifyPrefs into the App.tsx initial bundle); cached on
@@ -1078,47 +1090,179 @@ export default function App() {
 	// so a refresh doesn't repeat the auto-navigate (which would be
 	// confusing if the user has since left the room or routed away).
 	const shareIntentConsumedRef = useRef(false);
-	// Consume a parsed share intent: join the room (idempotent for
-	// already-joined ones), pick the right active space so the room
-	// shows in the sidebar, then activate it.  Extracted so both
-	// the on-mount cold path (URL the SPA loaded with) and the
-	// running-app warm path (Tauri `deep-link` event) feed the same
-	// pipeline.
+
+	// Deep-link confirm-before-join state.  Held in one slot so the
+	// JoinConfirmSheet's "loading metadata", "loaded, awaiting
+	// click", "joining", and "join failed" states can all flow
+	// through the same prop set without four parallel useStates.
+	// Null = no pending intent (no sheet shown).
+	const [pendingJoin, setPendingJoin] = useState<{
+		intent: ShareIntent;
+		fallbackId: string;
+		preview: {
+			roomId: string;
+			name: string;
+			topic?: string;
+			avatarUrl?: string;
+			memberCount?: number;
+			isSpace: boolean;
+			nsfw?: boolean;
+		} | null;
+		loading: boolean;
+		joining: boolean;
+		error: string | null;
+	} | null>(null);
+
+	// Route a successfully-joined (or already-member) target into
+	// the right activeSpace + activeRoom.  Three branches:
+	//   - target is a SPACE id: select it as activeSpace, don't set
+	//     activeRoom (SpaceLanding renders).
+	//   - target is a ROOM id we're a member of: select its parent
+	//     space (or DMs / spaces_overview) AND select the room.
+	//   - target is a ROOM id we just joined: the Room object may
+	//     not be in roomsRef yet (matrix-js-sdk takes a sync round
+	//     trip to populate); we set activeRoom anyway so the SPA
+	//     remembers the intent — once the room lands in the sidebar
+	//     it'll already be selected.
+	const navigateToTarget = useCallback((targetId: string, isSpace: boolean) => {
+		if (isSpace) {
+			dispatch({ type: "set_active_space", space: { kind: "space", id: targetId as SpaceId } });
+			return;
+		}
+		const room = roomsRef.current.find(r => r.id === targetId);
+		if (room) {
+			if (room.kind === "dm") {
+				dispatch({ type: "set_active_space", space: { kind: "dms" } });
+			} else if (room.parentSpaceIds.length > 0) {
+				dispatch({
+					type: "set_active_space",
+					space: { kind: "space", id: room.parentSpaceIds[0] as SpaceId },
+				});
+			} else {
+				dispatch({ type: "set_active_space", space: { kind: "spaces_overview" } });
+			}
+		}
+		dispatch({ type: "set_active_room", roomId: targetId as RoomId });
+	}, []);
+
+	// Consume a parsed share intent.  Strategy:
+	//   1. Preview the target via matrix-js-sdk (local Room first, then
+	//      MSC3266 summary).  This gives us name, avatar, isSpace, NSFW
+	//      flag, member count.
+	//   2. If the preview resolves a roomId we already have a Room or
+	//      Space for, the user is already a member — navigate
+	//      immediately, no confirm card.
+	//   3. Else open the JoinConfirmSheet with the preview.  The card's
+	//      Join button runs the actual joinRoomById /
+	//      joinSpaceWithChildren + navigate.
+	//   4. If preview entirely fails (federated room the local server
+	//      can't see), the sheet still opens with a "blind join"
+	//      message; the user can choose to join or cancel.
 	const consumeShareIntent = useCallback(async (intent: ShareIntent) => {
 		if (!transport) return;
+		const target = intent.kind === "invite" ? intent.target : intent.roomId;
+		// Fast path: the target is a Matrix id (starts with `!`) AND
+		// we already see it in our joined rooms / spaces.  Skip both
+		// the preview fetch and the confirm sheet — open the target
+		// directly.  Bookmarks, re-clicks, and notification dispatches
+		// all flow through here, so the user sees zero friction.
+		const fastRoom = roomsRef.current.find(r => r.id === target);
+		const fastSpace = spacesRef.current.find(s => s.id === target);
+		if (fastRoom || fastSpace) {
+			navigateToTarget(target, !!fastSpace);
+			clearShareUrl();
+			return;
+		}
+		// Slow path: not obviously a member.  Open the confirm sheet
+		// in loading state so the user gets instant feedback that the
+		// click registered, then fetch preview metadata async.
+		setPendingJoin({
+			intent,
+			fallbackId: target,
+			preview: null,
+			loading: true,
+			joining: false,
+			error: null,
+		});
 		try {
-			let roomId: string;
-			if (intent.kind === "invite") {
-				// joinRoomById is idempotent — already-joined rooms
-				// resolve immediately to their roomId.  Aliases get
-				// resolved server-side as part of the join.
-				roomId = await transport.joinRoomById(intent.target);
-			} else {
-				roomId = intent.roomId;
-			}
-			// Pick the right "active space" so the room actually
-			// shows up in the rendered list.  Reuses the same
-			// resolution logic as openRoomFromNotification.
-			const room = roomsRef.current.find(r => r.id === roomId);
-			if (room) {
-				if (room.kind === "dm") {
-					dispatch({ type: "set_active_space", space: { kind: "dms" } });
-				} else if (room.parentSpaceIds.length > 0) {
-					dispatch({
-						type: "set_active_space",
-						space: { kind: "space", id: room.parentSpaceIds[0] as SpaceId },
-					});
-				} else {
-					dispatch({ type: "set_active_space", space: { kind: "spaces_overview" } });
+			const preview = await transport.previewTarget(target);
+			// Alias case: previewTarget resolved an alias to a real
+			// roomId; re-check membership using the resolved id so
+			// pre-joined aliases don't surface the confirm card.
+			const resolvedId = preview?.roomId ?? target;
+			if (preview && resolvedId !== target) {
+				const r2 = roomsRef.current.find(r => r.id === resolvedId);
+				const s2 = spacesRef.current.find(s => s.id === resolvedId);
+				if (r2 || s2) {
+					setPendingJoin(null);
+					navigateToTarget(resolvedId, preview.isSpace);
+					clearShareUrl();
+					return;
 				}
 			}
-			dispatch({ type: "set_active_room", roomId: roomId as RoomId });
+			// Not a member; surface the confirm sheet with whatever
+			// metadata we got (null preview = blind join path).
+			setPendingJoin(p => p && p.intent === intent ? { ...p, preview, loading: false } : p);
 		} catch (err) {
-			console.warn("share-intent: failed to consume", intent, err);
-		} finally {
-			clearShareUrl();
+			console.warn("share-intent: preview failed", intent, err);
+			setPendingJoin(p => p && p.intent === intent ? { ...p, preview: null, loading: false } : p);
 		}
-	}, [transport]);
+	}, [transport, navigateToTarget]);
+
+	// Confirm handler — runs when the user clicks Join in the sheet.
+	// Splits on isSpace because spaces use joinSpaceWithChildren
+	// (Discord-style cascade), rooms use the plain joinRoomById.
+	// Failures keep the sheet open with the error string so the user
+	// can read it and decide whether to cancel or retry (one-click).
+	// Memoized context value for inline room-mention pills.  Stable
+	// across renders unless rooms/spaces/transport change, so pills
+	// don't churn on every App-level state update.  Note rooms /
+	// spaces here are the LIVE state.rooms / state.spaces (the same
+	// arrays react re-renders on); refs would be stale.
+	const shareIntentContextValue = useMemo(() => ({
+		open: consumeShareIntent,
+		rooms: state.rooms,
+		spaces: state.spaces,
+	}), [consumeShareIntent, state.rooms, state.spaces]);
+
+	const confirmJoinShareIntent = useCallback(async () => {
+		const current = pendingJoin;
+		if (!current || !transport) return;
+		setPendingJoin(p => p && p.intent === current.intent ? { ...p, joining: true, error: null } : p);
+		try {
+			const target = current.fallbackId;
+			const isSpace = current.preview?.isSpace ?? false;
+			// If the target is NSFW-flagged and the viewer hasn't yet
+			// opted into NSFW visibility, the act of clicking Join in
+			// the confirm sheet is itself explicit consent — they saw
+			// the warning pill before clicking.  Flip the pref so
+			// joinSpaceWithChildren includes any NSFW child rooms in
+			// the cascade, and so Explore / future invites don't keep
+			// nagging.  Mirror of the existing matrix-invite NSFW gate
+			// behavior in nsfwGate's onConfirm.
+			if (current.preview?.nsfw && !settings.showNsfw) {
+				try {
+					await transport.setNsfwPreference(true);
+					setSettings(s => ({ ...s, showNsfw: true }));
+				} catch (err) {
+					console.warn("share-intent: NSFW pref flip failed", err);
+				}
+			}
+			let resolvedId: string;
+			if (isSpace) {
+				const result = await transport.joinSpaceWithChildren(target);
+				resolvedId = result.spaceId;
+			} else {
+				resolvedId = await transport.joinRoomById(target);
+			}
+			setPendingJoin(null);
+			navigateToTarget(resolvedId, isSpace);
+			clearShareUrl();
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			setPendingJoin(p => p && p.intent === current.intent ? { ...p, joining: false, error: msg } : p);
+		}
+	}, [pendingJoin, transport, navigateToTarget, settings.showNsfw]);
 
 	useEffect(() => {
 		if (shareIntentConsumedRef.current) return;
@@ -1748,6 +1892,7 @@ export default function App() {
 
 	return (
 		<TransportContext.Provider value={transport}>
+		<ShareIntentProvider value={shareIntentContextValue}>
 		<div className="h-full flex flex-col">
 			{/* Hidden audio sinks for every joined remote participant.
 			    Lives at the App level so audio survives navigation
@@ -2524,6 +2669,22 @@ export default function App() {
 					accessToken={creds.access_token}
 				/>
 			)}
+			{/* Deep-link confirm-before-join sheet.  Opens whenever
+			    consumeShareIntent kicks off — stays open through the
+			    preview-fetch + join phases, closes on success /
+			    cancel.  Cancel just resets pendingJoin without
+			    joining; the user lands wherever they were. */}
+			<JoinConfirmSheet
+				open={!!pendingJoin}
+				onOpenChange={(o) => { if (!o) setPendingJoin(null); }}
+				preview={pendingJoin?.preview ?? null}
+				fallbackId={pendingJoin?.fallbackId ?? ""}
+				loading={pendingJoin?.loading ?? false}
+				joining={pendingJoin?.joining ?? false}
+				error={pendingJoin?.error ?? null}
+				nsfwOptedIn={!!settings.showNsfw}
+				onConfirm={confirmJoinShareIntent}
+			/>
 			<CreateRoomSheet
 				open={createRoomOpen}
 				onOpenChange={setCreateRoomOpen}
@@ -2843,6 +3004,7 @@ export default function App() {
 				/>
 			)}
 		</div>
+		</ShareIntentProvider>
 		</TransportContext.Provider>
 	);
 }
