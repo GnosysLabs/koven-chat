@@ -32,7 +32,7 @@ import { useTransport } from "@/lib/transportContext";
 import { fetchRoomPreview, useRoomPreview } from "@/lib/roomPreviewCache";
 import type { ShareIntent } from "@/lib/inviteLink";
 import { cn } from "@/lib/utils";
-import { EyeOff, Globe, Hash, Lock } from "lucide-react";
+import { Hash, LayoutGrid, Lock } from "lucide-react";
 
 export interface RoomMentionPillProps {
 	/** The parsed intent the pill represents — could be invite-shaped
@@ -81,7 +81,6 @@ export function RoomMentionPill({ intent, original, tone = "other" }: RoomMentio
 	}, [transport, target, localRoom, localSpace, cachedPreview]);
 
 	const isSpace = !!localSpace || cachedPreview?.isSpace === true;
-	const isPrivateSpace = localSpace?.kind === "private";
 	const isEncrypted = !!localRoom?.encrypted;
 	const isDm = localRoom?.kind === "dm";
 
@@ -104,15 +103,17 @@ export function RoomMentionPill({ intent, original, tone = "other" }: RoomMentio
 		return target.length > 24 ? `${target.slice(0, 21)}…` : target;
 	})();
 
-	// Icon selection.  Encryption → Lock, private space → EyeOff,
-	// public space → Globe, room → Hash.  Cached previews give us
-	// isSpace + nsfw but no public/private signal, so cached
-	// spaces fall back to Globe rather than guessing.  DMs render
-	// generically (Hash) so a DM permalink doesn't leak the
-	// counterparty's identity into the pill label.
+	// Icon selection.  Encryption wins (Lock), then spaces (the
+	// LayoutGrid icon matching the marketing site's "Spaces & rooms"
+	// feature tile), else rooms get Hash.  DMs render generically
+	// (Hash) so a DM permalink doesn't leak the counterparty's
+	// identity through the pill icon.  We don't surface a public-vs-
+	// private distinction on the pill — Discord doesn't either, and
+	// the visibility is implicit in whether the viewer can click
+	// through to join.
 	const Icon = (() => {
 		if (isEncrypted) return Lock;
-		if (isSpace) return isPrivateSpace ? EyeOff : Globe;
+		if (isSpace) return LayoutGrid;
 		return Hash;
 	})();
 
