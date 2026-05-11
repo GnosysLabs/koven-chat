@@ -5,7 +5,7 @@
 // chronological.  Membership of the active room is tracked separately
 // so the UI can render a member list without re-querying the SDK.
 
-import type { CollapseAggregate, EventId, FlagAggregate, Member, Message, PollAggregate, ReactionAggregate, Room, RoomId, Space, SpaceId, UserId } from "@koven/shared";
+import type { CollapseAggregate, EventId, FlagAggregate, Member, Message, PollAggregate, ReactionAggregate, Room, RoomId, Space, SpaceId, SpaceInvite, UserId } from "@koven/shared";
 import type { CollapseEventLite, FlagEventLite, PollEndEvent, PollResponseEvent, ReactionEvent, SyncState } from "@/lib/matrix";
 
 // Per-message reactions, keyed by message event id.
@@ -71,6 +71,13 @@ export interface AppState {
 	syncState: SyncState;
 	rooms: Room[];
 	spaces: Space[];
+	// Pending SPACE invites (room invites continue to live on the
+	// rooms array as `isInvite=true`, surfaced inline in RoomList).
+	// Spaces split out because the SpaceBar can't host inline
+	// Accept / Decline UI and because letting invite-state spaces
+	// fall into `spaces` would re-create the bug where an NSFW space
+	// name + avatar surface in SpaceBar before the user has accepted.
+	spaceInvites: SpaceInvite[];
 	messagesByRoom: Map<RoomId, Message[]>;
 	// Set of room ids whose initial timeline page has finished
 	// loading.  Distinct from `messagesByRoom.has(roomId)` because
@@ -114,6 +121,7 @@ export const initialState: AppState = {
 	syncState: "preparing",
 	rooms: [],
 	spaces: [],
+	spaceInvites: [],
 	messagesByRoom: new Map(),
 	loadedTimelines: new Set(),
 	membersByRoom: new Map(),
@@ -139,6 +147,7 @@ export type Action =
 	| { type: "sync_state"; state: SyncState }
 	| { type: "rooms_updated"; rooms: Room[] }
 	| { type: "spaces_updated"; spaces: Space[] }
+	| { type: "space_invites_updated"; invites: SpaceInvite[] }
 	| { type: "messages_loaded"; roomId: RoomId; messages: Message[] }
 	| { type: "message_arrived"; message: Message; live: boolean }
 	| { type: "message_redacted"; roomId: RoomId; eventId: EventId }
@@ -168,6 +177,9 @@ export function reduce(state: AppState, action: Action): AppState {
 
 		case "spaces_updated":
 			return { ...state, spaces: action.spaces };
+
+		case "space_invites_updated":
+			return { ...state, spaceInvites: action.invites };
 
 		case "messages_loaded": {
 			const next = new Map(state.messagesByRoom);

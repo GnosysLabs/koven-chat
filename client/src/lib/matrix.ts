@@ -25,6 +25,7 @@ import type {
 	MessageKind,
 	Space,
 	SpaceId,
+	SpaceInvite,
 	UserId,
 	RoomId,
 	EventId,
@@ -289,6 +290,12 @@ export interface MatrixHandlers {
 	onSyncState(state: SyncState): void;
 	onRoomsUpdated(rooms: Room[]): void;
 	onSpacesUpdated(spaces: Space[]): void;
+	// Pending SPACE invites only.  Room invites continue to surface
+	// via onRoomsUpdated (with `isInvite=true`) so RoomList's inline
+	// Requests section keeps working.  Spaces split out because the
+	// SpaceBar can't host inline Accept/Decline UI; the consumer
+	// renders a dedicated banner + sheet instead.
+	onSpaceInvitesUpdated(invites: SpaceInvite[]): void;
 	onMessage(msg: Message, options: { live: boolean }): void;
 	// Fires when a redaction event arrives that targets a real
 	// message bubble (self-delete, bot-owner-delete, mod kick of a
@@ -3504,6 +3511,12 @@ export class MatrixTransport {
 		await c.leave(roomId);
 		await c.forget(roomId).catch(() => {/* ok if not supported */});
 		this.emitRoomList();
+		// Space invites flow through the same call (spaces are rooms
+		// with type=m.space at the Matrix layer).  Emit the space
+		// list too so the PendingInvitesPill clears immediately after
+		// a decline, otherwise the pill would linger until something
+		// else triggered a space-list refresh.
+		this.emitSpaceList();
 	}
 
 	/**
@@ -3885,11 +3898,63 @@ export class MatrixTransport {
 	/** Pull spaces as our shared `Space` shape, sorted alpha. */
 	getSpaces(): Space[] {
 		if (!this.client) return [];
+		// Only joined spaces render in SpaceBar.  Invite-state spaces
+		// are explicitly EXCLUDED here so a pending invite can't
+		// silently appear as if it were already a member space, which
+		// was a privacy / NSFW-gate bypass: an NSFW space's name and
+		// avatar would surface in the user's SpaceBar before they had
+		// any chance to accept or decline.  Pending invites surface
+		// through getPendingSpaceInvites() and the PendingInvitesPill
+		// instead.
 		return this.client.getRooms()
 			.filter(r => this.isSpace(r))
-			.filter(r => isLiveMembership(r.getMyMembership()))
+			.filter(r => r.getMyMembership() === "join")
 			.map(r => this.sdkRoomToSpace(r))
 			.sort((a, b) => a.name.localeCompare(b.name));
+	}
+
+	/**
+	 * Pending space invites the user hasn't accepted or declined.
+	 * Returned with enough preview data (name, topic, avatar,
+	 * inviter, NSFW flag, joined-member count) for the consumer to
+	 * render either a "1 NSFW Space invite pending" pill or a full
+	 * details sheet with Accept / Decline controls.
+	 *
+	 * For NSFW invites the SAME data is returned regardless of the
+	 * user's NSFW preference: the caller is responsible for hiding
+	 * name / avatar in the surface UI until the user explicitly
+	 * taps in.  Returning everything here keeps the gate UI free to
+	 * blur or redact selectively; selectively withholding fields
+	 * here would force the gate to round-trip another fetch.
+	 */
+	getPendingSpaceInvites(): SpaceInvite[] {
+		const c = this.client;
+		if (!c) return [];
+		return c.getRooms()
+			.filter(r => this.isSpace(r))
+			.filter(r => r.getMyMembership() === "invite")
+			.map(r => this.sdkRoomToSpaceInvite(r))
+			.sort((a, b) => a.name.localeCompare(b.name));
+	}
+
+	private sdkRoomToSpaceInvite(r: SdkRoom): SpaceInvite {
+		const inviter = r.getDMInviter() ?? undefined;
+		// Member count for invites: matrix-js-sdk's getJoinedMemberCount
+		// reads `m.joined_member_count` from invite_state when present.
+		// Falls back to counting joined members the SDK has seen, which
+		// may be 0 for pre-accept invites where Synapse forwards only a
+		// minimal slice of state.  `undefined` lets the UI omit the
+		// member-count line entirely rather than showing a misleading 0.
+		const memberCount = r.getJoinedMemberCount();
+		return {
+			id: r.roomId as SpaceId,
+			name: r.name || (r.roomId as string),
+			topic: r.currentState.getStateEvents("m.room.topic", "")?.getContent().topic as string | undefined,
+			avatarUrl: r.getMxcAvatarUrl() ?? undefined,
+			memberCount: memberCount > 0 ? memberCount : undefined,
+			inviter: inviter as UserId | undefined,
+			isNsfw: readKovenNsfw(r),
+		};
 	}
 
 	private isSpace(r: SdkRoom): boolean {
@@ -4614,6 +4679,13 @@ export class MatrixTransport {
 		this.spaceListEmitPending = requestAnimationFrame(() => {
 			this.spaceListEmitPending = null;
 			this.handlers.onSpacesUpdated(this.getSpaces());
+			// Pending invites share the same emit lifecycle: anything
+			// that mutates space-shaped state (MyMembership flip on a
+			// space, new invite arriving, accept / decline / leave) is
+			// already calling emitSpaceList, so piggybacking the invite
+			// list here keeps both surfaces in lockstep without a
+			// second debounce or a parallel listener wiring.
+			this.handlers.onSpaceInvitesUpdated(this.getPendingSpaceInvites());
 		});
 	}
 

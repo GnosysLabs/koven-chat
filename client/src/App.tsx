@@ -57,6 +57,8 @@ import { fetchIntegrationsStatus } from "@/lib/giphy";
 import { ENGINE_URL } from "@/lib/urls";
 import { setAppBadge } from "@/lib/appBadge";
 import { NsfwAcceptDialog } from "@/components/NsfwAcceptDialog";
+import { PendingInvitesPill } from "@/components/PendingInvitesPill";
+import { PendingInvitesSheet } from "@/components/PendingInvitesSheet";
 import { AddExistingRoomDialog } from "@/components/AddExistingRoomDialog";
 import { useCollapsedRooms } from "@/lib/collapsedRooms";
 import { fetchAllBotMxids } from "@/lib/bots-cache";
@@ -270,6 +272,12 @@ export default function App() {
 	// because it isn't really a chat surface; pressing any other
 	// tab clears it without disturbing the underlying activeSpace.
 	const [mobileMeOpen, setMobileMeOpen] = useState(false);
+	// Pending-space-invites sheet open flag.  The pill banner above
+	// the main content area sets this true when tapped; the sheet
+	// itself owns the per-invite Accept / Decline buttons.  Decoupled
+	// from the invite list so the sheet stays open while the user
+	// processes multiple invites in a row.
+	const [pendingInvitesOpen, setPendingInvitesOpen] = useState(false);
 	const [editingSpaceId, setEditingSpaceId] = useState<SpaceId | null>(null);
 	const [editingRoomId, setEditingRoomId] = useState<RoomId | null>(null);
 	// Target of the active invite dialog: a room or space id.  Null
@@ -564,6 +572,7 @@ export default function App() {
 			onSyncState: (s: SyncState) => dispatch({ type: "sync_state", state: s }),
 			onRoomsUpdated: rooms => dispatch({ type: "rooms_updated", rooms }),
 			onSpacesUpdated: spaces => dispatch({ type: "spaces_updated", spaces }),
+			onSpaceInvitesUpdated: invites => dispatch({ type: "space_invites_updated", invites }),
 			onMessage: (message, { live }) => {
 				dispatch({ type: "message_arrived", message, live });
 				// Mark-as-read for messages arriving in the room
@@ -2030,6 +2039,10 @@ export default function App() {
 					{bootError ? `Connection error: ${bootError}` : `Sync: ${state.syncState}`}
 				</div>
 			)}
+			<PendingInvitesPill
+				invites={state.spaceInvites}
+				onOpen={() => setPendingInvitesOpen(true)}
+			/>
 			{/* Mobile-only top bar.  Single-column shell can't show
 			    list + chat side-by-side, so we provide explicit
 			    back navigation:
@@ -3052,6 +3065,32 @@ export default function App() {
 								dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
 							}
 						}
+					}
+				}}
+			/>
+			<PendingInvitesSheet
+				open={pendingInvitesOpen && state.spaceInvites.length > 0}
+				onOpenChange={setPendingInvitesOpen}
+				invites={state.spaceInvites}
+				nsfwOptedIn={!!settings.showNsfw}
+				onAccept={async (id) => {
+					// Route through the existing gate: it surfaces the
+					// NSFW dialog when the invite is flagged and the
+					// viewer hasn't opted in, and it triggers the
+					// engine-side cascade-on-join so child rooms get
+					// pulled in on accept.  acceptInviteWithGate
+					// returns null when it deferred behind the NSFW
+					// dialog; that's not an error here, the gate
+					// dialog renders separately and will finish the
+					// join itself.
+					await acceptInviteWithGate(id as RoomId);
+				}}
+				onDecline={async (id) => {
+					if (!transport) return;
+					try {
+						await transport.declineInvite(id as RoomId);
+					} catch (e) {
+						dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
 					}
 				}}
 			/>

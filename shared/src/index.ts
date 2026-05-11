@@ -131,6 +131,30 @@ export interface Space {
 	nsfw: boolean;
 }
 
+// Pending space invite.  Spaces and rooms differ in how pending
+// invites surface in the SPA: room invites land in RoomList as
+// inline "Requests" rows that already have Accept / Decline / NSFW
+// gate handling.  Space invites need their own surface (the SpaceBar
+// is a column of icons with no room for inline preview), so this
+// type carries everything PendingInvitesSheet renders + everything
+// the NSFW gate needs to decide whether to suppress the preview.
+//
+// `isNsfw` reflects the `chat.koven.nsfw` state event in the
+// invite_state Synapse forwards (configured via
+// `room_invite_state_types` in homeserver.yaml).  When the
+// homeserver omits the type, this falls back to false and the
+// post-accept dialog catches it instead, but the preferred path is
+// the pre-accept gate driven by this flag.
+export interface SpaceInvite {
+	id: SpaceId;
+	name: string;
+	topic?: string;
+	avatarUrl?: string;
+	memberCount?: number;
+	inviter?: UserId;
+	isNsfw: boolean;
+}
+
 export interface Member {
 	userId: UserId;
 	displayName: string;
