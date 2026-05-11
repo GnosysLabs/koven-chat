@@ -163,9 +163,18 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 				video: activeCall.defaults?.video ?? false,
 			},
 		}).catch(err => {
-			setError(err instanceof Error ? err.message : String(err));
-			setPhase("idle");
-			setActiveCall(null);
+			// CRITICAL — keep activeCall + phase in place so the
+			// InCallPane stays mounted and can SHOW the user the
+			// error.  Tearing state down silently (the previous
+			// behavior) made failures invisible: the UI just
+			// vanished back to chat with no indication of what
+			// went wrong.  The user can hit Cancel to clear, or
+			// (eventually) Retry once the underlying issue is
+			// fixed.  Logged loud so it's grep-able in dev tools
+			// and the desktop app's console.
+			const msg = err instanceof Error ? err.message : String(err);
+			console.error("CallProvider: initMeeting failed", err);
+			setError(msg);
 		});
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [activeCall?.authToken]);

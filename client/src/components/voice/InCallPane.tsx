@@ -4,11 +4,10 @@
 // device pickers + Join button) and the in-call grid based on
 // the CallProvider's phase machine.
 //
-// Connecting state shows a centered spinner so the user has
-// something to watch while the SDK opens its websocket to
-// Cloudflare's signaling server.  Pre-join + joined render their
-// existing components.  Idle returns null (the parent shouldn't
-// have mounted us in that case anyway, but defensive).
+// Connecting state shows a centered spinner — OR an error message
+// if the SDK failed to open its websocket / acquire media / get a
+// valid token.  Errors are visible because the previous "kill
+// state silently on failure" path made bugs invisible.
 //
 // onJoined / onLeaveRequested route through the context so the
 // rest of the app (mini-strip, audio sink, RoomVoiceBar) stays
@@ -17,17 +16,37 @@
 import { useCall } from "@/lib/call-context";
 import { PreJoinScreen } from "@/components/voice/PreJoinScreen";
 import { CallView } from "@/components/voice/CallView";
+import { Button } from "@/components/ui/button";
 
 export interface InCallPaneProps {
 	roomName: string;
 }
 
 export function InCallPane({ roomName }: InCallPaneProps) {
-	const { phase, confirmJoin, endCall, activeCall } = useCall();
+	const { phase, confirmJoin, endCall, activeCall, error } = useCall();
 
 	if (phase === "idle") return null;
 
 	if (phase === "connecting") {
+		// Failure surface: the SDK init promise rejected.  Keep the
+		// call view mounted so the user can see + react to the
+		// error.  Cancel tears down; the user can re-Join from the
+		// Live bar afterwards (which mints a fresh single-use token).
+		if (error) {
+			return (
+				<div className="flex-1 flex flex-col items-center justify-center gap-4 min-h-0 px-6">
+					<div className="text-sm font-medium text-destructive text-center">
+						Couldn&rsquo;t connect to the call.
+					</div>
+					<div className="text-xs text-muted-foreground max-w-md text-center break-words">
+						{error}
+					</div>
+					<Button onClick={() => { void endCall(); }} variant="ghost" size="sm">
+						Cancel
+					</Button>
+				</div>
+			);
+		}
 		return (
 			<div className="flex-1 flex flex-col items-center justify-center gap-4 min-h-0">
 				<img
@@ -40,6 +59,9 @@ export function InCallPane({ roomName }: InCallPaneProps) {
 				<div className="text-sm text-muted-foreground">
 					Connecting to Live…
 				</div>
+				<Button onClick={() => { void endCall(); }} variant="ghost" size="sm">
+					Cancel
+				</Button>
 			</div>
 		);
 	}

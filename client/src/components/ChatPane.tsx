@@ -102,7 +102,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import { AlertTriangle, BarChart3, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Images, Lock, Network, Paperclip, Play, Scale, Settings, X } from "lucide-react";
+import { AlertTriangle, ArrowDown, BarChart3, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Images, Lock, Network, Paperclip, Play, Scale, Settings, X } from "lucide-react";
 
 export interface ChatPaneProps {
 	room: Room | null;
@@ -369,38 +369,83 @@ export function ChatPane({
 	// the bottom themselves.
 	const followBottomRef = useRef(true);
 	const prevRoomIdRef = useRef<string | undefined>(undefined);
+	// Mirror of !followBottomRef into React state so the floating
+	// "Jump to newest" affordance can render conditionally.  We
+	// keep the ref version too because the scroll handlers run
+	// outside the React render cycle and need synchronous reads.
+	const [scrolledUp, setScrolledUp] = useState(false);
 
-	// Room change: re-arm the lock and snap to bottom now.  We don't
-	// know the final scrollHeight here (images / avatars decode
-	// async) but the ResizeObserver below catches every subsequent
-	// growth and re-snaps.  `prevRoomIdRef` distinguishes "fresh
-	// room enter" from "messages.length changed in the same room."
+	// Re-arm the lock and snap to bottom on:
+	//   - room change (fresh enter into a different room)
+	//   - messages.length change (new message arrives, follow if at bottom)
+	//   - call view exit (the scroll container was UNMOUNTED while
+	//     in call view; remounting it gives us a fresh DOM node
+	//     with scrollTop=0 — without re-snapping here, the user
+	//     lands at the top of history every time they leave the
+	//     call view).
+	// `prevRoomIdRef` distinguishes "fresh room enter" from
+	// "messages.length changed in the same room"; `wasInCallViewRef`
+	// catches the call-view → chat-view transition where neither
+	// room.id nor messages.length necessarily changed.
+	const wasInCallViewRef = useRef(false);
 	useEffect(() => {
 		const el = scrollRef.current;
 		if (!el) return;
 		const isRoomChange = prevRoomIdRef.current !== room?.id;
+		const becameVisible = wasInCallViewRef.current && !isInActiveCallRoom;
 		prevRoomIdRef.current = room?.id;
-		if (isRoomChange) {
+		wasInCallViewRef.current = isInActiveCallRoom;
+		if (isRoomChange || becameVisible) {
 			followBottomRef.current = true;
+			// Wipe the "scrolled up" badge when transitioning
+			// rooms or exiting call view — onScroll will re-set
+			// it the moment a meaningful upward scroll happens.
+			setScrolledUp(false);
 		}
-		if (followBottomRef.current) {
-			el.scrollTop = el.scrollHeight;
-		}
-	}, [messages.length, room?.id]);
+		if (!followBottomRef.current) return;
+
+		// Belt-and-suspenders multi-snap.  scrollHeight at this
+		// moment reflects ONLY the content React has already laid
+		// out — async work (image / avatar decoding, web-fonts
+		// settling, lazy-decoded video posters) keeps growing the
+		// content for a few frames after.  A single scrollTop
+		// assignment lands at "current bottom," which becomes
+		// "above the new bottom" the moment another asset loads.
+		// The ResizeObserver re-snaps on every growth, but for the
+		// first few hundred ms after a room change there's a
+		// race where the snap hasn't bound yet (effect bind order)
+		// or has bound but missed the first growth.  Three snaps
+		// (now / rAF / 200ms) cover all of those windows for ~zero
+		// runtime cost.  Safe to over-snap because the
+		// followBottomRef gate at the top means we only re-snap
+		// while the user is at-or-near the bottom anyway.
+		const snap = () => {
+			if (followBottomRef.current && scrollRef.current) {
+				scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+			}
+		};
+		snap();
+		const raf = requestAnimationFrame(snap);
+		const t = window.setTimeout(snap, 200);
+		return () => {
+			cancelAnimationFrame(raf);
+			window.clearTimeout(t);
+		};
+	}, [messages.length, room?.id, isInActiveCallRoom]);
 
 	// Continuous re-snap on content resize.  ResizeObserver fires
-	// every time the inner content's height changes — the most
-	// common cases are async image / avatar decodes growing rows
-	// AFTER we already set scrollTop, paginated history loading
-	// from getRoomMessages, and reactions / flags getting added to
-	// existing rows.  As long as `followBottomRef.current` is true
-	// (user hasn't scrolled up), we keep the viewport pinned to the
-	// new bottom regardless of what's growing or how long it takes.
+	// every time the inner content's height changes — async image
+	// decodes, paginated history loading, reactions getting added,
+	// etc.  As long as `followBottomRef.current` is true (user
+	// hasn't scrolled up) we keep the viewport pinned to the bottom.
 	//
-	// Wrapper element exists only because ResizeObserver on the
-	// scroll container itself watches the BORDER box (clientHeight),
-	// not scrollHeight.  Observing the inner content gives us the
-	// timeline's true rendered height.
+	// IMPORTANT: re-binds when `isInActiveCallRoom` flips so the
+	// observer attaches to the freshly-mounted scroll container
+	// after the call view goes away.  The previous version had
+	// an empty dep list — if the container wasn't mounted at
+	// FIRST mount (because the call view was on top), the
+	// ResizeObserver never attached, and snapping was broken
+	// for the rest of the session.
 	useEffect(() => {
 		const inner = scrollContentRef.current;
 		const el = scrollRef.current;
@@ -412,7 +457,7 @@ export function ChatPane({
 		});
 		ro.observe(inner);
 		return () => ro.disconnect();
-	}, []);
+	}, [isInActiveCallRoom]);
 
 	// Watch user scroll position to maintain followBottomRef + drive
 	// the "load more history when scrolled near the top" pagination
@@ -451,7 +496,17 @@ export function ChatPane({
 		if (!el) return;
 		const onScroll = () => {
 			const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-			followBottomRef.current = distance < 100;
+			const atBottom = distance < 100;
+			followBottomRef.current = atBottom;
+			// Surface a floating "Jump to newest" affordance when
+			// the user has scrolled meaningfully back from the
+			// bottom (≥ 200px feels like a deliberate scroll-up
+			// rather than a stray wheel tick).  Hidden again the
+			// moment they're back near the bottom.  We compare
+			// React state before setState so we don't churn re-
+			// renders on every scroll event.
+			const wantShow = distance >= 200;
+			setScrolledUp(prev => (prev === wantShow ? prev : wantShow));
 
 			// Pagination trigger.  matrix-js-sdk's startClient pulls
 			// initialSyncLimit (200) events per room initially;
@@ -1004,7 +1059,8 @@ export function ChatPane({
 			    useLayoutEffect-based restore in the pagination
 			    handler hasn't fired yet (e.g. between the SDK's
 			    timeline mutation and React's commit). */}
-			<div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4" style={{ overflowAnchor: "auto" }}>
+			<div className="relative flex-1 min-h-0">
+			<div ref={scrollRef} className="absolute inset-0 overflow-y-auto px-4 py-4" style={{ overflowAnchor: "auto" }}>
 				{/* Inner content wrapper exists ONLY so the
 				    ResizeObserver in the auto-scroll effect has a
 				    single observable element whose size reflects the
@@ -1137,6 +1193,36 @@ export function ChatPane({
 					})
 				)}
 				</div>
+			</div>
+			{/* "Jump to newest" floating button — Discord / Slack
+			    pattern.  Appears at the bottom-center of the
+			    scroll area when the user has scrolled meaningfully
+			    back from the bottom (200px+).  Click → snap to
+			    bottom + re-arm the follow-bottom lock.  Hidden
+			    again the moment the user is back near the bottom. */}
+			{scrolledUp && (
+				<button
+					type="button"
+					onClick={() => {
+						const el = scrollRef.current;
+						if (!el) return;
+						el.scrollTop = el.scrollHeight;
+						followBottomRef.current = true;
+						setScrolledUp(false);
+					}}
+					className={cn(
+						"absolute bottom-3 left-1/2 -translate-x-1/2",
+						"flex items-center gap-1.5 px-3 py-1.5 rounded-full",
+						"bg-card border border-border shadow-lg text-xs font-medium",
+						"text-foreground hover:bg-accent transition-colors",
+					)}
+					aria-label="Jump to newest message"
+					title="Jump to newest message"
+				>
+					<ArrowDown className="h-3.5 w-3.5" />
+					Jump to newest
+				</button>
+			)}
 			</div>
 
 			{room.isInvite ? (
