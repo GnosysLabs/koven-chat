@@ -94,6 +94,7 @@ import { useMatrixAttachment, useMatrixVideoPoster } from "@/lib/useMatrixAttach
 import { useMatrixMedia } from "@/lib/useMatrixMedia";
 import { autoAvatarUrl } from "@/lib/avatar";
 import { useUrlPreview } from "@/lib/useUrlPreview";
+import type { UrlPreview } from "@/lib/matrix";
 import { useTransport } from "@/lib/transportContext";
 import { messageMentionsUser } from "@/lib/mention";
 import {
@@ -2814,48 +2815,111 @@ function UrlPreviewSlot({ text }: { text: string }) {
 		catch { return preview.siteName ?? ""; }
 	})();
 
-	// Two-column card when there's a thumbnail; full-width when there
-	// isn't.  The accent border on the left mirrors Discord/Slack and
-	// signals "this is metadata about a link, not a message itself."
-	const hasImage = !!imageUrl;
+	// Three layout modes, Twitter-card style:
+	//
+	//   "hero"    — image dominates, sitting on top of the card with
+	//               the text stack below.  Twitter's
+	//               summary_large_image.  Used when the OG image is
+	//               large enough to read at width (>= 400 px reported)
+	//               OR clearly landscape (aspect >= 1.3).
+	//
+	//   "compact" — small square thumbnail on the right, text on the
+	//               left.  Twitter's summary.  Used when an image
+	//               exists but is small, portrait, or has no reported
+	//               dimensions (safer default than ballooning a
+	//               favicon to hero size).
+	//
+	//   "text"    — no image at all.  Card shrinks to just the metadata
+	//               block.
+	//
+	// We trust Synapse's parsed `og:image:width` / `og:image:height`
+	// here.  Servers that don't expose them collapse to "compact" so
+	// the worst case is a tiny image rendered as a 96px thumbnail —
+	// never an icon stretched to fill a hero slot.
+	const layout: "hero" | "compact" | "text" = (() => {
+		if (!imageUrl) return "text";
+		const w = preview.imageWidth ?? 0;
+		const h = preview.imageHeight ?? 0;
+		if (w >= 400 || (w > 0 && h > 0 && w / h >= 1.3)) return "hero";
+		return "compact";
+	})();
+
 	return (
 		<a
 			href={preview.url}
 			target="_blank"
 			rel="noopener noreferrer"
 			className={cn(
-				"mt-1.5 block max-w-md rounded-md overflow-hidden bg-muted/40 border border-border",
-				"border-l-2 border-l-primary/70",
-				"hover:bg-muted/60 transition-colors",
+				"mt-1.5 block max-w-md rounded-xl overflow-hidden bg-muted/40 border border-border",
+				"hover:bg-muted/60 hover:border-border/80 transition-colors",
+				// No left accent stripe in the new design — Twitter /
+				// modern social cards rely on the rounded outline +
+				// hover state alone to signal "external link card."
 			)}
 		>
-			<div className={cn("flex", hasImage ? "gap-3" : "")}>
-				<div className="flex-1 min-w-0 px-3 py-2 space-y-0.5">
-					{(preview.siteName ?? host) && (
-						<div className="text-[10px] uppercase tracking-wider text-muted-foreground truncate">
-							{preview.siteName ?? host}
-						</div>
-					)}
-					<div className="text-sm font-medium leading-snug line-clamp-2">
-						{preview.title}
-					</div>
-					{preview.description && (
-						<div className="text-xs text-muted-foreground leading-snug line-clamp-2">
-							{preview.description}
-						</div>
-					)}
-				</div>
-				{hasImage && (
-					<div className="shrink-0 w-24 h-24 bg-muted-foreground/10">
+			{layout === "hero" && (
+				<>
+					{/* 2:1 hero with object-cover so portrait-leaning
+					    images crop centrally rather than letterboxing
+					    inside the card.  bg-muted-foreground/10 fills
+					    the box while the image is still streaming. */}
+					<div className="aspect-[2/1] w-full bg-muted-foreground/10 overflow-hidden">
 						<img
 							src={imageUrl}
 							alt=""
-							className="w-full h-full object-cover"
+							loading="lazy"
+							className="w-full h-full object-cover block"
 						/>
 					</div>
-				)}
-			</div>
+					<div className="px-3 py-2.5 space-y-1">
+						<UrlPreviewText preview={preview} host={host} />
+					</div>
+				</>
+			)}
+			{layout === "compact" && (
+				<div className="flex gap-3">
+					<div className="flex-1 min-w-0 px-3 py-2.5 space-y-1">
+						<UrlPreviewText preview={preview} host={host} />
+					</div>
+					<div className="shrink-0 w-24 h-24 bg-muted-foreground/10 overflow-hidden">
+						<img
+							src={imageUrl ?? ""}
+							alt=""
+							loading="lazy"
+							className="w-full h-full object-cover block"
+						/>
+					</div>
+				</div>
+			)}
+			{layout === "text" && (
+				<div className="px-3 py-2.5 space-y-1">
+					<UrlPreviewText preview={preview} host={host} />
+				</div>
+			)}
 		</a>
+	);
+}
+
+/** Shared text block for the three preview layouts.  Keeps the
+ * site / title / description rules in one place so the hero and
+ * compact variants stay visually consistent. */
+function UrlPreviewText({ preview, host }: { preview: UrlPreview; host: string }) {
+	return (
+		<>
+			{(preview.siteName ?? host) && (
+				<div className="text-[10px] uppercase tracking-wider text-muted-foreground truncate">
+					{preview.siteName ?? host}
+				</div>
+			)}
+			<div className="text-sm font-semibold leading-snug line-clamp-2 text-foreground">
+				{preview.title}
+			</div>
+			{preview.description && (
+				<div className="text-xs text-muted-foreground leading-snug line-clamp-3">
+					{preview.description}
+				</div>
+			)}
+		</>
 	);
 }
 
