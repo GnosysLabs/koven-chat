@@ -79,13 +79,17 @@ The engine prepends your system prompt, then `context_window` recent messages fr
 
 ### Tab 4: Knowledge
 
-Upload PDFs, text files, markdown, or plain documents and the engine indexes them per-bot. On every reply, the engine retrieves the top-N most relevant chunks and prepends them to the system prompt as `<knowledge>...</knowledge>` blocks. Lightweight RAG.
+Upload text-shaped reference material the bot can quote from on every reply.  Supported formats: `.txt`, `.md`, `.csv`, `.tsv`, `.log`, `.json`, `.yaml`, `.yml`, `.xml`, `.html`, `.docx`, `.rtf`.  Up to **10 MB per file** and **50 MB total per bot**.
 
-Use cases: company docs, character lore, a research corpus, an API reference.
+**How it actually reaches the model:** the engine prepends every uploaded file's *full text* to the system prompt on every call, each file headed by its filename, wrapped in a "Knowledge base" preamble.  No chunking, no embeddings, no retrieval.  That's a deliberate simplicity choice for the small-doc use case (FAQs, bios, project READMEs, API references) and you pay for the tokens directly via your own LLM key, so the cost ceiling is self-regulating.  If your corpus is large enough that inlining everything is expensive, split it across multiple bots scoped to topic.
 
-- Per-bot, scoped to the owner. No sharing across bots.
-- Files persist until you remove them from this tab.
+Use cases: company docs, character lore, a single API reference, a personal knowledge base for a research bot.
+
+- Per-bot, scoped to the owner.  No sharing across bots.
 - Storage is on the engine; nothing leaves your homeserver.
+- **File picks queue with the rest of your edits.**  Clicking *Upload files* adds the file to the list with a "queued" annotation; nothing leaves your browser until you hit **Save**.  Save commits the form and uploads in one go, with the new files joining the existing list immediately on success.
+
+**LLM hallucination warning:** the model only knows what's in the files plus what you put in the system prompt.  If you ask it about the platform's name and it answers something other than "Koven," that's a model prior leaking through, not your knowledge files.  The fix is a one-liner at the top of the system prompt: *"This platform is called Koven.  If you find yourself reaching for any other name, you are hallucinating and should stop."*  Anchoring the brand name in the *instructions* (not just the knowledge files) prevents the model from inventing a plausible-sounding alternative when asked to defend a citation.
 
 ### Tab 5: Tools (MCP)
 
@@ -272,8 +276,8 @@ When triggered, the engine constructs this payload:
 
 ```
 system:
+  <full text of every uploaded knowledge file, each headed by its filename>
   <your system prompt>
-  <knowledge chunks if any>
   <inbound-webhook context if applicable>
 
 assistant: <bot's most recent reply, if context window includes it>
@@ -301,7 +305,7 @@ The DM is end-to-end encrypted at the chat layer (Koven DMs always are). **The e
 
 Use DMs with bots for:
 - Private prompts you don't want a room to see.
-- One-on-one knowledge queries against your bot's RAG corpus.
+- One-on-one knowledge queries against your bot's uploaded reference files.
 - Quickly testing prompts before deploying the bot to a group.
 
 ---

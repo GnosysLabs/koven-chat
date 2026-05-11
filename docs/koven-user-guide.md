@@ -59,17 +59,20 @@ After creation you're the **founder**. Founders can add rooms, edit the space's 
 
 ### Joining a space
 
-Three ways:
+Four ways:
 
 1. **Explore.** Compass icon → search or browse → click a tile → "Join."
 2. **Invite link.** A friend sends you `https://client.koven.chat/invite/<id>` or `koven://invite/<id>`. Click it; if you're already in the space you jump straight in. If not, a confirmation card shows the space's name, avatar, and member count before you commit.
 3. **Pasted in a message.** A room or space id pasted in any chat renders as a clickable pill. Same confirmation flow.
+4. **A direct Matrix invite from another member.** When someone uses the in-app "Invite" affordance to put you on a space, the invite shows up as a pill at the top of the main view: *"1 Space invite pending · Tap to see details."* Tap it to open a dedicated sheet listing every pending space invite with the inviter, member count, topic, and Accept / Decline per row.  Invite-state spaces never silently appear in your SpaceBar; you see them only after you accept.
+
+When the invite is for an **NSFW-flagged space** and you haven't enabled NSFW content in Settings, the pill calls that out (*"1 NSFW Space invite pending"*) and the sheet hides the name, avatar, and topic behind a placeholder until you explicitly opt in.  Accepting an NSFW invite walks through the same gate dialog (Enable NSFW & accept / Cancel) the existing flag pipeline uses.
 
 When you join a space, **the engine automatically pulls you into every joinable room inside it** — Discord-style "join the server, get all the channels." Public rooms, knockable rooms, and restricted (in-space-members-only) rooms all auto-join. Invite-only rooms inside the space stay invite-gated.
 
 ### Leaving a space
 
-Right-click the space tile in the sidebar → **Leave space**. You drop from the space and every room cascade-joined you to. You can rejoin later if the space is public or you have an invite link.
+Right-click the space tile in the sidebar → **Leave space**. You drop from the space **and every child room you were cascade-joined to in it**, so other members no longer see you as a joined member of those rooms (matching your own view, where the space and its rooms are gone).  You can rejoin later if the space is public or you have an invite link.
 
 ### Encrypted spaces
 
@@ -174,6 +177,16 @@ Person icon in the sidebar → `+` → search a user → start.
 DMs are **always end-to-end encrypted at the chat layer**. The engine can't read DM messages, and the moderation pipeline doesn't apply (no flagging, no mod log).
 
 DMs list order is currently fixed (most-recently-active first); there's no per-user pinning for DMs.
+
+### Deleting a DM
+
+Open the DM, then in the right-side profile panel click **Delete conversation**.  A confirmation modal explains exactly what's about to happen:
+
+- Every message in the conversation is deleted server-side, atomically, for BOTH of you.
+- The other party is removed from the conversation; it disappears from their list on their next sync.
+- The action **cannot be undone**.  Media already downloaded to either side's disk (cached attachments) isn't reachable to undo, but the events that referenced it are gone.
+
+If you message that person again afterward, a fresh DM opens; there's no stale conversation to inherit.
 
 ### DM calls
 
@@ -354,6 +367,18 @@ Per-room notification levels (room context menu → Notifications):
 System-level: Koven uses native OS notifications on macOS, Windows, Linux. They appear in your notification center; clicking jumps to the relevant room.
 
 DMs default to **All** because that's the expected DM behavior.
+
+**What the bell shows:** DMs, @-mentions, and replies to your messages.  Room and space invites used to live there too, but they now have their own dedicated banner + sheet at the top of the app (see *Joining a space*), so the bell stays focused on the things you replied to or got pinged on.
+
+## Presence
+
+Koven shows whether the people in your conversations are around.  Three states:
+
+- **Online** (green dot): actively using the client right now.
+- **Away** (amber dot): signed in, but the client has been idle, the tab is in the background, or another window has focus.  Flips automatically after about 5 minutes of inactivity, instantly when you switch tabs or focus a different application.
+- **Offline** (no dot): not connected.
+
+You always see yourself as online in your own UI; everyone else sees your real state.  Bots always read as online (they don't go idle).  Encrypted DMs show the per-user dot in the DM row; in regular rooms the member list groups joined members into "Online" and "Offline / idle" sections.
 
 ---
 
