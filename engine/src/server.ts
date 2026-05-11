@@ -4208,8 +4208,12 @@ export function startServer(): void {
 								// sub-space children auto-cascaded; matches
 								// the joinSpaceWithChildren rule (sub-spaces
 								// stay explicit opt-in).
-								if (!(await isSpaceRoom(roomId))) continue;
+								const isSpace = await isSpaceRoom(roomId);
+								if (!isSpace) continue;
 								const childIds = await getSpaceChildRoomIds(roomId);
+								console.log(
+									`engine: space-join cascade — user=${userId} space=${roomId} children=${childIds.length}`,
+								);
 								for (const childId of childIds) {
 									try {
 										// Skip sub-spaces — same rule as

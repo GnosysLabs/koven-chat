@@ -198,9 +198,56 @@ export async function startBot(bot: BotRow): Promise<RunningBot> {
 			return;
 		}
 
-		client.joinRoom(roomId)
-			.then(() => console.log(`bot ${bot.mxid}: joined ${roomId} (invited by ${inviter}${isDm ? ", DM" : ""})`))
-			.catch((err) => console.warn(`bot ${bot.mxid}: failed to join ${roomId}`, err));
+		void (async () => {
+			try {
+				await client.joinRoom(roomId);
+				console.log(`bot ${bot.mxid}: joined ${roomId} (invited by ${inviter}${isDm ? ", DM" : ""})`);
+				// Discord-style space cascade.  When the invite was to a
+				// SPACE (m.space-typed room), the bot also auto-joins
+				// every joinable child room so the owner doesn't have
+				// to invite the bot to each room separately.  The
+				// engine has a symmetric cascade on m.room.member +
+				// isSpaceRoom (see server.ts), but doing it ALSO bot-
+				// side keeps the bot working even on instances whose
+				// engine isn't running the cascade code yet, and is
+				// the more reliable signal in any case (no admin-join
+				// round-trip; the bot uses its own credentials).
+				//
+				// Only fires when the joined room is itself a space —
+				// regular-room joins fall through with no extra work.
+				// Skipped for DMs (single-other-party rooms have no
+				// children to cascade to).
+				if (isDm) return;
+				try {
+					const joinedRoom = client.getRoom(roomId);
+					const createEvent = joinedRoom?.currentState.getStateEvents("m.room.create", "");
+					const roomType = (createEvent?.getContent() as { type?: string } | undefined)?.type;
+					if (roomType !== "m.space") return;
+					const hier = await client.getRoomHierarchy(roomId, 50, 3, false);
+					const rooms = (hier.rooms ?? []) as Array<{
+						room_id: string;
+						room_type?: string;
+						join_rule?: string;
+					}>;
+					for (const r of rooms) {
+						if (r.room_id === roomId) continue;             // skip the space itself
+						if (r.room_type === "m.space") continue;         // skip sub-spaces
+						const rule = r.join_rule ?? "public";
+						if (rule !== "public" && rule !== "knock" && rule !== "restricted") continue;
+						try {
+							await client.joinRoom(r.room_id);
+							console.log(`bot ${bot.mxid}: cascade-joined ${r.room_id} (child of ${roomId})`);
+						} catch (err) {
+							console.warn(`bot ${bot.mxid}: failed to cascade-join ${r.room_id}`, err);
+						}
+					}
+				} catch (err) {
+					console.warn(`bot ${bot.mxid}: space-cascade after joining ${roomId} failed`, err);
+				}
+			} catch (err) {
+				console.warn(`bot ${bot.mxid}: failed to join ${roomId}`, err);
+			}
+		})();
 	});
 
 	// Per-event dedupe so a message that arrives encrypted via
