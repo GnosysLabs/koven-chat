@@ -631,6 +631,18 @@ pub fn run() {
 				builder = builder.decorations(false);
 			}
 
+			// Enable DevTools in production builds.  Tauri release
+			// builds disable inspector by default, which leaves users
+			// (and us) with NO way to see console errors when the SPA
+			// misbehaves — every "silent failure" report becomes a
+			// guessing game.  Trade: anyone can right-click → Inspect
+			// and poke at the app, but a desktop app that loads a
+			// known SPA from localhost has no secrets to protect that
+			// inspection would expose — the same code is served from
+			// client.koven.chat where DevTools is always available
+			// anyway.  Win-win on debuggability.
+			builder = builder.devtools(true);
+
 			let builder_final = builder
 				// Inject a click + window.open interceptor that routes
 				// external URLs through the opener plugin.  Required

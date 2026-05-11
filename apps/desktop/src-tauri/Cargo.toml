@@ -1,6 +1,6 @@
 [package]
 name = "koven-desktop"
-version = "0.19.2"
+version = "0.19.3"
 description = "Koven desktop shell — Tauri WebView wrapping client.koven.chat with native window chrome, OS-routed external links, and a minisign-signed in-app updater."
 authors = ["Gnosys Labs"]
 edition = "2021"
@@ -22,7 +22,15 @@ tauri-build = { version = "2", features = [] }
 # a properly-bundled .AppImage with icons in the right places ends
 # up showing the generic placeholder.  Mirrors iris-linux; the cost
 # is a few KB on the release binary.
-tauri = { version = "2", features = ["image-png", "macos-private-api"] }
+# `devtools` enables the inspector in RELEASE builds.  Without this
+# flag, `WebviewWindowBuilder::devtools(true)` is a silent no-op in
+# release.  We keep it on permanently because the trade — anyone
+# can right-click → Inspect — is fine for an app that loads a
+# known SPA from localhost (no secrets to protect that the same
+# code on client.koven.chat doesn't already expose), and the
+# alternative ("user reports silent failure → we have no way to
+# see what happened") makes diagnosing prod bugs impossible.
+tauri = { version = "2", features = ["image-png", "macos-private-api", "devtools"] }
 tauri-plugin-opener = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-single-instance = "2"
