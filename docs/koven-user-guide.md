@@ -378,7 +378,7 @@ Koven shows whether the people in your conversations are around.  Three states:
 - **Away** (amber dot): signed in, but the client has been idle, the tab is in the background, or another window has focus.  Flips automatically after about 5 minutes of inactivity, instantly when you switch tabs or focus a different application.
 - **Offline** (no dot): not connected.
 
-You always see yourself as online in your own UI; everyone else sees your real state.  Bots always read as online (they don't go idle).  Encrypted DMs show the per-user dot in the DM row; in regular rooms the member list groups joined members into "Online" and "Offline / idle" sections.
+You always see yourself as online in your own UI; everyone else sees your real state.  Bots always read as online (they don't go idle).  Encrypted DMs show the per-user dot in the DM row; in regular rooms the member list separates joined members into **Online**, **Away**, **Bots**, and **Offline** sections so you can tell at a glance who's actually around for a real-time conversation.
 
 ---
 

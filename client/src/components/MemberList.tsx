@@ -76,11 +76,20 @@ function effectivePresence(m: Member, isBot: boolean): "online" | "unavailable" 
 	return m.presence ?? "offline";
 }
 
-/** Online section catches both "online" (active right now) and
- * "unavailable" (logged in but idle).  Both feel like "they're
- * around"; offline is the only meaningfully different bucket. */
-function isInOnlineSection(p: ReturnType<typeof effectivePresence>): boolean {
-	return p === "online" || p === "unavailable";
+/** Four sections in display order: Online (green), Away (amber,
+ * idle / hidden tab / blurred window), Bots, Offline.  Away is
+ * surfaced separately rather than folded into Online so the room
+ * roster signals who's actually around right now vs. who's
+ * technically logged in but unresponsive, which matters for
+ * coordinating real-time conversation.  Per-user dot colour is
+ * unchanged: green for online, amber for unavailable, nothing for
+ * offline. */
+function isOnlinePresence(p: ReturnType<typeof effectivePresence>): boolean {
+	return p === "online";
+}
+
+function isAwayPresence(p: ReturnType<typeof effectivePresence>): boolean {
+	return p === "unavailable";
 }
 
 export function MemberList({
@@ -191,12 +200,12 @@ export function MemberList({
 	const sortRows = (a: typeof decorated[number], b: typeof decorated[number]) =>
 		a.m.displayName.localeCompare(b.m.displayName);
 
-	// Three buckets: bots get their own section between online and
-	// offline.  Bots are excluded from the online bucket so we don't
-	// double-count them.
+	// Four buckets: Online → Away → Bots → Offline.  Bots are
+	// excluded from the human buckets so they don't double-count.
 	const bots    = decorated.filter(d => d.isBot).sort(sortRows);
-	const online  = decorated.filter(d => !d.isBot &&  isInOnlineSection(d.presence)).sort(sortRows);
-	const offline = decorated.filter(d => !d.isBot && !isInOnlineSection(d.presence)).sort(sortRows);
+	const online  = decorated.filter(d => !d.isBot && isOnlinePresence(d.presence)).sort(sortRows);
+	const away    = decorated.filter(d => !d.isBot && isAwayPresence(d.presence)).sort(sortRows);
+	const offline = decorated.filter(d => !d.isBot && !isOnlinePresence(d.presence) && !isAwayPresence(d.presence)).sort(sortRows);
 
 	return (
 		<aside className="w-56 border-l border-border bg-card flex flex-col">
@@ -238,6 +247,24 @@ export function MemberList({
 						{online.length > 0 && (
 							<Section label="Online" count={online.length}>
 								{online.map(d => {
+									const isSelf = d.m.userId === currentUserId;
+									return (
+										<MemberRow
+											key={d.m.userId}
+											member={d.m}
+											isSelf={isSelf}
+											isBot={d.isBot}
+											presence={d.presence}
+											onClick={() => onSelectMember(d.m.userId)}
+											onContextMenu={(e) => openContextMenu(e, { userId: d.m.userId, isBot: d.isBot, isSelf })}
+										/>
+									);
+								})}
+							</Section>
+						)}
+						{away.length > 0 && (
+							<Section label="Away" count={away.length}>
+								{away.map(d => {
 									const isSelf = d.m.userId === currentUserId;
 									return (
 										<MemberRow
