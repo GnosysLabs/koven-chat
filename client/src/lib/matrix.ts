@@ -4921,6 +4921,33 @@ export class MatrixTransport {
 		return msgs;
 	}
 
+	/** O(1) lookup of a single event's sender — drives the
+	 * "{displayName}'s message" label on inline message-permalink
+	 * pills.  Returns null when the room isn't joined locally,
+	 * the event hasn't been paginated in yet, or the event is a
+	 * non-message type (state events, reactions, etc).
+	 *
+	 * Uses matrix-js-sdk's `room.findEventById` which hits an
+	 * internal hash map — safe to call once per pill per render
+	 * without N*M timeline-walk cost.  Caller is responsible for
+	 * caching across renders if it wants to (see
+	 * messagePreviewCache.ts). */
+	getMessagePreview(roomId: RoomId, eventId: EventId): { senderDisplayName: string } | null {
+		const room = this.client?.getRoom(roomId);
+		if (!room) return null;
+		const event = room.findEventById(eventId);
+		if (!event) return null;
+		if (event.getType() !== "m.room.message") return null;
+		const sender = event.getSender();
+		if (!sender) return null;
+		// Prefer the room-scoped display name (what the message bubble
+		// itself renders) over the global profile — they can drift if
+		// the user set a per-room nick.
+		const member = room.getMember(sender);
+		const displayName = member?.name || sender;
+		return { senderDisplayName: displayName };
+	}
+
 	/** All reaction events currently visible for a room, oldest first.
 	 *
 	 * Two sources, merged + deduped because matrix-js-sdk stores

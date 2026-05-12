@@ -26,13 +26,14 @@
 //     icon.  No remote preview fetch — that happens on click via
 //     previewTarget inside the JoinConfirmSheet flow.
 
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { useShareIntent } from "@/lib/shareIntentContext";
 import { useTransport } from "@/lib/transportContext";
 import { fetchRoomPreview, useRoomPreview } from "@/lib/roomPreviewCache";
 import type { ShareIntent } from "@/lib/inviteLink";
+import type { EventId, RoomId } from "@koven/shared";
 import { cn } from "@/lib/utils";
-import { Hash, LayoutGrid, Lock } from "lucide-react";
+import { Hash, LayoutGrid, Lock, MessageSquare } from "lucide-react";
 
 export interface RoomMentionPillProps {
 	/** The parsed intent the pill represents — could be invite-shaped
@@ -54,6 +55,21 @@ export function RoomMentionPill({ intent, original, tone = "other" }: RoomMentio
 	const ctx = useShareIntent();
 	const transport = useTransport();
 	const target = intent.kind === "invite" ? intent.target : intent.roomId;
+
+	// Message permalinks: look up the referenced event locally so the
+	// pill can read "💬 Alice's message" instead of the generic
+	// "Message" placeholder.  Lookup is O(1) via matrix-js-sdk's
+	// internal hash, so this is safe to call on every render of every
+	// pill.  Null when the room isn't joined / the event hasn't been
+	// paginated in yet — caller falls back to "Message".
+	const messagePreview = useMemo(() => {
+		if (intent.kind !== "message") return null;
+		if (!transport) return null;
+		return transport.getMessagePreview(
+			intent.roomId as RoomId,
+			intent.eventId as EventId,
+		);
+	}, [transport, intent]);
 
 	// Tier 1: viewer is already a member.  Pure read from the
 	// snapshot threaded through context.  Cheapest; no fetch, no
@@ -92,6 +108,18 @@ export function RoomMentionPill({ intent, original, tone = "other" }: RoomMentio
 	// — the click flow will fetch and surface the real name in
 	// the JoinConfirmSheet.
 	const label = (() => {
+		// Message permalinks render as "{senderDisplayName}'s message"
+		// when we can resolve the sender, falling back to the generic
+		// "Message" when the event isn't reachable from this client.
+		// We strip a trailing "s" from "name's" → "name'" only in the
+		// rare apostrophe-s collision (display names ending in s);
+		// real display names like "James" still read fine as "James's
+		// message" (English style varies on this; we pick the form
+		// every chat client uses for "Alice's reply").
+		if (intent.kind === "message") {
+			if (messagePreview) return `${messagePreview.senderDisplayName}'s message`;
+			return "Message";
+		}
 		if (localSpace) return localSpace.name;
 		if (localRoom) return localRoom.name;
 		if (cachedPreview && cachedPreview !== null && cachedPreview.name) return cachedPreview.name;
@@ -99,19 +127,19 @@ export function RoomMentionPill({ intent, original, tone = "other" }: RoomMentio
 			const colon = target.indexOf(":");
 			return colon > 0 ? target.slice(0, colon) : target;
 		}
-		if (intent.kind === "message") return "Message";
 		return target.length > 24 ? `${target.slice(0, 21)}…` : target;
 	})();
 
-	// Icon selection.  Encryption wins (Lock), then spaces (the
-	// LayoutGrid icon matching the marketing site's "Spaces & rooms"
-	// feature tile), else rooms get Hash.  DMs render generically
-	// (Hash) so a DM permalink doesn't leak the counterparty's
-	// identity through the pill icon.  We don't surface a public-vs-
-	// private distinction on the pill — Discord doesn't either, and
-	// the visibility is implicit in whether the viewer can click
-	// through to join.
+	// Icon selection.  Encryption wins (Lock), then message-permalink
+	// gets the speech-bubble (MessageSquare), then spaces (LayoutGrid
+	// matching the marketing site's "Spaces & rooms" feature tile),
+	// else rooms get Hash.  DMs render generically (Hash) so a DM
+	// permalink doesn't leak the counterparty's identity through the
+	// pill icon.  We don't surface a public-vs-private distinction
+	// on the pill — Discord doesn't either, and the visibility is
+	// implicit in whether the viewer can click through to join.
 	const Icon = (() => {
+		if (intent.kind === "message") return MessageSquare;
 		if (isEncrypted) return Lock;
 		if (isSpace) return LayoutGrid;
 		return Hash;
@@ -146,9 +174,15 @@ export function RoomMentionPill({ intent, original, tone = "other" }: RoomMentio
 
 	// DMs shouldn't surface their "real name" (the other party) in
 	// a pill — that's a low-grade leak of who you DM with into any
-	// room where someone references the DM's permalink.  Render the
-	// generic "Direct message" label instead.
-	const safeLabel = isDm ? "Direct message" : label;
+	// room where someone references the DM's permalink.  Applies to
+	// both invite-shaped pills (room name == counterparty) AND
+	// message-shaped pills (sender == counterparty), so the
+	// suppression covers either: "{counterparty}'s message" pasted
+	// into a group chat would advertise the DM relationship just as
+	// directly as the room name would.
+	const safeLabel = isDm
+		? "Direct message"
+		: label;
 
 	return (
 		<a
