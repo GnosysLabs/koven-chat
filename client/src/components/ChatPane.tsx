@@ -147,6 +147,12 @@ export interface ChatPaneProps {
 	// (sender labels, reply-quote labels).  Default empty Set means
 	// no badges — safe pre-fetch state.
 	botMxids?: Set<string>;
+	// Service identities (engine appservice user, Synapse admin
+	// user) the SPA filters from "seen by" rosters so they don't
+	// appear as participants who read everything.  Distinct from
+	// botMxids: these aren't bots, just platform components that
+	// happen to be Matrix users on the homeserver.
+	serviceMxids?: Set<string>;
 	// Subset of botMxids the viewer owns — used to gate the trash
 	// button on bot messages.  Empty Set means the viewer has no
 	// bots; non-empty means show Delete on rows whose sender is in
@@ -268,6 +274,7 @@ export function ChatPane({
 	onSendMessage, onSendAttachment, onReact, onUnreact, onFlag, onUnflag, onAcceptInvite, onDeclineInvite, onInvite, onEditRoom,
 	isSuspended, onOpenModLog, onFlagRoom, collapsedRoomIds,
 	botMxids,
+	serviceMxids,
 	myOwnedBotMxids,
 	onDeleteMessage,
 	messagesLoaded,
@@ -1198,6 +1205,7 @@ export function ChatPane({
 								onMentionClick={(userId) => onOpenProfile?.(userId)}
 								onOpenSenderProfile={(userId) => onOpenProfile?.(userId)}
 								botMxids={botMxids}
+								serviceMxids={serviceMxids}
 								pollAggregate={pollsByMessage?.get(m.id)}
 								viewerUserId={viewerUserId}
 								onPollVote={onVoteOnPoll}
@@ -1632,7 +1640,7 @@ function MessageRow({
 	message, avatarMxc, continuesGroup, isFirst, flaggable, roomEncrypted,
 	reactions, flags, collapse, onReact, onReply, onFlag, onTogglePillFlag, onToggleReactionPill, isBot,
 	isOwnedBot, isHovered, onDelete,
-	isDm, receiptsVersion, memberAvatars, memberNames, mentionsViewer, onMentionClick, botMxids,
+	isDm, receiptsVersion, memberAvatars, memberNames, mentionsViewer, onMentionClick, botMxids, serviceMxids,
 	pollAggregate, viewerUserId, onPollVote, onPollEnd,
 	roomId, onQuote, onSendDmToSender, onBlockSender,
 	onOpenSenderProfile,
@@ -1706,6 +1714,11 @@ function MessageRow({
 	// receipts don't show up in the "seen by" stack — that count is
 	// for real readers, not the engine's auto-syncing bot clients.
 	botMxids?: Set<string>;
+	// Service identities (engine appservice, Synapse admin user).
+	// Filtered out of the seen-by stack alongside bots for the same
+	// reason: they read everything because of how the platform is
+	// architected, not because they're participating.
+	serviceMxids?: Set<string>;
 	// Live poll aggregate for this row, when message.kind === "poll".
 	// Drives the bars + per-answer counts + viewer's selected answers.
 	pollAggregate?: PollAggregate;
@@ -2020,6 +2033,7 @@ function MessageRow({
 								memberAvatars={memberAvatars}
 								memberNames={memberNames}
 								botMxids={botMxids}
+								serviceMxids={serviceMxids}
 							/>
 						)}
 						{flaggable && flags && flags.count > 0 && (
@@ -3135,6 +3149,7 @@ function SeenIndicator({
 	memberAvatars,
 	memberNames,
 	botMxids,
+	serviceMxids,
 }: {
 	roomId: RoomId;
 	eventId: EventId;
@@ -3149,6 +3164,11 @@ function SeenIndicator({
 	// READ the message — i.e. real humans — not which automated
 	// processes happen to also be in the room.
 	botMxids?: Set<string>;
+	// Service identities (engine appservice, Synapse admin user)
+	// also filtered: same rationale as bots, plus the @-prefix
+	// regex doesn't catch their non-bot localparts (@engine,
+	// @koven-svc), so we need the explicit set.
+	serviceMxids?: Set<string>;
 }) {
 	const transport = useTransport();
 	const [open, setOpen] = useState(false);
@@ -3167,25 +3187,25 @@ function SeenIndicator({
 		// out unconditionally.  Bot receipts are also filtered when
 		// we know the roster (botMxids), but the engine appservice
 		// isn't in that roster (it's a service identity, not a bot).
-		const myServer = transport.currentUserId?.split(":")[1] ?? "";
-		const enginePrefix = myServer ? `@engine:${myServer}` : null;
 		const filtered = all.filter(s => {
-			if (enginePrefix && s.userId === enginePrefix) return false;
+			// Service identities (engine appservice, Synapse admin
+			// user) read everything as a matter of platform
+			// architecture; their receipts are noise.
+			if (serviceMxids && serviceMxids.has(s.userId)) return false;
+			// Current bot roster.
 			if (botMxids && botMxids.has(s.userId)) return false;
-			// Filter by mxid pattern too.  A deleted bot drops out
-			// of botMxids (the engine roster), but its old m.read
-			// receipts persist server-side until everyone in the
-			// room moves their own read marker past those events.
-			// Without this, a deleted bot keeps showing up as a
-			// "seen" face on historical messages indefinitely.
-			// Bot mxids are reserved-namespace localparts in our
-			// Synapse config; no human can have one.
+			// Mxid-pattern fallback for deleted bots.  Their old
+			// m.read receipts persist server-side after the engine
+			// row is dropped (Matrix has no "redact a receipt"
+			// verb), so they'd otherwise keep haunting historical
+			// messages.  Bot mxids are reserved-namespace localparts
+			// in our Synapse config; no human can have one.
 			if (/^@bot-/.test(s.userId)) return false;
 			return true;
 		});
 		return filtered;
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [transport, roomId, eventId, receiptsVersion, botMxids]);
+	}, [transport, roomId, eventId, receiptsVersion, botMxids, serviceMxids]);
 
 	if (isDm) {
 		// DM: WhatsApp / iMessage-style tick marks.  The parent

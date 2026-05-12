@@ -64,7 +64,7 @@ import { PendingInvitesPill } from "@/components/PendingInvitesPill";
 import { PendingInvitesSheet } from "@/components/PendingInvitesSheet";
 import { AddExistingRoomDialog } from "@/components/AddExistingRoomDialog";
 import { useCollapsedRooms } from "@/lib/collapsedRooms";
-import { fetchAllBotMxids } from "@/lib/bots-cache";
+import { fetchAllBotMxids, fetchServiceMxids } from "@/lib/bots-cache";
 import { startFoundersRosterRefresh } from "@/lib/founders-cache";
 import { fetchUiaPassword } from "@/lib/auth";
 import { TransportContext } from "@/lib/transportContext";
@@ -331,6 +331,11 @@ export default function App() {
 	// up without a page reload.  Default empty Set so first-render
 	// branches just don't render any badges.
 	const [botMxids, setBotMxids] = useState<Set<UserId>>(() => new Set());
+	// Service identities (engine appservice user, Synapse admin user)
+	// the SPA filters from member-count UI and "seen by" rosters.
+	// Distinct from botMxids so the BOT badge stays bot-only:
+	// service accounts shouldn't read as bots in user-facing labels.
+	const [serviceMxids, setServiceMxids] = useState<Set<UserId>>(() => new Set());
 
 	// ─── Bot management state (the user's own roster) ────────────────
 	// Lifted to App so BotList (sidebar) and BotsPane (detail pane)
@@ -420,8 +425,16 @@ export default function App() {
 	useEffect(() => {
 		let cancelled = false;
 		const refresh = async () => {
-			const set = await fetchAllBotMxids();
-			if (!cancelled) setBotMxids(set);
+			// Bots + services come from the same engine endpoint;
+			// fire them in parallel and update both atomically.
+			const [bots, services] = await Promise.all([
+				fetchAllBotMxids(),
+				fetchServiceMxids(),
+			]);
+			if (!cancelled) {
+				setBotMxids(bots);
+				setServiceMxids(services);
+			}
 		};
 		refresh();
 		const id = window.setInterval(refresh, 5 * 60 * 1000);
@@ -2462,6 +2475,7 @@ export default function App() {
 					flagsByMessage={state.flagsByMessage}
 					collapsesByMessage={state.collapsesByMessage}
 					botMxids={botMxids}
+					serviceMxids={serviceMxids}
 					myOwnedBotMxids={myOwnedBotMxids}
 					onDeleteMessage={async (eventId) => {
 						if (!creds?.access_token || !state.activeRoomId) {

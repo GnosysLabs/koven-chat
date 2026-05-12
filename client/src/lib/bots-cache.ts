@@ -13,10 +13,11 @@ import type { UserId } from "@koven/shared";
 
 interface AllMxidsResponse {
 	bots?: string[];
+	services?: string[];
 }
 
 /** Pull the public list of bot mxids from the engine.  Always
- * returns a Set — empty on error so callers can treat it as the
+ * returns a Set, empty on error so callers can treat it as the
  * default "no badge anywhere" state without tripping over null. */
 export async function fetchAllBotMxids(): Promise<Set<UserId>> {
 	try {
@@ -24,6 +25,23 @@ export async function fetchAllBotMxids(): Promise<Set<UserId>> {
 		if (!r.ok) return new Set();
 		const body = (await r.json()) as AllMxidsResponse;
 		return new Set((body.bots ?? []) as UserId[]);
+	} catch {
+		return new Set();
+	}
+}
+
+/** Sibling fetch: non-bot service identities the instance runs
+ * (engine appservice user, Synapse admin user).  Returned from the
+ * same /api/bots/all-mxids endpoint as a separate `services` array
+ * so we don't have to round-trip twice; merged client-side here.
+ * Used to filter "seen by" rosters and member counts so the
+ * platform's own service accounts don't show up as participants. */
+export async function fetchServiceMxids(): Promise<Set<UserId>> {
+	try {
+		const r = await fetch(`${ENGINE_URL}/api/bots/all-mxids`, { credentials: "omit" });
+		if (!r.ok) return new Set();
+		const body = (await r.json()) as AllMxidsResponse;
+		return new Set((body.services ?? []) as UserId[]);
 	} catch {
 		return new Set();
 	}

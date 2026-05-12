@@ -1761,10 +1761,37 @@ export function startServer(): void {
 			}
 
 			// GET /api/bots/all-mxids
-			// Public read.  Returns every enabled bot's mxid so clients
-			// can render the BOT badge without needing per-bot lookups.
+			// Public read.  Two arrays:
+			//   - bots: every enabled bot's mxid.  Drives the BOT
+			//     badge next to usernames, plus any "is this a bot"
+			//     check the SPA needs.
+			//   - services: non-bot service identities the instance
+			//     runs (the engine appservice user, the Synapse
+			//     admin user used for /_synapse/admin/v* calls).
+			//     The SPA filters these out of the "seen by" stack +
+			//     member counts so they don't appear as participants
+			//     who happen to read everything (which they do, but
+			//     it's a noisy signal users don't want).  Returned
+			//     alongside bots in one fetch so the SPA only has to
+			//     poll one endpoint to keep both rosters current.
+			//
+			// Both lists are stable across the instance lifetime
+			// (bots change with user CRUD; services come from env),
+			// so the 5-minute client poll is plenty.
 			if (req.method === "GET" && path === "/api/bots/all-mxids") {
-				return json({ bots: listAllBotMxids() });
+				const services: string[] = [];
+				if (config.engineUserId) services.push(config.engineUserId);
+				if (config.synapseAdminUser) {
+					// synapseAdminUser is stored as a bare localpart
+					// in some setups, full mxid in others.  Normalise
+					// to the @user:server form before returning.
+					const raw = config.synapseAdminUser.trim();
+					const mxid = raw.startsWith("@")
+						? raw
+						: `@${raw}:${config.homeserverName}`;
+					if (!services.includes(mxid)) services.push(mxid);
+				}
+				return json({ bots: listAllBotMxids(), services });
 			}
 
 			// POST /api/webhooks/in/:token
