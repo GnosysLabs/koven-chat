@@ -19,8 +19,27 @@
 //     media just scroll the chat first to load more, then reopen the
 //     gallery.  Auto-paginating from the gallery would require a
 //     dedicated request loop; deferred until anyone asks.
+//
+// Lightbox modal-stacking note:
+//   The lightbox is its OWN top-level `<Dialog>`, rendered as a
+//   sibling of the grid Dialog (not as a nested portal inside it).
+//   The previous "nested DialogPortal inside the grid's
+//   DialogContent" pattern was broken in a specific way that made
+//   every lightbox control unclickable — and we kept re-fixing the
+//   wrong layer.  Root cause: Radix Dialog in modal mode marks every
+//   body-level container that isn't the active DialogContent's tree
+//   with `inert` + `aria-hidden` via its focus-scope library.  A
+//   nested portal renders to a SIBLING wrapper under document.body,
+//   so the outer dialog's modal mechanism marks the nested wrapper
+//   inert — and `inert` swallows pointer events at the browser
+//   level (the click never reaches the button's handler).  Switching
+//   to two sibling Dialogs lets Radix manage the modal stack
+//   natively: the inner Dialog's tree is the active surface while
+//   it's open, the grid Dialog gets the inert/aria-hidden treatment
+//   in the meantime, and both restore correctly on close.
 
 import { useMemo, useState, useEffect } from "react";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { ChevronLeft, ChevronRight, Download, Images, Play, X } from "lucide-react";
 import { downloadMediaUrl } from "@/lib/downloadMedia";
 import {
@@ -28,7 +47,6 @@ import {
 	DialogContent,
 	DialogDescription,
 	DialogHeader,
-	DialogPortal,
 	DialogTitle,
 } from "@/components/ui/dialog";
 import { useMatrixAttachment, useMatrixVideoPoster } from "@/lib/useMatrixAttachment";
@@ -68,90 +86,80 @@ export function GallerySheet({ open, onOpenChange, messages, roomName }: Gallery
 
 	// Keyboard nav inside the lightbox: arrow keys scroll, Escape
 	// closes back to the grid.  Skipped while the lightbox is closed
-	// so the keys remain available to the underlying app.
+	// so the keys remain available to the underlying app.  We don't
+	// rely on Radix's onEscapeKeyDown for arrow navigation; Radix
+	// only forwards Escape, not arrow keys.
 	useEffect(() => {
 		if (lightboxIdx === null) return;
 		const onKey = (e: KeyboardEvent) => {
 			if (e.key === "ArrowLeft") setLightboxIdx(i => (i === null ? null : Math.max(0, i - 1)));
 			else if (e.key === "ArrowRight") setLightboxIdx(i => (i === null ? null : Math.min(items.length - 1, i + 1)));
-			else if (e.key === "Escape") setLightboxIdx(null);
 		};
 		window.addEventListener("keydown", onKey);
 		return () => window.removeEventListener("keydown", onKey);
 	}, [lightboxIdx, items.length]);
 
+	const lightboxOpen = lightboxIdx !== null && !!items[lightboxIdx];
+
 	return (
-		<Dialog open={open} onOpenChange={onOpenChange}>
-			<DialogContent
-				className="sm:max-w-3xl max-h-[85vh] flex flex-col gap-0 p-0 overflow-hidden"
-				// Lightbox is portalled to document.body so it can
-				// escape the dialog's transformed containing block
-				// (necessary for the fixed-position overlay to fill
-				// the viewport instead of getting squished into the
-				// dialog's footprint).  Side-effect: clicks on
-				// lightbox chevrons / download / etc. look like
-				// outside-clicks to Radix Dialog, which by default
-				// closes on outside pointer-down — so the dialog
-				// (and the lightbox under it) tore down on the
-				// first chevron tap.  Block the close while the
-				// lightbox is open.  Same for Escape: it should
-				// close the LIGHTBOX first, dialog second.
-				onPointerDownOutside={(e) => {
-					if (lightboxIdx !== null) e.preventDefault();
-				}}
-				onEscapeKeyDown={(e) => {
-					if (lightboxIdx !== null) {
-						e.preventDefault();
-						setLightboxIdx(null);
-					}
-				}}
-			>
-				<DialogHeader className="px-5 pt-5 pb-3 border-b border-border/60">
-					<DialogTitle className="flex items-center gap-2 text-base">
-						<Images className="h-4 w-4 text-muted-foreground" />
-						Media in {roomName}
-					</DialogTitle>
-					<DialogDescription className="text-xs">
-						{items.length === 0
-							? "No images or videos have been shared yet."
-							: `${items.length} ${items.length === 1 ? "item" : "items"} — most recent first.`}
-					</DialogDescription>
-				</DialogHeader>
+		<>
+			<Dialog open={open} onOpenChange={onOpenChange}>
+				<DialogContent
+					className="sm:max-w-3xl max-h-[85vh] flex flex-col gap-0 p-0 overflow-hidden"
+				>
+					<DialogHeader className="px-5 pt-5 pb-3 border-b border-border/60">
+						<DialogTitle className="flex items-center gap-2 text-base">
+							<Images className="h-4 w-4 text-muted-foreground" />
+							Media in {roomName}
+						</DialogTitle>
+						<DialogDescription className="text-xs">
+							{items.length === 0
+								? "No images or videos have been shared yet."
+								: `${items.length} ${items.length === 1 ? "item" : "items"} — most recent first.`}
+						</DialogDescription>
+					</DialogHeader>
 
-				<div className="flex-1 overflow-y-auto p-3">
-					{items.length === 0 ? (
-						<div className="h-full min-h-[200px] flex flex-col items-center justify-center gap-2 text-muted-foreground">
-							<Images className="h-8 w-8 opacity-40" />
-							<p className="text-sm">Nothing to show.</p>
-							<p className="text-[11px] leading-snug max-w-[260px] text-center">
-								Scroll up in chat to load older history, then reopen this gallery.
-							</p>
-						</div>
-					) : (
-						<div className="grid grid-cols-3 sm:grid-cols-4 gap-1.5">
-							{items.map((m, i) => (
-								<MediaThumb
-									key={m.id}
-									message={m}
-									onClick={() => setLightboxIdx(i)}
-								/>
-							))}
-						</div>
-					)}
-				</div>
+					<div className="flex-1 overflow-y-auto p-3">
+						{items.length === 0 ? (
+							<div className="h-full min-h-[200px] flex flex-col items-center justify-center gap-2 text-muted-foreground">
+								<Images className="h-8 w-8 opacity-40" />
+								<p className="text-sm">Nothing to show.</p>
+								<p className="text-[11px] leading-snug max-w-[260px] text-center">
+									Scroll up in chat to load older history, then reopen this gallery.
+								</p>
+							</div>
+						) : (
+							<div className="grid grid-cols-3 sm:grid-cols-4 gap-1.5">
+								{items.map((m, i) => (
+									<MediaThumb
+										key={m.id}
+										message={m}
+										onClick={() => setLightboxIdx(i)}
+									/>
+								))}
+							</div>
+						)}
+					</div>
+				</DialogContent>
+			</Dialog>
 
-				{lightboxIdx !== null && items[lightboxIdx] && (
-					<MediaLightbox
-						message={items[lightboxIdx]!}
-						hasPrev={lightboxIdx > 0}
-						hasNext={lightboxIdx < items.length - 1}
-						onPrev={() => setLightboxIdx(i => i === null ? null : Math.max(0, i - 1))}
-						onNext={() => setLightboxIdx(i => i === null ? null : Math.min(items.length - 1, i + 1))}
-						onClose={() => setLightboxIdx(null)}
-					/>
-				)}
-			</DialogContent>
-		</Dialog>
+			{/* Lightbox — sibling Dialog, not nested.  See the file
+			    header for why this matters.  Renders only when there's
+			    a valid index AND the corresponding item exists; the
+			    `open` flag flips both on / off based on that combined
+			    check so stale indices (e.g. after the items array
+			    shrinks while a lightbox was somehow stuck open) don't
+			    leave it open against a missing item. */}
+			<MediaLightboxDialog
+				open={lightboxOpen}
+				onClose={() => setLightboxIdx(null)}
+				message={lightboxIdx !== null ? items[lightboxIdx] ?? null : null}
+				hasPrev={lightboxIdx !== null && lightboxIdx > 0}
+				hasNext={lightboxIdx !== null && lightboxIdx < items.length - 1}
+				onPrev={() => setLightboxIdx(i => i === null ? null : Math.max(0, i - 1))}
+				onNext={() => setLightboxIdx(i => i === null ? null : Math.min(items.length - 1, i + 1))}
+			/>
+		</>
 	);
 }
 
@@ -237,7 +245,74 @@ function MediaThumb({ message, onClick }: { message: Message; onClick(): void })
 	);
 }
 
-function MediaLightbox({
+/** Standalone lightbox dialog.  Sibling of the gallery Dialog, not
+ * nested inside it — see the file-header note on why nesting broke
+ * pointer events.  Uses Radix's raw primitives directly so we can
+ * skip the wrapped DialogContent's default close-X and back-arrow
+ * decorations: the lightbox has its own controls in their own
+ * positions, and the wrapped chrome would render on top of them. */
+function MediaLightboxDialog({
+	open,
+	onClose,
+	message,
+	hasPrev,
+	hasNext,
+	onPrev,
+	onNext,
+}: {
+	open: boolean;
+	onClose(): void;
+	message: Message | null;
+	hasPrev: boolean;
+	hasNext: boolean;
+	onPrev(): void;
+	onNext(): void;
+}) {
+	if (typeof document === "undefined") return null;
+	return (
+		<DialogPrimitive.Root
+			open={open}
+			onOpenChange={(o) => { if (!o) onClose(); }}
+		>
+			<DialogPrimitive.Portal>
+				<DialogPrimitive.Overlay
+					className={cn(
+						"fixed inset-0 z-[60] bg-black/85",
+						"data-[state=open]:animate-in data-[state=closed]:animate-out",
+						"data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+					)}
+				/>
+				<DialogPrimitive.Content
+					className={cn(
+						"fixed inset-0 z-[60] outline-none flex items-center justify-center",
+						"data-[state=open]:animate-in data-[state=closed]:animate-out",
+						"data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+					)}
+					aria-describedby={undefined}
+				>
+					{/* Accessible title for screen readers; visually
+					    hidden because the lightbox's visual context
+					    is the media itself plus the caption row. */}
+					<DialogPrimitive.Title className="sr-only">
+						{message?.mediaName ?? (message?.kind === "video" ? "Video" : "Image")}
+					</DialogPrimitive.Title>
+					{message && (
+						<MediaLightboxBody
+							message={message}
+							hasPrev={hasPrev}
+							hasNext={hasNext}
+							onPrev={onPrev}
+							onNext={onNext}
+							onClose={onClose}
+						/>
+					)}
+				</DialogPrimitive.Content>
+			</DialogPrimitive.Portal>
+		</DialogPrimitive.Root>
+	);
+}
+
+function MediaLightboxBody({
 	message,
 	hasPrev,
 	hasNext,
@@ -255,37 +330,19 @@ function MediaLightbox({
 	const url = useMatrixAttachment(message);
 	const poster = useMatrixVideoPoster(message);
 	const isVideo = message.kind === "video";
-	if (typeof document === "undefined") return null;
-	// Portal to document.body so the fixed overlay actually fills the
-	// viewport.  Without this the lightbox renders INSIDE the
-	// containing DialogContent, which uses `translate-x-[-50%]
-	// translate-y-[-50%]` for centering — that establishes a
-	// containing block for `position: fixed`, so `inset-0` ends up
-	// pinned to the dialog's 768×85vh footprint instead of the full
-	// viewport.  Net effect was the image getting squeezed into the
-	// dialog's aspect ratio rather than its own.
-	//
-	// Use Radix's `DialogPortal` (not a raw `createPortal`) so the
-	// lightbox lives inside the same Dialog scope as DialogContent.
-	// When `modal={true}` (the default), Radix marks every SIBLING
-	// subtree of its portal with `inert` + `aria-hidden` via its
-	// focus-scope library — which means a raw createPortal target
-	// becomes uninteractive: clicks land but the browser swallows
-	// them at the inert boundary.  That's the bug that made the
-	// close / download / chevron buttons appear dead.  DialogPortal
-	// renders to document.body too (same fixed-positioning benefit)
-	// but Radix treats its descendants as part of the dialog so
-	// inert isn't applied.
+
+	// Backdrop click closes; clicks on the media / controls
+	// stopPropagation so they don't bubble to it.  We attach the
+	// backdrop handler to a fixed-positioned overlay that fills the
+	// DialogContent (which itself fills the viewport), and lay the
+	// controls + media on top via absolute positioning.
 	return (
-		<DialogPortal>
-		{/* Stacked over the dialog content via a fixed overlay so the
-		    underlying grid stays mounted (preserves scroll position +
-		    thumbnail decode work).  Backdrop blocks pointer events to
-		    the grid so clicks fall through to the close button only. */}
-		<div
-			className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85"
-			onClick={onClose}
-		>
+		<>
+			<div
+				className="absolute inset-0"
+				onClick={onClose}
+				aria-hidden="true"
+			/>
 			<button
 				type="button"
 				onClick={(e) => { e.stopPropagation(); onClose(); }}
@@ -301,12 +358,10 @@ function MediaLightbox({
 						// Same blob:-URL-anchor problem as the chat-pane
 						// download path: Tauri's WKWebView / WebKitGTK
 						// silently drop anchor downloads pointed at a
-						// blob: URL, so the previous <a download> here
-						// did nothing in the desktop apps.  Route
-						// through downloadMediaUrl, which fetches the
-						// bytes and serves them as a data: URL the
-						// Rust on_download handler intercepts and
-						// writes to OS Downloads/.
+						// blob: URL.  Route through downloadMediaUrl,
+						// which fetches the bytes and serves them as a
+						// data: URL the Rust on_download handler
+						// intercepts and writes to OS Downloads/.
 						e.stopPropagation();
 						await downloadMediaUrl(url, message.mediaName ?? "download");
 					}}
@@ -322,7 +377,7 @@ function MediaLightbox({
 					type="button"
 					onClick={(e) => { e.stopPropagation(); onPrev(); }}
 					aria-label="Previous"
-					className="absolute left-4 p-3 rounded-full bg-background/20 hover:bg-background/40 text-white"
+					className="absolute left-4 top-1/2 -translate-y-1/2 p-3 rounded-full bg-background/20 hover:bg-background/40 text-white"
 				>
 					<ChevronLeft className="h-6 w-6" />
 				</button>
@@ -332,13 +387,13 @@ function MediaLightbox({
 					type="button"
 					onClick={(e) => { e.stopPropagation(); onNext(); }}
 					aria-label="Next"
-					className="absolute right-4 p-3 rounded-full bg-background/20 hover:bg-background/40 text-white"
+					className="absolute right-4 top-1/2 -translate-y-1/2 p-3 rounded-full bg-background/20 hover:bg-background/40 text-white"
 				>
 					<ChevronRight className="h-6 w-6" />
 				</button>
 			)}
 			<div
-				className="max-w-[92vw] max-h-[85vh] flex flex-col gap-2 items-center"
+				className="relative max-w-[92vw] max-h-[85vh] flex flex-col gap-2 items-center"
 				onClick={(e) => e.stopPropagation()}
 			>
 				{url ? (
@@ -350,27 +405,16 @@ function MediaLightbox({
 							// `poster` paints instantly from the
 							// embedded thumbnail mxc while the actual
 							// video bytes stream in.  Without it,
-							// WKWebView shows a black square until the
-							// first keyframe decodes (which can be
-							// 1-2s on a 4K source).
+							// WKWebView shows a black square until
+							// the first keyframe decodes (which can
+							// be 1-2s on a 4K source).
 							poster={poster}
-							// Both axes capped — the natural aspect
-							// ratio is preserved because <video> with
-							// explicit max-w + max-h shrinks
-							// proportionally rather than stretching.
 							className="max-w-[92vw] max-h-[80vh] rounded-md"
 						/>
 					) : (
 						<img
 							src={url}
 							alt={message.mediaName ?? "image"}
-							// `object-contain` is belt-and-braces here
-							// — max-w + max-h on an <img> already
-							// preserves aspect ratio, but if either
-							// the surrounding flex layout or a future
-							// CSS change ever forced the element to a
-							// fixed shape, contain stops it from
-							// stretching.
 							className="max-w-[92vw] max-h-[80vh] rounded-md object-contain"
 						/>
 					)
@@ -383,7 +427,7 @@ function MediaLightbox({
 					<span>{new Date(message.timestamp).toLocaleString()}</span>
 				</div>
 			</div>
-		</div>
-		</DialogPortal>
+		</>
 	);
 }
+
