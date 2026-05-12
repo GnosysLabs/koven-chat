@@ -53,10 +53,8 @@ import { ProfileSheet } from "@/components/ProfileSheet";
 import { AppSettingsSheet } from "@/components/AppSettingsSheet";
 import { EncryptionSetupSheet } from "@/components/EncryptionSetupSheet";
 import { EncryptionUnlockSheet } from "@/components/EncryptionUnlockSheet";
-import { SuspendedBanner } from "@/components/SuspendedBanner";
 import { ModLogSheet } from "@/components/ModLogSheet";
-import { FloorReviewSheet } from "@/components/FloorReviewSheet";
-import { botKickBanFromSpace, deleteOwnMessage, fetchAdminStatus, fetchFloorQueue, fetchMyStatus, fetchRoomParents, flagRoom, type SuspensionSummary } from "@/lib/instance";
+import { botKickBanFromSpace, deleteOwnMessage, fetchAdminStatus, fetchRoomParents, flagRoom } from "@/lib/instance";
 import { fetchIntegrationsStatus } from "@/lib/klipy";
 import { ENGINE_URL } from "@/lib/urls";
 import { setAppBadge } from "@/lib/appBadge";
@@ -64,7 +62,6 @@ import { NsfwAcceptDialog } from "@/components/NsfwAcceptDialog";
 import { PendingInvitesPill } from "@/components/PendingInvitesPill";
 import { PendingInvitesSheet } from "@/components/PendingInvitesSheet";
 import { AddExistingRoomDialog } from "@/components/AddExistingRoomDialog";
-import { useCollapsedRooms } from "@/lib/collapsedRooms";
 import { fetchAllBotMxids, fetchServiceMxids } from "@/lib/bots-cache";
 import { startFoundersRosterRefresh } from "@/lib/founders-cache";
 import { fetchUiaPassword } from "@/lib/auth";
@@ -128,11 +125,6 @@ export default function App() {
 		} : null;
 	}, [accounts, activeUserId]);
 	const [state, dispatch] = useReducer(reduce, initialState);
-	// Engine-driven collapsed-room set: drives the room-name display
-	// override + the Explore directory filter for the offensive-room-
-	// name pipeline.  Polled every 5 min + on focus; we also call
-	// `refresh()` immediately after a flag submission.
-	const { ids: collapsedRoomIds, refresh: refreshCollapsedRooms } = useCollapsedRooms();
 	// In-app notification bell.  Polls /api/notifications/unread-count
 	// every ~30s; full list is fetched on bell open.  Hook is a no-op
 	// until creds resolve, so it's safe to mount unconditionally.
@@ -379,11 +371,6 @@ export default function App() {
 	// from the login form — that means setup also works after a page
 	// refresh, not just immediately after a fresh sign-in.
 	const [encState, setEncState] = useState<"needs-setup" | "needs-unlock" | "ready" | null>(null);
-	// Suspension state, polled from the engine.  Null until the first
-	// poll completes; a populated value means the engine considers
-	// this account paused (status = "pending" or "confirmed") and the
-	// UI gates compose / DM / room creation.
-	const [suspension, setSuspension] = useState<SuspensionSummary | null>(null);
 	// Per-room mod log dialog target.  Null = closed.
 	const [modLogRoomId, setModLogRoomId] = useState<RoomId | null>(null);
 	// Ignored-user list (Matrix-native block).  Mirrors transport state
@@ -392,14 +379,10 @@ export default function App() {
 	// as a Set for O(1) lookups; updated whenever account_data fires
 	// `m.ignored_user_list`.
 	const [ignoredUsers, setIgnoredUsers] = useState<Set<UserId>>(new Set());
-	// Admin status + pending-review queue length.  Drives the shield
-	// icon (admin-only) above Settings in the SpaceBar plus its red
-	// attention dot.  Polled on the same 60s cadence as other "rare
-	// event" surfaces; bumped immediately after the admin acts on a
-	// case via the FloorReviewSheet's onQueueChanged callback.
+	// Admin status — drives the shield icon (admin-only) above Settings
+	// in the SpaceBar.  Polled every 60s so newly-granted admin rights
+	// surface without a refresh.
 	const [isAdmin, setIsAdmin] = useState(false);
-	const [pendingReviewCount, setPendingReviewCount] = useState(0);
-	const [reviewSheetOpen, setReviewSheetOpen] = useState(false);
 	// Instance-wide third-party integrations.  Polled once on sign-in
 	// (admin re-saves invalidate it via a refresh — see InstanceAdmin
 	// section).  Drives the GIF picker visibility in the composer.
@@ -510,15 +493,12 @@ export default function App() {
 		void refreshMyBots();
 	}, [state.activeRoomId, refreshMyBots, myBotsLoading]);
 
-	// Admin status + pending-review-queue length poll.  Cheap two-call
-	// fan-out on the same cadence as the suspension poll: first probe
-	// /api/instance/me to confirm we're an admin, and only then pull
-	// /api/admin/floor-queue (which would 403 for non-admins anyway).
+	// Admin-status poll.  Probes /api/instance/me on a 60s cadence so a
+	// newly-granted (or revoked) admin row surfaces without a refresh.
 	// Listening on `creds` so the timer resets across sign-in / sign-out.
 	useEffect(() => {
 		if (!creds) {
 			setIsAdmin(false);
-			setPendingReviewCount(0);
 			return;
 		}
 		let cancelled = false;
@@ -527,15 +507,9 @@ export default function App() {
 				const status = await fetchAdminStatus(creds.access_token);
 				if (cancelled) return;
 				setIsAdmin(status.is_admin);
-				if (!status.is_admin) {
-					setPendingReviewCount(0);
-					return;
-				}
-				const queue = await fetchFloorQueue(creds.access_token);
-				if (!cancelled) setPendingReviewCount(queue.length);
 			} catch {
-				// Transient network error; keep last-known values rather
-				// than thrash the badge.
+				// Transient network error; keep last-known value rather
+				// than thrash the UI.
 			}
 		};
 		poll();
@@ -567,45 +541,9 @@ export default function App() {
 		return () => { cancelled = true; };
 	}, [creds]);
 
-	// Manual refresh hook — fired by the FloorReviewSheet after every
-	// confirm/reverse so the badge updates without waiting for the
-	// next poll tick.  Idempotent.
-	async function refreshPendingReviewCount() {
-		if (!creds || !isAdmin) return;
-		try {
-			const queue = await fetchFloorQueue(creds.access_token);
-			setPendingReviewCount(queue.length);
-		} catch {
-			/* ignore — next poll will catch it */
-		}
-	}
-
-	// Suspension state poll.  Hits /api/me/status on boot and every
-	// 60s thereafter so a freshly-applied suspension takes effect
-	// without a refresh.  Lighter than a websocket — the cadence
-	// matches "actually-pretty-rare event" timing.
-	useEffect(() => {
-		if (!creds) {
-			setSuspension(null);
-			return;
-		}
-		let cancelled = false;
-		const poll = async () => {
-			try {
-				const status = await fetchMyStatus(creds.access_token);
-				if (!cancelled) setSuspension(status?.suspension ?? null);
-			} catch {
-				// Transient network error — leave the previous state
-				// in place rather than thrash the UI on a flake.
-			}
-		};
-		poll();
-		const id = window.setInterval(poll, 60_000);
-		return () => {
-			cancelled = true;
-			window.clearInterval(id);
-		};
-	}, [creds]);
+	// (Suspension-state and floor-queue polls deleted — admins act on
+	// reports via the upcoming /api/admin/reports queue, not via the
+	// retired consensus-suspension pipeline.)
 
 	// Listen for `open-room` messages posted by the service worker
 	// when the user taps a notification.  The SW can't navigate the
@@ -801,10 +739,6 @@ export default function App() {
 			onFlagRedacted: (_roomId, flagEventId) => dispatch({
 				type: "flag_redacted",
 				flagEventId,
-			}),
-			onCollapse: (collapse) => dispatch({
-				type: "collapse_arrived",
-				collapse,
 			}),
 			onPollResponse: (ev) => dispatch({
 				type: "poll_response_arrived",
@@ -1616,10 +1550,6 @@ export default function App() {
 			flags: transport.getRoomFlags(state.activeRoomId),
 			myUserId: creds.user_id as UserId,
 		});
-		dispatch({
-			type: "collapses_loaded",
-			collapses: transport.getRoomCollapses(state.activeRoomId),
-		});
 	}, [state.activeRoomId, transport, creds]);
 
 	function handleLogin(newCreds: MatrixCredentials, uiaPassword: string) {
@@ -1709,8 +1639,7 @@ export default function App() {
 		// No publish-quota check — Discord doesn't limit channel
 		// creation, and under the invariant every room is contained
 		// inside the space's privacy boundary, so there's no risk of
-		// flooding Explore.  Suspended-account blocks still happen
-		// server-side via the engine's can-publish-room hook.
+		// flooding Explore.
 		setCreateRoomOpen(true);
 	}, [state.activeSpace]);
 
@@ -2195,7 +2124,6 @@ export default function App() {
 					/>
 				</div>
 			)}
-			{suspension && <SuspendedBanner suspension={suspension} />}
 			{state.syncState !== "ready" && state.syncState !== "syncing" && (
 				<div className="text-xs px-3 py-1 bg-muted text-muted-foreground border-b border-border">
 					{bootError ? `Connection error: ${bootError}` : `Sync: ${state.syncState}`}
@@ -2269,8 +2197,6 @@ export default function App() {
 						// No publish-quota check — Discord doesn't limit
 						// server / channel creation, and rate-limit tiers
 						// just confused users who'd hit "1/day" silently.
-						// Suspended-account blocks still happen server-
-						// side via the engine's can-publish-room hook.
 						setCreateSpaceOpen(true);
 					}}
 					onOpenProfile={() => setViewedUserId(creds.user_id as UserId)}
@@ -2279,8 +2205,6 @@ export default function App() {
 					onSwitchAccount={switchAccount}
 					onAddAccount={() => setAddAccountMode(true)}
 					onSignOutAccount={handleSignOutOfAccount}
-					onOpenReview={isAdmin ? () => setReviewSheetOpen(true) : undefined}
-					pendingReviewCount={pendingReviewCount}
 					transport={transport}
 					accessToken={creds.access_token}
 					onEditSpace={(id) => setEditingSpaceId(id)}
@@ -2379,8 +2303,6 @@ export default function App() {
 							rooms={state.rooms}
 							spaces={state.spaces}
 							accessToken={creds?.access_token ?? null}
-							collapsedRoomIds={collapsedRoomIds}
-							onCollapseRefresh={refreshCollapsedRooms}
 							showNsfw={!!settings.showNsfw}
 							onJoined={(roomId, isSpace) => {
 								if (isSpace) {
@@ -2412,7 +2334,6 @@ export default function App() {
 					onEditRoom={(roomId) => setEditingRoomId(roomId)}
 					onOpenProfile={(userId) => setViewedUserId(userId)}
 					onRequestDeleteDm={openDeleteDmFor}
-					collapsedRoomIds={collapsedRoomIds}
 					botMxids={botMxids}
 					// True once initial sync has reached the "syncing"
 					// or "ready" state — at that point matrix-js-sdk
@@ -2475,8 +2396,6 @@ export default function App() {
 						rooms={state.rooms}
 						spaces={state.spaces}
 						accessToken={creds?.access_token ?? null}
-						collapsedRoomIds={collapsedRoomIds}
-						onCollapseRefresh={refreshCollapsedRooms}
 						showNsfw={!!settings.showNsfw}
 						onJoined={(roomId, isSpace) => {
 							// Joining a room → switch to Rooms view + open
@@ -2555,7 +2474,6 @@ export default function App() {
 					}}
 					reactionsByMessage={state.reactionsByMessage}
 					flagsByMessage={state.flagsByMessage}
-					collapsesByMessage={state.collapsesByMessage}
 					botMxids={botMxids}
 					serviceMxids={serviceMxids}
 					myOwnedBotMxids={myOwnedBotMxids}
@@ -2674,14 +2592,8 @@ export default function App() {
 					onFlagRoom={async (roomId, category, rationale) => {
 						if (!creds?.access_token) return;
 						const r = await flagRoom(creds.access_token, roomId, category, rationale);
-						if (!r.ok) throw new Error(r.error ?? "Flag submission failed");
-						// Re-poll the collapsed-rooms list — a floor flag
-						// may have just collapsed the room, in which case
-						// the SPA should pick that up immediately rather
-						// than wait for the next 5-min interval.
-						await refreshCollapsedRooms();
+						if (!r.ok) throw new Error(r.error ?? "Report submission failed");
 					}}
-					collapsedRoomIds={collapsedRoomIds}
 					onAcceptInvite={async (roomId) => {
 						await acceptInviteWithGate(roomId as RoomId);
 					}}
@@ -2700,7 +2612,6 @@ export default function App() {
 					// alongside the MatrixCall flow — DM calls now
 					// go through RoomVoiceBar's Join button + the
 					// CallProvider system, same as group rooms.
-					isSuspended={!!suspension}
 					onOpenModLog={(roomId) => setModLogRoomId(roomId as RoomId)}
 					onOpenProfile={(userId) => setViewedUserId(userId as UserId)}
 					// Right-click message context menu: Send DM and
@@ -3366,15 +3277,6 @@ export default function App() {
 					onOpenChange={(o) => { if (!o) setModLogRoomId(null); }}
 					roomId={modLogRoomId}
 					transport={transport}
-				/>
-			)}
-			{isAdmin && (
-				<FloorReviewSheet
-					open={reviewSheetOpen}
-					onOpenChange={setReviewSheetOpen}
-					accessToken={creds.access_token}
-					transport={transport}
-					onQueueChanged={refreshPendingReviewCount}
 				/>
 			)}
 		</div>

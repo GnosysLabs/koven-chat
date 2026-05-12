@@ -1,6 +1,6 @@
 // Profile sheet — used for two distinct cases:
 //   1. The current user views/edits their own profile (display name,
-//      bio, avatar are editable; metadata + reputation read-only).
+//      bio, avatar editable; metadata read-only).
 //   2. The current user views another member's profile from the
 //      MemberList (everything read-only; bio is omitted because it's
 //      stored in account_data and isn't readable across users).
@@ -24,9 +24,6 @@ import { Ban, Camera, MessageSquare, Pencil, Trash2, UserCheck, UserX } from "lu
 import type { MatrixTransport } from "@/lib/matrix";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { BotBadge } from "@/components/BotBadge";
-import { loadReputation } from "@/lib/useReputation";
-import type { ReputationData } from "@/lib/reputation";
-import { descriptorFor, nextTierUnlockLabel, tickClassForFilled, ticksFor } from "@/lib/reputation";
 import { fetchUserBio, fetchUserProfile, updateMyBio } from "@/lib/profile";
 import { FounderBadge } from "@/components/FounderBadge";
 import { getFounderCap } from "@/lib/founders-cache";
@@ -52,7 +49,7 @@ export interface ProfileSheetProps {
 	// App.tsx uses this to update the SpaceBar tile without refresh.
 	onSelfProfileSaved?(avatarMxc: string | null | undefined): void;
 	// True when the viewed user is a registered bot — drives the BOT
-	// pill and suppresses the reputation block.
+	// pill.
 	isBot?: boolean;
 	// Open / create a DM with the viewed user.  Hidden when omitted
 	// or when the viewer is looking at their own profile.  Caller is
@@ -61,12 +58,9 @@ export interface ProfileSheetProps {
 	onStartDm?(userId: UserId): void | Promise<void>;
 	// True iff the viewer is the founder of the parent space of the
 	// room from which this sheet was opened.  Combined with `isBot`
-	// it gates the full Kick / Ban affordance: bots aren't people,
-	// so the space founder can silence one without the consensus
-	// pipeline.  Anyone else (regular members, founders viewing
-	// humans) sees no kick/ban buttons.  When omitted, defaults to
-	// false — read-only views outside a room context (DMs, member-
-	// of-no-particular-room) skip the affordance entirely.
+	// it gates the full Kick / Ban affordance: bots are managed
+	// unilaterally by the space founder.  Anyone else sees no
+	// kick/ban buttons.  When omitted, defaults to false.
 	canKickBanBots?: boolean;
 	// True iff the viewer owns the bot they're looking at.  When
 	// combined with `canRemoveOwnBot`, surfaces a "Remove from
@@ -200,12 +194,6 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 	// true = open to anyone (show Message button).  Populated from
 	// the same getPublicBotInfo() fetch that populates `creator`.
 	const [botAcceptsDms, setBotAcceptsDms] = useState<boolean | undefined>(undefined);
-	// Reputation fetched in the same Promise.all as profile + bio so
-	// the body has all three before any of it paints.  Three-valued:
-	//   undefined — fetch hasn't returned yet (suppress body render),
-	//   null      — fetched, engine returned no data (show "Engine offline"),
-	//   ReputationData — fetched + populated.
-	const [rep, setRep] = useState<ReputationData | null | undefined>(undefined);
 
 	// Avatar state: existing URL we render unless replaced by a fresh
 	// upload (kept as a File until Save), or cleared.
@@ -243,7 +231,6 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 		const haveFreshDataForThisUser = profile?.userId === viewedUserId;
 		if (!haveFreshDataForThisUser) {
 			setLoading(true);
-			setRep(undefined);
 			setCreator(undefined);
 			setBotAcceptsDms(undefined);
 		}
@@ -256,28 +243,21 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 			? transport.getMyProfile()
 			: transport.getUserProfile(viewedUserId as UserId);
 
-		// Three-way Promise.all: Matrix profile, engine bio, AND
-		// reputation are all required before the body paints.
-		// Without the rep wait the sheet would render a brief
-		// "Engine offline" rep block and then snap to the populated
-		// version — exactly the jarring flash the user reported.
-		// Reputation fetch failures resolve as `null` so we don't
-		// gate the whole sheet on a transient engine outage.
-		// fetchUserProfile carries both bio AND founder_number in one
-		// response; replaces the standalone fetchUserBio call so we
-		// only round-trip the engine's /api/profile endpoint once.
+		// Two-way Promise.all: Matrix profile + engine bio fetched in
+		// parallel.  fetchUserProfile carries both bio AND
+		// founder_number in one response; replaces the standalone
+		// fetchUserBio call so we only round-trip the engine's
+		// /api/profile endpoint once.
 		Promise.all([
 			matrixFetcher,
 			fetchUserProfile(viewedUserId),
-			loadReputation(viewedUserId).catch(() => null),
 		])
-			.then(([p, fetchedProfile, fetchedRep]) => {
+			.then(([p, fetchedProfile]) => {
 				if (cancelled) return;
 				setProfile(p);
 				setDisplayName(p.displayName);
 				setBio(fetchedProfile.bio);
 				setFounderNumber(fetchedProfile.founder_number);
-				setRep(fetchedRep);
 				setLoading(false);
 				// Cache the just-fetched values so a later Cancel
 				// can revert any in-flight edits back to this state
@@ -485,7 +465,6 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 		&& !loading
 		&& !!profile
 		&& profile.userId === viewedUserId
-		&& rep !== undefined
 		// Bot profiles also wait on the creator-lookup so the
 		// "Created by" row appears in the same paint as the rest of
 		// the body — `creator === undefined` means the lookup is
@@ -540,18 +519,12 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 					</DialogDescription>
 				</DialogHeader>
 
-				{/* Show loading until ALL three of profile + bio + rep
-				    have resolved (rep === undefined means the fetch
-				    is still in flight; null means fetched and engine
-				    returned nothing).  Without the rep gate the body
-				    renders with an "Engine offline" rep block briefly,
-				    then snaps to the populated version once the rep
-				    fetch lands — three jarring phases in a row.
-				    Stale-while-revalidate: when reopening for the same
-				    user we already have profile data for, skip the
-				    loading state and let the cached profile + cached
-				    rep paint instantly. */}
-				{!profile || profile.userId !== viewedUserId || rep === undefined ? (
+				{/* Show loading until profile + bio have resolved.
+				    Stale-while-revalidate: when reopening for the
+				    same user we already have data for, skip the
+				    loading state and let the cached values paint
+				    instantly. */}
+				{!profile || profile.userId !== viewedUserId ? (
 					<div className="py-8 text-center text-sm text-muted-foreground">Loading…</div>
 				) : isSelf && editing ? (
 					// ─── Self-edit layout ──────────────────────────────────
@@ -650,13 +623,6 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 									e.target.value = "";
 								}}
 							/>
-						</div>
-
-						{/* Reputation gets the full row now that user id lives
-						    inline under the display name and the Status
-						    placeholder is gone. */}
-						<div className="pt-3 border-t border-border">
-							<ReputationRow rep={rep ?? null} isSelf />
 						</div>
 
 						{error && (
@@ -762,18 +728,6 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 							</div>
 						)}
 
-						{!isBot && (
-							<div className="pt-2 border-t border-border">
-								{/* `isSelf` here surfaces the next-tier
-								    unlock label below the level meter
-								    on your own profile.  Hidden on
-								    others' profiles because calling out
-								    where someone is on their tier
-								    ladder reads as surveillance. */}
-								<ReputationRow rep={rep ?? null} isSelf={isSelf} />
-							</div>
-						)}
-
 						{error && (
 							<div className="text-xs text-destructive border border-destructive/40 bg-destructive/10 rounded px-3 py-2">
 								{error}
@@ -791,10 +745,10 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 							// with this user," so visually separating
 							// them reads cleaner anyway.
 							//
-							// Bots aren't covered by the consensus
-							// protections that gate human kick/ban — a
-							// misbehaving bot can be silenced by the
-							// space's founder unilaterally.  Two buttons
+							// Bots are managed unilaterally by the space
+							// founder; a misbehaving bot can be silenced
+							// without going through the report queue.
+							// Two buttons
 							// rather than a single dropdown because the
 							// affordance is rare enough that signposting
 							// both options inline is clearer than a
@@ -934,79 +888,3 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 	);
 }
 
-// Reputation breakdown — vertical-tick level meter (matching the
-// sidebar visual), tier label, weight, then a clean key/value list of
-// the underlying counters.  Description sits below as muted context.
-//
-// When viewing your own profile we also show how long until the next
-// age-gate unlocks (omitted on others' profiles — feels like
-// surveillance to call out where someone is on their tier ladder).
-//
-// Falls back to a one-liner if the engine hasn't returned data yet.
-function ReputationRow({ rep, isSelf }: { rep: ReputationData | null; isSelf?: boolean }) {
-	if (!rep) {
-		return (
-			<div className="flex items-baseline justify-between gap-3 text-xs">
-				<span className="text-muted-foreground">Reputation</span>
-				<span className="text-muted-foreground italic">Engine offline</span>
-			</div>
-		);
-	}
-	const desc = descriptorFor(rep.weight);
-	// Floor 0: brand-new users at weight 0.5 see zero ticks filled.
-	// ticksFor() rounds to 2 decimals before flooring so the count
-	// always agrees with the displayed `weight.toFixed(2)`.
-	const filled = ticksFor(rep.weight);
-	const unlockLabel = isSelf ? nextTierUnlockLabel(rep.age_days) : null;
-
-	return (
-		<div className="space-y-2">
-			<div className="text-xs text-muted-foreground">Reputation</div>
-			<div className="flex items-center gap-2.5 flex-wrap">
-				<LevelTicks filled={filled} total={5} tickClass={tickClassForFilled(filled)} />
-				<span className="font-medium text-sm">{desc.label}</span>
-				<span className="text-xs text-muted-foreground tabular-nums">{rep.weight.toFixed(2)}</span>
-				{unlockLabel && (
-					<span className="text-[11px] text-muted-foreground italic">
-						· {unlockLabel}
-					</span>
-				)}
-			</div>
-			<dl className="grid grid-cols-3 gap-2 text-[11px]">
-				<MetricCell label="Posts" sub="30d" value={String(rep.posts_30d ?? 0)} />
-				<MetricCell label="Reactions" sub="90d" value={String(rep.reactions_90d ?? 0)} />
-				<MetricCell label="Age" sub="days" value={rep.age_days !== undefined ? rep.age_days.toFixed(1) : "—"} />
-			</dl>
-		</div>
-	);
-}
-
-function LevelTicks({ filled, total, tickClass }: { filled: number; total: number; tickClass: string }) {
-	return (
-		<span className="inline-flex items-end gap-px">
-			{Array.from({ length: total }).map((_, i) => (
-				<span
-					key={i}
-					className={`w-[3px] rounded-[1px] ${
-						i === 0 ? "h-2"
-							: i === 1 ? "h-2.5"
-							: i === 2 ? "h-3"
-							: i === 3 ? "h-3.5"
-							: "h-4"
-					} ${i < filled ? tickClass : "bg-muted-foreground/25"}`}
-				/>
-			))}
-		</span>
-	);
-}
-
-function MetricCell({ label, sub, value }: { label: string; sub: string; value: string }) {
-	return (
-		<div className="rounded-md bg-muted/40 border border-border px-2 py-1.5">
-			<div className="text-[10px] uppercase tracking-wide text-muted-foreground">
-				{label} <span className="lowercase font-normal">· {sub}</span>
-			</div>
-			<div className="text-sm font-semibold tabular-nums">{value}</div>
-		</div>
-	);
-}

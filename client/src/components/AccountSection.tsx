@@ -6,15 +6,15 @@
 //
 // 1. BLOCKED USERS. Matrix-native ignore (m.ignored_user_list). A
 //    one-sided client filter: messages from these users no longer
-//    render in your timeline. This does NOT participate in consensus
-//    moderation; flags and reputation are unrelated.
+//    render in your timeline. Block is a personal filter, separate
+//    from the reports admins act on.
 //
 // 2. DELETE ACCOUNT. POST /_matrix/client/v3/account/deactivate via
 //    UIA password. Synapse is asked to erase the account's events
-//    (`erase: true` is the default), and the engine drops the user's
-//    reputation row + any pending suspension on them via /api/me/purge
-//    before the deactivate call goes out. Refused if the user is the
-//    only remaining admin.
+//    (`erase: true` is the default), and the engine drops any
+//    remaining account-side rows via /api/me/purge before the
+//    deactivate call goes out. Refused if the user is the only
+//    remaining admin.
 //
 //    UIA: with email-code auth there's no user-known password, so the
 //    delete flow fetches a fresh ephemeral UIA password from the
@@ -154,7 +154,7 @@ export function AccountSection({ accessToken, transport, ignoredUsers, onSignedO
 				<div>
 					<div className="text-sm font-medium">Blocked users</div>
 					<p className="text-xs text-muted-foreground leading-snug mt-0.5">
-						Hides their messages from your timeline and stops their DMs from reaching you. Block is a personal filter; it doesn't count toward consensus moderation. Use Flag for that.
+						Hides their messages from your timeline and stops their DMs from reaching you. Block is a personal filter; admins don't see it. To get admins involved, report instead.
 					</p>
 				</div>
 
@@ -216,7 +216,7 @@ export function AccountSection({ accessToken, transport, ignoredUsers, onSignedO
 					null
 				) : isOnlyAdmin ? (
 					<div className="text-xs border border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400 rounded px-3 py-2 leading-relaxed">
-						You're the only admin on this instance. Promote another admin before deleting your account, or floor-violation review on this instance will become impossible.
+						You're the only admin on this instance. Promote another admin before deleting your account, or report review on this instance will become impossible.
 					</div>
 				) : deleteState === "idle" ? (
 					<Button
@@ -237,8 +237,7 @@ export function AccountSection({ accessToken, transport, ignoredUsers, onSignedO
 							<li>Your username (Matrix ID) is permanently retired.</li>
 							<li>The contents of every message you've sent are erased on the homeserver.</li>
 							<li>Direct conversations on your side disappear; the other party retains their copy.</li>
-							<li>Flags you submitted stay in the public mod log (audit trail).</li>
-							<li>Your reputation row is dropped.</li>
+							<li>Reports you submitted stay in the audit log.</li>
 						</ul>
 
 						<label className="flex items-start gap-2 text-xs">

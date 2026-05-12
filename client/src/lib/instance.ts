@@ -127,9 +127,9 @@ export async function revokeAdminUser(accessToken: string, userId: string): Prom
 
 /**
  * Self-cleanup hook called immediately before the client asks Synapse
- * to deactivate the account.  Drops the user's reputation row + any
- * pending suspension on them.  Refuses (HTTP 409) if the caller is the
- * only remaining admin (promote another admin first).
+ * to deactivate the account.  Drops any engine-side rows tied to the
+ * caller.  Refuses (HTTP 409) if the caller is the only remaining
+ * admin (promote another admin first).
  */
 export async function purgeMyEngineState(accessToken: string): Promise<{ ok: boolean; error?: string }> {
 	const r = await fetch(`${ENGINE_URL}/api/me/purge`, {
@@ -141,72 +141,6 @@ export async function purgeMyEngineState(accessToken: string): Promise<{ ok: boo
 		return { ok: false, error: body.error ?? `HTTP ${r.status}` };
 	}
 	return { ok: true };
-}
-
-// ─── Suspension state ────────────────────────────────────────────────
-
-export type SuspensionReason =
-	| "floor_violation"
-	| "repeated_false_floor_flags"
-	| "repeated_room_collapses";
-export type SuspensionStatus = "pending" | "confirmed" | "reversed" | "dismissed";
-
-export interface SuspensionSummary {
-	id: number;
-	reason: SuspensionReason;
-	status: SuspensionStatus;
-	created_at: number;
-}
-
-export interface MyStatusResponse {
-	user_id: string;
-	suspended: boolean;
-	suspension: SuspensionSummary | null;
-}
-
-/**
- * Probe the engine for the current user's suspension state.  The
- * client polls this on boot (and periodically afterwards) to gate
- * compose / DM creation / room creation when the account is paused.
- * Returns null on auth errors so the caller can degrade gracefully.
- */
-export async function fetchMyStatus(accessToken: string): Promise<MyStatusResponse | null> {
-	const r = await fetch(`${ENGINE_URL}/api/me/status`, {
-		headers: { Authorization: `Bearer ${accessToken}` },
-	});
-	if (!r.ok) return null;
-	return (await r.json()) as MyStatusResponse;
-}
-
-export interface PublishQuota {
-	allowed: boolean;
-	kind: "room" | "space";
-	reason?: "admin" | "suspended" | "rate_limited";
-	weight?: number;
-	count: number;
-	threshold: number;
-	retry_after_sec?: number;
-}
-
-/**
- * Pre-flight check for the "Create room / space" UI.  Mirrors the
- * server-side gate at /api/internal/can-publish-room so the SPA
- * can show an explanatory popup explaining the per-tier daily caps
- * BEFORE the user fills in a form that would just be denied at
- * submit.  Returns null on transport / auth failures — caller
- * should optimistically allow in that case (the real submit will
- * still go through the gate).
- */
-export async function fetchPublishQuota(
-	accessToken: string,
-	kind: "room" | "space",
-): Promise<PublishQuota | null> {
-	const r = await fetch(
-		`${ENGINE_URL}/api/me/publish-quota?kind=${encodeURIComponent(kind)}`,
-		{ headers: { Authorization: `Bearer ${accessToken}` } },
-	);
-	if (!r.ok) return null;
-	return (await r.json()) as PublishQuota;
 }
 
 /**
@@ -233,69 +167,6 @@ export async function fetchRoomParents(roomId: string): Promise<string[]> {
 		console.warn("fetchRoomParents threw", err);
 		return [];
 	}
-}
-
-// ─── Admin: floor-violation review queue ─────────────────────────────
-
-export interface PendingSuspension {
-	id: number;
-	user_id: string;
-	reason: SuspensionReason;
-	flag_event_id: string | null;
-	target_event_id: string | null;
-	target_room_id: string | null;
-	flagger: string | null;
-	status: SuspensionStatus;
-	created_at: number;
-}
-
-export async function fetchFloorQueue(accessToken: string): Promise<PendingSuspension[]> {
-	const r = await fetch(`${ENGINE_URL}/api/admin/floor-queue`, {
-		headers: { Authorization: `Bearer ${accessToken}` },
-	});
-	if (!r.ok) return [];
-	const body = (await r.json()) as { pending: PendingSuspension[] };
-	return body.pending ?? [];
-}
-
-/** Three review actions:
- *   - confirm: deactivate the reported user, no flagger penalty
- *   - reverse: lift the reported user's suspension AND penalize the
- *              flagger (weight clamp + auto-suspend threshold tick).
- *              Use when the report looks malicious / weaponized.
- *   - dismiss: lift the reported user's suspension, NO flagger
- *              penalty.  Use when the report was a good-faith
- *              mistake — flagger thought it was a violation but
- *              admin disagrees, and there's no malicious intent.
- *
- * The mod log records which action was chosen so users can see how
- * admins are distinguishing between malicious and good-faith cases. */
-export type FloorReviewAction = "confirm" | "reverse" | "dismiss";
-
-export async function reviewFloorCase(
-	accessToken: string,
-	id: number,
-	action: FloorReviewAction,
-	note?: string,
-): Promise<{ ok: boolean; autoSuspendedFlagger?: boolean; deactivated?: boolean; error?: string }> {
-	const r = await fetch(`${ENGINE_URL}/api/admin/floor-queue/${id}/${action}`, {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-			Authorization: `Bearer ${accessToken}`,
-		},
-		body: JSON.stringify({ note: note ?? "" }),
-	});
-	if (!r.ok) {
-		const body = await r.json().catch(() => ({})) as { error?: string };
-		return { ok: false, error: body.error ?? `HTTP ${r.status}` };
-	}
-	const body = await r.json() as { auto_suspended_flagger?: boolean; deactivated?: boolean };
-	return {
-		ok: true,
-		autoSuspendedFlagger: body.auto_suspended_flagger,
-		deactivated: body.deactivated,
-	};
 }
 
 // ─── Per-room audit log ──────────────────────────────────────────────
@@ -326,30 +197,10 @@ export type ModLogEntry =
 		retracted_by: string;        // mxid that issued the retraction
 	}
 	| {
-		kind: "collapse";
-		ts: number;
-		target_event_id: string;
-		flagger_count: number;
-		weighted_score: number;
-		categories: string[];
-	}
-	| {
-		kind: "suspension";
-		ts: number;
-		id: number;
-		user_id: string;
-		reason: SuspensionReason;
-		flagger: string | null;
-		target_event_id: string | null;
-		status: SuspensionStatus;
-		reviewed_at: number | null;
-		reviewed_by: string | null;
-	}
-	| {
 		// Voluntary takedown — sender redacted their own message, or
 		// a bot's owner redacted the bot's message.  Distinct from
-		// `collapse` (community-driven) and from `flag_retracted`
-		// (which targets the FLAG event, not the message).
+		// `flag_retracted` (which targets the FLAG event, not the
+		// message itself).
 		kind: "self_deletion";
 		ts: number;
 		target_event_id: string;
@@ -515,31 +366,10 @@ export async function botKickBanFromSpace(
 	};
 }
 
-// ─── Room-target flagging (offensive room name pipeline) ─────────────
+// ─── Room-target flagging ────────────────────────────────────────────
 
-export interface CollapsedRoom {
-	room_id: string;
-	collapsed_at: number;
-	categories: string[];
-	fast_track: boolean;
-}
-
-/** Public list of currently-collapsed rooms.  Polled by the SPA on
- * Explore + room-list refresh: the Explore directory hides any room
- * in this list, and any place we render a room name (sidebar, chat
- * header, member sheets) substitutes "Name Removed by Community
- * Review" when the room id matches.  No auth — the override is only
- * meaningful if every client honours it. */
-export async function fetchCollapsedRooms(): Promise<CollapsedRoom[]> {
-	const r = await fetch(`${ENGINE_URL}/api/rooms/collapsed`);
-	if (!r.ok) return [];
-	const body = (await r.json()) as { rooms?: CollapsedRoom[] };
-	return body.rooms ?? [];
-}
-
-/** Submit a flag against a room as a whole.  Same category set as
- * message flags; floor_violation fast-tracks via the engine and opens
- * a suspension on the room's creator pending admin review. */
+/** Submit a report against a room as a whole.  Same category set as
+ * message reports; the engine records it for admins to act on. */
 export async function flagRoom(
 	accessToken: string,
 	roomId: string,
@@ -561,10 +391,10 @@ export async function flagRoom(
 	return { ok: true };
 }
 
-/** Retract the caller's own active flag on a room.  No-op (404) if
- * they had no active flag.  Symmetrical with the message-flag retract
- * path that fires when the user redacts their chat.koven.flag.v1
- * event. */
+/** Retract the caller's own active report on a room.  No-op (404) if
+ * they had no active report.  Symmetrical with the message-report
+ * retract path that fires when the user redacts their
+ * chat.koven.flag.v1 event. */
 export async function unflagRoom(
 	accessToken: string,
 	roomId: string,

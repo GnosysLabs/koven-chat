@@ -46,12 +46,6 @@ export interface ExplorePaneProps {
 	// HTTP endpoint.  When null the per-tile flag affordance is hidden
 	// (a logged-out user can browse Explore but can't flag).
 	accessToken: string | null;
-	// Set of room ids the engine reports as collapsed.  Filtered out
-	// of the Explore directory so the offensive name never surfaces
-	// to a fresh visitor.  After a flag submission lands in the
-	// collapse pipeline, the SPA polls this list to refresh.
-	collapsedRoomIds: Set<string>;
-	onCollapseRefresh?(): void | Promise<void>;
 	// Whether the viewer has opted into seeing NSFW-flagged rooms +
 	// spaces.  When false (the default), Explore filters them out
 	// entirely.  When true, they appear with a small badge so the
@@ -61,7 +55,7 @@ export interface ExplorePaneProps {
 
 export function ExplorePane({
 	transport, rooms, spaces, onJoined,
-	accessToken, collapsedRoomIds, onCollapseRefresh,
+	accessToken,
 	showNsfw,
 }: ExplorePaneProps) {
 	const [query, setQuery] = useState("");
@@ -137,30 +131,20 @@ export function ExplorePane({
 	}, [rooms, spaces]);
 
 	const visible = useMemo(() => {
-		// Drop collapsed rooms from the directory entirely — surfacing
-		// "Name Removed by Community Review" tiles in Explore wouldn't
-		// help anyone and would re-broadcast the fact that they exist.
-		// Joined users still see the override in their room list (via
-		// displayRoomName); Explore is the discovery surface, so we
-		// just hide them.
-		let liveResults = collapsedRoomIds.size === 0
-			? results
-			: results.filter(r => !collapsedRoomIds.has(r.roomId));
 		// NSFW gate.  When the viewer hasn't opted in, drop every
-		// NSFW-flagged entry from the directory entirely — same shape
-		// as collapsed rooms.  When they have opted in, all entries
-		// flow through; the badge on each tile communicates which
-		// ones carry the flag.
+		// NSFW-flagged entry from the directory entirely.  When they
+		// have opted in, all entries flow through; the badge on each
+		// tile communicates which ones carry the flag.
+		let liveResults = results;
 		if (!showNsfw) {
 			liveResults = liveResults.filter(r => !r.nsfw);
 		}
 		// Discord-style: Explore only surfaces SPACES (servers).  Rooms
 		// live inside their parent space and inherit its visibility, so
 		// listing them as separate Explore entries duplicates the space
-		// and confuses discovery.  The filter chips that used to let
-		// users toggle this view are gone for the same reason.
+		// and confuses discovery.
 		return liveResults.filter(r => r.isSpace);
-	}, [results, collapsedRoomIds, showNsfw]);
+	}, [results, showNsfw]);
 
 	async function handleJoin(entry: PublicEntry) {
 		if (!transport) return;
@@ -236,10 +220,8 @@ export function ExplorePane({
 				)}
 			</div>
 
-			{/* Flag-this-room dialog.  Shared FlagDialog component with
-			    target="room" so users see room-specific copy (what
-			    happens when the flag tips consensus, what false-flag
-			    consequences look like). */}
+			{/* Report-this-room dialog.  Shared FlagDialog component with
+			    target="room" so users see room-specific copy. */}
 			<FlagDialog
 				open={!!flagDialog}
 				onOpenChange={(o) => { if (!o) setFlagDialog(null); }}
@@ -247,13 +229,8 @@ export function ExplorePane({
 				onSubmit={async (category: FlagCategory, rationale?: string) => {
 					if (!flagDialog || !accessToken) return;
 					const r = await flagRoom(accessToken, flagDialog.roomId, category, rationale);
-					if (!r.ok) throw new Error(r.error ?? "Flag submission failed");
+					if (!r.ok) throw new Error(r.error ?? "Report submission failed");
 					setFlagDialog(null);
-					// Floor flags collapse on the engine side immediately;
-					// non-floor flags may still be one of the votes that
-					// pushes the room over the threshold.  Either way,
-					// re-poll so the user sees the latest state.
-					if (onCollapseRefresh) await onCollapseRefresh();
 				}}
 			/>
 		</div>

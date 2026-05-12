@@ -1,17 +1,15 @@
 // Per-room public mod log.  Shown from a button in the ChatPane
 // header.  Reads /api/rooms/:id/mod-log on open and renders the
-// merged chronological feed of:
+// merged chronological feed of every recorded admin / self action:
 //
-//   - flags (every flag submitted in this room: who flagged whom,
+//   - flags (every report submitted in this room: who reported what,
 //     under what category, when)
-//   - collapses (every message that crossed the consensus threshold
-//     and got hidden)
-//   - suspensions (floor-violation suspensions filed in this room,
-//     with their current status)
+//   - self-deletions (sender redacted their own message, or a bot
+//     owner redacted the bot's)
+//   - bot-membership actions (founder kicked / banned a bot)
 //
-// Public read by design.  The whole governance philosophy depends on
-// the audit trail being inspectable by anyone in the community: the
-// only check on collective moderation power is sunlight.
+// Public read by design — the audit trail is inspectable by anyone
+// in the community.
 
 import { useEffect, useState } from "react";
 import {
@@ -23,7 +21,7 @@ import {
 } from "@/components/ui/dialog";
 import { fetchRoomModLog, type ModLogEntry } from "@/lib/instance";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
-import { Ban, Flag, FlagOff, Hammer, ShieldAlert, Trash2, UserX } from "lucide-react";
+import { Ban, Flag, FlagOff, Trash2, UserX } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { MatrixTransport } from "@/lib/matrix";
 import { useResolvedUser } from "@/lib/useResolvedUser";
@@ -83,7 +81,7 @@ export function ModLogSheet({ open, onOpenChange, roomId, transport }: ModLogShe
 				<DialogHeader>
 					<DialogTitle>Mod log</DialogTitle>
 					<DialogDescription>
-						Public, append-only record of every flag, collapse, and suspension that's happened in this room.
+						Public, append-only record of moderation activity in this room — reports, self-deletions, and bot kicks/bans.
 					</DialogDescription>
 				</DialogHeader>
 
@@ -179,33 +177,10 @@ function Entry({ e }: { e: ModLogEntry }) {
 		);
 	}
 
-	if (e.kind === "collapse") {
-		return (
-			<li className="flex items-start gap-3 px-3 py-2 rounded border border-border bg-amber-500/5">
-				<Hammer className="h-4 w-4 shrink-0 mt-0.5 text-amber-500" />
-				<div className="flex-1 min-w-0 text-xs leading-snug">
-					<div className="font-medium">Message collapsed</div>
-					<div className="text-muted-foreground mt-0.5">
-						{e.flagger_count} flagger{e.flagger_count === 1 ? "" : "s"}, weighted score {e.weighted_score.toFixed(2)}
-					</div>
-					<div className="text-muted-foreground">
-						Categories: {e.categories.map(labelForCategory).join(", ")}
-					</div>
-					<div className="text-[10px] text-muted-foreground/70 mt-1 tabular-nums">{time}</div>
-				</div>
-			</li>
-		);
-	}
-
 	if (e.kind === "self_deletion") {
 		// Voluntary takedown.  Two sub-cases distinguished by
 		// deletion_kind: 'self' (sender deleted their own message)
 		// or 'bot_owner' (a bot's owner deleted the bot's message).
-		// In both cases we surface the deletion as a distinct row
-		// — visibly different from a community collapse — so the
-		// audit log makes clear nothing community-driven happened
-		// here.  Background uses a neutral muted tone rather than
-		// the amber/red of consensus actions.
 		const isBotOwnerDelete = e.deletion_kind === "bot_owner";
 		return (
 			<li className="flex items-start gap-3 px-3 py-2 rounded border border-border bg-muted/30">
@@ -238,11 +213,9 @@ function Entry({ e }: { e: ModLogEntry }) {
 	}
 
 	if (e.kind === "bot_membership") {
-		// Founder-only kick / ban of a bot.  Distinct visual from
-		// the suspension row (which is for humans + driven by floor
-		// flags) — bot-membership actions are unilateral by design,
-		// so framing them with the same destructive red would
-		// over-state what's actually happening.  Amber for kick
+		// Founder-only kick / ban of a bot.  Bot-membership actions
+		// are unilateral by design, so framing them with destructive
+		// red would over-state what's happening.  Amber for kick
 		// (recoverable: bot can rejoin if reinvited), red for ban
 		// (sticky until a manual unban).
 		const isKick = e.action === "kick";
@@ -282,48 +255,10 @@ function Entry({ e }: { e: ModLogEntry }) {
 		);
 	}
 
-	// suspension
-	const statusColor =
-		e.status === "confirmed" ? "text-destructive"
-		: e.status === "reversed"  ? "text-amber-500 line-through"
-		: e.status === "dismissed" ? "text-muted-foreground line-through"
-		: "text-amber-500";
-	const statusLabel =
-		e.status === "confirmed" ? "confirmed (account banned)"
-		: e.status === "reversed"  ? "reversed (false report — flagger penalized)"
-		: e.status === "dismissed" ? "dismissed in good faith (no penalty)"
-		: e.status; // pending
-	const reasonLabel =
-		e.reason === "floor_violation" ? "Floor-violation suspension"
-		: e.reason === "repeated_room_collapses" ? "Repeated-room-collapses suspension"
-		: "Repeat-false-flagger suspension";
-	return (
-		<li className="flex items-start gap-3 px-3 py-2 rounded border border-destructive/30 bg-destructive/5">
-			<ShieldAlert className="h-4 w-4 shrink-0 mt-0.5 text-destructive" />
-			<div className="flex-1 min-w-0 text-xs leading-snug">
-				<div className="font-medium">{reasonLabel}</div>
-				<div className={cn("mt-0.5", statusColor)}>Status: {statusLabel}</div>
-				<div className="flex items-center gap-1 mt-0.5">
-					<span className="text-muted-foreground">Suspended:</span>
-					<UserInline userId={e.user_id} />
-				</div>
-				{e.flagger && (
-					<div className="flex items-center gap-1 mt-0.5">
-						<span className="text-muted-foreground">Filed by:</span>
-						<UserInline userId={e.flagger} />
-					</div>
-				)}
-				{e.reviewed_at && e.reviewed_by && (
-					<div className="flex items-center gap-1 mt-0.5">
-						<span className="text-muted-foreground">Reviewed by:</span>
-						<ReviewerInline reviewer={e.reviewed_by} />
-						<span className="text-muted-foreground/70 ml-1">at {new Date(e.reviewed_at).toLocaleString()}</span>
-					</div>
-				)}
-				<div className="text-[10px] text-muted-foreground/70 mt-1 tabular-nums">Filed {time}</div>
-			</div>
-		</li>
-	);
+	// Exhaustiveness guard: every ModLogEntry variant should have been
+	// handled above.  If a new kind lands in the API without a render
+	// here we drop it silently rather than crash the sheet.
+	return null;
 }
 
 function UserInline({ userId }: { userId: string }) {
@@ -353,31 +288,6 @@ function UserInline({ userId }: { userId: string }) {
 			<span className="text-[11px] font-medium truncate">{label}</span>
 		</span>
 	);
-}
-
-// Reviewers can be a real mxid (an admin user) or one of two
-// system-initiated sentinels: "self_retracted" (the flagger
-// withdrew their flag, auto-reversing the suspension) or
-// "self_deactivate" (the suspended user deleted their own account
-// while the case was pending).  Sentinels render as a plain
-// "System" tag with the action paraphrased — rendering them as a
-// mxid is misleading (no such user exists) and visually noisy.
-function ReviewerInline({ reviewer }: { reviewer: string }) {
-	if (reviewer === "self_retracted") {
-		return (
-			<span className="text-muted-foreground italic">
-				System (flag retracted)
-			</span>
-		);
-	}
-	if (reviewer === "self_deactivate") {
-		return (
-			<span className="text-muted-foreground italic">
-				System (account self-deleted)
-			</span>
-		);
-	}
-	return <UserInline userId={reviewer} />;
 }
 
 function labelForCategory(c: string): string {

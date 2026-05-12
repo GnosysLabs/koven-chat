@@ -13,7 +13,6 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
-import { COLLAPSED_NAME } from "@/lib/collapsedRooms";
 import type { Room, RoomId, Space, UserId } from "@koven/shared";
 import { BellOff, ChevronDown, ChevronRight, Check, Copy, Lock, Plus, UserX, X } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
@@ -51,11 +50,6 @@ export interface RoomListProps {
 	onCreateRoom(): void;
 	onAcceptInvite(roomId: RoomId): void | Promise<void>;
 	onDeclineInvite(roomId: RoomId): void | Promise<void>;
-	// Set of room ids the engine reports as collapsed (offensive room
-	// name pipeline).  Sidebar entries for these rooms render with the
-	// "Name Removed by Community Review" placeholder instead of the
-	// verbatim name.
-	collapsedRoomIds?: Set<string>;
 	// True once matrix-js-sdk's initial /sync has produced a populated
 	// rooms list at least once.  RoomList suppresses the "No rooms in
 	// this space yet" hint while false — without this gate, switching
@@ -111,7 +105,6 @@ const ADMIN_PL_THRESHOLD = 50;
 export function RoomList({
 	rooms, spaces, activeSpace, activeRoomId, currentUserId,
 	onSelectRoom, onCreateRoom, onAcceptInvite, onDeclineInvite,
-	collapsedRoomIds,
 	roomsLoaded, transport, accessToken,
 	onEditRoom, onOpenProfile, onRequestDeleteDm, botMxids,
 	onMoveRoom,
@@ -247,7 +240,6 @@ export function RoomList({
 						groups={groups}
 						spaceId={activeSpaceObj!.id}
 						activeRoomId={activeRoomId}
-						collapsedRoomIds={collapsedRoomIds}
 						currentUserId={currentUserId}
 						transport={transport ?? null}
 						accessToken={accessToken ?? null}
@@ -267,7 +259,6 @@ export function RoomList({
 							key={room.id}
 							room={room}
 							active={room.id === activeRoomId}
-							collapsed={!!collapsedRoomIds?.has(room.id)}
 							onSelect={() => onSelectRoom(room.id)}
 							currentUserId={currentUserId}
 							transport={transport ?? null}
@@ -471,7 +462,7 @@ function DmPresenceDot({ presence }: { presence: Room["dmPresence"] }) {
  * wrapper so pointer events fall through normally — clicks land on
  * the row button, no drag activation distance to fight. */
 function RoomGroupedList({
-	groups, spaceId, activeRoomId, collapsedRoomIds,
+	groups, spaceId, activeRoomId,
 	currentUserId, transport, accessToken,
 	onSelectRoom, onEditRoom, onOpenProfile, onRequestDeleteDm, botMxids,
 	canDrag, onMoveRoom,
@@ -479,7 +470,6 @@ function RoomGroupedList({
 	groups: RoomGroup[];
 	spaceId: RoomId;
 	activeRoomId: RoomId | null;
-	collapsedRoomIds?: Set<string>;
 	currentUserId: UserId;
 	transport: MatrixTransport | null;
 	accessToken: string | null;
@@ -611,7 +601,6 @@ function RoomGroupedList({
 											key={room.id}
 											room={room}
 											active={room.id === activeRoomId}
-											collapsed={!!collapsedRoomIds?.has(room.id)}
 											onSelect={() => onSelectRoom(room.id)}
 											currentUserId={currentUserId}
 											transport={transport}
@@ -629,7 +618,6 @@ function RoomGroupedList({
 											key={room.id}
 											room={room}
 											active={room.id === activeRoomId}
-											collapsed={!!collapsedRoomIds?.has(room.id)}
 											onSelect={() => onSelectRoom(room.id)}
 											currentUserId={currentUserId}
 											transport={transport}
@@ -669,7 +657,6 @@ function RoomGroupedList({
 						<RoomRow
 							room={activeDraggedRoom}
 							active={false}
-							collapsed={!!collapsedRoomIds?.has(activeDraggedRoom.id)}
 							onSelect={() => { /* preview-only */ }}
 							currentUserId={currentUserId}
 							transport={null}
@@ -765,17 +752,12 @@ function DraggableRoomRow(props: React.ComponentProps<typeof RoomRow>) {
 }
 
 function RoomRow({
-	room, active, collapsed, onSelect,
+	room, active, onSelect,
 	currentUserId, transport, accessToken, activeSpaceId,
 	onEditRoom, onOpenProfile, onRequestDeleteDm, isBotPeer,
 }: {
 	room: Room;
 	active: boolean;
-	// True when the room is in the engine's collapsed-rooms list.  The
-	// row still renders (you might be a member who needs to leave),
-	// but with the "Name Removed by Community Review" placeholder in
-	// place of the verbatim name.
-	collapsed: boolean;
 	onSelect(): void;
 	// Right-click context menu wiring.
 	currentUserId: UserId;
@@ -842,21 +824,15 @@ function RoomRow({
 					// silenced" at a glance, the way Discord does.
 					isMuted && "text-muted-foreground/70",
 				)}
-				title={collapsed ? COLLAPSED_NAME : room.name}
+				title={room.name}
 			>
 				<RoomAvatar room={room} isBotPeer={isBotPeer} />
 				<span className="flex-1 truncate flex items-center gap-1.5 min-w-0">
 					<span className={cn(
 						"truncate",
 						hasUnread && !isMuted && "font-semibold",
-						// Italicise + dim the placeholder so collapsed
-						// rooms are visually distinct from regular ones —
-						// they exist in the user's room list (they're
-						// still a member) but the elevated styling makes
-						// it obvious the name was redacted by review.
-						collapsed && "italic text-muted-foreground",
 					)}>
-						{collapsed ? COLLAPSED_NAME : room.name}
+						{room.name}
 					</span>
 					{isMuted && (
 						<BellOff className="h-3 w-3 shrink-0 text-muted-foreground" aria-label="Muted" />

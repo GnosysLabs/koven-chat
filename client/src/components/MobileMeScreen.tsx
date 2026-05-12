@@ -69,7 +69,7 @@ export function MobileMeScreen({
 			<MeRow
 				icon={<UserIcon className="h-5 w-5" />}
 				label="View profile"
-				sublabel="Your public profile, bio, and reputation"
+				sublabel="Your public profile, bio, and avatar"
 				onClick={onOpenProfile}
 			/>
 			<MeRow

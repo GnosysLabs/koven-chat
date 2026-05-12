@@ -5,9 +5,8 @@
 // bubble color; everyone else uses the muted card color.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CollapseAggregate, EventId, FlagAggregate, FlagCategory, Member, Message, PollAggregate, ReactionAggregate, Room, RoomId, UserId } from "@koven/shared";
+import type { EventId, FlagAggregate, FlagCategory, Member, Message, PollAggregate, ReactionAggregate, Room, RoomId, UserId } from "@koven/shared";
 import { cn } from "@/lib/utils";
-import { COLLAPSED_NAME } from "@/lib/collapsedRooms";
 import { Button } from "@/components/ui/button";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { ReactionPills } from "@/components/ReactionPills";
@@ -111,7 +110,6 @@ export interface ChatPaneProps {
 	memberAvatars: Map<string, string | undefined>;   // userId → mxc URL
 	reactionsByMessage: Map<EventId, ReactionAggregate[]>;
 	flagsByMessage: Map<EventId, FlagAggregate>;
-	collapsesByMessage: Map<EventId, CollapseAggregate>;
 	onSendMessage(text: string, replyTo: EventId | null): void;
 	// Upload + send a file attachment.  Returns once the event has been
 	// dispatched; the parent handles errors via the global error
@@ -125,24 +123,13 @@ export interface ChatPaneProps {
 	onDeclineInvite(roomId: EventId): void | Promise<void>;
 	onInvite(roomId: EventId): void;
 	onEditRoom(roomId: EventId): void;
-	// Engine-reported suspension state for the current user.  When
-	// true, the compose row, call buttons, and invite affordance are
-	// disabled.  Read remains allowed.  The full-width banner above
-	// the app explains the situation.
-	isSuspended: boolean;
 	// Open the per-room public mod log dialog.
 	onOpenModLog(roomId: EventId): void;
-	// Submit a room-target flag (the offensive-room-name pipeline) —
-	// rendered as a Flag icon right of the mod log icon in the header.
-	// Optional: when omitted (DMs, encrypted rooms, etc.) the icon is
-	// hidden.  Throws on engine-side rejection so the dialog can show
-	// the error inline.
+	// Submit a room-target report.  Rendered as a Flag icon right of
+	// the mod log icon in the header.  Optional: when omitted (DMs,
+	// encrypted rooms, etc.) the icon is hidden.  Throws on engine-
+	// side rejection so the dialog can show the error inline.
 	onFlagRoom?(roomId: EventId, category: FlagCategory, rationale?: string): void | Promise<void>;
-	// Display-name override.  When this set contains the active room
-	// id, the header renders "Name Removed by Community Review" in
-	// place of the room name.  Same set the SPA-wide RoomList +
-	// SpaceLanding consume.
-	collapsedRoomIds?: Set<string>;
 	// mxids that should render with a BOT badge next to their name
 	// (sender labels, reply-quote labels).  Default empty Set means
 	// no badges — safe pre-fetch state.
@@ -282,9 +269,9 @@ const GROUP_WINDOW_MS = 5 * 60 * 1000;
 const MAX_PENDING_ATTACHMENTS = 10;
 
 export function ChatPane({
-	room, messages, memberAvatars, reactionsByMessage, flagsByMessage, collapsesByMessage,
+	room, messages, memberAvatars, reactionsByMessage, flagsByMessage,
 	onSendMessage, onSendAttachment, onReact, onUnreact, onFlag, onUnflag, onAcceptInvite, onDeclineInvite, onInvite, onEditRoom,
-	isSuspended, onOpenModLog, onFlagRoom, collapsedRoomIds,
+	onOpenModLog, onFlagRoom,
 	botMxids,
 	serviceMxids,
 	myOwnedBotMxids,
@@ -309,16 +296,12 @@ export function ChatPane({
 	scrollToEvent,
 	onScrolledToEvent,
 }: ChatPaneProps) {
-	// Consensus flagging only works where the local engine can act:
-	//   - DMs are 1-on-1 — no quorum to gather, no consensus to reach.
-	//   - Encrypted rooms hide message content from the engine (and
-	//     from any admin reviewing a floor case), so the moderation
-	//     pipeline is hollow there — the admin queue would surface
-	//     reports they can't read.  Better to not offer the affordance
-	//     than to let users believe they took action that won't
-	//     produce a real review.
-	// (Federation is no longer a consideration: Koven instances don't
-	// federate, so every joined room is local.  See docs/GOVERNANCE.md.)
+	// Reporting only works where the engine can read messages:
+	//   - DMs are 1-on-1 — there's no admin to forward a report to.
+	//   - Encrypted rooms hide message content from the engine, so
+	//     admins reviewing a report can't see the underlying message.
+	//     Better to hide the affordance than to surface unreadable
+	//     reports to the admin queue.
 	const flaggable = !!room && room.kind !== "dm" && !room.encrypted;
 	const [roomFlagOpen, setRoomFlagOpen] = useState(false);
 	// Gallery sheet — opens from the header's Images icon, shows every
@@ -1080,23 +1063,12 @@ export function ChatPane({
 					/>
 					<div className="flex flex-col min-w-0">
 						<span className="text-sm font-semibold truncate flex items-center gap-1.5">
-							<span className={cn(
-								"truncate",
-								// Italicise the placeholder so it visually
-								// reads as system-imposed, not as a user-
-								// chosen room name.
-								collapsedRoomIds?.has(room.id) && "italic text-muted-foreground",
-							)}>
-								{collapsedRoomIds?.has(room.id) ? COLLAPSED_NAME : room.name}
-							</span>
+							<span className="truncate">{room.name}</span>
 							{room.kind === "dm" && room.dmUserId && botMxids?.has(room.dmUserId) && (
 								<BotBadge />
 							)}
 						</span>
-						{/* Topic stays hidden when the room is collapsed —
-						    the topic field can carry the same kind of
-						    abuse the name does, so we suppress both. */}
-						{room.topic && !collapsedRoomIds?.has(room.id) && (
+						{room.topic && (
 							<span className="text-xs text-muted-foreground truncate max-w-[60ch]">{room.topic}</span>
 						)}
 					</div>
@@ -1123,7 +1095,7 @@ export function ChatPane({
 							icon={<Lock className="h-3 w-3" />}
 							label="Encrypted"
 							tone="success"
-							title="End-to-end encrypted. The engine can't read these messages, so Koven moderation doesn't apply — flagging, room collapse, and the mod log are silent here. Activity in this room also doesn't contribute to your reputation score, since reputation is built from posts the engine can index."
+							title="End-to-end encrypted. The engine can't read these messages, so reporting and the mod log are silent here."
 						/>
 					)}
 					{room.nsfw && (
@@ -1180,21 +1152,16 @@ export function ChatPane({
 						</button>
 					)}
 					{onFlagRoom && room.kind !== "dm" && !room.isInvite && !room.encrypted && (
-						// Flag the room itself (its name + topic), not a
+						// Report the room itself (its name + topic), not a
 						// single message inside it.  Same gating as the
 						// mod log icon — hidden in DMs and encrypted
-						// rooms where the consensus pipeline can't act.
-						// Already-collapsed rooms still show the flag
-						// affordance: users may want to pile on with a
-						// floor flag (turning a community-vote collapse
-						// into a creator suspension) and the engine
-						// dedupes our own flag idempotently.
+						// rooms where the engine can't read content.
 						<button
 							type="button"
 							onClick={() => setRoomFlagOpen(true)}
 							className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-							title="Flag this room"
-							aria-label="Flag this room"
+							title="Report this room"
+							aria-label="Report this room"
 						>
 							<Flag className="h-4 w-4" />
 						</button>
@@ -1292,7 +1259,6 @@ export function ChatPane({
 								roomEncrypted={!!room.encrypted}
 								reactions={reactionsByMessage.get(m.id) ?? []}
 								flags={flagsByMessage.get(m.id)}
-								collapse={collapsesByMessage.get(m.id)}
 								isDm={room.kind === "dm"}
 								receiptsVersion={receiptsVersion ?? 0}
 								memberAvatars={memberAvatars}
@@ -1334,13 +1300,6 @@ export function ChatPane({
 									? () => { void onBlockSender(m.sender as UserId); }
 									: undefined}
 								onFlag={(category, rationale) => onFlag(m.id, category, rationale)}
-								onTogglePillFlag={() => {
-									const cur = flagsByMessage.get(m.id);
-									if (cur?.myFlagId) onUnflag(cur.myFlagId);
-									// If the user hasn't flagged yet, the pill click
-									// is handled inline (opens the flag dialog) — see
-									// MessageRow below.
-								}}
 								isBot={!!botMxids?.has(m.sender)}
 								// True when the sender is a bot the viewer owns —
 								// drives the flag→delete swap on the action toolbar
@@ -1356,16 +1315,13 @@ export function ChatPane({
 								}}
 								// Delete button is shown only when:
 								//   - parent supplied a handler, AND
-								//   - the message isn't already collapsed/redacted
-								//     (deleting an already-deleted message is a
-								//     no-op that errors at the engine), AND
 								//   - the viewer is the sender OR owns the bot
 								//     that sent it.
 								// Bot ownership comes from the App-level set; the
 								// engine re-checks server-side, so a tampered SPA
 								// can't actually delete other users' content.
 								onDelete={
-									onDeleteMessage && !collapsesByMessage.get(m.id) && (
+									onDeleteMessage && (
 										m.isSelf || !!myOwnedBotMxids?.has(m.sender)
 									)
 										// Suppress delete on pending (local-echo)
@@ -1487,7 +1443,7 @@ export function ChatPane({
 					/>
 				)}
 				<form
-					onSubmit={e => { e.preventDefault(); if (!isSuspended) send(); }}
+					onSubmit={e => { e.preventDefault(); send(); }}
 					className="flex gap-2 items-end"
 				>
 					{onSendAttachment && (
@@ -1506,12 +1462,12 @@ export function ChatPane({
 									// picked after a remove + re-attach.
 									e.target.value = "";
 								}}
-								disabled={isSuspended || uploading}
+								disabled={uploading}
 							/>
 							<button
 								type="button"
 								onClick={() => fileInputRef.current?.click()}
-								disabled={isSuspended || uploading || pendingAttachments.length >= MAX_PENDING_ATTACHMENTS}
+								disabled={uploading || pendingAttachments.length >= MAX_PENDING_ATTACHMENTS}
 								className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
 								title={
 									pendingAttachments.length >= MAX_PENDING_ATTACHMENTS
@@ -1531,7 +1487,7 @@ export function ChatPane({
 						<button
 							type="button"
 							onClick={() => setPollDialogOpen(true)}
-							disabled={isSuspended || uploading || pendingAttachments.length > 0}
+							disabled={uploading || pendingAttachments.length > 0}
 							className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
 							title="Create a poll"
 							aria-label="Create a poll"
@@ -1547,12 +1503,12 @@ export function ChatPane({
 						// the bottom of the multi-line composer.
 						<MediaPicker
 							accessToken={accessToken}
-							disabled={isSuspended || uploading || pendingAttachments.length > 0}
+							disabled={uploading || pendingAttachments.length > 0}
 							onPick={sendMedia}
 						>
 							<button
 								type="button"
-								disabled={isSuspended || uploading || pendingAttachments.length > 0}
+								disabled={uploading || pendingAttachments.length > 0}
 								className={cn(
 									"h-8 px-2 rounded-md inline-flex items-center justify-center",
 									"text-[10px] font-bold tracking-wide",
@@ -1636,25 +1592,23 @@ export function ChatPane({
 								// doesn't accidentally fire a send.
 								if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
 									e.preventDefault();
-									if (!isSuspended && !uploading) send();
+									if (!uploading) send();
 								}
 							}}
 							placeholder={
-								isSuspended
-									? "Posting paused while your account is under review"
-									: uploading
-										? "Sending…"
-										: pendingAttachments.length > 0
-											? "Add a caption…"
-											: replyTarget
-												? `Reply to ${replyTarget.senderDisplayName}`
-												: `Message ${room.name}`
+								uploading
+									? "Sending…"
+									: pendingAttachments.length > 0
+										? "Add a caption…"
+										: replyTarget
+											? `Reply to ${replyTarget.senderDisplayName}`
+											: `Message ${room.name}`
 							}
 							// Disabled during upload so Enter doesn't double-submit
 							// or queue another message while the previous one's
 							// attachment is still being uploaded.
-							disabled={isSuspended || uploading}
-							autoFocus={!isSuspended}
+							disabled={uploading}
+							autoFocus
 							className={cn(
 								// Match the Input component's visual style so the
 								// composer slot looks identical at single-line
@@ -1737,7 +1691,7 @@ export function ChatPane({
 
 function MessageRow({
 	message, avatarMxc, continuesGroup, isFirst, flaggable, roomEncrypted,
-	reactions, flags, collapse, onReact, onReply, onFlag, onTogglePillFlag, onToggleReactionPill, isBot,
+	reactions, flags, onReact, onReply, onFlag, onToggleReactionPill, isBot,
 	isOwnedBot, isHovered, isFlashing, onDelete,
 	isDm, receiptsVersion, memberAvatars, memberNames, mentionsViewer, onMentionClick, botMxids, serviceMxids,
 	pollAggregate, viewerUserId, onPollVote, onPollEnd,
@@ -1758,7 +1712,6 @@ function MessageRow({
 	roomEncrypted: boolean;
 	reactions: ReactionAggregate[];
 	flags: FlagAggregate | undefined;
-	collapse: CollapseAggregate | undefined;
 	// True when the message sender is a registered bot — drives the
 	// BOT pill rendered next to the sender label.  The badge is the
 	// only visual difference from a human's message; nothing else
@@ -1776,7 +1729,6 @@ function MessageRow({
 	onReact(emoji: string): void;
 	onReply(): void;
 	onFlag(category: FlagCategory, rationale?: string): void | Promise<void>;
-	onTogglePillFlag(): void;
 	onToggleReactionPill(reaction: ReactionAggregate): void;
 	// Authoritative "is the cursor currently over this row?" signal,
 	// computed in ChatPane via a single native pointermove listener
@@ -1851,7 +1803,6 @@ function MessageRow({
 	// Right-click context menu state.  Cursor-positioned, dismissed
 	// via the generic ContextMenu primitive's outside-mousedown handler.
 	const [ctxMenuPos, setCtxMenuPos] = useState<{ x: number; y: number } | null>(null);
-	const [expanded, setExpanded] = useState(false);
 	// Popover state stays local to the row — only relevant for THIS
 	// row's React picker.  Combined with the parent-supplied
 	// `isHovered` to keep the toolbar visible while the user picks
@@ -1871,33 +1822,12 @@ function MessageRow({
 	const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 	const showActions = isHovered || reactOpen || deleteDialogOpen;
 	const handleDelete = onDelete ? () => setDeleteDialogOpen(true) : undefined;
-	const myFlagId = flags?.myFlagId;
-	// You can't flag your own messages — both because the consensus
-	// vote is meaningless on yourself and because it'd let users
-	// silence themselves accidentally.  We still render the flag pill
-	// (count of flags FROM others) so a user can see they've been
-	// reported, but the action surface (hover button + click-to-open
-	// dialog from the pill) is gated.
-	//
-	// Same gate applies to bots the viewer owns: the owner controls
-	// the bot's prompt and configuration, so flagging is the wrong
-	// remedy — they should just delete the message.  The trash icon
-	// (provided by ChatPane via `onDelete` on the same condition)
-	// takes its place on the toolbar.
+	// You can't report your own messages.  Same gate applies to bots
+	// the viewer owns: the owner controls the bot's prompt and config,
+	// so reporting is the wrong remedy — they should just delete the
+	// message.  The trash icon (provided by ChatPane via `onDelete` on
+	// the same condition) takes its place on the toolbar.
 	const canFlag = flaggable && !message.isSelf && !isOwnedBot;
-	function handlePillClick() {
-		if (!canFlag) return;
-		// Click on the flag pill: if you've already flagged, withdraw
-		// (immediate); otherwise open the flag dialog so you can pick
-		// a category and "+1" the existing flag.
-		if (myFlagId) onTogglePillFlag();
-		else setFlagDialogOpen(true);
-	}
-	// Floor-violation (fastTrack) collapses are hard-hidden — these are
-	// CSAM / threats / doxx by classifier, and the whole point of the
-	// floor pipeline is that this content is never re-served.  No
-	// click-to-view affordance, no way for `expanded` to flip true.
-	const isCollapsed = !!collapse && (collapse.fastTrack || !expanded);
 	// Vertical-rhythm rules.  Symmetric vertical padding (`py-`) so
 	// every row has equal breathing room above AND below — the
 	// timeline reads as steady rhythm and the gutter doubles as the
@@ -1919,7 +1849,7 @@ function MessageRow({
 	//     shift, but it matches what every other chat client (Slack,
 	//     Discord, iMessage) does on reaction toggle and is what
 	//     makes "no reactions" stacks feel natural.
-	const hasReactions = !isCollapsed && reactions.length > 0;
+	const hasReactions = reactions.length > 0;
 	const rowPadding = cn(
 		continuesGroup ? "pt-0" : "pt-4",
 		hasReactions ? "pb-7" : "pb-0.5",
@@ -1963,18 +1893,7 @@ function MessageRow({
 				onClick={onOpenSenderProfile ? () => onOpenSenderProfile(message.sender as UserId) : undefined}
 			/>
 				<div className="flex-1 min-w-0 pt-1 text-sm italic text-muted-foreground flex items-center gap-2">
-					{isCollapsed ? (
-						<CollapsedBubble collapse={collapse!} onExpand={() => setExpanded(true)} />
-					) : (
-						<span>* <span className="text-foreground/80">{message.senderDisplayName}</span> {message.text}</span>
-					)}
-					{flaggable && flags && flags.count > 0 && (
-						<FlagPill
-							count={flags.count}
-							hasFlagged={!!myFlagId}
-							onClick={handlePillClick}
-						/>
-					)}
+					<span>* <span className="text-foreground/80">{message.senderDisplayName}</span> {message.text}</span>
 					{showActions && (
 						<MessageActions
 							onReact={onReact}
@@ -2091,29 +2010,25 @@ function MessageRow({
 					    messages where flex would otherwise stretch the
 					    column wider. */}
 					<div className="relative w-fit flex flex-col min-w-0">
-						{isCollapsed ? (
-							<CollapsedBubble collapse={collapse!} onExpand={() => setExpanded(true)} />
-						) : (
-							<MessageBubble
-								message={message}
-								memberNames={memberNames}
-								memberAvatars={memberAvatars}
-								onMentionClick={onMentionClick}
-								pollAggregate={pollAggregate}
-								viewerUserId={viewerUserId}
-								onPollVote={onPollVote}
-								onPollEnd={onPollEnd}
-								isBot={isBot}
-							/>
-						)}
-						{!isCollapsed && message.kind === "text" && !roomEncrypted && (
+						<MessageBubble
+							message={message}
+							memberNames={memberNames}
+							memberAvatars={memberAvatars}
+							onMentionClick={onMentionClick}
+							pollAggregate={pollAggregate}
+							viewerUserId={viewerUserId}
+							onPollVote={onPollVote}
+							onPollEnd={onPollEnd}
+							isBot={isBot}
+						/>
+						{message.kind === "text" && !roomEncrypted && (
 							// Link preview rides under the bubble for plain text
-							// messages only.  Skipped on attachments / collapses /
-							// emotes to keep those layouts clean.  Also skipped
-							// in encrypted rooms — see roomEncrypted prop above.
+							// messages only.  Skipped on attachments / emotes
+							// to keep those layouts clean.  Also skipped in
+							// encrypted rooms — see roomEncrypted prop above.
 							<UrlPreviewSlot text={message.text} />
 						)}
-						{!isCollapsed && reactions.length > 0 && (
+						{reactions.length > 0 && (
 							<div className="absolute left-0 top-full">
 								<ReactionPills reactions={reactions} onToggle={onToggleReactionPill} />
 							</div>
@@ -2139,7 +2054,7 @@ function MessageRow({
 						    DM rooms get a "Read · time" line; group
 						    rooms get an avatar stack + count that
 						    opens a modal listing every reader. */}
-						{message.isSelf && !message.pending && !isCollapsed && (
+						{message.isSelf && !message.pending && (
 							<SeenIndicator
 								roomId={message.roomId}
 								eventId={message.id}
@@ -2150,22 +2065,6 @@ function MessageRow({
 								botMxids={botMxids}
 								serviceMxids={serviceMxids}
 							/>
-						)}
-						{flaggable && flags && flags.count > 0 && (
-							<FlagPill
-								count={flags.count}
-								hasFlagged={!!myFlagId}
-								onClick={handlePillClick}
-							/>
-						)}
-						{collapse && expanded && (
-							<button
-								type="button"
-								onClick={() => setExpanded(false)}
-								className="text-[10px] text-muted-foreground hover:text-foreground underline"
-							>
-								hide
-							</button>
 						)}
 						{/* Reserved slot for the action toolbar.  Always
 						    present (even when not hovered) so the row's
@@ -2249,53 +2148,6 @@ function MessageRow({
 				/>
 			)}
 		</div>
-	);
-}
-
-function CollapsedBubble({ collapse, onExpand }: { collapse: CollapseAggregate; onExpand(): void }) {
-	// Floor-violation collapses are non-revealable.  Render a static
-	// banner — no onClick, no "click to view" hint, no hover affordance.
-	if (collapse.fastTrack) {
-		return (
-			<div
-				className="inline-flex items-center gap-2 px-3 py-2 rounded-xl text-xs italic text-muted-foreground bg-muted/50 border border-dashed border-destructive/40"
-				title="This message was hidden by the platform's floor-violation rules and cannot be revealed."
-			>
-				<Flag className="h-3 w-3 text-destructive/70" />
-				<span>Hidden — flagged as a serious violation</span>
-			</div>
-		);
-	}
-	return (
-		<button
-			type="button"
-			onClick={onExpand}
-			className="inline-flex items-center gap-2 px-3 py-2 rounded-xl text-xs italic text-muted-foreground bg-muted/50 border border-dashed border-border hover:bg-muted transition-colors"
-			title="Click to view the original content"
-		>
-			<Flag className="h-3 w-3" />
-			<span>{`Collapsed by community review · ${collapse.flaggerCount} flaggers · weight ${collapse.weightedScore.toFixed(2)}`}</span>
-			<span className="not-italic text-[10px] opacity-70">(click to view)</span>
-		</button>
-	);
-}
-
-function FlagPill({ count, hasFlagged, onClick }: { count: number; hasFlagged: boolean; onClick(): void }) {
-	return (
-		<button
-			type="button"
-			onClick={onClick}
-			title={hasFlagged ? "You flagged this · click to withdraw" : `${count} ${count === 1 ? "flag" : "flags"} · click to add yours`}
-			className={cn(
-				"shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-xs transition-colors",
-				hasFlagged
-					? "border-destructive/60 bg-destructive/10 text-destructive hover:bg-destructive/15"
-					: "border-border bg-muted/40 text-muted-foreground hover:bg-accent"
-			)}
-		>
-			<Flag className="h-3 w-3" />
-			<span className="tabular-nums">{count}</span>
-		</button>
 	);
 }
 

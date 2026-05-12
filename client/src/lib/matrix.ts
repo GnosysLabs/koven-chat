@@ -92,19 +92,6 @@ export interface FlagEventLite {
 	rationale?: string;
 }
 
-// Collapse events — emitted by the engine into a room's timeline when
-// flag thresholds are met.  One per target message.
-export interface CollapseEventLite {
-	eventId: EventId;        // the chat.koven.collapse.v1 event id
-	roomId: RoomId;
-	targetEventId: EventId;
-	flaggerCount: number;
-	weightedScore: number;
-	categories: string[];
-	timestamp: number;
-	fastTrack: boolean;
-}
-
 // ─── Stored credentials ──────────────────────────────────────────────
 
 const CREDENTIALS_KEY = "koven:matrix-credentials";
@@ -323,7 +310,6 @@ export interface MatrixHandlers {
 	onPollResponseRedacted(roomId: RoomId, responseEventId: EventId): void;
 	onFlag(flag: FlagEventLite, options: { live: boolean }): void;
 	onFlagRedacted(roomId: RoomId, flagEventId: EventId): void;
-	onCollapse(collapse: CollapseEventLite, options: { live: boolean }): void;
 	/// Fires for every m.poll.response event on the timeline — one per
 	/// vote, including changes (each new response from the same voter
 	/// supersedes their previous answer per MSC3381).  Consumer
@@ -2480,8 +2466,9 @@ export class MatrixTransport {
 		// Koven PL scheme — two tiers only: creator (PL 100) and
 		// everyone else (PL 0).  All administrative actions require
 		// the creator; chat AND invites are open to every member.
-		// Content moderation goes through the engine's flag /
-		// consensus / collapse pipeline, not Matrix redactions / kicks.
+		// Content moderation: members report messages/rooms via the
+		// engine's report queue; admins act via standard Matrix
+		// moderation (kick / ban / redact).
 		//
 		// Passed via `power_level_content_override` so Synapse writes
 		// the PL state event as part of room creation, atomically.
@@ -2592,12 +2579,12 @@ export class MatrixTransport {
 		const c = this.requireClient();
 
 		// Koven power-level model: two tiers, creator (PL 100) and
-		// everyone else (PL 0).  No moderators — content moderation
-		// is the community's job via the flag / consensus / collapse
-		// pipeline in the engine, not a privileged-user role at the
-		// Matrix layer.  Synapse's default scheme assumes a PL-50
-		// moderator tier; we override so administrative state needs
-		// the creator while invites + chat stay open to all members.
+		// everyone else (PL 0).  No moderators — members report bad
+		// content via the engine's report queue, admins act via
+		// standard Matrix moderation (kick / ban / redact).  Synapse's
+		// default scheme assumes a PL-50 moderator tier; we override
+		// so administrative state needs the creator while invites +
+		// chat stay open to all members.
 		//
 		// Passed via `power_level_content_override` so the PL state
 		// event is part of room creation, atomic with the create.
@@ -2783,10 +2770,7 @@ export class MatrixTransport {
 			});
 		}
 
-		// DMs are end-to-end encrypted by default.  The 1-on-1 shape
-		// means there's no quorum for the consensus moderation layer
-		// to act on anyway, so the privacy tradeoff that's awkward in
-		// group rooms is the right call here.  Crypto is initialized
+		// DMs are end-to-end encrypted by default.  Crypto is initialized
 		// in start() via initRustCrypto + the cryptoCallbacks bound to
 		// SSSS, so by the time this runs the megolm session machinery
 		// is up and sendEvent into the encrypted room works.
@@ -4659,9 +4643,8 @@ export class MatrixTransport {
 	// m.ignored_user_list account_data, the SDK drops their events from
 	// timelines on the way in and refuses to deliver our outgoing
 	// messages to them through DMs.  It's a unilateral, client-side
-	// filter: it does NOT feed into reputation or the consensus collapse
-	// pipeline.  The block list and the flag system are separate
-	// primitives, intentionally.
+	// filter: it does NOT feed into the report queue.  The block list
+	// and the report system are separate primitives, intentionally.
 	//
 	// Account data syncs across devices, so blocking on web carries to
 	// any other Matrix client the user signs into.
@@ -4757,11 +4740,8 @@ export class MatrixTransport {
 	}
 
 	// ─── Self-deactivate ───────────────────────────────────────────────
-	// POST /_matrix/client/v3/account/deactivate.  Distinct from the
-	// admin-side /_synapse/admin/v1/deactivate path the engine uses for
-	// confirmed floor-violation bans (that one needs admin auth and
-	// can target any user); this one needs the account password (UIA)
-	// and can only target self.
+	// POST /_matrix/client/v3/account/deactivate.  Needs the account
+	// password (UIA) and can only target self.
 	//
 	// `erase: true` instructs Synapse to redact all events the user
 	// authored.  We default it on so "delete account" reads as
@@ -5204,20 +5184,6 @@ export class MatrixTransport {
 		return out;
 	}
 
-	/** All collapse events currently in a room's timeline, oldest first. */
-	getRoomCollapses(roomId: RoomId): CollapseEventLite[] {
-		const room = this.client?.getRoom(roomId);
-		if (!room) return [];
-		const out: CollapseEventLite[] = [];
-		for (const event of room.getLiveTimeline().getEvents()) {
-			if (event.getType() !== "chat.koven.collapse.v1") continue;
-			if (event.isRedacted()) continue;
-			const c = this.eventToCollapse(event, room);
-			if (c) out.push(c);
-		}
-		return out;
-	}
-
 	// ─── Private helpers ────────────────────────────────────────────
 
 	private requireClient(): sdk.MatrixClient {
@@ -5522,27 +5488,6 @@ export class MatrixTransport {
 		};
 	}
 
-	private eventToCollapse(event: MatrixEvent, room: SdkRoom): CollapseEventLite | null {
-		if (event.isRedacted()) return null;
-		const content = event.getContent() as any;
-		const targetEventId = content?.target_event_id as string | undefined;
-		if (!targetEventId) return null;
-		const eventId = event.getId();
-		if (!eventId) return null;
-		return {
-			eventId: eventId as EventId,
-			roomId: room.roomId as RoomId,
-			targetEventId: targetEventId as EventId,
-			flaggerCount: typeof content.flaggers === "object" && Array.isArray(content.flaggers)
-				? content.flaggers.length
-				: (typeof content.threshold_users === "number" ? content.threshold_users : 0),
-			weightedScore: typeof content.weighted_score === "number" ? content.weighted_score : 0,
-			categories: Array.isArray(content.categories) ? (content.categories as string[]) : [],
-			timestamp: typeof content.timestamp === "number" ? content.timestamp : event.getTs(),
-			fastTrack: !!content.fast_track,
-		};
-	}
-
 	private eventToFlag(event: MatrixEvent, room: SdkRoom): FlagEventLite | null {
 		if (event.isRedacted()) return null;
 		const content = event.getContent() as any;
@@ -5788,14 +5733,6 @@ export class MatrixTransport {
 		if (type === "chat.koven.flag.v1") {
 			const f = this.eventToFlag(event, room);
 			if (f) this.handlers.onFlag(f, { live });
-			return;
-		}
-
-		// Collapse events emitted by the engine — one per message
-		// that's been collapsed by community review.
-		if (type === "chat.koven.collapse.v1") {
-			const c = this.eventToCollapse(event, room);
-			if (c) this.handlers.onCollapse(c, { live });
 			return;
 		}
 

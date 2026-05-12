@@ -5,15 +5,13 @@
 // chronological.  Membership of the active room is tracked separately
 // so the UI can render a member list without re-querying the SDK.
 
-import type { CollapseAggregate, EventId, FlagAggregate, Member, Message, PollAggregate, ReactionAggregate, Room, RoomId, Space, SpaceId, SpaceInvite, UserId } from "@koven/shared";
-import type { CollapseEventLite, FlagEventLite, PollEndEvent, PollResponseEvent, ReactionEvent, SyncState } from "@/lib/matrix";
+import type { EventId, FlagAggregate, Member, Message, PollAggregate, ReactionAggregate, Room, RoomId, Space, SpaceId, SpaceInvite, UserId } from "@koven/shared";
+import type { FlagEventLite, PollEndEvent, PollResponseEvent, ReactionEvent, SyncState } from "@/lib/matrix";
 
 // Per-message reactions, keyed by message event id.
 export type ReactionsByMessage = Map<EventId, ReactionAggregate[]>;
 // Per-message flags, keyed by message event id.
 export type FlagsByMessage = Map<EventId, FlagAggregate>;
-// Per-message collapse markers (one per target — engine emits once).
-export type CollapsesByMessage = Map<EventId, CollapseAggregate>;
 // Per-message poll aggregates, keyed by the poll's start event id.
 export type PollsByMessage = Map<EventId, PollAggregate>;
 /** Reverse index for last-vote-per-voter: poll id → voter mxid →
@@ -109,7 +107,6 @@ export interface AppState {
 	reactionRefs: Map<EventId, ReactionRef>;
 	flagsByMessage: FlagsByMessage;
 	flagRefs: Map<EventId, FlagRef>;
-	collapsesByMessage: CollapsesByMessage;
 	pollsByMessage: PollsByMessage;
 	// Reverse index for "last vote per voter" — see PollVotesIndex.
 	// Internal-only; PollCard reads pollsByMessage and never touches
@@ -145,7 +142,6 @@ export const initialState: AppState = {
 	reactionRefs: new Map(),
 	flagsByMessage: new Map(),
 	flagRefs: new Map(),
-	collapsesByMessage: new Map(),
 	pollsByMessage: new Map(),
 	pollVotesIndex: new Map(),
 	pollResponseRefs: new Map(),
@@ -175,8 +171,6 @@ export type Action =
 	| { type: "flags_loaded"; flags: FlagEventLite[]; myUserId: UserId }
 	| { type: "flag_arrived"; flag: FlagEventLite; myUserId: UserId }
 	| { type: "flag_redacted"; flagEventId: EventId }
-	| { type: "collapses_loaded"; collapses: CollapseEventLite[] }
-	| { type: "collapse_arrived"; collapse: CollapseEventLite }
 	| { type: "poll_response_arrived"; response: PollResponseEvent; myUserId: UserId }
 	| { type: "poll_response_redacted"; responseEventId: EventId }
 	| { type: "poll_end_arrived"; end: PollEndEvent }
@@ -348,17 +342,6 @@ export function reduce(state: AppState, action: Action): AppState {
 		case "flag_redacted":
 			return applyFlagRedaction(state, action.flagEventId);
 
-		case "collapses_loaded": {
-			let next: AppState = state;
-			for (const c of action.collapses) {
-				next = applyCollapse(next, c);
-			}
-			return next;
-		}
-
-		case "collapse_arrived":
-			return applyCollapse(state, action.collapse);
-
 		case "poll_response_arrived":
 			return applyPollResponse(state, action.response, action.myUserId);
 
@@ -493,23 +476,6 @@ function applyFlag(state: AppState, f: FlagEventLite, myUserId: UserId): AppStat
 		});
 	}
 	return { ...state, flagsByMessage, flagRefs };
-}
-
-function applyCollapse(state: AppState, c: CollapseEventLite): AppState {
-	// First-write-wins: the engine emits one collapse per target.  If
-	// somehow we receive a duplicate, we ignore it.
-	if (state.collapsesByMessage.has(c.targetEventId)) return state;
-	const collapsesByMessage = new Map(state.collapsesByMessage);
-	collapsesByMessage.set(c.targetEventId, {
-		targetEventId: c.targetEventId,
-		collapseEventId: c.eventId,
-		flaggerCount: c.flaggerCount,
-		weightedScore: c.weightedScore,
-		categories: c.categories,
-		timestamp: c.timestamp,
-		fastTrack: c.fastTrack,
-	});
-	return { ...state, collapsesByMessage };
 }
 
 /** Recompute a poll's counts + per-answer voter lists from scratch

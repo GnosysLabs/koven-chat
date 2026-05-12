@@ -1,7 +1,8 @@
-// Flag-this-message dialog.  Lives outside MessageActions because two
-// surfaces can open it: the hover-toolbar's flag button and the
-// always-visible flag pill on already-flagged messages (so users who
-// agree with an existing flag can pile on).
+// Report-this-message dialog.  Opens from the message hover-toolbar
+// Flag button + the right-click context menu, and (with target="room")
+// from the room-header Flag icon.  Submits a chat.koven.flag.v1 event
+// that the engine records for admins to act on; this dialog itself
+// just collects the category + optional rationale.
 
 import { useState } from "react";
 import {
@@ -28,11 +29,10 @@ export interface FlagDialogProps {
 	open: boolean;
 	onOpenChange(open: boolean): void;
 	onSubmit(category: FlagCategory, rationale?: string): void | Promise<void>;
-	// Same dialog handles both message flags (default) and room-target
-	// flags (the "offensive room name" pipeline).  The discriminator
-	// flips title + copy so users know exactly what the consensus
-	// action will hide — a single message vs. a whole room's name in
-	// Explore + everywhere it renders.
+	// Same dialog handles both message reports (default) and room-target
+	// reports.  The discriminator just flips title + copy so the user
+	// knows whether they're reporting a single message or the room as
+	// a whole.
 	target?: "message" | "room";
 }
 
@@ -41,24 +41,16 @@ export function FlagDialog({ open, onOpenChange, onSubmit, target = "message" }:
 	const [rationale, setRationale] = useState("");
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
-	// "form" = picking a category + rationale.  "confirm" = serious-
-	// violation confirmation step shown after the user selects the
-	// floor_violation category and clicks Flag.  Acknowledgement
-	// required because false reports in this category carry severe
-	// consequences (immediate suspension of the target, plus
-	// reputation damage and potential auto-suspension of the false
-	// flagger after threshold).
-	const [step, setStep] = useState<"form" | "confirm">("form");
 
 	function reset() {
 		setCategory(null);
 		setRationale("");
 		setError(null);
 		setPending(false);
-		setStep("form");
 	}
 
-	async function doSubmit() {
+	async function submit(e: React.FormEvent) {
+		e.preventDefault();
 		if (!category) return;
 		setPending(true);
 		setError(null);
@@ -72,98 +64,17 @@ export function FlagDialog({ open, onOpenChange, onSubmit, target = "message" }:
 		}
 	}
 
-	async function submit(e: React.FormEvent) {
-		e.preventDefault();
-		if (!category) return;
-		// Floor-violation flags require an explicit confirmation step.
-		// Other categories submit immediately.
-		if (category === "floor_violation" && step !== "confirm") {
-			setStep("confirm");
-			return;
-		}
-		await doSubmit();
-	}
-
 	return (
 		<Dialog open={open} onOpenChange={(o) => { if (!o) reset(); onOpenChange(o); }}>
 			<DialogContent className="sm:max-w-md">
-				{step === "confirm" ? (
-					<>
-						<DialogHeader>
-							<DialogTitle className="flex items-center gap-2 text-destructive">
-								<AlertTriangle className="h-4 w-4" />
-								Confirm serious-violation report
-							</DialogTitle>
-							<DialogDescription>
-								Read this carefully before submitting.
-							</DialogDescription>
-						</DialogHeader>
-						<div className="space-y-3 text-sm">
-							<p>This category is reserved for content that is one of:</p>
-							<ul className="list-disc pl-5 space-y-1 text-muted-foreground text-xs">
-								<li>Child sexual abuse material (CSAM)</li>
-								<li>A credible, specific threat of violence</li>
-								<li>Personal information published without consent (doxxing)</li>
-							</ul>
-							<p>Submitting this report will:</p>
-							<ul className="list-disc pl-5 space-y-1 text-muted-foreground text-xs">
-								{target === "room" ? (
-									<>
-										<li>Immediately replace this room's name with "Name Removed by Community Review" everywhere it renders.</li>
-										<li>Hide the room from the Explore directory.</li>
-										<li>Suspend the room's creator pending admin review.</li>
-										<li>Be permanently logged in the public mod log with your username attached.</li>
-									</>
-								) : (
-									<>
-										<li>Immediately collapse the message into a non-revealable hidden state.</li>
-										<li>Suspend the message author's account pending admin review.</li>
-										<li>Be permanently logged in this room's public mod log with your username attached.</li>
-									</>
-								)}
-							</ul>
-							<p className="text-destructive">If an admin reviews this report and finds it was a false alarm:</p>
-							<ul className="list-disc pl-5 space-y-1 text-destructive/80 text-xs">
-								<li>Your reputation drops to the floor for the next 30 days.</li>
-								<li>Two reversed false reports within 30 days, or three ever, will auto-suspend your own account pending admin review.</li>
-							</ul>
-							<p className="text-xs text-muted-foreground">
-								If the content is just rude, off-topic, or factually wrong, go back and pick a different category. The community vote handles those.
-							</p>
-						</div>
-						{error && (
-							<div className="text-xs text-destructive border border-destructive/40 bg-destructive/10 rounded px-3 py-2">
-								{error}
-							</div>
-						)}
-						<DialogFooter>
-							<Button
-								type="button"
-								variant="ghost"
-								onClick={() => setStep("form")}
-								disabled={pending}
-								autoFocus
-							>
-								Back
-							</Button>
-							<Button
-								type="button"
-								onClick={doSubmit}
-								disabled={pending}
-								className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-							>
-								{pending ? "Submitting…" : "I understand, submit"}
-							</Button>
-						</DialogFooter>
-					</>
-				) : (
-				<>
 				<DialogHeader>
-					<DialogTitle>{target === "room" ? "Flag this room" : "Flag this message"}</DialogTitle>
+					<DialogTitle>
+						{target === "room" ? "Report this room to admins" : "Report this message to admins"}
+					</DialogTitle>
 					<DialogDescription>
 						{target === "room"
-							? `Flags from multiple weighted users hide the room and replace its name pending review. Pick the closest reason.`
-							: `Flags from multiple weighted users collapse a post pending review. Pick the closest reason.`}
+							? "Admins review reports and can take action against the room or its members. Pick the closest reason."
+							: "Admins review reports and can take action against the message or its sender. Pick the closest reason."}
 					</DialogDescription>
 				</DialogHeader>
 				<form onSubmit={submit} className="space-y-4">
@@ -180,7 +91,7 @@ export function FlagDialog({ open, onOpenChange, onSubmit, target = "message" }:
 						<div className="pt-2 mt-2 border-t border-border">
 							<CategoryRow
 								label="Serious violation"
-								description="CSAM, doxxing, credible threat. Bypasses voting."
+								description="CSAM, doxxing, credible threat of violence."
 								selected={category === "floor_violation"}
 								onClick={() => setCategory("floor_violation")}
 								destructive
@@ -197,7 +108,7 @@ export function FlagDialog({ open, onOpenChange, onSubmit, target = "message" }:
 							id="flag-rationale"
 							value={rationale}
 							onChange={(e) => setRationale(e.target.value)}
-							placeholder="Anything reviewers should know about why this is a problem"
+							placeholder="Anything admins should know about why this is a problem"
 							maxLength={280}
 							rows={2}
 							className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-none"
@@ -218,12 +129,10 @@ export function FlagDialog({ open, onOpenChange, onSubmit, target = "message" }:
 							Cancel
 						</Button>
 						<Button type="submit" disabled={!category || pending}>
-							{pending ? "Flagging…" : category === "floor_violation" ? "Continue" : "Flag"}
+							{pending ? "Reporting…" : "Report"}
 						</Button>
 					</DialogFooter>
 				</form>
-				</>
-				)}
 			</DialogContent>
 		</Dialog>
 	);

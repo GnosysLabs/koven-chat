@@ -6,7 +6,7 @@
 import { forwardRef, useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
 import type { Room, Space, SpaceId, UserId } from "@koven/shared";
-import { Bot, Compass, EyeOff, Globe, Plus, Settings, ShieldAlert, User } from "lucide-react";
+import { Bot, Compass, EyeOff, Globe, Plus, Settings, User } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { AccountSwitcher } from "@/components/AccountSwitcher";
 import { SpaceTileContextMenu } from "@/components/SpaceTileContextMenu";
@@ -57,11 +57,6 @@ export interface SpaceBarProps {
 	onOpenCreateSpace(): void;
 	onOpenProfile(): void;
 	onOpenSettings(): void;
-	// Admin-only surfaces.  When `onOpenReview` is omitted the shield
-	// button is hidden entirely; non-admins shouldn't see it at all,
-	// even with a zero-count badge.  Pending count drives the red dot.
-	onOpenReview?(): void;
-	pendingReviewCount?: number;
 	// Right-click context-menu plumbing for space tiles.  Optional
 	// so SpaceBar still renders in test contexts where the transport
 	// isn't available — context menu won't show.
@@ -99,8 +94,6 @@ export function SpaceBar({
 	onOpenCreateSpace,
 	onOpenProfile,
 	onOpenSettings,
-	onOpenReview,
-	pendingReviewCount = 0,
 	transport,
 	accessToken,
 	onMarkAllReadInSpace,
@@ -262,21 +255,6 @@ export function SpaceBar({
 			</div>
 
 			<div className="flex flex-col items-center gap-1 pb-1">
-				{onOpenReview && (
-					<IconButton
-						onClick={onOpenReview}
-						title={
-							pendingReviewCount > 0
-								? `Pending review (${pendingReviewCount})`
-								: "Pending review"
-						}
-						ariaLabel="Pending review"
-						dot={pendingReviewCount > 0}
-						dotClass="bg-destructive"
-					>
-						<ShieldAlert className="h-4 w-4" />
-					</IconButton>
-				)}
 				<IconButton onClick={onOpenSettings} title="Settings" ariaLabel="Settings">
 					<Settings className="h-4 w-4" />
 				</IconButton>

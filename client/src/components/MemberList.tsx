@@ -12,7 +12,6 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
-import { RepBadge } from "@/components/RepBadge";
 import { BotBadge } from "@/components/BotBadge";
 import { Ban, Copy, MessageSquare, User, UserX } from "lucide-react";
 import type { Member } from "@koven/shared";
@@ -601,7 +600,6 @@ function MemberRow({
 					<span className="truncate">{member.displayName}</span>
 					{isBot && <BotBadge />}
 				</span>
-				{!isBot && <RepBadge userId={member.userId} />}
 			</button>
 		</li>
 	);
