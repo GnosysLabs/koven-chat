@@ -28,6 +28,13 @@ import {
 	bootstrapEmailBinding,
 	botMembershipActionsForRoom,
 	countBotsByOwner,
+	countOpenFlags,
+	getFlagById,
+	listAllFlagsForReportQueue,
+	modActionsForRoom,
+	recordModAction,
+	setFlagReviewStatus,
+	type ModAction,
 	createBot,
 	deleteAllNotifications,
 	deleteBio,
@@ -3320,10 +3327,206 @@ export function startServer(): void {
 						action: a.action,
 						founder: a.founder,
 					}));
-					const merged = [...flags, ...selfDeletions, ...botActions]
+					// Standard admin moderation primitives (PL ≥ 50).
+					// Carved out of the consensus model: humans get
+					// kicked / banned / redacted by an authoritative
+					// admin, not by group vote.  See mod_actions table
+					// in db.ts.
+					const modActionsRaw = modActionsForRoom(roomId);
+					const modActions = modActionsRaw.map(a => ({
+						kind: "mod_action" as const,
+						ts: a.created_at,
+						action: a.action,
+						actor: a.actor,
+						target_user: a.target_user,
+						target_event_id: a.target_event_id,
+						new_power_level: a.new_power_level,
+						reason: a.reason,
+					}));
+					const merged = [...flags, ...selfDeletions, ...botActions, ...modActions]
 						.sort((a, b) => b.ts - a.ts);
-					return json({ room_id: roomId, entries: merged });
+					return json({
+						room_id: roomId,
+						entries: merged,
+						// Also surface the raw mod_actions rows alongside
+						// the merged feed so callers that want to render
+						// them in a typed way don't have to discriminate
+						// off the union.
+						mod_actions: modActionsRaw,
+					});
 				}
+			}
+
+			// ─── Record a moderator action ───────────────────────────
+			// POST /api/rooms/:roomId/mod-actions
+			//
+			// Audit-trail side of standard Matrix admin moderation.  The
+			// caller has already (or is about to) perform the underlying
+			// Matrix mutation via Synapse directly (kick / ban / redact /
+			// PL state event); this endpoint only records the row that
+			// the per-room mod log + admin sheet read from.
+			//
+			// Auth: caller's bearer + PL ≥ 50 in the room.  PL is read
+			// off m.room.power_levels via the admin state API (the
+			// caller may not be joined yet for unban / redact, and even
+			// when joined the client API is gated to current members; the
+			// admin endpoint sidesteps both).
+			{
+				const m = path.match(/^\/api\/rooms\/([^/]+)\/mod-actions$/);
+				if (req.method === "POST" && m) {
+					const token = extractToken(req);
+					const userId = await whoami(token);
+					if (!userId || !token) {
+						return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+					}
+					const roomId = decodeURIComponent(m[1]!);
+					const body = (await req.json().catch(() => ({}))) as {
+						action?: unknown;
+						target_user?: unknown;
+						target_event_id?: unknown;
+						new_power_level?: unknown;
+						reason?: unknown;
+					};
+
+					const VALID_ACTIONS: readonly ModAction[] = [
+						"kick", "ban", "unban", "redact", "role_change",
+					] as const;
+					const action = body.action;
+					if (typeof action !== "string" || !(VALID_ACTIONS as readonly string[]).includes(action)) {
+						return json({
+							errcode: "M_INVALID_PARAM",
+							error: `action must be one of ${VALID_ACTIONS.join(", ")}`,
+						}, { status: 400 });
+					}
+					const targetUser = typeof body.target_user === "string" ? body.target_user : undefined;
+					const targetEventId = typeof body.target_event_id === "string" ? body.target_event_id : undefined;
+					const newPowerLevel = typeof body.new_power_level === "number" && Number.isFinite(body.new_power_level)
+						? Math.trunc(body.new_power_level)
+						: undefined;
+					const rawReason = typeof body.reason === "string" ? body.reason.slice(0, 1000) : undefined;
+
+					// Action-specific required-field validation.
+					if (action === "kick" || action === "ban" || action === "unban" || action === "role_change") {
+						if (!targetUser) {
+							return json({
+								errcode: "M_INVALID_PARAM",
+								error: `${action} requires target_user`,
+							}, { status: 400 });
+						}
+					}
+					if (action === "redact") {
+						if (!targetEventId) {
+							return json({
+								errcode: "M_INVALID_PARAM",
+								error: "redact requires target_event_id",
+							}, { status: 400 });
+						}
+					}
+					if (action === "role_change") {
+						if (newPowerLevel === undefined) {
+							return json({
+								errcode: "M_INVALID_PARAM",
+								error: "role_change requires new_power_level",
+							}, { status: 400 });
+						}
+					}
+
+					// PL check.  Read m.room.power_levels via Synapse's
+					// admin state API and compare the caller's effective
+					// PL against the 50 cutoff.  A missing users entry
+					// falls back to users_default (default 0 in spec).
+					const state = await readRoomState(roomId);
+					if (!state) {
+						return json({
+							errcode: "M_NOT_FOUND",
+							error: "room not found or state unreadable",
+						}, { status: 404 });
+					}
+					const pl = pickStateContent(state, "m.room.power_levels", "") as {
+						users?: Record<string, number>;
+						users_default?: number;
+					} | null;
+					const defaultPl = typeof pl?.users_default === "number" ? pl.users_default : 0;
+					const callerPl = typeof pl?.users?.[userId] === "number" ? pl.users[userId]! : defaultPl;
+					if (callerPl < 50) {
+						return json({
+							errcode: "M_FORBIDDEN",
+							error: "caller PL < 50 in this room",
+						}, { status: 403 });
+					}
+
+					const rec = recordModAction({
+						roomId,
+						action: action as ModAction,
+						actor: userId,
+						targetUser: targetUser ?? null,
+						targetEventId: targetEventId ?? null,
+						newPowerLevel: newPowerLevel ?? null,
+						reason: rawReason ?? null,
+					});
+					return json({ id: rec.id, created_at: rec.created_at });
+				}
+			}
+
+			// ─── Admin reports queue ────────────────────────────────
+			// Member-submitted flags surface here for instance admins to
+			// triage.  Status starts at 'open'; admins flip it to
+			// 'dismissed' (no action warranted) or 'actioned' (admin
+			// already handled it via the standard primitives).
+			if (req.method === "GET" && path === "/api/admin/reports") {
+				const auth = await requireAdmin(req);
+				if (auth instanceof Response) return auth;
+				const rows = listAllFlagsForReportQueue().map(r => ({
+					id: r.id,
+					room_id: r.room_id,
+					flagger: r.flagger,
+					target_kind: r.target_kind,
+					// For target_kind='message', target_event_id is the
+					// flagged message id and target_room_id is null.
+					// For target_kind='room', target_event_id is the
+					// flagged room id (room ids start with `!`, event
+					// ids start with `$`; flag-room rows reuse the
+					// target_event_id column for the room id).  The SPA
+					// gets the disambiguated shape it expects without
+					// having to inspect the leading char.
+					target_event_id: r.target_kind === "room" ? null : r.target_event_id,
+					target_room_id:  r.target_kind === "room" ? r.target_event_id : null,
+					category: r.category,
+					rationale: r.rationale,
+					created_at: r.ts,
+					status: r.review_status,
+				}));
+				return json({ reports: rows });
+			}
+
+			{
+				const m = path.match(/^\/api\/admin\/reports\/(\d+)\/(dismiss|action)$/);
+				if (req.method === "POST" && m) {
+					const auth = await requireAdmin(req);
+					if (auth instanceof Response) return auth;
+					const flagId = Number(m[1]!);
+					const verb = m[2] as "dismiss" | "action";
+					const existing = getFlagById(flagId);
+					if (!existing) {
+						return json({
+							errcode: "M_NOT_FOUND",
+							error: "report not found",
+						}, { status: 404 });
+					}
+					const nextStatus = verb === "dismiss" ? "dismissed" : "actioned";
+					setFlagReviewStatus(flagId, nextStatus);
+					return json({ id: flagId, status: nextStatus });
+				}
+			}
+
+			// ─── Open-report count for admin polling ────────────────
+			// Tiny helper so the admin shield-icon badge in the SpaceBar
+			// can show a count without paging through the whole report
+			// queue every refresh.
+			if (req.method === "GET" && path === "/api/admin/reports/count") {
+				const auth = await requireAdmin(req);
+				if (auth instanceof Response) return auth;
+				return json({ open: countOpenFlags() });
 			}
 
 			// ─── Self-delete a message ──────────────────────────────

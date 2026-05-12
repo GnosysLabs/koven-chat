@@ -329,6 +329,41 @@ db.exec(`
 	CREATE INDEX IF NOT EXISTS idx_bot_membership_actions_room_ts
 		ON bot_membership_actions(room_id, created_at DESC);
 
+	-- Standard Matrix admin moderation primitives, audit-trail side.
+	-- The actual Matrix mutation (kick / ban / unban / redact / PL state
+	-- event) is performed by the acting admin's SPA against Synapse
+	-- directly; the engine records a row here in parallel so the per-
+	-- room mod log can show who did what.  Caller's PL ≥ 50 in the
+	-- room is enforced server-side on the recording endpoint.
+	--
+	-- Polymorphic target columns:
+	--   - action='kick'|'ban'|'unban'|'role_change' → target_user set
+	--   - action='redact'                          → target_event_id set
+	--   - action='role_change'                     → new_power_level set
+	-- reason is operator-supplied free text capped at 1000 chars on the
+	-- endpoint side.
+	CREATE TABLE IF NOT EXISTS mod_actions (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		room_id         TEXT NOT NULL,
+		-- 'kick' | 'ban' | 'unban' | 'redact' | 'role_change'
+		action          TEXT NOT NULL,
+		-- Acting admin's mxid.  Required (engine writes only happen post-
+		-- whoami).
+		actor           TEXT NOT NULL,
+		-- Target user mxid (kick/ban/unban/role_change) — NULL for redact.
+		target_user     TEXT,
+		-- Target event id (redact) — NULL for member actions.
+		target_event_id TEXT,
+		-- For role_change: the new PL the actor set on the target.
+		new_power_level INTEGER,
+		-- Operator-supplied free text.  Capped at 1000 chars on the
+		-- endpoint side.
+		reason          TEXT,
+		created_at      INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_mod_actions_room_ts
+		ON mod_actions(room_id, created_at DESC);
+
 	-- Per-bot knowledge files.  Plain-text reference material the
 	-- bot owner uploads (FAQs, character bios, project docs).  Each
 	-- file's full content is concatenated into the system prompt at
@@ -599,6 +634,13 @@ ensureColumns("flags", [
 	// namespaces are disjoint and we can keep the unified primary-key
 	// shape on the table without sentinels.
 	{ name: "target_kind", ddl: "target_kind TEXT NOT NULL DEFAULT 'message'" },
+	// Admin reports queue: each flag carries a triage state that the
+	// admin reports sheet drives.  Defaults to 'open' so existing rows
+	// surface in the queue post-migration; admins flip to 'dismissed'
+	// (no action warranted) or 'actioned' (admin already moderated the
+	// underlying message / user via the standard primitives).
+	// 'open' | 'dismissed' | 'actioned'
+	{ name: "review_status", ddl: "review_status TEXT NOT NULL DEFAULT 'open'" },
 ]);
 ensureColumns("bots", [
 	// JSON array of trigger phrases — see CREATE TABLE comment above.
@@ -797,7 +839,11 @@ export type FlagRow = {
 	// the mod log can surface both the original flag and the retraction.
 	retracted_at?: number | null;
 	retracted_by?: string | null;
+	// Admin reports queue triage status.  See ensureColumns above.
+	review_status?: FlagReviewStatus;
 };
+
+export type FlagReviewStatus = "open" | "dismissed" | "actioned";
 
 const insertFlagStmt = db.prepare(`
 	INSERT OR IGNORE INTO flags (event_id, target_event_id, room_id, flagger, category, rationale, ts, target_kind)
@@ -854,6 +900,59 @@ const flagsForRoomStmt = db.prepare(`
 `);
 export function flagsForRoom(roomId: string): FlagRow[] {
 	return flagsForRoomStmt.all(roomId) as FlagRow[];
+}
+
+// ─── Admin reports queue ────────────────────────────────────────────
+// The admin reports sheet pulls every flag — open OR resolved — so the
+// UI can show triage state.  Ordered newest first.  Retracted flags
+// are still surfaced (status reflects admin triage, not the flagger's
+// retraction); the UI can decide whether to filter those out.
+
+const allFlagsForReportQueueStmt = db.prepare(`
+	SELECT id, event_id, target_event_id, room_id, flagger, category, rationale,
+	       ts, target_kind, review_status
+	FROM flags
+	ORDER BY ts DESC
+`);
+export interface AdminReportRow {
+	id: number;
+	event_id: string;
+	target_event_id: string;
+	room_id: string;
+	flagger: string;
+	category: string;
+	rationale: string | null;
+	ts: number;
+	target_kind: FlagTargetKind;
+	review_status: FlagReviewStatus;
+}
+export function listAllFlagsForReportQueue(): AdminReportRow[] {
+	return allFlagsForReportQueueStmt.all() as AdminReportRow[];
+}
+
+const setFlagReviewStatusStmt = db.prepare(`
+	UPDATE flags SET review_status = ? WHERE id = ?
+`);
+export function setFlagReviewStatus(flagId: number, status: FlagReviewStatus): boolean {
+	const r = setFlagReviewStatusStmt.run(status, flagId);
+	return r.changes > 0;
+}
+
+const getFlagByIdStmt = db.prepare(`
+	SELECT id, event_id, target_event_id, room_id, flagger, category, rationale,
+	       ts, target_kind, review_status
+	FROM flags
+	WHERE id = ?
+`);
+export function getFlagById(flagId: number): AdminReportRow | null {
+	return (getFlagByIdStmt.get(flagId) as AdminReportRow | undefined) ?? null;
+}
+
+const countOpenFlagsStmt = db.prepare(`
+	SELECT COUNT(*) AS n FROM flags WHERE review_status = 'open'
+`);
+export function countOpenFlags(): number {
+	return (countOpenFlagsStmt.get() as { n: number }).n;
 }
 
 // ─── Room creations (rate-limit gate) ──────────────────────────────
@@ -1967,6 +2066,63 @@ const botMembershipActionsForRoomStmt = db.prepare(`
 `);
 export function botMembershipActionsForRoom(roomId: string): BotMembershipActionRow[] {
 	return botMembershipActionsForRoomStmt.all(roomId) as BotMembershipActionRow[];
+}
+
+// ─── Standard admin moderation actions (audit trail) ────────────────
+// Append-only log of kick / ban / unban / redact / role_change events
+// performed by admins (PL ≥ 50) against humans / messages.  The Matrix
+// mutation itself happens client-side; the engine only stores the row.
+
+export type ModAction = "kick" | "ban" | "unban" | "redact" | "role_change";
+
+export interface ModActionRow {
+	id: number;
+	room_id: string;
+	action: ModAction;
+	actor: string;
+	target_user: string | null;
+	target_event_id: string | null;
+	new_power_level: number | null;
+	reason: string | null;
+	created_at: number;
+}
+
+const insertModActionStmt = db.prepare(`
+	INSERT INTO mod_actions
+	(room_id, action, actor, target_user, target_event_id, new_power_level, reason, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+export function recordModAction(opts: {
+	roomId: string;
+	action: ModAction;
+	actor: string;
+	targetUser?: string | null;
+	targetEventId?: string | null;
+	newPowerLevel?: number | null;
+	reason?: string | null;
+}): { id: number; created_at: number } {
+	const createdAt = Date.now();
+	const r = insertModActionStmt.run(
+		opts.roomId,
+		opts.action,
+		opts.actor,
+		opts.targetUser ?? null,
+		opts.targetEventId ?? null,
+		opts.newPowerLevel ?? null,
+		opts.reason ?? null,
+		createdAt,
+	);
+	return { id: Number(r.lastInsertRowid), created_at: createdAt };
+}
+
+const modActionsForRoomStmt = db.prepare(`
+	SELECT * FROM mod_actions
+	WHERE room_id = ?
+	ORDER BY created_at DESC
+`);
+export function modActionsForRoom(roomId: string): ModActionRow[] {
+	return modActionsForRoomStmt.all(roomId) as ModActionRow[];
 }
 
 // ─── User self-deactivation cleanup ─────────────────────────────────
