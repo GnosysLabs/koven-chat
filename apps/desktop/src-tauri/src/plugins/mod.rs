@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+pub mod linux_desktop_integration;
 #[cfg(target_os = "macos")]
 pub mod mac_rounded_corners;
 #[cfg(target_os = "macos")]

@@ -29,6 +29,8 @@ use tauri::menu::{AboutMetadataBuilder, MenuBuilder, SubmenuBuilder};
 // Windows main window into Win11's rounded-corner treatment.  No-op
 // on Win10.
 mod plugins;
+#[cfg(target_os = "linux")]
+use plugins::linux_desktop_integration;
 #[cfg(target_os = "macos")]
 use plugins::mac_rounded_corners;
 #[cfg(target_os = "windows")]
@@ -433,6 +435,16 @@ pub fn run() {
 			}
 		})
 		.setup(move |app| {
+			// Linux: write a `.desktop` entry + icons into
+			// ~/.local/share/ when running from an AppImage so
+			// GNOME / KDE see Koven as a real application (proper
+			// name, proper icon, pinnable to taskbar).  No-op on
+			// .deb / .rpm installs and during `cargo tauri dev`.
+			// See plugins/linux_desktop_integration.rs for the full
+			// rationale.
+			#[cfg(target_os = "linux")]
+			linux_desktop_integration::integrate();
+
 			// macOS application menu.  Tauri 2 doesn't auto-build one,
 			// and without an explicit menu the system falls back to a
 			// stub that names every item after the binary
@@ -666,14 +678,26 @@ pub fn run() {
 			// WM_NCHITTEST handling.  Acceptable starting point —
 			// the corner-rounding is the load-bearing visual.
 			//
-			// Linux keeps default decorations — distros vary too
-			// much (GTK CSD, KWin, mutter, etc.) for one custom
-			// chrome to look right everywhere.
-			#[cfg(any(target_os = "macos", target_os = "windows"))]
+			// Linux trade-offs with `decorations(false)`: the SPA
+			// renders the same Win11-style chrome the Windows build
+			// uses (see DesktopTitleBar.tsx's "linux" branch).  Drag
+			// is handled in JS via `data-tauri-drag-region` —
+			// WebKitGTK doesn't expose an HWND-subclass equivalent,
+			// and the JS-IPC latency that races with mousedown on
+			// Windows is forgiving on GTK.  Resize-from-edge is the
+			// real loss: GNOME/mutter doesn't grant edge-resize to
+			// undecorated Wayland windows, so the SPA also paints a
+			// ring of invisible 4px handles around the viewport that
+			// call `startResizeDragging` (see DesktopResizeEdges in
+			// DesktopTitleBar.tsx).  No rounded corners on Linux —
+			// no DWM equivalent, and `transparent(true)` is the
+			// usual Linux corner-mask trick but it disables window
+			// shadows and confuses every WM differently.
+			#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 			{
 				// Strip native chrome (no traffic lights / no system
-				// title-bar buttons).  Window stays OPAQUE on both
-				// platforms — we'll round its corners via Cocoa
+				// title-bar buttons).  Window stays OPAQUE on macOS
+				// + Windows — we'll round its corners via Cocoa
 				// layer mask (macOS) or DWMWA_WINDOW_CORNER_PREFERENCE
 				// (Win11).  `transparent(true)` is documented as
 				// actively breaking layer corner-masking on macOS

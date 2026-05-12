@@ -1,4 +1,4 @@
-// Custom desktop title bar.  Two variants:
+// Custom desktop title bar.  Three variants:
 //
 //   * macOS: three macOS-style traffic lights on the LEFT.  The
 //     Rust side hides the OS-native traffic lights so we render
@@ -17,28 +17,41 @@
 //     wire `data-tauri-drag-region` here — letting it fire would
 //     start a SECOND drag via JS-IPC after the native one already
 //     began, and the two race on every click.
-//
-// Linux falls through to the OS's native GTK/KDE chrome — distros
-// vary too much for one custom title bar to look right everywhere.
+//   * Linux: same Win11-style chrome as Windows, but drag goes
+//     through the JS-IPC path (data-tauri-drag-region +
+//     startDragging fallback) because WebKitGTK has no HWND-
+//     subclass equivalent.  Mutter/KWin are forgiving about the
+//     few-ms latency, so the macOS approach works here too.  The
+//     undecorated GTK window loses WM-provided resize edges on
+//     Wayland — we paint our own via DesktopResizeEdges below.
+//     No rounded corners (no DWM analog; transparency breaks
+//     shadows on most WMs).
 
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 
-type Platform = "macos" | "windows" | "other";
+type Platform = "macos" | "windows" | "linux" | "other";
 
 function detectPlatform(): Platform {
 	if (typeof window === "undefined") return "other";
 	const tag = (window as { __KOVEN_PLATFORM__?: string }).__KOVEN_PLATFORM__;
 	if (tag === "macos") return "macos";
 	if (tag === "windows") return "windows";
+	if (tag === "linux") return "linux";
 	return "other";
 }
+
+// Tauri's resize-direction strings; we only ever pass these eight.
+type ResizeDirection =
+	| "North" | "South" | "East" | "West"
+	| "NorthEast" | "NorthWest" | "SouthEast" | "SouthWest";
 
 type TauriWindow = {
 	close(): Promise<void>;
 	minimize(): Promise<void>;
 	toggleMaximize(): Promise<void>;
 	startDragging(): Promise<void>;
+	startResizeDragging(direction: ResizeDirection): Promise<void>;
 	isMaximized(): Promise<boolean>;
 	onFocusChanged(
 		cb: (e: { payload: boolean }) => void,
@@ -182,18 +195,13 @@ export function DesktopTitleBar() {
 		);
 	}
 
-	// Windows variant: three controls on the RIGHT, full-height
-	// hover backgrounds, X turning red on hover per Win11
-	// convention.  The drag region (the empty space left of the
-	// controls) is handled entirely by the WM_LBUTTONDOWN subclass
-	// in Rust — no data-tauri-drag-region, no onMouseDown handler.
-	// Both would only call startDragging via JS-IPC, which races
-	// against the native drag the subclass already initiated, and
-	// the two paths confuse each other on every other click.
-	return (
-		<div
-			className="absolute inset-x-0 top-0 h-10 z-50 flex items-center justify-end select-none"
-		>
+	// Win11-style chrome strip: three controls on the RIGHT (min /
+	// max / close), full-height hover backgrounds, X turning red
+	// on hover per Win11 convention.  Shared between the Windows
+	// and Linux variants — the only difference is drag wiring,
+	// which the caller owns via `dragProps`.
+	const win11Controls = (
+		<>
 			<WindowsControl
 				ariaLabel="Minimize"
 				onClick={withWindow("minimize", (w) => w.minimize())}
@@ -228,6 +236,44 @@ export function DesktopTitleBar() {
 					<path d="M1 1 L9 9 M9 1 L1 9" stroke="currentColor" strokeWidth="1" />
 				</svg>
 			</WindowsControl>
+		</>
+	);
+
+	if (platform === "linux") {
+		// Linux: same Win11 chrome as Windows, but drag goes
+		// through the JS-IPC path (data-tauri-drag-region +
+		// onMouseDown fallback) because WebKitGTK has no HWND
+		// subclass to intercept WM_LBUTTONDOWN.  mutter/KWin tolerate
+		// the few-ms IPC latency that broke Windows pre-subclass.
+		// DesktopResizeEdges paints invisible 4px handles around
+		// the window so an undecorated GTK window keeps its resize
+		// affordance on Wayland (mutter doesn't grant edge-grab to
+		// undecorated wl_surfaces).
+		return (
+			<>
+				<div
+					data-tauri-drag-region
+					onMouseDown={handleDragMouseDown}
+					className="absolute inset-x-0 top-0 h-10 z-50 flex items-center justify-end select-none"
+				>
+					{win11Controls}
+				</div>
+				<DesktopResizeEdges />
+			</>
+		);
+	}
+
+	// Windows variant: drag region (the empty space left of the
+	// controls) is handled entirely by the WM_LBUTTONDOWN subclass
+	// in Rust — no data-tauri-drag-region, no onMouseDown handler.
+	// Both would only call startDragging via JS-IPC, which races
+	// against the native drag the subclass already initiated, and
+	// the two paths confuse each other on every other click.
+	return (
+		<div
+			className="absolute inset-x-0 top-0 h-10 z-50 flex items-center justify-end select-none"
+		>
+			{win11Controls}
 		</div>
 	);
 }
@@ -296,5 +342,90 @@ function WindowsControl({
 		>
 			{children}
 		</button>
+	);
+}
+
+// Eight invisible 4px hit-zones (4 edges + 4 corners) layered over
+// the window perimeter, calling `startResizeDragging(<direction>)`
+// on mousedown.  Linux-only — Windows handles resize via the OS's
+// non-client hit testing (decorations(false) keeps the resize-frame
+// behaviour), macOS via Cocoa's window resize gestures.  On Linux
+// the undecorated GtkWindow loses both: mutter/Wayland in particular
+// only honours edge-resize for windows that carry CSD via libdecor
+// or for windows the WM itself decorates, and we're neither.  Hand-
+// rolling the resize ring is the same trick Electron's frameless
+// windows use on Linux.
+//
+// Corner zones are stacked LAST so their 12×12 footprint wins the
+// hit test over the edge strips that pass through underneath — diag
+// resize from the corners stays exactly diag, never accidentally
+// rolling to horizontal/vertical when the cursor's a few px off.
+function DesktopResizeEdges() {
+	function onEdgeDown(direction: ResizeDirection) {
+		return (e: React.MouseEvent<HTMLDivElement>) => {
+			if (e.button !== 0) return;
+			e.preventDefault();
+			const w = cachedWindow;
+			if (w) {
+				void w.startResizeDragging(direction).catch((err) =>
+					console.error(`DesktopResizeEdges: ${direction} failed`, err),
+				);
+				return;
+			}
+			void getCurrentWindow()
+				.then((win) => win.startResizeDragging(direction))
+				.catch((err) =>
+					console.error(`DesktopResizeEdges: ${direction} failed`, err),
+				);
+		};
+	}
+
+	// z-50 sits above the SPA content but below the title-bar
+	// strip (also z-50 but rendered later in the tree, so it wins
+	// ties).  Edges are 4px so they don't visually overlap the
+	// content; corners are 12px so diag-resize has a sensible
+	// target area without the edges fighting them for the hit.
+	const edge = "absolute z-50 select-none";
+	return (
+		<>
+			{/* Top edge — between the two top corners. */}
+			<div
+				className={cn(edge, "top-0 left-3 right-3 h-1 cursor-ns-resize")}
+				onMouseDown={onEdgeDown("North")}
+			/>
+			{/* Bottom edge — between the two bottom corners. */}
+			<div
+				className={cn(edge, "bottom-0 left-3 right-3 h-1 cursor-ns-resize")}
+				onMouseDown={onEdgeDown("South")}
+			/>
+			{/* Left edge — between the two left corners. */}
+			<div
+				className={cn(edge, "left-0 top-3 bottom-3 w-1 cursor-ew-resize")}
+				onMouseDown={onEdgeDown("West")}
+			/>
+			{/* Right edge — between the two right corners. */}
+			<div
+				className={cn(edge, "right-0 top-3 bottom-3 w-1 cursor-ew-resize")}
+				onMouseDown={onEdgeDown("East")}
+			/>
+			{/* Four corners.  12×12, stacked after edges so the
+			    diag hit zone wins. */}
+			<div
+				className={cn(edge, "top-0 left-0 w-3 h-3 cursor-nwse-resize")}
+				onMouseDown={onEdgeDown("NorthWest")}
+			/>
+			<div
+				className={cn(edge, "top-0 right-0 w-3 h-3 cursor-nesw-resize")}
+				onMouseDown={onEdgeDown("NorthEast")}
+			/>
+			<div
+				className={cn(edge, "bottom-0 left-0 w-3 h-3 cursor-nesw-resize")}
+				onMouseDown={onEdgeDown("SouthWest")}
+			/>
+			<div
+				className={cn(edge, "bottom-0 right-0 w-3 h-3 cursor-nwse-resize")}
+				onMouseDown={onEdgeDown("SouthEast")}
+			/>
+		</>
 	);
 }
