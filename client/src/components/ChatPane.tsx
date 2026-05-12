@@ -27,6 +27,7 @@ import {
 import { serverOf } from "@/lib/mxid";
 import { FlagDialog } from "@/components/FlagDialog";
 import { DeleteMessageDialog } from "@/components/DeleteMessageDialog";
+import { AdminRedactDialog } from "@/components/AdminRedactDialog";
 import { MediaContextMenu } from "@/components/MediaContextMenu";
 import { MessageContextMenu } from "@/components/MessageContextMenu";
 import { firstLink, linkify } from "@/lib/linkify";
@@ -1859,18 +1860,17 @@ function MessageRow({
 	// both the toolbar and the dialog rendered until the user
 	// commits or cancels.
 	const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-	const showActions = isHovered || reactOpen || deleteDialogOpen;
+	// Admin-redact dialog state lives at the row level for the same
+	// reason as deleteDialogOpen: MessageActions is hover-gated, so a
+	// confirmation Dialog mounted inside it would unmount the moment
+	// the user moved their cursor off the row.  Lifting it to the row
+	// + including it in `showActions` keeps the toolbar AND the
+	// dialog visible until the operator commits or cancels.
+	const [adminRedactDialogOpen, setAdminRedactDialogOpen] = useState(false);
+	const showActions = isHovered || reactOpen || deleteDialogOpen || adminRedactDialogOpen;
 	const handleDelete = onDelete ? () => setDeleteDialogOpen(true) : undefined;
-	// Admin redact uses a plain window.confirm — no row-level dialog
-	// state to maintain because the action targets someone else's
-	// content and the operator is already an admin.  Errors are caught
-	// upstream by the App-level handler.
 	const handleAdminRedact = onAdminRedact
-		? () => {
-			if (typeof window === "undefined") return;
-			if (!window.confirm("Redact this message as an admin? This cannot be undone.")) return;
-			void onAdminRedact();
-		}
+		? () => setAdminRedactDialogOpen(true)
 		: undefined;
 	// You can't report your own messages.  Same gate applies to bots
 	// the viewer owns: the owner controls the bot's prompt and config,
@@ -1969,6 +1969,13 @@ function MessageRow({
 						open={deleteDialogOpen}
 						onOpenChange={setDeleteDialogOpen}
 						onConfirm={onDelete}
+					/>
+				)}
+				{onAdminRedact && (
+					<AdminRedactDialog
+						open={adminRedactDialogOpen}
+						onOpenChange={setAdminRedactDialogOpen}
+						onConfirm={onAdminRedact}
 					/>
 				)}
 			</div>
@@ -2160,6 +2167,13 @@ function MessageRow({
 					open={deleteDialogOpen}
 					onOpenChange={setDeleteDialogOpen}
 					onConfirm={onDelete}
+				/>
+			)}
+			{onAdminRedact && (
+				<AdminRedactDialog
+					open={adminRedactDialogOpen}
+					onOpenChange={setAdminRedactDialogOpen}
+					onConfirm={onAdminRedact}
 				/>
 			)}
 			{ctxMenuPos && (
