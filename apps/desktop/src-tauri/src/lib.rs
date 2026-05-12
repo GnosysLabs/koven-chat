@@ -919,6 +919,14 @@ pub fn run() {
 			#[cfg(target_os = "windows")]
 			{
 				windows_rounded_corners::apply_rounded_corners(&win);
+				// Subclass the HWND so WM_NCHITTEST returns
+				// HTCAPTION for the top 40px (minus the right ~138px
+				// where the Min/Max/Close buttons live).  Lets
+				// Windows handle drag natively — no JS round-trip,
+				// no async race on mousedown, and the standard
+				// caption gestures (double-click to maximize, Aero
+				// Snap, right-click system menu) all come back.
+				windows_rounded_corners::apply_drag_region(&win);
 			}
 			#[cfg(not(target_os = "macos"))]
 			{

@@ -2,18 +2,24 @@
 //
 //   * macOS: three macOS-style traffic lights on the LEFT.  The
 //     Rust side hides the OS-native traffic lights so we render
-//     ours at pixel-perfect coordinates.
+//     ours at pixel-perfect coordinates.  Drag is handled by
+//     Tauri's `data-tauri-drag-region` on the strip — synchronous
+//     enough on Cocoa that the JS-IPC round-trip doesn't race
+//     against the mouse-up.
 //   * Windows: Windows 11-style min / max / close on the RIGHT.
 //     Rust strips the native title bar (`decorations(false)`) and
-//     applies DWM corner rounding before first paint.
+//     applies DWM corner rounding before first paint.  Drag is
+//     handled entirely in Rust: a subclass on the WebView2 child
+//     HWND intercepts WM_LBUTTONDOWN in the drag region and
+//     synthesizes a WM_NCLBUTTONDOWN HTCAPTION on the parent
+//     in-process (see apps/desktop/src-tauri/src/plugins/
+//     windows_rounded_corners.rs::apply_drag_region).  We do NOT
+//     wire `data-tauri-drag-region` here — letting it fire would
+//     start a SECOND drag via JS-IPC after the native one already
+//     began, and the two race on every click.
 //
 // Linux falls through to the OS's native GTK/KDE chrome — distros
 // vary too much for one custom title bar to look right everywhere.
-//
-// The strip carries `data-tauri-drag-region` (and an explicit
-// `startDragging()` fallback for browsers where the drag-region
-// attribute alone isn't enough) across the empty space between the
-// controls so window drag works the way users expect.
 
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
@@ -42,9 +48,45 @@ type TauriWindow = {
 	): Promise<() => void>;
 };
 
+// Module-level cache for the Tauri window object.  Hot path:
+// mousedown on the drag strip calls startDragging() with ZERO
+// awaits.  Without this cache, every drag attempt does
+// `await import("@tauri-apps/api/window")` + a `.then()` chain
+// before the IPC even fires — and on Windows the
+// `WM_NCLBUTTONDOWN HTCAPTION` trick that starts the drag only
+// works if the message arrives while the user is still holding
+// the mouse button.  If React re-renders or the JS event loop is
+// busy (Matrix sync, focus events), the few-ms delay is enough to
+// miss the window and the drag silently no-ops — hence the
+// "sometimes works, sometimes doesn't" intermittent we saw.
+//
+// preloadTauriWindow() is fire-and-forget at module load; the
+// promise resolves into cachedWindow as soon as Tauri's API is
+// available.  The browser build (no Tauri injected) just gets a
+// rejected promise we ignore.
+let cachedWindow: TauriWindow | null = null;
+let cachedWindowPromise: Promise<TauriWindow | null> | null = null;
+function preloadTauriWindow(): Promise<TauriWindow | null> {
+	if (cachedWindowPromise) return cachedWindowPromise;
+	cachedWindowPromise = import("@tauri-apps/api/window")
+		.then((mod) => {
+			cachedWindow = mod.getCurrentWindow() as unknown as TauriWindow;
+			return cachedWindow;
+		})
+		.catch(() => null);
+	return cachedWindowPromise;
+}
+// Kick off the preload immediately so by the time the user
+// clicks the title bar (always at least one paint after mount),
+// cachedWindow is already populated.
+if (typeof window !== "undefined") {
+	void preloadTauriWindow();
+}
+
 async function getCurrentWindow(): Promise<TauriWindow> {
-	const mod = await import("@tauri-apps/api/window");
-	return mod.getCurrentWindow() as unknown as TauriWindow;
+	const w = cachedWindow ?? (await preloadTauriWindow());
+	if (!w) throw new Error("Tauri window unavailable");
+	return w;
 }
 
 export function DesktopTitleBar() {
@@ -92,6 +134,16 @@ export function DesktopTitleBar() {
 		if (e.button !== 0) return;
 		const t = e.target as HTMLElement;
 		if (t.closest("button")) return;
+		// Fire startDragging synchronously off the cached window if
+		// it's ready.  This is the path 99.9% of clicks take — the
+		// async path only matters for clicks before the dynamic
+		// import has resolved (effectively never on a real run).
+		if (cachedWindow) {
+			void cachedWindow.startDragging().catch((err) =>
+				console.error("DesktopTitleBar: startDragging failed", err),
+			);
+			return;
+		}
 		void getCurrentWindow()
 			.then((w) => w.startDragging())
 			.catch((err) => console.error("DesktopTitleBar: startDragging failed", err));
@@ -102,6 +154,10 @@ export function DesktopTitleBar() {
 			<div
 				data-tauri-drag-region
 				onMouseDown={handleDragMouseDown}
+				// macOS: keep both data-tauri-drag-region AND the
+				// startDragging fallback — Cocoa is forgiving about
+				// the JS-IPC latency, and either path reliably
+				// initiates drag.
 				className="absolute inset-x-0 top-0 h-10 z-50 flex items-center pl-5 gap-2 select-none"
 			>
 				<TrafficLight
@@ -128,12 +184,14 @@ export function DesktopTitleBar() {
 
 	// Windows variant: three controls on the RIGHT, full-height
 	// hover backgrounds, X turning red on hover per Win11
-	// convention.  The drag region is the entire bar minus the
-	// buttons, same pattern as macOS.
+	// convention.  The drag region (the empty space left of the
+	// controls) is handled entirely by the WM_LBUTTONDOWN subclass
+	// in Rust — no data-tauri-drag-region, no onMouseDown handler.
+	// Both would only call startDragging via JS-IPC, which races
+	// against the native drag the subclass already initiated, and
+	// the two paths confuse each other on every other click.
 	return (
 		<div
-			data-tauri-drag-region
-			onMouseDown={handleDragMouseDown}
 			className="absolute inset-x-0 top-0 h-10 z-50 flex items-center justify-end select-none"
 		>
 			<WindowsControl

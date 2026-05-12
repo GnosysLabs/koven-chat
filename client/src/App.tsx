@@ -2128,12 +2128,19 @@ export default function App() {
 			    image extends edge-to-edge under the floating
 			    traffic lights. */}
 			{isCustomChromeDesktop && (
-				<div className="h-10 shrink-0 border-b border-border flex items-center justify-center relative">
+				// pointer-events-none so the entire 40px strip is
+				// non-interactive — DesktopTitleBar (absolute, z-50,
+				// rendered as a sibling in main.tsx) sits over this
+				// row and owns the drag-region + window controls.
+				// Without this, post-login the gutter was eating
+				// mousedowns intended for the drag region and the
+				// window stopped being draggable from the top bar.
+				<div className="h-10 shrink-0 border-b border-border flex items-center justify-center relative pointer-events-none">
 					<img
 						src="/favicon.png"
 						alt=""
 						aria-hidden
-						className="h-6 w-6 pointer-events-none select-none"
+						className="h-6 w-6 select-none"
 					/>
 				</div>
 			)}

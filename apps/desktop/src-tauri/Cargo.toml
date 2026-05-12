@@ -99,7 +99,19 @@ objc = "0.2.7"
 # `windows` crate because we use exactly one function and one
 # constant; the raw bindings keep the dependency surface small.
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    # Drag-region hit-testing — see plugins/windows_rounded_corners.rs.
+    # WM_NCHITTEST + HTCAPTION on the top 40px makes Windows treat
+    # the strip as native title bar, so drag is handled by the OS
+    # instead of a JS-IPC roundtrip (which was racy on every mousedown).
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_LibraryLoader",
+] }
 
 # Smaller release binary — strip symbols, opt for size.  Tauri bundles
 # webview2 / webkit on the host so the binary itself is dominated by
