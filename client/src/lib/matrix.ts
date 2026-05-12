@@ -3751,15 +3751,27 @@ export class MatrixTransport {
 	 *      mental model of "rooms belong to a server" while honoring
 	 *      Matrix's many-to-many parent reality.
 	 *
-	 * Per-child failures are logged and counted but never abort the
-	 * sequence: getting halfway out is better than getting stuck
-	 * half-in.  The space room itself is left LAST so the SDK still
-	 * has the parent's local state available while we walk children.
+	 * Per-child failures are logged but never abort the sequence:
+	 * getting halfway out is better than getting stuck half-in.
+	 *
+	 * Order matters for perceived latency.  Leaving the space FIRST
+	 * (then children in the background) is what makes the SpaceBar
+	 * tile vanish in ~one round-trip instead of waiting for all
+	 * N+1 sequential leaves to settle.  Doing children first kept
+	 * the dead space tile pinned in the sidebar for the full
+	 * duration, 5-10 seconds on an 8-room space.  We collect the
+	 * child id set BEFORE issuing the parent leave so we don't
+	 * race the SDK clearing local state on the just-left room.
+	 *
+	 * Returns immediately after the parent leave resolves; child
+	 * cleanup continues asynchronously in the background.  The
+	 * returned counts are for the SCHEDULED work, not finished
+	 * (which is fine, callers use this method for navigation
+	 * dispatch, not for accounting).
 	 */
 	async leaveSpaceWithChildren(spaceId: SpaceId): Promise<{
-		leftChildren: number;
+		scheduledChildren: number;
 		skippedChildren: number;
-		failedChildren: number;
 	}> {
 		const c = this.requireClient();
 		const me = c.getUserId();
@@ -3773,13 +3785,15 @@ export class MatrixTransport {
 			await c.forget(spaceId).catch(() => {});
 			this.emitRoomList();
 			this.emitSpaceList();
-			return { leftChildren: 0, skippedChildren: 0, failedChildren: 0 };
+			return { scheduledChildren: 0, skippedChildren: 0 };
 		}
 
 		// Build the set of child room ids declared by m.space.child
 		// state events on the space.  An empty `via` array on a child
 		// event means it's been "tombstoned" (admin removed the room
-		// from the space) — skip those.
+		// from the space): skip those.  Done BEFORE the parent leave
+		// so we don't lose access to currentState as the SDK tears
+		// the space room down.
 		const childIds = new Set<string>();
 		const childEvents = space.currentState.getStateEvents("m.space.child") ?? [];
 		for (const ev of childEvents) {
@@ -3810,15 +3824,11 @@ export class MatrixTransport {
 			}
 		}
 
-		let left = 0;
+		// Pre-filter the children to the ones we actually need to act
+		// on.  Filtering up front so the count we return is accurate
+		// and the background loop doesn't waste turns on no-ops.
+		const childrenToLeave: string[] = [];
 		let skipped = 0;
-		let failed = 0;
-		// Sequential rather than parallel — Synapse rate-limits /leave,
-		// and a thundering herd of leave calls on a 50-channel space
-		// gets several of them rejected with 429.  Sequential keeps us
-		// well inside the per-user quota and the wall-clock time is
-		// fine because we leave child rooms in the user's mental
-		// background after they've already navigated away.
 		for (const childId of childIds) {
 			const child = c.getRoom(childId);
 			// Skip sub-spaces — symmetric with joinSpaceWithChildren.
@@ -3829,31 +3839,45 @@ export class MatrixTransport {
 			// kicked, never joined to begin with).
 			const membership = child?.getMyMembership();
 			if (membership !== "join" && membership !== "invite") { skipped++; continue; }
-			try {
-				await c.leave(childId);
-				await c.forget(childId).catch(() => {});
-				left++;
-			} catch (err) {
-				console.warn(`leaveSpaceWithChildren: failed to leave child ${childId}`, err);
-				failed++;
-			}
+			childrenToLeave.push(childId);
 		}
 
-		// Leave the space itself last.
+		// Leave the space FIRST so the SpaceBar tile vanishes via the
+		// MyMembership listener immediately, then run child leaves in
+		// the background where the user isn't watching.  If the parent
+		// leave fails we throw without touching children: the headline
+		// action failed, the user needs to see the error, and we don't
+		// want to half-leave a space the user might still want.
 		try {
 			await c.leave(spaceId);
 			await c.forget(spaceId).catch(() => {});
 		} catch (err) {
 			console.warn(`leaveSpaceWithChildren: failed to leave space ${spaceId}`, err);
-			// Re-throw — the user explicitly asked to leave the space;
-			// child cleanup having already run is fine but the headline
-			// operation failing should bubble up so the UI can show it.
 			throw err;
 		}
-
 		this.emitRoomList();
 		this.emitSpaceList();
-		return { leftChildren: left, skippedChildren: skipped, failedChildren: failed };
+
+		// Background cleanup.  Sequential rather than parallel because
+		// Synapse rate-limits /leave: a thundering herd of N leave
+		// calls on a 50-channel space gets several rejected with 429.
+		// Sequential stays comfortably under the per-user quota and
+		// the wall-clock time doesn't matter because the user has
+		// already seen the space leave the sidebar.  Per-child failures
+		// are logged but don't abort, getting most of them out is
+		// better than rolling back any.
+		void (async () => {
+			for (const childId of childrenToLeave) {
+				try {
+					await c.leave(childId);
+					await c.forget(childId).catch(() => {});
+				} catch (err) {
+					console.warn(`leaveSpaceWithChildren: failed to leave child ${childId} (background)`, err);
+				}
+			}
+		})();
+
+		return { scheduledChildren: childrenToLeave.length, skippedChildren: skipped };
 	}
 
 	/**
