@@ -24,10 +24,9 @@ The short version is documented in the project README; this guide is the long ve
 14. [Verification checklist](#verification-checklist)
 15. [Updating](#updating)
 16. [Backups](#backups)
-17. [Federation: how it works, how to test](#federation-how-it-works-how-to-test)
-18. [Troubleshooting](#troubleshooting)
-19. [What `.env` actually controls](#what-env-actually-controls)
-20. [Tearing down](#tearing-down)
+17. [Troubleshooting](#troubleshooting)
+18. [What `.env` actually controls](#what-env-actually-controls)
+19. [Tearing down](#tearing-down)
 
 ---
 
@@ -82,7 +81,7 @@ koven.example   A   <your VPS IP>
 
 ### Layout 2: apex + subdomain
 
-Chat lives at a subdomain.  User IDs still read `@alice:koven.example` because the apex serves `/.well-known/matrix/*` to redirect Matrix federation to the subdomain.  This is the layout used by the public `koven.chat` instance (apex hosts the marketing site, `client.koven.chat` hosts the app).
+Chat lives at a subdomain.  User IDs still read `@alice:koven.example` because the apex serves `/.well-known/matrix/client` so Matrix-shaped clients typing `@alice:koven.example` find the homeserver URL on the subdomain.  (Koven instances don't federate, so the apex doesn't serve `/.well-known/matrix/server` or `/.well-known/koven` — only the local-client discovery route.)  This is the layout used by the public `koven.chat` instance (apex hosts the marketing site, `client.koven.chat` hosts the app).
 
 ```
 KOVEN_HOSTNAME=client.koven.example
@@ -109,7 +108,7 @@ DNS:
 client.koven.example   A   <your VPS IP>
 ```
 
-> Pick now, not later.  `SERVER_NAME` is permanent: every user ID, every Matrix event, every federation handshake bakes it in.  Changing it later means migrating every user to new IDs by hand.
+> Pick now, not later.  `SERVER_NAME` is permanent: every user ID and every Matrix event bakes it in.  Changing it later means migrating every user to new IDs by hand.
 
 After choosing, wait for DNS to propagate.  Verify with `dig +short <hostname>` from your laptop until it returns your VPS IP.  Let's Encrypt cert acquisition will silently fail otherwise.
 
@@ -289,7 +288,7 @@ Open `https://koven.example` in a browser.  You should see the login screen.  Re
 
 ## Scenario B: fresh VPS, Caddy, apex + subdomain
 
-Same as Scenario A, but chat lives at `client.koven.example` while user IDs stay `@alice:koven.example`.  The apex still has to point at the same VPS so it can serve `/.well-known/matrix/*` for federation.
+Same as Scenario A, but chat lives at `client.koven.example` while user IDs stay `@alice:koven.example`.  The apex still has to point at the same VPS so it can serve `/.well-known/matrix/client` for local-client homeserver discovery — Koven instances don't federate, so the apex serves only that one well-known route (no `/.well-known/matrix/server`, no `/.well-known/koven`).
 
 Differences from Scenario A:
 
@@ -321,7 +320,7 @@ dig +short client.koven.example
 
 `./bin/koven setup` and `docker compose up -d` exactly as in Scenario A.  Caddy fetches certs for both hostnames.
 
-Optional: if you want a marketing page at the apex instead of just `.well-known/*` redirects, put HTML in `marketing/` and serve it.  Out of scope for this guide.
+Optional: if you want a marketing page at the apex instead of just the `.well-known/matrix/client` route + a redirect to the chat subdomain, serve your own HTML at the apex.  Out of scope for this guide.
 
 ---
 
@@ -351,7 +350,7 @@ client.koven.example   A   <your VPS IP>
 
 `./bin/koven setup` and `docker compose up -d`.
 
-Caveat: federation will use `client.koven.example` as your server name forever.  If you later get the apex and want to migrate to Scenario B, every existing user ID would change.  There's no clean migration, so commit to this layout only if you're sure you'll never control the apex.
+Caveat: your `SERVER_NAME` will be `client.koven.example` forever.  If you later get the apex and want to migrate to Scenario B, every existing user ID would change.  There's no clean migration, so commit to this layout only if you're sure you'll never control the apex.
 
 ---
 
@@ -416,7 +415,7 @@ Synapse and the engine start bound to `127.0.0.1:8008` and `127.0.0.1:9000` resp
 
 ## Scenario E: text only, no calls
 
-Leave the `CF_REALTIME_*` variables blank in `.env`.  Setup detects this and the engine's `/api/calls/*` endpoints return 503; the SPA hides the Join Live button.  Everything else (text, DMs, bots, governance, federation) works.
+Leave the `CF_REALTIME_*` variables blank in `.env`.  Setup detects this and the engine's `/api/calls/*` endpoints return 503; the SPA hides the Join Live button.  Everything else (text, DMs, bots, governance) works.
 
 If you change your mind later, fill in the Cloudflare variables and restart the engine container:
 
@@ -485,11 +484,10 @@ After `docker compose up -d`, walk through these to confirm the instance is heal
 3. **DMs work**: register a second account, start a DM with it, send a message.  Both sides see it.
 4. **Encryption works**: the DM shows a Lock badge in the chat header.
 5. **Live channel button shows**: any room has a Join Live button (only if Cloudflare credentials are configured).
-6. **Matrix federation endpoint**: `https://<SERVER_NAME>/.well-known/matrix/server` returns JSON like `{"m.server":"<KOVEN_HOSTNAME>:443"}`.  This is what other Matrix homeservers query to find yours.
-7. **Koven federation endpoint**: `https://<SERVER_NAME>/.well-known/koven` returns Koven's federation-gate handshake (a small JSON object).  Only Koven peers care about this.
-8. **Engine alive**: `docker compose logs engine` shows `engine: listening on :9000` and periodic `engine: tick` lines.
-9. **Synapse alive**: `docker compose logs synapse` shows `Synapse now listening on TCP port 8008`.
-10. **Caddy alive (Caddy variant)**: `docker compose logs caddy` shows `certificate obtained successfully`.  No 5xx errors.
+6. **Client well-known**: `https://<SERVER_NAME>/.well-known/matrix/client` returns JSON like `{"m.homeserver":{"base_url":"https://<KOVEN_HOSTNAME>"}}`.  Local-client discovery only; Matrix clients that type `@user:<SERVER_NAME>` use this to find your Synapse.  (No `/.well-known/matrix/server` and no `/.well-known/koven` — Koven instances don't federate.)
+7. **Engine alive**: `docker compose logs engine` shows `engine: listening on :9000` and periodic `engine: tick` lines.
+8. **Synapse alive**: `docker compose logs synapse` shows `Synapse now listening on TCP port 8008`.
+9. **Caddy alive (Caddy variant)**: `docker compose logs caddy` shows `certificate obtained successfully`.  No 5xx errors.
 
 If any step fails, see [Troubleshooting](#troubleshooting).
 
@@ -536,7 +534,7 @@ Three things to back up:
 
 1. **Postgres data** (all chat history, all user accounts).  Lives in the named volume `postgres_data`.
 2. **Engine SQLite** (governance state, bot configs, notifications).  Lives in `./data/engine/engine.sqlite` (bind-mounted, so it's right there on the filesystem).
-3. **Synapse signing key**.  Lives at `./synapse-data/signing.key`.  **Don't lose this.**  Other Koven instances cache it as your homeserver's identity; if it changes, federation with peers breaks until they reconnect.
+3. **Synapse signing key**.  Lives at `./synapse-data/signing.key`.  **Don't lose this.**  Synapse signs its own outbound events with this key; rotating it without a clean restart leaves an instance unable to read its own history.
 
 Minimal backup script (run from `/opt/koven-chat`):
 
@@ -571,35 +569,6 @@ docker compose down
 gunzip < /backup/koven-2026-01-01/synapse.sql.gz | docker compose exec -T postgres psql -U synapse synapse
 docker compose up -d
 ```
-
----
-
-## Federation: how it works, how to test
-
-Every Koven instance auto-serves `/.well-known/koven` from its reverse proxy.  When your Synapse tries to talk to a federated peer for the first time, our custom Synapse module (`koven-federation-gate.py`) probes the peer's `/.well-known/koven`.  Valid Koven response = allowed (cached 10 minutes).  Anything else = denied.
-
-This means:
-
-- `@alice:other-koven.chat` works the moment you type it in your invite UI.
-- `@bob:matrix.org` (vanilla Matrix) is silently isolated, even though they're a real Matrix user.
-
-To test federation:
-
-1. Get a second Koven instance up (or use the public `koven.chat` for a sanity check).
-2. From your instance, invite `@admin:koven.chat` to a room.
-3. Check `docker compose logs synapse | grep federation`.  You should see the well-known probe succeed and the invite federate.
-
-To debug a federation failure:
-
-```sh
-# What does the peer serve?
-curl https://<peer-server-name>/.well-known/koven
-
-# What does your Synapse log when it tries to talk to them?
-docker compose logs synapse | grep federation
-```
-
-Common cause: peer is a vanilla Matrix homeserver (no `/.well-known/koven`).  Working as intended; vanilla Matrix is excluded by design.
 
 ---
 
@@ -683,15 +652,9 @@ cp .env.example .env
 
 This destroys all chat history, all users, and all governance state.  Use with intent.
 
-### "Federation with another Koven instance silently doesn't work"
+### "I can't message someone on another Koven instance"
 
-Both instances must serve `/.well-known/koven`.  Test the peer:
-
-```sh
-curl https://<peer-hostname>/.well-known/koven
-```
-
-If empty or 404, their setup is broken.  If it returns JSON, your end of the federation gate is the problem; check `docker compose logs synapse | grep koven-federation-gate`.
+That's intentional.  Koven instances don't federate — with each other or with any other Matrix server.  Each instance is its own community.  See [`docs/GOVERNANCE.md#why-koven-doesnt-federate`](GOVERNANCE.md#why-koven-doesnt-federate) for the reasoning, and tell the other user to make an account on your instance (or vice versa) if you want to talk.
 
 ---
 

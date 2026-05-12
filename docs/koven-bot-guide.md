@@ -256,11 +256,11 @@ The current usage numbers (`total_prompt_tokens`, `total_completion_tokens`, `to
 
 A bot replies when **any** of the following is true in a room it's joined to:
 
-1. **The triggering message contains the bot's full mxid.** e.g. `hey @bot-foo:koven.chat what's the weather` — works from any server.
-2. **The triggering message contains `@<localpart>`** on the same server. e.g. `hey @bot-foo what's the weather` from a user on `:koven.chat` triggers `@bot-foo:koven.chat`. Won't trigger across servers (a bare `@bot-foo` is ambiguous when bots exist on multiple homeservers).
+1. **The triggering message contains the bot's full mxid.** e.g. `hey @bot-foo:koven.chat what's the weather`.
+2. **The triggering message contains `@<localpart>`**. e.g. `hey @bot-foo what's the weather` triggers `@bot-foo:koven.chat` (Koven instances don't federate, so every bot localpart resolves on the local server unambiguously).
 3. **The triggering message is a reply** to a message the bot sent. Reply-chains work without re-mentioning.
 4. **The triggering message is in a 1:1 DM with the bot** (exactly 2 members, one of which is the bot). Every message in the DM triggers — no mention needed.
-5. **m.mentions intent.** Matrix's official mentions field (`m.mentions.user_ids` includes the bot's mxid). The SPA writes this on every @-mention; some federated clients use it too.
+5. **m.mentions intent.** Matrix's official mentions field (`m.mentions.user_ids` includes the bot's mxid). The SPA writes this on every @-mention.
 
 Edge cases:
 

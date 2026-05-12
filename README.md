@@ -31,7 +31,7 @@ Group chat — spaces, rooms, DMs, voice + video calls, screen share, bots — b
 - **Public mod log** — every flag, collapse, suspension is logged forever, append-only, readable by anyone in the room. The only check on collective moderation power is sunlight.
 - **Universal deep links** — `koven://` scheme + `https://client.koven.chat/invite/…` Universal Links open the desktop app directly on macOS, Linux, and Windows. Confirmation card with preview metadata before the user joins.
 - **Inline room mentions** — paste a room id, alias, invite URL, or matrix.to link in any message and it renders as a Discord-style pill. Click jumps in.
-- **Federation** — Koven instances federate with each other. The federation gate auto-discovers peer instances via `/.well-known/koven` and refuses vanilla Matrix homeservers.
+- **Per-instance, no federation** — Koven instances don't federate with each other or with vanilla Matrix homeservers. Each Koven instance is its own community with its own moderation outcomes, its own reputation registry, its own mod log. See [`docs/GOVERNANCE.md`](docs/GOVERNANCE.md#why-koven-doesnt-federate) for the reasoning.
 
 See [docs/GOVERNANCE.md](docs/GOVERNANCE.md) for the moderation primitives in detail. Two end-user-facing guides also live in `docs/`: [koven-user-guide.md](docs/koven-user-guide.md) (everything members see in the product) and [koven-bot-guide.md](docs/koven-bot-guide.md) (the bot platform end-to-end, including MCP + webhooks).
 
@@ -39,7 +39,7 @@ See [docs/GOVERNANCE.md](docs/GOVERNANCE.md) for the moderation primitives in de
 
 ## What's in this repo
 
-The web client, the desktop app (Tauri), the server-side governance engine, and a complete self-hosting bundle (Synapse with the federation gate, Postgres, coturn, plus a choice of Caddy with auto-TLS or host nginx + certbot).
+The web client, the desktop app (Tauri), the server-side governance engine, and a complete self-hosting bundle (Synapse — client-server API only, no federation — Postgres, coturn, plus a choice of Caddy with auto-TLS or host nginx + certbot).
 
 ```
                     ┌────────────────────┐
@@ -70,7 +70,7 @@ The web client, the desktop app (Tauri), the server-side governance engine, and 
 | `apps/desktop/`        | Tauri 2 desktop bundle (macOS / Linux / Windows)                                                      |
 | `engine/`              | Bun service: governance, admin, profiles, bots, calls, instance config                                |
 | `shared/`              | TypeScript types shared between client and engine                                                     |
-| `docker/synapse/`      | Synapse Dockerfile + config templates + `koven-room-gate` + `koven-federation-gate`                   |
+| `docker/synapse/`      | Synapse Dockerfile + config templates + `koven-room-gate` Synapse module                              |
 | `docker/coturn/`       | coturn config template                                                                                |
 | `docker/nginx/`        | Optional nginx config template if you're not using the bundled Caddy                                  |
 | `marketing/`           | Static landing site at <https://koven.chat>                                                           |
@@ -161,7 +161,7 @@ If you don't want calls at all, leave these blank. Everything else still works.
 This:
 
 1. Generates random secrets (Postgres password, Synapse macaroon/form/registration secrets, engine appservice tokens, TURN shared secret, bot-key encryption secret) and writes them back into `.env`. **Idempotent** — existing values are preserved on re-runs.
-2. On first run, generates Synapse's signing key (`synapse-data/signing.key`). **Don't lose this file** — federating peers cache it as your homeserver's identity.
+2. On first run, generates Synapse's signing key (`synapse-data/signing.key`). Synapse needs this to sign its own events; if you lose it Synapse won't boot.
 3. Renders Synapse's `homeserver.yaml`, the engine appservice registration, the coturn config, and (if applicable) the nginx config from templates in `docker/`. Re-run after editing `.env` to propagate changes.
 4. Builds the web client (`bun install && bun run --cwd client build`). Caddy serves the output from `client/dist`.
 5. Renders the Caddyfile (or nginx config, depending on your choice) for your domain layout.
@@ -181,8 +181,7 @@ Open `https://<your hostname>` and sign up. **The first user to register becomes
 - Web client loads at `https://<hostname>`.
 - You can register a second account and DM yourself; messages are E2EE.
 - Live channel button shows in any room (only if Cloudflare credentials are set).
-- `https://<hostname>/.well-known/matrix/server` returns JSON pointing at your Synapse.
-- `https://<hostname>/.well-known/koven` returns Koven's federation-gate handshake.
+- `https://<hostname>/.well-known/matrix/client` returns JSON pointing at your Synapse.  (No `/.well-known/matrix/server` or `/.well-known/koven` — Koven instances don't federate; only the client-discovery route is served.)
 
 If any of those fail, `docker compose logs caddy synapse engine` shows what's wrong. The most common gotcha is DNS not propagated yet (Let's Encrypt cert acquisition fails → Caddy keeps retrying every 15 min).
 
@@ -230,11 +229,13 @@ docker compose up -d
 
 ---
 
-## Federation
+## No federation
 
-Koven instances federate **only with other Koven instances**. No manual whitelisting, no admin friction. Synapse's outgoing federation is gated by the `koven-federation-gate` Python module in our Synapse image. On first contact with a new domain it probes `https://<domain>/.well-known/koven`. A valid Koven response means allowed (and cached for 10 minutes); anything else is denied.
+Koven instances **do not federate** — with each other or with any other Matrix server. Each instance is its own bounded community: its own membership, its own reputation registry, its own consensus moderation outcomes, its own mod log. Cross-instance DMs, cross-instance rooms, cross-instance reputation — none of it exists. A user on one Koven instance can't reach a user on another except by joining that other instance directly.
 
-So `@alice:other-koven.chat` works the moment you type it, while vanilla Matrix homeservers are silently isolated. Every Koven instance auto-serves `/.well-known/koven` from its reverse proxy so peer discovery is symmetric.
+The reasoning is laid out in full in [`docs/GOVERNANCE.md`](docs/GOVERNANCE.md#why-koven-doesnt-federate). The short version: Koven's value proposition is consensus-driven moderation backed by a shared reputation registry. Federation makes the community boundary fuzzy, makes remote reputation un-trustable, and makes moderation outcomes diverge per-server — all three are load-bearing, and federation actively undermines them.
+
+Concretely: Synapse runs with `federation_domain_whitelist: []` and no `federation` listener, the reverse proxy serves no `/.well-known/matrix/server` route, and nothing in the codebase branches on "is this a remote room."
 
 ---
 

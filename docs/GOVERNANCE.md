@@ -133,7 +133,7 @@ Four layers run in defense, each closing a different part of the attack surface:
 **2. Community consensus on the space or room name itself.** Anyone can flag a space (from its Explore tile) or a room (from its in-room header, Flag icon right of the public mod log Scale icon). The same distinct-flagger floor of 3 and dynamic weighted-score gate that govern message collapse govern name collapse. When the threshold is met:
 
 - The collapsed space's or room's name renders as **"Name Removed by Community Review"** everywhere it appears in the SPA — sidebar, chat header, member sheets, profile mentions. The actual `m.room.name` state event is left untouched; the override is a display concern only, so admin reverse can restore the original verbatim from the engine.
-- Synapse's directory listing is flipped from `public` to `private`, removing the entry from local Explore *and* federated peers' directories (Layer 3 below).
+- Synapse's directory listing is flipped from `public` to `private`, removing the entry from local Explore.
 - The space or room continues to function for existing members. They can leave; messages still flow if they stay. The collapse silences the *broadcast*, not the conversation.
 
 The placeholder is a deliberate self-documenting artifact. A user seeing "Name Removed by Community Review" in their sidebar knows what happened, can audit the public mod log to see who flagged and why, and can vouch for the original name to admins if they think the collapse was mistaken.
@@ -145,7 +145,7 @@ The placeholder is a deliberate self-documenting artifact. A user seeing "Name R
 - On admin **confirm**: the creator's account is permanently deactivated via Synapse's admin API. Standard floor-violation outcome.
 - On admin **reverse**: the suspension lifts, the engine deletes the collapse row, and the directory listing is flipped back to public. Flag rows stay (append-only audit). The original name renders again from `m.room.name`. The flagger eats the standard false-flag penalty if the case ever was floor-class.
 
-Federation-aware directory hide is part of the same step: when the engine calls Synapse's directory API to set `visibility=private`, Synapse's federation `/_matrix/federation/v1/publicRooms` endpoint only returns `visibility=public` rooms, so the offensive name stops being broadcast to peer Koven instances in the same step that it stops being broadcast locally. Reverse lifts visibility back to public.
+(Federation-aware directory hide is moot here: Koven instances don't federate, so there are no peer directories to leak the offensive name into in the first place.  See [Why Koven doesn't federate](#why-koven-doesnt-federate) below.)
 
 Edge case: a space that was already private before being flagged gets re-published to public on admin reverse. That's accepted for v1 — offensive-name attacks land on publicly-discoverable spaces by definition; private-space collapses are exotic.
 
@@ -170,7 +170,7 @@ The blocked-users list is managed in Settings → Account, with a one-click bloc
 
 ## Deleting your own messages
 
-A trash icon appears on the message-action toolbar for any message you sent yourself, and for any message sent by a bot you own. Clicking it asks for confirmation, then redacts the underlying Matrix event — the message text disappears for everyone in the room and across federation, and the row renders as a redaction stub thereafter.
+A trash icon appears on the message-action toolbar for any message you sent yourself, and for any message sent by a bot you own. Clicking it asks for confirmation, then redacts the underlying Matrix event — the message text disappears for everyone in the room and the row renders as a redaction stub thereafter.
 
 The deletion is recorded in the room's public mod log as a `self_deletion` entry. The text is gone, but the fact that *something was deleted, by whom, when* stays auditable forever. This matches the consensus-collapse pipeline's ethos: the community can always see that an action happened, even when the content of that action is hidden.
 
@@ -272,11 +272,36 @@ DM calls ring once per outgoing call. The caller's join sends a `chat.koven.call
 
 Cloudflare retains operational call metadata (session durations, participant ids the engine assigned) per their standard service contract. Koven does not record call sessions to the per-room mod log. Calls are real-time interactions, not a moderation surface.
 
-## Federation
+## Why Koven doesn't federate
 
-Koven instances federate only with other Koven instances. The Synapse module `koven-federation-gate` (in `docker/synapse/modules/`) hooks the spam-checker callback and probes `https://<remote>/.well-known/koven` on first contact with a new homeserver. A valid Koven response means the peer's events are accepted; anything else (vanilla Synapse, 404, malformed JSON) means denied. Cached for 10 minutes on positive matches, 1 minute on negatives. Auto-discovery is symmetric: every Koven install serves `/.well-known/koven` via Caddy.
+Koven instances **do not federate** with each other or with any other Matrix server. Each instance is a self-contained community: its own membership, its own reputation registry, its own consensus moderation outcomes, its own mod log. Cross-instance DMs and cross-instance rooms don't exist; cross-instance reputation doesn't exist.
 
-Encrypted DMs that cross federation boundaries lose the engine's visibility. The engine bot can't read encrypted message content, so flags submitted on encrypted-DM messages don't trigger floor-violation suspensions (the lookup of "who authored the target message" fails). Encrypted DMs are between two endpoints; the consensus moderation primitive applies to plaintext rooms.
+This is a deliberate design choice, not a configuration default. The reasoning:
+
+**1. Community boundaries get fuzzy under federation.** Koven's whole model is "the community votes on what gets collapsed." When @alice on koven-a flags @bob's message in a room with members from koven-a, koven-b, and koven-c, the consensus question becomes ambiguous: whose vote counts? Just the local instance? Everyone in the room across all instances? There is no honest answer that preserves the "the community decides" promise without contradicting itself on at least one of those readings.
+
+**2. Reputation can't be trusted across servers.** Reputation accumulates with participation in the local engine's view of activity. If koven-b federates in, koven-a's engine has no way to verify or trust koven-b's reputation values for koven-b's users — they're whatever koven-b's engine reports. A bad actor stands up their own Koven instance, grants themselves max reputation, and injects high-weight votes into your community. The "Koven peer" probe gate (when it existed) only verified that the remote was a Koven install, not that its reputation values were trustworthy. Cross-server reputation needs cryptographic provenance plus an out-of-band trust establishment, neither of which Koven provides.
+
+**3. Moderation outcomes diverge per-server.** A collapse on koven-a is local: it flips the SPA's render of the target message to the collapsed placeholder for users connected to koven-a. Koven-b's engine doesn't observe koven-a's collapse, doesn't write a koven-b mod log entry for it, doesn't apply it to koven-b's view of the same federated room. Two communities now see two different versions of "what was moderated." The mod log becomes "per-instance log of what THIS server's community decided," which is a much weaker promise than the canonical record this document otherwise describes.
+
+**4. Operationally, federation grows the attack surface without proportionate benefit.** An open federation port (8448) is a spam/abuse vector; a `/.well-known/matrix/server` route is a discovery signal; remote events have to be authenticated, decrypted, sanitised. None of that work delivers anything users on the local instance can't already do without it.
+
+**Practical consequences for users:**
+
+- `@alice:other-koven.example` mentions don't resolve to clickable profiles.
+- matrix.to URLs pointing at users / rooms on other servers go to a dead end.
+- Invite flows for users on other servers 4xx at the server and surface as a clean error in the UI.
+- DMs with users on other servers stop working at the protocol level — Synapse refuses outbound federation.
+- Migration between instances is not free: it requires explicit export/import, not silent cross-instance presence.
+
+**Defense in depth.** Federation isn't just "off by config" — it's off across four layers:
+
+1. Synapse drops the `federation` listener name from its HTTP listener, so it won't accept federation traffic on the port.
+2. `federation_domain_whitelist: []` (empty list) makes Synapse explicitly refuse outbound federation to any domain.
+3. The reverse proxy serves no `/.well-known/matrix/server` and no `/.well-known/koven` route — remote Matrix servers can't discover the instance.
+4. `docker-compose` doesn't expose port 8448 (the dedicated federation port), so even if a layer above misconfigured, there's no public listener.
+
+The `koven-federation-gate` Synapse module (which previously enforced "Koven-to-Koven federation only") has been deleted from the repo. The decision is no longer "selective federation" — it's "no federation."
 
 ## What this prevents, what it doesn't
 
@@ -285,7 +310,7 @@ Encrypted DMs that cross federation boundaries lose the engine's visibility. The
 - Quiet bans. Every flag, collapse, and suspension lands in the per-room public mod log.
 - Permabans for one bad day. Only floor violations result in bans; everything else decays as the rolling activity windows slide.
 - Hidden algorithmic suppression. No algorithm. The math is in this document.
-- Offensive-space-name floods. Suspended users can't publish at all; the consensus pipeline cleans the rest reactively; the federation visibility flip stops collapsed names from propagating to peer instances; the repeat-collapse accumulator surfaces serial offenders to admin review. (Individual rooms no longer appear in Explore — they live inside spaces — so the directory flood surface has narrowed to space creation.)
+- Offensive-space-name floods. Suspended users can't publish at all; the consensus pipeline cleans the rest reactively; the repeat-collapse accumulator surfaces serial offenders to admin review. (Individual rooms no longer appear in Explore — they live inside spaces — so the directory flood surface has narrowed to space creation, and the per-instance non-federated model means a collapsed name can't leak across to a peer's directory either.)
 
 **Does not prevent:**
 - Coordinated brigading by a large hostile group, if they can clear the dynamic threshold for the target room. Mitigated by reputation weighting and the time-gated tier ladder (a fresh account army carries minimum weight); not eliminated.

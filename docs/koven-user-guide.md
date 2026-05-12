@@ -135,7 +135,7 @@ Hover your own message → pencil icon. Edited messages display an `(edited)` ta
 
 ### Deleting
 
-Hover your own message → trash icon → confirm. The message redacts everywhere across federation. The deletion lands in the room's public mod log as a **Self-deletion** entry (visible to anyone) — the text is gone, but the fact something was deleted is logged forever.
+Hover your own message → trash icon → confirm. The message redacts everywhere in the room (every device, every client). The deletion lands in the room's public mod log as a **Self-deletion** entry (visible to anyone) — the text is gone, but the fact something was deleted is logged forever.
 
 You **cannot** delete other people's messages. That's the consensus pipeline's job (see Flagging).
 
@@ -424,7 +424,7 @@ Settings → Account → Delete account (at the bottom, in red).
 Flow:
 
 1. Engine clears your reputation row and any pending suspension on you.
-2. Synapse retires the username (it can never be re-registered), invalidates every session token, and redacts every message you've ever sent across federation.
+2. Synapse retires the username (it can never be re-registered), invalidates every session token, and redacts every message you've ever sent.
 3. Posts/flags/collapses/mod-log entries that describe **community decisions** stay — those aren't personal data. The audit trail stays intact.
 
 Irreversible. The username is gone, message contents are scrubbed, no undo. DMs vanish on your side; the other party retains their copy with your messages now showing as redactions.
