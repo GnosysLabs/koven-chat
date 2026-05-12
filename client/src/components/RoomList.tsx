@@ -65,6 +65,15 @@ export interface RoomListProps {
 	// by App.tsx since they manipulate App-level overlay state.
 	onEditRoom?(roomId: RoomId): void;
 	onOpenProfile?(userId: UserId): void;
+	// Right-click → "Delete conversation" on a DM row routes here
+	// instead of calling transport.leaveRoom directly.  The parent
+	// opens the bilateral-purge confirmation dialog (shared with the
+	// DmProfilePanel's "Delete conversation" button); confirming
+	// inside that dialog is what actually fires transport.deleteDm.
+	// A right-click that ran the server-side purge without
+	// confirmation would be too easy to misfire on a destructive,
+	// irreversible action.
+	onRequestDeleteDm?(roomId: RoomId): void;
 	// Set of mxids known to be bots.  Used by the per-row avatar
 	// to pick the right DiceBear style for bot DMs (kind="bot" →
 	// bottts robot fallback) instead of the default kind="user"
@@ -86,7 +95,7 @@ export function RoomList({
 	onSelectRoom, onCreateRoom, onAcceptInvite, onDeclineInvite,
 	onPinRoom, onUnpinRoom, collapsedRoomIds,
 	roomsLoaded, transport, accessToken,
-	onEditRoom, onOpenProfile, botMxids,
+	onEditRoom, onOpenProfile, onRequestDeleteDm, botMxids,
 }: RoomListProps) {
 	const activeSpaceObj = activeSpace?.kind === "space"
 		? spaces.find(s => s.id === activeSpace.id) ?? null
@@ -232,6 +241,7 @@ export function RoomList({
 								canManagePins={canManagePins}
 								onEditRoom={onEditRoom}
 								onOpenProfile={onOpenProfile}
+								onRequestDeleteDm={onRequestDeleteDm}
 								isBotPeer={
 									room.kind === "dm" && !!room.dmUserId && !!botMxids?.has(room.dmUserId)
 								}
@@ -361,7 +371,7 @@ function DmPresenceDot({ presence }: { presence: Room["dmPresence"] }) {
 function RoomRow({
 	room, active, pinned, collapsed, onSelect, onPin, onUnpin,
 	currentUserId, transport, accessToken, activeSpaceId, canManagePins,
-	onEditRoom, onOpenProfile, isBotPeer,
+	onEditRoom, onOpenProfile, onRequestDeleteDm, isBotPeer,
 }: {
 	room: Room;
 	active: boolean;
@@ -390,6 +400,7 @@ function RoomRow({
 	canManagePins: boolean;
 	onEditRoom?(roomId: RoomId): void;
 	onOpenProfile?(userId: UserId): void;
+	onRequestDeleteDm?(roomId: RoomId): void;
 	// True when this is a DM whose peer is a known bot — flips the
 	// avatar's DiceBear fallback style from fun-emoji ("user") to
 	// bottts ("bot") so the sidebar matches the rest of the UI.
@@ -565,6 +576,16 @@ function RoomRow({
 					onPin={onPin}
 					onUnpin={onUnpin}
 					onLeave={() => {
+						// DMs route through the shared bilateral-delete
+						// dialog (server-side purge for both parties).
+						// The old behaviour, transport.leaveRoom on the
+						// row, only left the caller's side, the other
+						// party retained the full conversation.  Non-DM
+						// rooms keep the normal one-sided leave.
+						if (room.kind === "dm" && onRequestDeleteDm) {
+							onRequestDeleteDm(room.id);
+							return;
+						}
 						transport.leaveRoom(room.id).catch(err => {
 							console.warn("RoomRow: leave failed", err);
 						});

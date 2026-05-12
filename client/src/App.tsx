@@ -35,6 +35,10 @@ import { BotList } from "@/components/BotList";
 import { listMyBots, deleteBot as apiDeleteBot, type BotSummary } from "@/lib/bots";
 import { MemberList } from "@/components/MemberList";
 import { DmProfilePanel } from "@/components/DmProfilePanel";
+import {
+	DeleteConversationDialog,
+	type DeleteProgressPhase,
+} from "@/components/DeleteConversationDialog";
 import { CreateRoomSheet } from "@/components/CreateRoomSheet";
 import { JoinConfirmSheet } from "@/components/JoinConfirmSheet";
 import { ShareIntentProvider } from "@/lib/shareIntentContext";
@@ -284,6 +288,24 @@ export default function App() {
 	// because it isn't really a chat surface; pressing any other
 	// tab clears it without disturbing the underlying activeSpace.
 	const [mobileMeOpen, setMobileMeOpen] = useState(false);
+	// Shared bilateral-DM-delete dialog state.  Driven by two entry
+	// points (the DmProfilePanel button on the right sidebar AND the
+	// sidebar room-row right-click "Delete conversation" item), both
+	// of which call openDeleteDm(roomId) below.  Kept here rather
+	// than inside DmProfilePanel because the right-click path doesn't
+	// require the panel to be open at all, and a server-side purge
+	// must always be gated by the same confirmation regardless of
+	// which surface triggered it.
+	const [deleteDmTarget, setDeleteDmTarget] = useState<{
+		roomId: RoomId;
+		otherDisplayName: string;
+	} | null>(null);
+	const [deleteDmInflight, setDeleteDmInflight] = useState(false);
+	const [deleteDmProgress, setDeleteDmProgress] = useState<{
+		phase: DeleteProgressPhase;
+		done: number;
+		total: number;
+	} | null>(null);
 	// Pending-space-invites sheet open flag.  The pill banner above
 	// the main content area sets this true when tapped; the sheet
 	// itself owns the per-invite Accept / Decline buttons.  Decoupled
@@ -1701,6 +1723,47 @@ export default function App() {
 		}
 	}, [transport, state.rooms, settings.showNsfw]);
 
+	// Open the bilateral-delete confirmation dialog for a specific
+	// DM.  Both the DmProfilePanel "Delete conversation" button AND
+	// the sidebar row's right-click "Delete conversation" item route
+	// through here; never call transport.deleteDm directly from a
+	// click handler because the confirm gate is the only thing
+	// stopping a misfire from nuking a conversation server-side.
+	//
+	// Display name resolution: the room object exposes `dmUserId` +
+	// `name`; for DMs the room's `name` is already the other party's
+	// display name (Synapse + matrix-js-sdk auto-synthesize it).
+	// Falls back to the bare mxid if we somehow don't have either.
+	const openDeleteDmFor = useCallback((roomId: RoomId) => {
+		const room = state.rooms.find(r => r.id === roomId);
+		const otherDisplayName = room?.name
+			?? (room?.dmUserId as string | undefined)
+			?? "this person";
+		setDeleteDmTarget({ roomId, otherDisplayName });
+	}, [state.rooms]);
+
+	const confirmDeleteDm = useCallback(async () => {
+		if (!transport || !deleteDmTarget) return;
+		setDeleteDmInflight(true);
+		setDeleteDmProgress({ phase: "redacting", done: 0, total: 0 });
+		try {
+			await transport.deleteDm(deleteDmTarget.roomId, (phase, done, total) => {
+				setDeleteDmProgress({ phase, done, total });
+			});
+			// If the deleted room is the one currently open, drop the
+			// active-room selection so we don't sit on a now-gone room.
+			if (state.activeRoomId === deleteDmTarget.roomId) {
+				dispatch({ type: "set_active_room", roomId: null });
+			}
+		} catch (e) {
+			dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+		} finally {
+			setDeleteDmInflight(false);
+			setDeleteDmProgress(null);
+			setDeleteDmTarget(null);
+		}
+	}, [transport, deleteDmTarget, state.activeRoomId]);
+
 	/** Sign out of the currently-active account.
 	 *
 	 * Three-step:
@@ -2258,6 +2321,7 @@ export default function App() {
 					accessToken={creds.access_token}
 					onEditRoom={(roomId) => setEditingRoomId(roomId)}
 					onOpenProfile={(userId) => setViewedUserId(userId)}
+					onRequestDeleteDm={openDeleteDmFor}
 					collapsedRoomIds={collapsedRoomIds}
 					botMxids={botMxids}
 					// True once initial sync has reached the "syncing"
@@ -2591,15 +2655,7 @@ export default function App() {
 							ignoredUsers={ignoredUsers}
 							isBot={botMxids.has(activeRoom.dmUserId as UserId)}
 							onOpenProfile={(userId) => setViewedUserId(userId)}
-							onDeleteDm={async (onProgress) => {
-								if (!transport || !state.activeRoomId) return;
-								try {
-									await transport.deleteDm(state.activeRoomId, onProgress);
-									dispatch({ type: "set_active_room", roomId: null });
-								} catch (e) {
-									dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
-								}
-							}}
+							onRequestDelete={() => openDeleteDmFor(activeRoom.id as RoomId)}
 						/>
 					) : (
 						<MemberList
@@ -3068,6 +3124,16 @@ export default function App() {
 						}
 					}
 				}}
+			/>
+			<DeleteConversationDialog
+				open={!!deleteDmTarget}
+				onOpenChange={(o) => {
+					if (!o && !deleteDmInflight) setDeleteDmTarget(null);
+				}}
+				otherDisplayName={deleteDmTarget?.otherDisplayName ?? ""}
+				deleting={deleteDmInflight}
+				progress={deleteDmProgress}
+				onConfirm={confirmDeleteDm}
 			/>
 			<PendingInvitesSheet
 				open={pendingInvitesOpen && state.spaceInvites.length > 0}
