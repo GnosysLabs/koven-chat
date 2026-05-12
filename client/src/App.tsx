@@ -487,6 +487,25 @@ export default function App() {
 		void refreshMyBots();
 	}, [refreshMyBots]);
 
+	// Belt-and-braces: re-fetch the bot roster every time the user
+	// navigates into a new room.  Past field reports surfaced a class
+	// of bugs where `myOwnedBotMxids` was empty at first paint (cold
+	// start hit /api/bots/me before the engine was ready, or a
+	// transient 5xx left `myBots` stuck at null with no retry), which
+	// left the user with `flag` instead of `delete` on their own
+	// bot's messages.  Re-firing on room change is cheap (small JSON
+	// response, one round trip) and guarantees the roster is fresh
+	// every time the user is about to LOOK at a bot's output.
+	//
+	// Skipped while the roster is already loading to avoid stampedes
+	// when the user rapid-fires across rooms; if a fetch is in
+	// flight, its result will cover the new room anyway.
+	useEffect(() => {
+		if (!state.activeRoomId) return;
+		if (myBotsLoading) return;
+		void refreshMyBots();
+	}, [state.activeRoomId, refreshMyBots, myBotsLoading]);
+
 	// Admin status + pending-review-queue length poll.  Cheap two-call
 	// fan-out on the same cadence as the suspension poll: first probe
 	// /api/instance/me to confirm we're an admin, and only then pull

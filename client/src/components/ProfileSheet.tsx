@@ -122,13 +122,22 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 	// kicks back-to-back.
 	const [botActionPending, setBotActionPending] = useState<"kick" | "ban" | null>(null);
 	const isBlocked = !!(viewedUserId && ignoredUsers?.has(viewedUserId));
-	// Founder branch: full Kick/Ban affordance.  Hidden when the bot
-	// is the viewer's own — own-bot management lives in Settings →
-	// Bots (or the owner-remove branch below for foreign spaces).
-	const showFounderBotControls = !!(isBot && canKickBanBots && !isMyBot && onBotMembership && viewedUserId && !isSelf);
+	// Founder branch: full Kick/Ban affordance.  Shown to the space
+	// founder for ANY bot in the space — including bots they own.
+	// "I'm the space founder AND I happen to own this bot" is a real
+	// case (the founder spun up a moderation bot and now wants it
+	// gone from this space without deleting the bot itself), and the
+	// engine endpoint handles it cleanly via the PL-based kick path.
+	// Pulling on it doesn't delete the bot from the instance, just
+	// from this space.
+	const showFounderBotControls = !!(isBot && canKickBanBots && onBotMembership && viewedUserId && !isSelf);
 	// Owner branch: "Remove from space" for bot owners viewing their
-	// own bot in a space they don't moderate.  Engine resolves the
-	// kick action into a voluntary leave under the bot's own token.
+	// own bot in a space they DON'T moderate.  Mutually exclusive
+	// with the founder branch above (`!canKickBanBots`) so a founder-
+	// who-also-owns gets the full Kick/Ban affordance, not the
+	// reduced single-action one.  Engine resolves the kick action
+	// into a voluntary leave under the bot's own token, so no PL
+	// in the space is required.
 	const showOwnerRemoveControl = !!(isBot && isMyBot && canRemoveOwnBot && !canKickBanBots && onBotMembership && viewedUserId && !isSelf);
 
 	async function handleBotAction(action: "kick" | "ban") {

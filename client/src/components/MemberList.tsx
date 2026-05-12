@@ -435,12 +435,13 @@ function MemberContextMenu({
 	const top = Math.min(y, vh - menuH - 8);
 
 	const showDm = !isSelf && canDm;
-	// Founder branch: full Kick / Ban affordance against any bot
-	// that isn't the viewer's own.  (Their own bot in their own
-	// space is also fine to kick/ban under the engine endpoint, but
-	// the UX nudge is to manage own bots from Settings → Bots, so
-	// we suppress here to keep the menu purpose-built.)
-	const showFounderKickBan = isBot && !isSelf && canKickBan && isSpaceFounder && !isMyBot;
+	// Founder branch: full Kick / Ban affordance against ANY bot in
+	// the space — including the founder's own.  A founder who also
+	// owns the bot wanting it out of their own space is a real case
+	// (e.g. retiring a moderation bot from a community without
+	// deleting it instance-wide), and the engine endpoint handles
+	// it through the PL-based kick path identically.
+	const showFounderKickBan = isBot && !isSelf && canKickBan && isSpaceFounder;
 	// Owner branch: "Remove my bot from this space" for bot owners
 	// who aren't also the space founder.  Mutually exclusive with
 	// showFounderKickBan — if the viewer is the founder we don't
