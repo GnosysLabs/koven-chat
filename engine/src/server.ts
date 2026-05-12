@@ -29,7 +29,7 @@ import {
 	botMembershipActionsForRoom,
 	countBotsByOwner,
 	countOpenFlags,
-	getFlagById,
+	getFlagByEventId,
 	listAllFlagsForReportQueue,
 	modActionsForRoom,
 	recordModAction,
@@ -3477,7 +3477,11 @@ export function startServer(): void {
 				const auth = await requireAdmin(req);
 				if (auth instanceof Response) return auth;
 				const rows = listAllFlagsForReportQueue().map(r => ({
-					id: r.id,
+					// Identifier is the flag's Matrix event id (the
+					// flags table uses event_id TEXT PRIMARY KEY; there's
+					// no separate INTEGER id).  SPA uses this verbatim in
+					// the dismiss / action endpoints below.
+					event_id: r.event_id,
 					room_id: r.room_id,
 					flagger: r.flagger,
 					target_kind: r.target_kind,
@@ -3500,13 +3504,17 @@ export function startServer(): void {
 			}
 
 			{
-				const m = path.match(/^\/api\/admin\/reports\/(\d+)\/(dismiss|action)$/);
+				// Flag event ids start with `$` and contain Matrix's
+				// usual url-safe charset (alphanum + ./-_=).  Match
+				// everything but the trailing /verb so we hand the
+				// decoded id verbatim to the DB lookup.
+				const m = path.match(/^\/api\/admin\/reports\/([^/]+)\/(dismiss|action)$/);
 				if (req.method === "POST" && m) {
 					const auth = await requireAdmin(req);
 					if (auth instanceof Response) return auth;
-					const flagId = Number(m[1]!);
+					const flagEventId = decodeURIComponent(m[1]!);
 					const verb = m[2] as "dismiss" | "action";
-					const existing = getFlagById(flagId);
+					const existing = getFlagByEventId(flagEventId);
 					if (!existing) {
 						return json({
 							errcode: "M_NOT_FOUND",
@@ -3514,8 +3522,8 @@ export function startServer(): void {
 						}, { status: 404 });
 					}
 					const nextStatus = verb === "dismiss" ? "dismissed" : "actioned";
-					setFlagReviewStatus(flagId, nextStatus);
-					return json({ id: flagId, status: nextStatus });
+					setFlagReviewStatus(flagEventId, nextStatus);
+					return json({ event_id: flagEventId, status: nextStatus });
 				}
 			}
 

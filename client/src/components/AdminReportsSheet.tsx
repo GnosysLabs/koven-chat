@@ -50,7 +50,7 @@ export function AdminReportsSheet({
 	open, onOpenChange, accessToken, onOpenTarget, onCountChanged,
 }: AdminReportsSheetProps) {
 	const [reports, setReports] = useState<AdminReport[] | null>(null);
-	const [busyId, setBusyId] = useState<number | null>(null);
+	const [busyId, setBusyId] = useState<string | null>(null);
 	// Local "filter to open only" toggle.  Default true — admins
 	// almost always want the queue (the closed-set view is occasional
 	// auditing).  Cheap client-side filter; engine returns the full
@@ -67,21 +67,21 @@ export function AdminReportsSheet({
 		return () => { cancelled = true; };
 	}, [open, accessToken]);
 
-	async function applyStatus(id: number, kind: "dismiss" | "action") {
+	async function applyStatus(eventId: string, kind: "dismiss" | "action") {
 		if (busyId) return;
-		setBusyId(id);
+		setBusyId(eventId);
 		try {
-			if (kind === "dismiss") await dismissReport(accessToken, id);
-			else await markReportActioned(accessToken, id);
+			if (kind === "dismiss") await dismissReport(accessToken, eventId);
+			else await markReportActioned(accessToken, eventId);
 			// Local optimistic update — flip the row's status so the
 			// "show open only" filter immediately hides it without a
 			// full refetch.
 			setReports(prev => prev?.map(r =>
-				r.id === id
+				r.event_id === eventId
 					? { ...r, status: kind === "dismiss" ? "dismissed" : "actioned" }
 					: r,
 			) ?? prev);
-			const remaining = (reports ?? []).filter(r => r.id !== id && r.status === "open").length;
+			const remaining = (reports ?? []).filter(r => r.event_id !== eventId && r.status === "open").length;
 			onCountChanged?.(remaining);
 		} catch (err) {
 			console.warn("admin reports: applyStatus failed", err);
@@ -134,11 +134,11 @@ export function AdminReportsSheet({
 						<ol className="space-y-2">
 							{visible.map(r => (
 								<ReportRow
-									key={r.id}
+									key={r.event_id}
 									r={r}
-									busy={busyId === r.id}
-									onDismiss={() => applyStatus(r.id, "dismiss")}
-									onAction={() => applyStatus(r.id, "action")}
+									busy={busyId === r.event_id}
+									onDismiss={() => applyStatus(r.event_id, "dismiss")}
+									onAction={() => applyStatus(r.event_id, "action")}
 									onOpenTarget={onOpenTarget}
 								/>
 							))}

@@ -419,7 +419,10 @@ export async function unflagRoom(
 // is performed via the separate transport + recordModAction calls.
 
 export interface AdminReport {
-	id: number;
+	// The flag's Matrix event id ($...).  This is the canonical
+	// identifier — the flags table uses event_id as its primary key
+	// and the dismiss / action endpoints take it verbatim in the URL.
+	event_id: string;
 	room_id: string;
 	flagger: string;
 	target_kind: "message" | "room";
@@ -449,9 +452,9 @@ export async function fetchAdminReportsCount(accessToken: string): Promise<numbe
 	return body.open ?? 0;
 }
 
-export async function dismissReport(accessToken: string, flagId: number): Promise<void> {
+export async function dismissReport(accessToken: string, flagEventId: string): Promise<void> {
 	const r = await fetch(
-		`${ENGINE_URL}/api/admin/reports/${flagId}/dismiss`,
+		`${ENGINE_URL}/api/admin/reports/${encodeURIComponent(flagEventId)}/dismiss`,
 		{
 			method: "POST",
 			headers: { Authorization: `Bearer ${accessToken}` },
@@ -463,9 +466,9 @@ export async function dismissReport(accessToken: string, flagId: number): Promis
 	}
 }
 
-export async function markReportActioned(accessToken: string, flagId: number): Promise<void> {
+export async function markReportActioned(accessToken: string, flagEventId: string): Promise<void> {
 	const r = await fetch(
-		`${ENGINE_URL}/api/admin/reports/${flagId}/action`,
+		`${ENGINE_URL}/api/admin/reports/${encodeURIComponent(flagEventId)}/action`,
 		{
 			method: "POST",
 			headers: { Authorization: `Bearer ${accessToken}` },

@@ -908,14 +908,18 @@ export function flagsForRoom(roomId: string): FlagRow[] {
 // are still surfaced (status reflects admin triage, not the flagger's
 // retraction); the UI can decide whether to filter those out.
 
+// The `flags` table's primary key is `event_id TEXT` (the Matrix
+// event id of the chat.koven.flag.v1 event).  There's no separate
+// INTEGER `id` — the queries here use event_id as the identifier
+// end-to-end, including the wire format the admin reports sheet
+// reads.
 const allFlagsForReportQueueStmt = db.prepare(`
-	SELECT id, event_id, target_event_id, room_id, flagger, category, rationale,
+	SELECT event_id, target_event_id, room_id, flagger, category, rationale,
 	       ts, target_kind, review_status
 	FROM flags
 	ORDER BY ts DESC
 `);
 export interface AdminReportRow {
-	id: number;
 	event_id: string;
 	target_event_id: string;
 	room_id: string;
@@ -931,21 +935,21 @@ export function listAllFlagsForReportQueue(): AdminReportRow[] {
 }
 
 const setFlagReviewStatusStmt = db.prepare(`
-	UPDATE flags SET review_status = ? WHERE id = ?
+	UPDATE flags SET review_status = ? WHERE event_id = ?
 `);
-export function setFlagReviewStatus(flagId: number, status: FlagReviewStatus): boolean {
-	const r = setFlagReviewStatusStmt.run(status, flagId);
+export function setFlagReviewStatus(flagEventId: string, status: FlagReviewStatus): boolean {
+	const r = setFlagReviewStatusStmt.run(status, flagEventId);
 	return r.changes > 0;
 }
 
-const getFlagByIdStmt = db.prepare(`
-	SELECT id, event_id, target_event_id, room_id, flagger, category, rationale,
+const getFlagByEventIdStmt = db.prepare(`
+	SELECT event_id, target_event_id, room_id, flagger, category, rationale,
 	       ts, target_kind, review_status
 	FROM flags
-	WHERE id = ?
+	WHERE event_id = ?
 `);
-export function getFlagById(flagId: number): AdminReportRow | null {
-	return (getFlagByIdStmt.get(flagId) as AdminReportRow | undefined) ?? null;
+export function getFlagByEventId(flagEventId: string): AdminReportRow | null {
+	return (getFlagByEventIdStmt.get(flagEventId) as AdminReportRow | undefined) ?? null;
 }
 
 const countOpenFlagsStmt = db.prepare(`
