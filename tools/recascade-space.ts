@@ -57,24 +57,23 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 
-	const members = await getAllJoinedMembers(spaceId);
 	const localSuffix = `:${config.homeserverName}`;
-	const localMembers = members.filter(m => m.endsWith(localSuffix));
-	console.log(`space ${spaceId}: ${localMembers.length} local member(s) (incl. bots)`);
-
 	const childIds = await getSpaceChildRoomIds(spaceId);
 	console.log(`space ${spaceId}: ${childIds.length} declared child room(s)`);
 
-	let processedRooms = 0;
-	let joinsAttempted = 0;
-	let joinsSucceeded = 0;
-	let joinsSkipped = 0;
-	let joinsFailed = 0;
-
+	// Resolve the FULL local-member set: union of the space's own
+	// members and every joined member of every (non-sub-space) child
+	// room.  Captures bots that joined a single child room (e.g. the
+	// bot playground) without ever joining the parent space, so the
+	// cascade reaches them on the way back into every other room.
+	const allLocalMembers = new Set<string>();
+	for (const m of await getAllJoinedMembers(spaceId)) {
+		if (m.endsWith(localSuffix)) allLocalMembers.add(m);
+	}
+	// Inspect each child room.  Pre-filter sub-spaces so we don't
+	// pull their internal members into the parent space's roster.
+	const inspectableChildren: string[] = [];
 	for (const childId of childIds) {
-		processedRooms++;
-		// Skip sub-spaces: the live cascade skips them too (joining
-		// a space pulls in rooms but not nested sub-spaces).
 		try {
 			if (await isSpaceRoom(childId)) {
 				console.log(`  ${childId}: sub-space, skipped`);
@@ -84,28 +83,58 @@ async function main(): Promise<void> {
 			console.warn(`  ${childId}: isSpaceRoom check failed`, err);
 			continue;
 		}
-
-		// Only auto-join rooms with rules that admin-join can fill.
-		// Public + knock + restricted resolve cleanly; invite-only
-		// rooms are intentionally invite-gated.
 		const rule = await getRoomJoinRule(childId);
 		if (rule !== "public" && rule !== "knock" && rule !== "restricted") {
 			console.log(`  ${childId}: join_rule=${rule}, skipped`);
 			continue;
 		}
+		inspectableChildren.push(childId);
+		for (const m of await getAllJoinedMembers(childId)) {
+			if (m.endsWith(localSuffix)) allLocalMembers.add(m);
+		}
+	}
 
-		// Snapshot the current child membership so we don't re-issue
-		// admin-join for users who are already in.  The admin call
-		// IS idempotent (Synapse returns 200 on a no-op), but skipping
-		// the HTTP round-trip when we know it's a no-op cuts the run
-		// time dramatically on rooms with most users already in.
+	const allMembers = [...allLocalMembers];
+	const bots = allMembers.filter(m => /^@bot-/.test(m));
+	console.log(`union: ${allMembers.length} local member(s) (${bots.length} bot(s))`);
+
+	let joinsAttempted = 0;
+	let joinsSucceeded = 0;
+	let joinsFailed = 0;
+
+	// Pass 1: ensure every union-member is also a member of the
+	// parent SPACE itself.  Without this step, bots that only ever
+	// joined a single child room stay out of the space and the
+	// engine's live newSpaceChildren cascade (which keys off the
+	// space's membership) would still miss them when a new room is
+	// added later.
+	const spaceMembers = new Set(await getAllJoinedMembers(spaceId));
+	const missingFromSpace = allMembers.filter(u => !spaceMembers.has(u));
+	if (missingFromSpace.length > 0) {
+		console.log(`space ${spaceId}: joining ${missingFromSpace.length} missing member(s) into the space itself`);
+		for (const userId of missingFromSpace) {
+			joinsAttempted++;
+			const r = await adminJoinUserToRoom(userId, spaceId);
+			if ("error" in r) {
+				joinsFailed++;
+				console.warn(`  ${userId} → space ${spaceId}: ${r.error} ${r.detail ?? ""}`);
+			} else {
+				joinsSucceeded++;
+			}
+		}
+	}
+
+	// Pass 2: ensure every union-member is in every joinable child
+	// room.  admin-join is idempotent, but pre-checking saves a
+	// round-trip per already-joined user, which compounds when the
+	// union is large.
+	for (const childId of inspectableChildren) {
 		const existing = new Set(await getAllJoinedMembers(childId));
-		const missing = localMembers.filter(u => !existing.has(u));
+		const missing = allMembers.filter(u => !existing.has(u));
 		if (missing.length === 0) {
 			console.log(`  ${childId}: already complete (${existing.size} members)`);
 			continue;
 		}
-
 		console.log(`  ${childId}: joining ${missing.length} missing member(s)`);
 		for (const userId of missing) {
 			joinsAttempted++;
@@ -117,11 +146,10 @@ async function main(): Promise<void> {
 				joinsSucceeded++;
 			}
 		}
-		joinsSkipped += existing.size;
 	}
 
 	console.log("");
-	console.log(`done: ${processedRooms} child room(s) processed`);
+	console.log(`done: ${inspectableChildren.length} child room(s) processed`);
 	console.log(`      ${joinsAttempted} join(s) attempted`);
 	console.log(`      ${joinsSucceeded} succeeded`);
 	console.log(`      ${joinsFailed} failed`);
