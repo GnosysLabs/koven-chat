@@ -1,15 +1,21 @@
 // Second column — the room list scoped to whatever's selected in the
 // SpaceBar.
-//   - Home: every DM the user is in, plus rooms not assigned to any
-//     space ("orphan" rooms).
+//   - DMs: every DM the user is in, sorted by recency (last-active
+//     conversation bubbles up — DMs aren't admin-managed, so recency
+//     is the natural sort).
 //   - A specific space: only rooms whose parentSpaceIds include that
-//     space's id.
+//     space's id, rendered in admin-dictated order grouped by
+//     category.  The order comes from each room's
+//     `m.space.child.order` field on the parent space; the category
+//     id comes from `m.space.child.chat.koven.category`; the
+//     category display order comes from the parent space's
+//     `chat.koven.space.categories` state event.
 
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { COLLAPSED_NAME } from "@/lib/collapsedRooms";
 import type { Room, RoomId, Space, UserId } from "@koven/shared";
-import { BellOff, Check, Copy, Lock, Pin, Plus, UserX, X } from "lucide-react";
+import { BellOff, ChevronDown, ChevronRight, Check, Copy, Lock, Plus, UserX, X } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { RoomRowContextMenu } from "@/components/RoomRowContextMenu";
 import { ContextMenu, type ContextMenuItem } from "@/components/ui/context-menu";
@@ -35,13 +41,6 @@ export interface RoomListProps {
 	onCreateRoom(): void;
 	onAcceptInvite(roomId: RoomId): void | Promise<void>;
 	onDeclineInvite(roomId: RoomId): void | Promise<void>;
-	// Pin / unpin a room within a space.  Space-scoped: pins are
-	// visible to everyone in the space and require state-event
-	// permission to set.  Only meaningful when activeSpace is a real
-	// user-created space.  Receives the space id so the transport
-	// knows where to write the `chat.koven.pinned_rooms` event.
-	onPinRoom?(spaceId: string, roomId: RoomId): void | Promise<void>;
-	onUnpinRoom?(spaceId: string, roomId: RoomId): void | Promise<void>;
 	// Set of room ids the engine reports as collapsed (offensive room
 	// name pipeline).  Sidebar entries for these rooms render with the
 	// "Name Removed by Community Review" placeholder instead of the
@@ -83,48 +82,36 @@ export interface RoomListProps {
 	botMxids?: Set<UserId>;
 }
 
-// PL gate for editing the space's `chat.koven.pinned_rooms` state
-// event.  Matches the rest of the UI (Settings sheet, Add Room) which
-// also use ≥ 50.  Koven's createSpace sets state_default to 100, so in
-// practice this still resolves to founder-only on Koven-created spaces;
-// the looser gate matters for spaces created outside our flow.
-const PIN_PL_THRESHOLD = 50;
-
 export function RoomList({
 	rooms, spaces, activeSpace, activeRoomId, currentUserId,
 	onSelectRoom, onCreateRoom, onAcceptInvite, onDeclineInvite,
-	onPinRoom, onUnpinRoom, collapsedRoomIds,
+	collapsedRoomIds,
 	roomsLoaded, transport, accessToken,
 	onEditRoom, onOpenProfile, onRequestDeleteDm, botMxids,
 }: RoomListProps) {
 	const activeSpaceObj = activeSpace?.kind === "space"
 		? spaces.find(s => s.id === activeSpace.id) ?? null
 		: null;
-	const pinnedRoomIds = activeSpaceObj?.pinnedRoomIds ?? [];
-	const pinnedRoomIdSet = new Set(pinnedRoomIds);
-	const canManagePins = !!activeSpaceObj && (activeSpaceObj.myPowerLevel ?? 0) >= PIN_PL_THRESHOLD;
 
 	const visibleRooms = filterRooms(rooms, activeSpace);
 	// Pending invites bubble to the top of the list as request rows
 	// with inline Accept/Decline buttons; "joined" rooms render as the
 	// usual clickable conversation rows below.
 	const inviteRooms = visibleRooms.filter(r => r.isInvite);
-	const joinedRooms = sortWithPinnedFirst(
-		visibleRooms.filter(r => !r.isInvite),
-		pinnedRoomIds,
-	);
+	const joinedRooms = visibleRooms.filter(r => !r.isInvite);
 	const header = headerFor(activeSpace, spaces);
 
-	const pinHandler = (roomId: RoomId) => {
-		if (!activeSpaceObj || !onPinRoom) return undefined;
-		const spaceId = activeSpaceObj.id;
-		return () => onPinRoom(spaceId, roomId);
-	};
-	const unpinHandler = (roomId: RoomId) => {
-		if (!activeSpaceObj || !onUnpinRoom) return undefined;
-		const spaceId = activeSpaceObj.id;
-		return () => onUnpinRoom(spaceId, roomId);
-	};
+	// Per-space groups (categories) — only meaningful inside a real
+	// space.  DMs render as a single flat list so the recency sort
+	// below applies uniformly.
+	const groups = activeSpace?.kind === "space" && activeSpaceObj
+		? groupRoomsByCategory(joinedRooms, activeSpaceObj)
+		: null;
+	// DMs and the home pseudo-spaces sort by recency; rooms in a
+	// real space sort by admin order inside groupRoomsByCategory.
+	const flatDmList = activeSpace?.kind === "dms"
+		? joinedRooms.slice().sort((a, b) => recencyOf(b) - recencyOf(a))
+		: joinedRooms;
 
 	// Showcase the active space's uploaded avatar at the top of the
 	// room list, parallel to MemberList's room-banner.  Skipped for
@@ -216,59 +203,123 @@ export function RoomList({
 							{emptyHintFor(activeSpace, canCreateRoomHere)}
 						</div>
 					) : null
+				) : groups ? (
+					// Categorised render for a real space — uncategorised
+					// bucket first (no header, Discord-style), then each
+					// admin-defined category with its header.
+					<RoomGroupedList
+						groups={groups}
+						activeRoomId={activeRoomId}
+						collapsedRoomIds={collapsedRoomIds}
+						currentUserId={currentUserId}
+						transport={transport ?? null}
+						accessToken={accessToken ?? null}
+						activeSpaceId={activeSpaceObj?.id ?? null}
+						onSelectRoom={onSelectRoom}
+						onEditRoom={onEditRoom}
+						onOpenProfile={onOpenProfile}
+						onRequestDeleteDm={onRequestDeleteDm}
+						botMxids={botMxids}
+					/>
 				) : (
-					joinedRooms.map(room => {
-						const isPinned = pinnedRoomIdSet.has(room.id);
-						const isCollapsed = !!collapsedRoomIds?.has(room.id);
-						return (
-							<RoomRow
-								key={room.id}
-								room={room}
-								active={room.id === activeRoomId}
-								pinned={isPinned}
-								collapsed={isCollapsed}
-								onSelect={() => onSelectRoom(room.id)}
-								onPin={canManagePins && !isPinned ? pinHandler(room.id) : undefined}
-								onUnpin={canManagePins && isPinned ? unpinHandler(room.id) : undefined}
-								// Right-click context menu wiring.  Each
-								// row owns its own menu state so multiple
-								// rooms can have hover affordances without
-								// stomping each other's open menus.
-								currentUserId={currentUserId}
-								transport={transport ?? null}
-								accessToken={accessToken ?? null}
-								activeSpaceId={activeSpaceObj?.id ?? null}
-								canManagePins={canManagePins}
-								onEditRoom={onEditRoom}
-								onOpenProfile={onOpenProfile}
-								onRequestDeleteDm={onRequestDeleteDm}
-								isBotPeer={
-									room.kind === "dm" && !!room.dmUserId && !!botMxids?.has(room.dmUserId)
-								}
-							/>
-						);
-					})
+					// Flat list for DMs (already recency-sorted) and any
+					// non-space pseudo-tab that bypasses categorisation.
+					flatDmList.map(room => (
+						<RoomRow
+							key={room.id}
+							room={room}
+							active={room.id === activeRoomId}
+							collapsed={!!collapsedRoomIds?.has(room.id)}
+							onSelect={() => onSelectRoom(room.id)}
+							currentUserId={currentUserId}
+							transport={transport ?? null}
+							accessToken={accessToken ?? null}
+							activeSpaceId={activeSpaceObj?.id ?? null}
+							onEditRoom={onEditRoom}
+							onOpenProfile={onOpenProfile}
+							onRequestDeleteDm={onRequestDeleteDm}
+							isBotPeer={
+								room.kind === "dm" && !!room.dmUserId && !!botMxids?.has(room.dmUserId)
+							}
+						/>
+					))
 				)}
 			</nav>
 		</aside>
 	);
 }
 
-// Reorder a room list so any room whose id appears in `pinnedIds`
-// floats to the top, in the order the space owner set on the
-// `chat.koven.pinned_rooms` event.  Unpinned rooms keep the order
-// they came in with (last-active descending, applied upstream).
-function sortWithPinnedFirst(rooms: Room[], pinnedIds: string[]): Room[] {
-	if (pinnedIds.length === 0) return rooms;
-	const byId = new Map(rooms.map(r => [r.id, r]));
-	const pinned: Room[] = [];
-	for (const id of pinnedIds) {
-		const r = byId.get(id);
-		if (r) pinned.push(r);
+/** Last-active timestamp of a room.  Source of truth for DM
+ * recency sort.  Falls back to 0 when missing so rooms without
+ * a known ts anchor at the bottom. */
+function recencyOf(room: Room): number {
+	return room.lastActiveTs || 0;
+}
+
+interface RoomGroup {
+	/** `null` for the implicit "Uncategorised" bucket rendered above
+	 * the admin-defined categories (Discord-style); a category id from
+	 * `Space.categories` otherwise. */
+	id: string | null;
+	/** Display label for the group header.  Null for the uncategorised
+	 * bucket — its rooms render without a header at the top of the
+	 * list. */
+	name: string | null;
+	rooms: Room[];
+}
+
+/** Split a flat room list into the categorised groups the sidebar
+ * renders.  The order inside each group follows the room's
+ * `m.space.child.order` field (lexicographic ascending), with
+ * unkeyed rooms falling to the bottom alphabetically — that way a
+ * fresh space with no admin order yet still renders predictably.
+ *
+ * Categories that exist in `space.categories` but have no rooms
+ * still appear so admins can drop rooms into them via drag-and-
+ * drop later.  Categories referenced by some room but missing from
+ * the space.categories list (orphan reference, e.g. category was
+ * renamed/deleted) fall through to the uncategorised group so the
+ * room doesn't vanish from the sidebar. */
+function groupRoomsByCategory(rooms: Room[], space: Space): RoomGroup[] {
+	const spaceId = space.id;
+	const known = new Set(space.categories.map(c => c.id));
+	const uncategorised: Room[] = [];
+	const byCategory = new Map<string, Room[]>();
+	for (const cat of space.categories) byCategory.set(cat.id, []);
+
+	for (const room of rooms) {
+		const meta = room.spaceChildMeta?.[spaceId];
+		const catId = meta?.category;
+		if (catId && known.has(catId)) {
+			byCategory.get(catId)!.push(room);
+		} else {
+			uncategorised.push(room);
+		}
 	}
-	const pinnedSet = new Set(pinned.map(r => r.id));
-	const rest = rooms.filter(r => !pinnedSet.has(r.id));
-	return [...pinned, ...rest];
+
+	const sortRooms = (list: Room[]) => {
+		list.sort((a, b) => {
+			const ao = a.spaceChildMeta?.[spaceId]?.order;
+			const bo = b.spaceChildMeta?.[spaceId]?.order;
+			// Rooms with an explicit order key sort before those without.
+			// Both with: lexicographic.  Both without: alphabetical.
+			if (ao !== undefined && bo === undefined) return -1;
+			if (ao === undefined && bo !== undefined) return 1;
+			if (ao !== undefined && bo !== undefined && ao !== bo) {
+				return ao < bo ? -1 : 1;
+			}
+			return a.name.localeCompare(b.name);
+		});
+	};
+	sortRooms(uncategorised);
+	for (const list of byCategory.values()) sortRooms(list);
+
+	const groups: RoomGroup[] = [];
+	groups.push({ id: null, name: null, rooms: uncategorised });
+	for (const cat of space.categories) {
+		groups.push({ id: cat.id, name: cat.name, rooms: byCategory.get(cat.id)! });
+	}
+	return groups;
 }
 
 function filterRooms(rooms: Room[], activeSpace: ActiveSpace): Room[] {
@@ -368,36 +419,103 @@ function DmPresenceDot({ presence }: { presence: Room["dmPresence"] }) {
 	);
 }
 
+/** Renders a list of `RoomGroup`s — the uncategorised bucket at the
+ * top with no header, then each admin-defined category with a
+ * collapse/expand header.  Empty categories still render (header
+ * only) so admins always have a drop target for the upcoming drag-
+ * and-drop UI; rendering them with a "No channels yet" footnote
+ * felt noisier than just leaving the header. */
+function RoomGroupedList({
+	groups, activeRoomId, collapsedRoomIds,
+	currentUserId, transport, accessToken, activeSpaceId,
+	onSelectRoom, onEditRoom, onOpenProfile, onRequestDeleteDm, botMxids,
+}: {
+	groups: RoomGroup[];
+	activeRoomId: RoomId | null;
+	collapsedRoomIds?: Set<string>;
+	currentUserId: UserId;
+	transport: MatrixTransport | null;
+	accessToken: string | null;
+	activeSpaceId: string | null;
+	onSelectRoom(roomId: RoomId): void;
+	onEditRoom?(roomId: RoomId): void;
+	onOpenProfile?(userId: UserId): void;
+	onRequestDeleteDm?(roomId: RoomId): void;
+	botMxids?: Set<UserId>;
+}) {
+	const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+	const toggle = (id: string) => {
+		setCollapsed(prev => {
+			const next = new Set(prev);
+			if (next.has(id)) next.delete(id); else next.add(id);
+			return next;
+		});
+	};
+	return (
+		<>
+			{groups.map((group) => {
+				const headerKey = group.id ?? "__uncategorised__";
+				const isOpen = !collapsed.has(headerKey);
+				const showHeader = !!group.name;
+				if (!showHeader && group.rooms.length === 0) return null;
+				return (
+					<div key={headerKey} className="mb-1 last:mb-0">
+						{showHeader && (
+							<button
+								type="button"
+								onClick={() => toggle(headerKey)}
+								className="w-full flex items-center gap-1 px-2 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground transition-colors"
+							>
+								{isOpen
+									? <ChevronDown className="h-3 w-3" />
+									: <ChevronRight className="h-3 w-3" />}
+								<span className="truncate">{group.name}</span>
+							</button>
+						)}
+						{isOpen && group.rooms.map(room => (
+							<RoomRow
+								key={room.id}
+								room={room}
+								active={room.id === activeRoomId}
+								collapsed={!!collapsedRoomIds?.has(room.id)}
+								onSelect={() => onSelectRoom(room.id)}
+								currentUserId={currentUserId}
+								transport={transport}
+								accessToken={accessToken}
+								activeSpaceId={activeSpaceId}
+								onEditRoom={onEditRoom}
+								onOpenProfile={onOpenProfile}
+								onRequestDeleteDm={onRequestDeleteDm}
+								isBotPeer={
+									room.kind === "dm" && !!room.dmUserId && !!botMxids?.has(room.dmUserId)
+								}
+							/>
+						))}
+					</div>
+				);
+			})}
+		</>
+	);
+}
+
 function RoomRow({
-	room, active, pinned, collapsed, onSelect, onPin, onUnpin,
-	currentUserId, transport, accessToken, activeSpaceId, canManagePins,
+	room, active, collapsed, onSelect,
+	currentUserId, transport, accessToken, activeSpaceId,
 	onEditRoom, onOpenProfile, onRequestDeleteDm, isBotPeer,
 }: {
 	room: Room;
 	active: boolean;
-	// Pin state is space-scoped, passed in from RoomList rather than
-	// read off the room — the same room can be pinned in one space
-	// and not in another (rooms can belong to multiple spaces).
-	pinned: boolean;
 	// True when the room is in the engine's collapsed-rooms list.  The
 	// row still renders (you might be a member who needs to leave),
 	// but with the "Name Removed by Community Review" placeholder in
 	// place of the verbatim name.
 	collapsed: boolean;
 	onSelect(): void;
-	// Either onPin or onUnpin is provided when the current user has
-	// permission to manage pins in the active space.  Both undefined
-	// means "no pin button at all" — the row is read-only.  The pinned
-	// indicator still shows on the avatar regardless of permission, so
-	// every member sees which rooms are pinned.
-	onPin?(): void;
-	onUnpin?(): void;
 	// Right-click context menu wiring.
 	currentUserId: UserId;
 	transport: MatrixTransport | null;
 	accessToken: string | null;
 	activeSpaceId: string | null;
-	canManagePins: boolean;
 	onEditRoom?(roomId: RoomId): void;
 	onOpenProfile?(userId: UserId): void;
 	onRequestDeleteDm?(roomId: RoomId): void;
@@ -429,27 +547,11 @@ function RoomRow({
 	const isFounder = !!room.creatorId && room.creatorId === currentUserId;
 	const canEdit = (room.myPowerLevel ?? 0) >= 50;
 
-	// Pin affordance: button always visible (and clickable) when the
-	// room is pinned and the user can unpin; faded-in on row hover when
-	// the user can pin but the room isn't pinned yet.  When the user
-	// has no pin permission, the button is hidden entirely but a
-	// non-interactive solid pin indicator still renders on pinned rooms
-	// so every member can tell at a glance which rooms are pinned.
-	const canTogglePin = pinned ? !!onUnpin : !!onPin;
-	const handlePinClick = (e: React.MouseEvent) => {
-		e.stopPropagation();
-		if (pinned) onUnpin?.();
-		else onPin?.();
-	};
 	// Source of truth: matrix-js-sdk's per-room unread counter,
 	// which markAsRead zeros locally via setUnreadNotificationCount
 	// before any receipt round-trips.  No presentation-layer
 	// suppression needed — the count itself is the truth.
 	const hasUnread = room.unreadCount > 0 || room.highlightCount > 0;
-	// Reserve room on the right for the pin icon (always when pinned;
-	// also when the user can pin, since the slot needs to be there for
-	// the hover affordance).  Avoids overlap with the unread dot.
-	const reservePinSlot = pinned || canTogglePin;
 	return (
 		<div
 			className={cn(
@@ -467,8 +569,7 @@ function RoomRow({
 				onClick={onSelect}
 				data-room-row=""
 				className={cn(
-					"w-full flex items-center gap-2 py-1.5 pl-2 text-sm text-left min-w-0",
-					reservePinSlot ? "pr-8" : "pr-2",
+					"w-full flex items-center gap-2 py-1.5 pl-2 pr-2 text-sm text-left min-w-0",
 					active ? "text-foreground" : "text-foreground/90",
 					// Muted rooms render with reduced text contrast +
 					// a small mute icon to communicate "this room is
@@ -508,38 +609,6 @@ function RoomRow({
 					/>
 				)}
 			</button>
-			{pinned && !canTogglePin && (
-				// Read-only pin marker for members who can't manage pins —
-				// just a visual indicator that this room was pinned by an
-				// admin so the elevated rooms still stand out for them.
-				<span
-					className="absolute right-1 top-1/2 -translate-y-1/2 p-1 text-primary pointer-events-none"
-					aria-label="Pinned"
-					title="Pinned by space admin"
-				>
-					<Pin className="h-3.5 w-3.5 fill-current" aria-hidden />
-				</span>
-			)}
-			{canTogglePin && (
-				<button
-					type="button"
-					onClick={handlePinClick}
-					aria-label={pinned ? "Unpin room" : "Pin room"}
-					title={pinned ? "Unpin from top" : "Pin to top"}
-					className={cn(
-						"absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded transition-opacity",
-						"hover:bg-background/80",
-						pinned
-							? "opacity-100 text-primary"
-							: "opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground",
-					)}
-				>
-					<Pin
-						className={cn("h-3.5 w-3.5", pinned && "fill-current")}
-						aria-hidden
-					/>
-				</button>
-			)}
 			{ctxMenuPos && transport && accessToken && (
 				<RoomRowContextMenu
 					x={ctxMenuPos.x}
@@ -548,8 +617,6 @@ function RoomRow({
 					currentUserId={currentUserId}
 					accessToken={accessToken}
 					activeSpaceId={activeSpaceId as RoomId | null}
-					isPinned={pinned}
-					canManagePins={canManagePins}
 					isFounder={isFounder}
 					canEdit={canEdit}
 					onMarkRead={() => {
@@ -573,8 +640,6 @@ function RoomRow({
 						});
 					}}
 					onEdit={onEditRoom ? () => onEditRoom(room.id) : undefined}
-					onPin={onPin}
-					onUnpin={onUnpin}
 					onLeave={() => {
 						// DMs route through the shared bilateral-delete
 						// dialog (server-side purge for both parties).

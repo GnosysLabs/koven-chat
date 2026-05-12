@@ -3,16 +3,20 @@
 // Same component handles regular rooms AND DMs — the items list
 // branches on room.kind so DMs get DM-specific affordances (View
 // profile, Block) while regular rooms get founder/admin items
-// (Edit, Pin/Unpin, Delete).  Per-viewer item filtering keeps the
-// menu honest: nobody sees actions they can't perform.
+// (Edit, Delete).  Per-viewer item filtering keeps the menu honest:
+// nobody sees actions they can't perform.
+//
+// Pin/unpin items were here previously; both are gone now that
+// per-space admin order (set via drag-and-drop in the sidebar)
+// replaces pinning.
 
 import { useMemo } from "react";
 import { ContextMenu, type ContextMenuItem } from "@/components/ui/context-menu";
 import {
-	Bell, BellOff, Check, Copy, Eye, EyeOff, LogOut, MessageSquare,
-	Pencil, Pin, PinOff, Trash2, User as UserIcon, UserX,
+	Bell, BellOff, Check, Copy, Eye, LogOut, MessageSquare,
+	Pencil, Trash2, User as UserIcon, UserX,
 } from "lucide-react";
-import type { Room, UserId, RoomId, SpaceId } from "@koven/shared";
+import type { Room, UserId, SpaceId } from "@koven/shared";
 import {
 	getRoomNotifyLevel as getCachedNotifyLevel,
 	setRoomNotifyLevel as setCachedNotifyLevel,
@@ -25,12 +29,11 @@ export interface RoomRowContextMenuProps {
 	room: Room;
 	currentUserId: UserId;
 	accessToken: string;
-	// Pin state for the active space — only meaningful when the row
-	// is being viewed inside a real space (not Home / DMs / Rooms).
-	// `null` when there's no active space context.
+	// Active space id — only meaningful when the row is being viewed
+	// inside a real space (not DMs).  `null` otherwise.  Retained on
+	// the props for the upcoming drag-and-drop "Move to category"
+	// submenu; for now the menu doesn't read it directly.
 	activeSpaceId: SpaceId | null;
-	isPinned: boolean;
-	canManagePins: boolean;
 	// Founder = creatorId match.  Drives Edit + Delete visibility.
 	isFounder: boolean;
 	// Higher PL gates Edit (PL >= 50 historically).  We use a single
@@ -42,8 +45,6 @@ export interface RoomRowContextMenuProps {
 	onMarkUnread(): void;
 	onCopyId(): void;
 	onEdit?(): void;
-	onPin?(): void;
-	onUnpin?(): void;
 	onLeave(): void;
 	onDelete?(): void;
 	// DM-only:
@@ -53,10 +54,10 @@ export interface RoomRowContextMenuProps {
 }
 
 export function RoomRowContextMenu({
-	x, y, room, currentUserId: _currentUserId, accessToken, activeSpaceId,
-	isPinned, canManagePins, isFounder, canEdit,
+	x, y, room, currentUserId: _currentUserId, accessToken, activeSpaceId: _activeSpaceId,
+	isFounder, canEdit,
 	onMarkRead, onMarkUnread, onCopyId,
-	onEdit, onPin, onUnpin, onLeave, onDelete,
+	onEdit, onLeave, onDelete,
 	onOpenProfile, onBlockDmUser,
 	onClose,
 }: RoomRowContextMenuProps) {
@@ -175,23 +176,9 @@ export function RoomRowContextMenu({
 		// people to the server, not to a single channel).  The space
 		// tile context menu retains its own "Copy invite link" entry.
 
-		// Pin / Unpin — only meaningful inside a real space, only
-		// available to users with manage-pins PL.
-		if (!isDm && activeSpaceId && canManagePins) {
-			if (isPinned) {
-				out.push({
-					label: "Unpin from this space",
-					icon: <PinOff className="h-4 w-4" />,
-					onClick: () => onUnpin?.(),
-				});
-			} else {
-				out.push({
-					label: "Pin to this space",
-					icon: <Pin className="h-4 w-4" />,
-					onClick: () => onPin?.(),
-				});
-			}
-		}
+		// (Pin/unpin items used to live here.  They're gone now —
+		// admin-defined per-space order, set via drag-and-drop in the
+		// sidebar, replaces pinning entirely.)
 
 		// Edit room — PL gated.  Only shown for rooms (not DMs); DMs
 		// don't have editable properties at this layer.
@@ -237,10 +224,10 @@ export function RoomRowContextMenu({
 
 		return out;
 	}, [
-		hasUnread, currentLevel, isDm, activeSpaceId, isPinned, canManagePins,
+		hasUnread, currentLevel, isDm,
 		isFounder, canEdit,
 		onMarkRead, onMarkUnread, onCopyId,
-		onEdit, onPin, onUnpin, onLeave, onDelete,
+		onEdit, onLeave, onDelete,
 		onOpenProfile, onBlockDmUser,
 		room.id, accessToken,
 	]);

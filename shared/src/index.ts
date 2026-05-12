@@ -84,6 +84,35 @@ export interface Room {
 	// be noise (#announcements, #report-a-bug, etc.).  Toggle via
 	// the room edit sheet (creator + admins only — state-event PL).
 	liveEnabled: boolean;
+	// Server-time of the most recent visible message in the room
+	// (m.room.message, m.room.encrypted, m.sticker, m.poll.start,
+	// m.call.invite).  Drives DM recency sort in RoomList — DMs
+	// aren't admin-managed, so the last-active conversation rises
+	// to the top the way Discord/Slack do it.  Falls back to the
+	// SDK's `getLastActiveTimestamp()` (any event type) when no
+	// message-shaped event has been paginated in yet, so quiet
+	// rooms still anchor on a real ts instead of 0.  Unused for
+	// non-DM rooms — admin-set order is the sort there.
+	lastActiveTs: number;
+	// Per-parent-space sort + category metadata, lifted from each
+	// parent space's `m.space.child` state event for this room.
+	// Keyed by parent space id because the same room can appear in
+	// multiple spaces with different positions (admins set order
+	// per-space).
+	//
+	// Shape per entry:
+	//   - `order`: Matrix-spec lexicographic sort key (string).  Lower
+	//     wins.  Unset = sort after every room that does have one,
+	//     then alphabetical by name.
+	//   - `category`: opaque category id matching one of the entries
+	//     in the parent space's `chat.koven.space.categories` event.
+	//     Unset = uncategorised (rendered above categorised rooms in
+	//     the sidebar, Discord-style).
+	//
+	// Empty object when the parent space has neither field set on its
+	// `m.space.child` link for this room.  Absent from the map for
+	// spaces the room isn't a member of.
+	spaceChildMeta?: Record<SpaceId, { order?: string; category?: string }>;
 }
 
 // Spaces are Matrix rooms with `type: "m.space"`.  They don't have
@@ -118,13 +147,18 @@ export interface Space {
 	myPowerLevel?: number;
 	// Sender of the original m.room.create event.  See Room.creatorId.
 	creatorId?: UserId;
-	// Room ids the space owner has chosen to pin.  Pins are a public
-	// affordance — visible to everyone in the space — set via the
-	// Koven-custom `chat.koven.pinned_rooms` state event on the space
-	// itself.  Order matters: rooms render at the top of the list in
-	// this order, with unpinned rooms sorted normally below them.
-	// Editing requires PL ≥ 50 in the space (state_default).
-	pinnedRoomIds: RoomId[];
+	// Admin-defined channel categories (Discord-style).  Stored on the
+	// space's `chat.koven.space.categories` state event as an ordered
+	// array; `id` is the stable key the per-room
+	// `m.space.child.chat.koven.category` field references, `name` is
+	// the display label.  Order in this array is the display order in
+	// the sidebar.  Editing the event requires PL ≥ 50.
+	//
+	// Rooms whose `category` doesn't match any id (or whose category
+	// is unset) render in an implicit "Uncategorised" pseudo-group
+	// above the named categories, mirroring Discord's "channels above
+	// the category bar" layout.
+	categories: Array<{ id: string; name: string }>;
 	// Founder marked this space as adult-content via
 	// `chat.koven.nsfw`.  Same Explore filtering / badge as Room.nsfw.
 	nsfw: boolean;

@@ -1092,6 +1092,15 @@ export class MatrixTransport {
 				this.emitRoomList();
 				return;
 			}
+			if (type === "chat.koven.space_order") {
+				// User dragged a space in the rail (or had a sibling
+				// device do it) — re-emit so the new order takes
+				// effect immediately.  Account_data events fire on
+				// every device the user is signed in on, so this
+				// keeps multi-device rails consistent.
+				this.emitSpaceList();
+				return;
+			}
 			if (type === "chat.koven.nsfw_preference") {
 				// Cross-device sync of the NSFW discovery toggle.  Fires
 				// for changes from THIS client (round-trip echo) and
@@ -3772,46 +3781,189 @@ export class MatrixTransport {
 	 * (visible to everyone in the space), not per-user — the goal is
 	 * for a space owner to elevate one or two important rooms above
 	 * the rest of the list so they stand out for every member.
+	 * Admin-controlled order + category for a room inside a parent
+	 * space.  Both fields live on the parent space's `m.space.child`
+	 * state event for that child (state_key = childRoomId), alongside
+	 * the existing `via` / `suggested` keys:
 	 *
-	 * Persisted as a `chat.koven.pinned_rooms` state event on the
-	 * space itself, with `state_key=""` and content
-	 *   `{ rooms: [roomId1, roomId2, ...] }`
-	 * Order in the array is the order rooms render in.  Editing the
-	 * event requires PL ≥ 50 in the space (state_default).
+	 *   {
+	 *     "via": ["koven.chat"],
+	 *     "order": "n",                          // Matrix spec — lex sort
+	 *     "chat.koven.category": "voice"         // Koven-custom — category id
+	 *   }
 	 *
-	 * No-op if the room is already pinned.
-	 */
-	async pinRoomInSpace(spaceId: SpaceId, roomId: RoomId): Promise<void> {
+	 * Writing requires PL ≥ 50 on the parent space (state_default).
+	 *
+	 * The order field is the standard Matrix lexicographic sort key
+	 * defined in MSC1772: lower wins.  The drag-and-drop UI in the
+	 * sidebar generates new keys via the lexicorank-style helper
+	 * `nextOrderKey()` so re-ordering only writes one event per drag
+	 * instead of re-shuffling every neighbour.
+	 *
+	 * Both fields are independent — set order without touching
+	 * category, set category without touching order.  Each setter
+	 * reads the existing content first to preserve the other field
+	 * + `via` (which Matrix requires for federation routing).  This
+	 * matters because writing an incomplete `m.space.child` event
+	 * would silently drop the child's via list. */
+	async setRoomOrderInSpace(
+		spaceId: SpaceId,
+		roomId: RoomId,
+		order: string | undefined,
+	): Promise<void> {
+		await this.patchSpaceChild(spaceId, roomId, (content) => {
+			if (order === undefined) {
+				delete (content as Record<string, unknown>)["order"];
+			} else {
+				(content as Record<string, unknown>)["order"] = order;
+			}
+		});
+	}
+
+	async setRoomCategoryInSpace(
+		spaceId: SpaceId,
+		roomId: RoomId,
+		category: string | undefined,
+	): Promise<void> {
+		await this.patchSpaceChild(spaceId, roomId, (content) => {
+			if (!category) {
+				delete (content as Record<string, unknown>)["chat.koven.category"];
+			} else {
+				(content as Record<string, unknown>)["chat.koven.category"] = category;
+			}
+		});
+	}
+
+	/** Set order AND category in one round trip — used by drag-drop
+	 * when the user drops a room INTO a different category, which
+	 * needs to land it at a specific position within that category
+	 * (so we set both fields atomically rather than writing two
+	 * events in sequence). */
+	async setRoomOrderAndCategoryInSpace(
+		spaceId: SpaceId,
+		roomId: RoomId,
+		order: string | undefined,
+		category: string | undefined,
+	): Promise<void> {
+		await this.patchSpaceChild(spaceId, roomId, (content) => {
+			const c = content as Record<string, unknown>;
+			if (order === undefined) delete c["order"]; else c["order"] = order;
+			if (!category) delete c["chat.koven.category"]; else c["chat.koven.category"] = category;
+		});
+	}
+
+	/** Read-modify-write helper for `m.space.child` content.  Pulls
+	 * the existing event (or seeds a fresh one with just `via`),
+	 * applies `mutator`, writes it back.  Preserves any field we
+	 * don't touch — important because `m.space.child` carries the
+	 * `via` list Matrix uses to route federation hints. */
+	private async patchSpaceChild(
+		spaceId: SpaceId,
+		roomId: RoomId,
+		mutator: (content: Record<string, unknown>) => void,
+	): Promise<void> {
 		const c = this.requireClient();
-		const current = this.readPinnedRoomIds(spaceId);
-		if (current.includes(roomId)) return;
-		const next = [...current, roomId];
-		await c.sendStateEvent(spaceId, "chat.koven.pinned_rooms" as any, { rooms: next }, "");
+		const space = c.getRoom(spaceId);
+		const existing = space?.currentState
+			.getStateEvents("m.space.child", roomId)
+			?.getContent() as Record<string, unknown> | undefined;
+		const next: Record<string, unknown> = existing
+			? { ...existing }
+			: { via: [this.serverName()] };
+		mutator(next);
+		await c.sendStateEvent(spaceId, "m.space.child" as any, next, roomId);
 		this.emitSpaceList();
 		this.emitRoomList();
 	}
 
-	async unpinRoomInSpace(spaceId: SpaceId, roomId: RoomId): Promise<void> {
+	/** Replace the space's category list.  Stored as a single
+	 * `chat.koven.space.categories` state event on the space; the
+	 * array order IS the display order.  Pass [] to clear all
+	 * categories (rooms with stale category ids fall back to
+	 * uncategorised in the UI). */
+	async setSpaceCategories(
+		spaceId: SpaceId,
+		categories: Array<{ id: string; name: string }>,
+	): Promise<void> {
 		const c = this.requireClient();
-		const current = this.readPinnedRoomIds(spaceId);
-		if (!current.includes(roomId)) return;
-		const next = current.filter(id => id !== roomId);
-		await c.sendStateEvent(spaceId, "chat.koven.pinned_rooms" as any, { rooms: next }, "");
+		await c.sendStateEvent(
+			spaceId,
+			"chat.koven.space.categories" as any,
+			{ categories },
+			"",
+		);
 		this.emitSpaceList();
 		this.emitRoomList();
 	}
 
-	/** Read the current `chat.koven.pinned_rooms` list for a space.
-	 * Returns [] if the event is missing, malformed, or the space isn't
-	 * in the local store. */
-	private readPinnedRoomIds(spaceId: SpaceId): RoomId[] {
-		const r = this.client?.getRoom(spaceId);
-		if (!r) return [];
-		const ev = r.currentState.getStateEvents("chat.koven.pinned_rooms", "");
-		if (!ev) return [];
-		const content = ev.getContent() as { rooms?: unknown };
-		if (!Array.isArray(content.rooms)) return [];
-		return content.rooms.filter((id): id is RoomId => typeof id === "string");
+	/** Read this user's persisted SpaceBar order from account_data.
+	 * Returns an empty array when the user hasn't dragged any spaces
+	 * yet (which is fine — the SpaceBar treats that as "natural
+	 * order").  Per-user, not per-space, so each user can rearrange
+	 * the rail without affecting anyone else. */
+	readMySpaceOrder(): SpaceId[] {
+		const c = this.client;
+		if (!c) return [];
+		const ev = c.getAccountData("chat.koven.space_order");
+		const content = ev?.getContent() as { order?: unknown } | undefined;
+		if (!content || !Array.isArray(content.order)) return [];
+		return content.order.filter((id): id is SpaceId => typeof id === "string");
+	}
+
+	/** Persist the user's SpaceBar order.  Account_data → per-user,
+	 * not visible to other members.  The full array is written each
+	 * time (account_data has no patch semantics). */
+	async setMySpaceOrder(order: SpaceId[]): Promise<void> {
+		const c = this.requireClient();
+		const me = this.creds?.user_id;
+		if (!me) return;
+		await c.setAccountData("chat.koven.space_order", { order });
+		this.emitSpaceList();
+	}
+
+	/** Read every `m.space.child` link on a space and build the
+	 * per-child meta map keyed by child room id.  Used by
+	 * sdkRoomToRoom to populate Room.spaceChildMeta. */
+	private readSpaceChildrenMeta(spaceId: SpaceId): Map<RoomId, { order?: string; category?: string }> {
+		const out = new Map<RoomId, { order?: string; category?: string }>();
+		const space = this.client?.getRoom(spaceId);
+		if (!space) return out;
+		const events = space.currentState.getStateEvents("m.space.child");
+		for (const ev of events) {
+			const childId = ev.getStateKey();
+			if (!childId) continue;
+			const content = ev.getContent() as { order?: unknown; "chat.koven.category"?: unknown };
+			// An `m.space.child` event without `via` (or with empty
+			// `via`) is the canonical "this child has been removed"
+			// marker per spec.  Skip those so they don't influence
+			// ordering on rooms that aren't actually linked anymore.
+			const via = (ev.getContent() as { via?: unknown }).via;
+			if (!Array.isArray(via) || via.length === 0) continue;
+			const order = typeof content.order === "string" ? content.order : undefined;
+			const category = typeof content["chat.koven.category"] === "string"
+				? content["chat.koven.category"]
+				: undefined;
+			out.set(childId as RoomId, { order, category });
+		}
+		return out;
+	}
+
+	/** Read the space's category list from `chat.koven.space.categories`.
+	 * Returns [] when the event is absent or malformed.  Display order
+	 * is the array order. */
+	private readSpaceCategories(spaceId: SpaceId): Array<{ id: string; name: string }> {
+		const space = this.client?.getRoom(spaceId);
+		if (!space) return [];
+		const ev = space.currentState.getStateEvents("chat.koven.space.categories", "");
+		const content = ev?.getContent() as { categories?: unknown } | undefined;
+		if (!content || !Array.isArray(content.categories)) return [];
+		return content.categories
+			.filter((c): c is { id: string; name: string } =>
+				typeof c === "object" && c !== null
+				&& typeof (c as { id?: unknown }).id === "string"
+				&& typeof (c as { name?: unknown }).name === "string",
+			)
+			.map(c => ({ id: c.id, name: c.name }));
 	}
 
 	/**
@@ -4198,34 +4350,23 @@ export class MatrixTransport {
 			// until the next page reload.
 			.filter(r => isLiveMembership(r.getMyMembership()))
 			.map(r => this.sdkRoomToRoom(r))
-			.sort((a, b) => {
-				// Sort by most-recent MESSAGE-shaped event so chatty
-				// rooms bubble up.  matrix-js-sdk's
-				// getLastActiveTimestamp() returns the latest event of
-				// ANY kind in the timeline, which means engine-driven
-				// state events (m.space.parent / m.space.child writes,
-				// member churn from @engine joining rooms, name + topic
-				// edits, pinned-room updates, etc.) bump quiet rooms to
-				// the top while a room with active conversation but
-				// stable state sinks below them.  That was the "sort
-				// order makes no logical sense" complaint — events
-				// users don't see were driving the order.
-				//
-				// lastMessageTs walks the live timeline from the tail
-				// and returns the ts of the first event whose type is
-				// in MESSAGE_LIKE_TYPES.  Cheap in the steady state
-				// (the latest event IS a message); only walks deeper on
-				// rooms whose tail is dominated by state events.  Pin
-				// handling stays space-scoped and applied in the UI
-				// layer (RoomList).
-				const ta = this.client ? lastMessageTs(this.client.getRoom(a.id)) : 0;
-				const tb = this.client ? lastMessageTs(this.client.getRoom(b.id)) : 0;
-				if (ta !== tb) return tb - ta;
-				return a.name.localeCompare(b.name);
-			});
+			// Stable alphabetical baseline.  The previous recency-based
+			// sort drove the "click a room, it sinks" complaint — every
+			// markAsRead flipped the lastMessageTs ordering, so rooms
+			// rearranged themselves on activity.  Admin-dictated order
+			// (per-parent-space `m.space.child.order` + the Koven
+			// category list) is the real sort now; that logic lives in
+			// RoomList because it's space-scoped and depends on which
+			// space tab is active.  This baseline is just for stable
+			// rendering when no admin order has been set yet, and for
+			// DMs (which use recency in the RoomList layer because DMs
+			// aren't admin-managed).
+			.sort((a, b) => a.name.localeCompare(b.name));
 	}
 
-	/** Pull spaces as our shared `Space` shape, sorted alpha. */
+	/** Pull spaces as our shared `Space` shape, sorted per the user's
+	 * SpaceBar drag-order from account_data; spaces not yet in that
+	 * list fall back to alphabetical at the end. */
 	getSpaces(): Space[] {
 		if (!this.client) return [];
 		// Only joined spaces render in SpaceBar.  Invite-state spaces
@@ -4236,11 +4377,26 @@ export class MatrixTransport {
 		// any chance to accept or decline.  Pending invites surface
 		// through getPendingSpaceInvites() and the PendingInvitesPill
 		// instead.
-		return this.client.getRooms()
+		const all = this.client.getRooms()
 			.filter(r => this.isSpace(r))
 			.filter(r => r.getMyMembership() === "join")
-			.map(r => this.sdkRoomToSpace(r))
-			.sort((a, b) => a.name.localeCompare(b.name));
+			.map(r => this.sdkRoomToSpace(r));
+
+		// User-set order from account_data — drag-and-drop in the
+		// SpaceBar writes here.  Spaces listed here come first, in
+		// that order; spaces NOT listed (newly-joined since the last
+		// drag) fall through to alphabetical at the bottom so the
+		// rail stays deterministic instead of randomising on join.
+		const userOrder = this.readMySpaceOrder();
+		const orderIdx = new Map<string, number>();
+		userOrder.forEach((id, i) => orderIdx.set(id, i));
+
+		return all.sort((a, b) => {
+			const ai = orderIdx.has(a.id) ? orderIdx.get(a.id)! : Number.MAX_SAFE_INTEGER;
+			const bi = orderIdx.has(b.id) ? orderIdx.get(b.id)! : Number.MAX_SAFE_INTEGER;
+			if (ai !== bi) return ai - bi;
+			return a.name.localeCompare(b.name);
+		});
 	}
 
 	/**
@@ -4327,14 +4483,13 @@ export class MatrixTransport {
 		if (myUserId) myPowerLevel = r.getMember(myUserId)?.powerLevel ?? 0;
 		const createEvent = r.currentState.getStateEvents("m.room.create", "");
 		const creatorId = (createEvent?.getSender() ?? undefined) as UserId | undefined;
-		// Pinned rooms — space-wide, set by space admins, visible to
-		// everyone.  Stored on the space's `chat.koven.pinned_rooms`
-		// state event.  Filter the list to ids we still see as live
-		// children so a pin doesn't survive room deletion as a stale
-		// reference.
-		const childIdSet = new Set(childRoomIds);
-		const pinnedRoomIds = this.readPinnedRoomIds(r.roomId as SpaceId)
-			.filter(id => childIdSet.has(id));
+		// Admin-defined category list — Discord-style channel groupings.
+		// Stored on the space's `chat.koven.space.categories` state
+		// event as an ordered array.  Each per-room `m.space.child`
+		// event carries a `chat.koven.category` field referencing one
+		// of these ids; the sidebar uses both signals to render the
+		// categorised room list.
+		const categories = this.readSpaceCategories(r.roomId as SpaceId);
 		// Koven-specific config: chat.koven.space.config state event.
 		// Currently only carries `e2ee_required` — meaning every child
 		// room of this space must be created encrypted + private.
@@ -4354,7 +4509,7 @@ export class MatrixTransport {
 			childRoomIds,
 			myPowerLevel,
 			creatorId,
-			pinnedRoomIds,
+			categories,
 			nsfw: readKovenNsfw(r),
 		};
 	}
@@ -5318,6 +5473,21 @@ export class MatrixTransport {
 			}
 		}
 
+		// Per-parent-space order + category metadata, lifted from each
+		// parent's `m.space.child` state event for this room.  Empty
+		// object when none of the parents have set order/category.
+		// Used by the sidebar's admin-dictated sort + the categorised
+		// rendering.  Walked once per room per emit; cheap (each parent
+		// space typically has < 100 children).
+		const spaceChildMeta: Record<SpaceId, { order?: string; category?: string }> = {};
+		for (const parentId of parentSpaceIds) {
+			const parentMeta = this.readSpaceChildrenMeta(parentId);
+			const meta = parentMeta.get(r.roomId as RoomId);
+			if (meta && (meta.order !== undefined || meta.category !== undefined)) {
+				spaceChildMeta[parentId] = meta;
+			}
+		}
+
 		return {
 			id: r.roomId as RoomId,
 			name: r.name || dmUserId || r.roomId,
@@ -5347,6 +5517,8 @@ export class MatrixTransport {
 			creatorId,
 			nsfw: readKovenNsfw(r),
 			liveEnabled: readKovenLiveEnabled(r),
+			lastActiveTs: lastMessageTs(r),
+			spaceChildMeta: Object.keys(spaceChildMeta).length > 0 ? spaceChildMeta : undefined,
 		};
 	}
 
