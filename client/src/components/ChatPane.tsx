@@ -2243,7 +2243,11 @@ function MessageRow({
 					onQuote={() => onQuote?.(message.text ?? "")}
 					onDelete={onDelete && !message.pending ? () => setDeleteDialogOpen(true) : undefined}
 					onFlag={canFlag ? () => setFlagDialogOpen(true) : undefined}
-					onSendDmToSender={onSendDmToSender}
+					// "Send DM to sender" is meaningless inside a DM —
+					// you ARE the DM with them.  Suppress so the menu
+					// doesn't suggest opening another conversation
+					// when this one already exists.
+					onSendDmToSender={isDm ? undefined : onSendDmToSender}
 					onBlockSender={onBlockSender}
 					onClose={() => setCtxMenuPos(null)}
 				/>
