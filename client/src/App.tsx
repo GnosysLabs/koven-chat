@@ -2511,7 +2511,7 @@ export default function App() {
 							: transport.sendText(state.activeRoomId, text);
 						send.catch(e => dispatch({ type: "error", message: e.message }));
 					}}
-					onSendAttachment={async (file, _replyTo, caption) => {
+					onSendAttachment={async (file, replyTo, caption) => {
 						if (!state.activeRoomId || !transport) return;
 						try {
 							// caption is the text the user typed alongside
@@ -2520,10 +2520,19 @@ export default function App() {
 							// style (body=caption, filename=file.name) so
 							// the renderer can show it underneath the
 							// media bubble on every connected client.
+							//
+							// replyTo carries the event id of the message
+							// being replied to when the composer's reply
+							// pill is active at send time.  Used for
+							// paperclip uploads, drag-drop attachments,
+							// and the Klipy media picker (GIF / clip /
+							// sticker) so all three honor the reply
+							// context the same way text messages do.
 							await transport.uploadAndSendAttachment(
 								state.activeRoomId,
 								file,
 								caption ?? undefined,
+								replyTo,
 							);
 						} catch (e) {
 							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });

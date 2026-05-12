@@ -1827,6 +1827,7 @@ export class MatrixTransport {
 		roomId: RoomId,
 		fileIn: File,
 		caption?: string,
+		replyTo?: EventId | null,
 	): Promise<EventId> {
 		const c = this.requireClient();
 		const room = c.getRoom(roomId);
@@ -1965,6 +1966,19 @@ export class MatrixTransport {
 			};
 		}
 		if (includeFilename) content.filename = file.name;
+
+		// Reply relation.  Same shape the text-reply path uses
+		// (replyTo above): m.relates_to.m.in_reply_to.event_id with
+		// the event being replied to.  When omitted, the message
+		// sends as a normal standalone attachment.  No body fallback
+		// quote, attachments don't carry a meaningful text body to
+		// prepend, and modern clients render the relation natively
+		// via the chat-pane's reply-pill renderer.
+		if (replyTo) {
+			(content as Record<string, unknown>)["m.relates_to"] = {
+				"m.in_reply_to": { event_id: replyTo },
+			};
+		}
 
 		const res = await c.sendEvent(roomId, "m.room.message" as any, content as any);
 		return res.event_id as EventId;
