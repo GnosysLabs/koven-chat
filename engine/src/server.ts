@@ -141,6 +141,7 @@ import {
 	inviteUserToRoom,
 	isSpaceRoom,
 	kickOrBanAs,
+	leaveRoomAs,
 	joinRoomIfNeeded,
 	listAllRooms,
 	loginAsUser,
@@ -3807,27 +3808,34 @@ export function startServer(): void {
 				}
 			}
 
-			// ─── Founder bot kick/ban ───────────────────────────────
+			// ─── Bot kick/ban/remove from a space ───────────────────
 			// POST /api/spaces/:spaceId/bots/:botMxid/kick
 			// POST /api/spaces/:spaceId/bots/:botMxid/ban
 			//
 			// Space-wide bot moderation: silence a bot across the
 			// space and every joinable child room in one call,
-			// instead of forcing the founder to walk every channel
-			// and click kick / ban individually.  Auth is the
-			// SPACE creator (not the per-room creator) since the
-			// space founder is the only single principal who has
-			// authority over the whole community.  For each target
-			// room (the space itself + every child), the founder's
-			// bearer token issues the kick/ban via Matrix's normal
-			// power-level check.  Rooms the founder doesn't have
-			// PL 100 in (e.g. an "Add existing room" link with a
-			// different creator) are logged + skipped, best-
-			// effort across the cascade.
+			// instead of walking every channel manually.  Two
+			// authorization paths:
+			//
+			//   1. Space FOUNDER — uses the founder's bearer with
+			//      Matrix's PL-based kick/ban.  Rooms the founder
+			//      doesn't have PL 100 in (e.g. an "Add existing
+			//      room" link with a different creator) are logged
+			//      + skipped, best-effort across the cascade.  Both
+			//      `kick` and `ban` are supported.
+			//
+			//   2. Bot OWNER (when not also the space founder) —
+			//      the owner has no PL in a foreign space, so we
+			//      can't PL-kick.  Instead, we issue a voluntary
+			//      /leave under the BOT's own bearer for each room
+			//      — same end state, valid authorization.  Only
+			//      `kick` (semantically "remove my bot") is allowed
+			//      via this path; `ban` is space-founder-only since
+			//      it dictates the space's ban list.
 			//
 			// Mod-log entries are recorded per affected room so the
-			// audit trail mirrors what would have happened if the
-			// founder had clicked kick/ban in each room separately.
+			// audit trail mirrors what would have happened if each
+			// action had been issued in-room.
 			{
 				const m = path.match(/^\/api\/spaces\/([^/]+)\/bots\/([^/]+)\/(kick|ban)$/);
 				if (req.method === "POST" && m) {
@@ -3854,12 +3862,6 @@ export function startServer(): void {
 					if (!spaceState || !spaceState.creator) {
 						return json({ errcode: "M_NOT_FOUND", error: "space not found" }, { status: 404 });
 					}
-					if (spaceState.creator !== userId) {
-						return json({
-							errcode: "M_FORBIDDEN",
-							error: "only the space founder can kick/ban bots from the space",
-						}, { status: 403 });
-					}
 
 					const bot = getBotByMxid(botMxid);
 					if (!bot) {
@@ -3868,35 +3870,64 @@ export function startServer(): void {
 							error: "target is not a bot on this instance",
 						}, { status: 403 });
 					}
-					if (bot.owner_id === userId) {
+
+					const isSpaceFounder = spaceState.creator === userId;
+					const isBotOwner = bot.owner_id === userId;
+					if (!isSpaceFounder && !isBotOwner) {
 						return json({
 							errcode: "M_FORBIDDEN",
-							error: "you can't kick or ban a bot you own; manage it from Settings → Bots instead",
+							error: "only the space founder or the bot's owner can remove a bot from the space",
+						}, { status: 403 });
+					}
+					// Bot owners (who aren't the space founder) can only
+					// remove their bot; banning would require space PL
+					// they don't have, and dictating someone else's ban
+					// list isn't theirs to do.
+					if (!isSpaceFounder && action === "ban") {
+						return json({
+							errcode: "M_FORBIDDEN",
+							error: "only the space founder can ban a bot from the space; you can remove your bot instead",
 						}, { status: 403 });
 					}
 
 					// Targets: the space itself, then every declared
 					// child room.  Including the space matters for
 					// ban (the bot might be a direct space member
-					// even if it's never in any child).  Kick on a
-					// room the bot isn't in just no-ops at Synapse;
-					// ban on a not-yet-member is forward-looking and
-					// blocks future joins.
+					// even if it's never in any child).  Leave/kick
+					// on a room the bot isn't in just no-ops at
+					// Synapse (or returns 403 "not in room" which we
+					// treat as success); ban on a not-yet-member is
+					// forward-looking and blocks future joins.
 					const childIds = await getSpaceChildRoomIds(spaceId).catch(() => [] as string[]);
 					const targets = [spaceId, ...childIds];
+
+					// Pick the authorization strategy.  Space founders
+					// PL-kick/ban under their own bearer; bot owners
+					// use the BOT's own bearer to /leave each room.
+					const useOwnerLeave = !isSpaceFounder && isBotOwner;
+					const botBearer = useOwnerLeave ? openSecret(bot.access_token_enc) : null;
 
 					let succeeded = 0;
 					let failed = 0;
 					for (const roomId of targets) {
-						const ok = await kickOrBanAs({
-							bearerToken: token,
-							roomId,
-							targetUserId: botMxid,
-							kind: action,
-							reason: action === "kick"
-								? "founder_kick_bot_space"
-								: "founder_ban_bot_space",
-						});
+						let ok: boolean;
+						if (useOwnerLeave && botBearer) {
+							ok = await leaveRoomAs({
+								bearerToken: botBearer,
+								roomId,
+								reason: "owner_removed_bot_from_space",
+							});
+						} else {
+							ok = await kickOrBanAs({
+								bearerToken: token,
+								roomId,
+								targetUserId: botMxid,
+								kind: action,
+								reason: action === "kick"
+									? "founder_kick_bot_space"
+									: "founder_ban_bot_space",
+							});
+						}
 						if (ok) {
 							succeeded++;
 							recordBotMembershipAction({

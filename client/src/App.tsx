@@ -55,7 +55,7 @@ import { EncryptionUnlockSheet } from "@/components/EncryptionUnlockSheet";
 import { SuspendedBanner } from "@/components/SuspendedBanner";
 import { ModLogSheet } from "@/components/ModLogSheet";
 import { FloorReviewSheet } from "@/components/FloorReviewSheet";
-import { botKickBan, botKickBanFromSpace, deleteOwnMessage, fetchAdminStatus, fetchFloorQueue, fetchMyStatus, fetchRoomParents, flagRoom, type SuspensionSummary } from "@/lib/instance";
+import { botKickBanFromSpace, deleteOwnMessage, fetchAdminStatus, fetchFloorQueue, fetchMyStatus, fetchRoomParents, flagRoom, type SuspensionSummary } from "@/lib/instance";
 import { fetchIntegrationsStatus } from "@/lib/klipy";
 import { ENGINE_URL } from "@/lib/urls";
 import { setAppBadge } from "@/lib/appBadge";
@@ -2719,15 +2719,41 @@ export default function App() {
 							})()}
 							// Right-click member menu.  Surfaces View
 							// profile / Send DM / Copy user ID for
-							// everyone, plus founder-only Kick / Ban
-							// for bot rows.
-							canKickBanBots={!!(activeRoom?.creatorId && creds.user_id && activeRoom.creatorId === creds.user_id)}
+							// everyone, plus per-target moderation
+							// for bot rows.  Two routes converge on
+							// the same engine endpoint
+							// (/api/spaces/:id/bots/:mxid/{kick,ban}):
+							//
+							//   - Space founder → "Kick from space" /
+							//     "Ban from space" (PL-based across
+							//     every child room)
+							//   - Bot owner (not the space founder) →
+							//     "Remove from space" (kick action,
+							//     resolved as a voluntary leave under
+							//     the bot's own token)
+							//
+							// MemberList decides which label to show
+							// per-row based on `myOwnedBotMxids`; the
+							// gate here just says "is there a parent
+							// space at all".  Both surfaces 403 cleanly
+							// at the engine if the caller is neither
+							// founder nor owner.
+							isSpaceFounder={(() => {
+								const parentSpaceId = activeRoom?.parentSpaceIds[0];
+								if (!parentSpaceId) return false;
+								const parentSpace = state.spaces.find(s => s.id === parentSpaceId);
+								return !!parentSpace?.creatorId && parentSpace.creatorId === creds.user_id;
+							})()}
+							myOwnedBotMxids={myOwnedBotMxids}
+							canKickBanBots={!!activeRoom?.parentSpaceIds[0]}
 							onBotKickBan={async (action, botMxid) => {
-								if (!creds?.access_token || !state.activeRoomId) return;
+								if (!creds?.access_token || !activeRoom) return;
+								const parentSpaceId = activeRoom.parentSpaceIds[0];
+								if (!parentSpaceId) return;
 								try {
-									await botKickBan(
+									await botKickBanFromSpace(
 										creds.access_token,
-										state.activeRoomId,
+										parentSpaceId,
 										botMxid as UserId,
 										action,
 									);
@@ -3048,11 +3074,19 @@ export default function App() {
 					const parentSpace = state.spaces.find(s => s.id === parentSpaceId);
 					return !!parentSpace?.creatorId && parentSpace.creatorId === creds.user_id;
 				})()}
-				// Suppress kick/ban affordance when the bot in question
-				// is one the viewer owns.  Founder-of-space === bot-
-				// owner is allowed (the affordance just hides);
-				// they can manage the bot from Settings → Bots.
+				// Suppress the founder Kick/Ban affordance when the bot
+				// is one the viewer owns (own-bot management lives in
+				// Settings → Bots).  The owner-side "Remove from space"
+				// affordance below kicks in instead when the viewer
+				// owns the bot but isn't the space's founder.
 				isMyBot={!!viewedUserId && myOwnedBotMxids.has(viewedUserId)}
+				// Drives the owner-side "Remove from space" button: any
+				// time there's a parent space context, owners can pull
+				// their own bot out of it.  The button is gated by
+				// `isMyBot && !canKickBanBots` inside ProfileSheet so
+				// founders viewing their own bot don't see two
+				// overlapping affordances.
+				canRemoveOwnBot={!!activeRoom?.parentSpaceIds[0]}
 				onBotMembership={async (action, botMxid) => {
 					if (!creds?.access_token || !activeRoom) return;
 					const parentSpaceId = activeRoom.parentSpaceIds[0];

@@ -59,28 +59,36 @@ export interface ProfileSheetProps {
 	// responsible for closing this sheet + navigating to the new
 	// room — we just hand back the target id.
 	onStartDm?(userId: UserId): void | Promise<void>;
-	// True iff the viewer is the founder of the room from which this
-	// sheet was opened.  Combined with `isBot` it gates the
-	// Kick / Ban affordance: bots aren't people, so the room founder
-	// can silence one without the consensus pipeline.  Anyone else
-	// (regular members, founders viewing humans) sees no kick/ban
-	// buttons.  When omitted, defaults to false — read-only views
-	// outside a room context (DMs, member-of-no-particular-room) skip
-	// the affordance entirely.
+	// True iff the viewer is the founder of the parent space of the
+	// room from which this sheet was opened.  Combined with `isBot`
+	// it gates the full Kick / Ban affordance: bots aren't people,
+	// so the space founder can silence one without the consensus
+	// pipeline.  Anyone else (regular members, founders viewing
+	// humans) sees no kick/ban buttons.  When omitted, defaults to
+	// false — read-only views outside a room context (DMs, member-
+	// of-no-particular-room) skip the affordance entirely.
 	canKickBanBots?: boolean;
-	// True iff the viewer owns the bot they're looking at.  Suppresses
-	// the kick/ban affordance even when canKickBanBots is true —
-	// kicking your own bot is incoherent (just delete it from
-	// Settings → Bots if you don't want it around), and banning it
-	// would lock yourself out of your own bot's room membership.
-	// Founder-of-room + bot's own owner is the same person → still
-	// no kick/ban; clean separation between "manage the bot" and
-	// "police bots in my room."
+	// True iff the viewer owns the bot they're looking at.  When
+	// combined with `canRemoveOwnBot`, surfaces a "Remove from
+	// space" button for owners viewing their own bot in a space
+	// they don't moderate (we can't issue a PL-based kick under
+	// their token; the engine resolves it as a voluntary leave under
+	// the bot's token instead).  When the viewer is the space
+	// founder AND the bot owner, the founder controls take priority
+	// and own-bot suppression no longer hides the controls — they
+	// can still kick/ban their own bot from their own space if they
+	// want to.
 	isMyBot?: boolean;
-	// Kick/ban handler.  Receives the action + the bot's mxid (the
-	// `viewedUserId` at click time) so the parent can pick the right
-	// engine endpoint.  Not invoked unless `canKickBanBots && isBot`,
-	// so callers don't need to re-validate.
+	// True iff there's a parent space context for the active room.
+	// Required for the "Remove from space" owner affordance — without
+	// a parent space the engine has no scope to act on.
+	canRemoveOwnBot?: boolean;
+	// Kick/ban/remove handler.  Receives the action + the bot's mxid
+	// (the `viewedUserId` at click time) so the parent can pick the
+	// right engine endpoint.  Invoked from either the founder
+	// Kick/Ban controls or the owner Remove control; "Remove" sends
+	// `kick` and lets the engine resolve it to a voluntary leave
+	// under the bot's own token.
 	onBotMembership?(action: "kick" | "ban", botMxid: UserId): void | Promise<void>;
 	// Open another user's profile from inside this sheet.  Used by the
 	// "Created by" credit row on bot profiles — clicking the bot's
@@ -98,7 +106,7 @@ interface BaseProfile {
 	homeserver: string;
 }
 
-export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ignoredUsers, onSelfProfileSaved, isBot, onStartDm, canKickBanBots, isMyBot, onBotMembership, onViewProfile }: ProfileSheetProps) {
+export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ignoredUsers, onSelfProfileSaved, isBot, onStartDm, canKickBanBots, isMyBot, canRemoveOwnBot, onBotMembership, onViewProfile }: ProfileSheetProps) {
 	const isSelf = useMemo(() => {
 		if (!viewedUserId || !transport) return false;
 		return transport.currentUserId === viewedUserId;
@@ -114,16 +122,27 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 	// kicks back-to-back.
 	const [botActionPending, setBotActionPending] = useState<"kick" | "ban" | null>(null);
 	const isBlocked = !!(viewedUserId && ignoredUsers?.has(viewedUserId));
-	const showBotControls = !!(isBot && canKickBanBots && !isMyBot && onBotMembership && viewedUserId && !isSelf);
+	// Founder branch: full Kick/Ban affordance.  Hidden when the bot
+	// is the viewer's own — own-bot management lives in Settings →
+	// Bots (or the owner-remove branch below for foreign spaces).
+	const showFounderBotControls = !!(isBot && canKickBanBots && !isMyBot && onBotMembership && viewedUserId && !isSelf);
+	// Owner branch: "Remove from space" for bot owners viewing their
+	// own bot in a space they don't moderate.  Engine resolves the
+	// kick action into a voluntary leave under the bot's own token.
+	const showOwnerRemoveControl = !!(isBot && isMyBot && canRemoveOwnBot && !canKickBanBots && onBotMembership && viewedUserId && !isSelf);
 
 	async function handleBotAction(action: "kick" | "ban") {
 		if (!viewedUserId || !onBotMembership || botActionPending) return;
 		// Friction proportional to consequence: kick is reversible
-		// (bot can rejoin if reinvited), ban is sticky.  Both still
-		// route through window.confirm so a misclick on hover doesn't
-		// silently silence a bot.
-		const verb = action === "kick" ? "Kick" : "Ban";
-		if (!window.confirm(`${verb} this bot from the room?`)) return;
+		// (bot can rejoin if reinvited), ban is sticky, remove is
+		// the owner pulling their own bot out (low friction).  All
+		// still route through window.confirm so a misclick on hover
+		// doesn't silently change membership.
+		const isOwnerRemove = showOwnerRemoveControl && action === "kick";
+		const prompt = isOwnerRemove
+			? "Remove your bot from this space?"
+			: `${action === "kick" ? "Kick" : "Ban"} this bot from the space?`;
+		if (!window.confirm(prompt)) return;
 		setBotActionPending(action);
 		setError(null);
 		try {
@@ -752,7 +771,7 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 							</div>
 						)}
 
-						{showBotControls && (
+						{showFounderBotControls && (
 							// Founder-only bot controls live in their OWN
 							// section above the footer, not inline with
 							// Block / Message / DM.  Stacking them in the
@@ -766,7 +785,7 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 							// Bots aren't covered by the consensus
 							// protections that gate human kick/ban — a
 							// misbehaving bot can be silenced by the
-							// room's founder unilaterally.  Two buttons
+							// space's founder unilaterally.  Two buttons
 							// rather than a single dropdown because the
 							// affordance is rare enough that signposting
 							// both options inline is clearer than a
@@ -801,6 +820,34 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 										{botActionPending === "ban" ? "Banning…" : "Ban bot from space"}
 									</Button>
 								</div>
+							</div>
+						)}
+						{showOwnerRemoveControl && (
+							// Owner-side affordance: pull your own bot out
+							// of a space you don't moderate.  The engine
+							// resolves the kick action into a voluntary
+							// leave under the bot's own token, so no PL
+							// in the space is required — owners can
+							// always pull their bots back.  Single button
+							// because there's only one action here; ban
+							// would require space PL that owners don't
+							// have.
+							<div className="pt-3 border-t border-border space-y-2">
+								<div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+									Your bot
+								</div>
+								<Button
+									type="button"
+									variant="outline"
+									size="sm"
+									onClick={() => handleBotAction("kick")}
+									disabled={!!botActionPending || loading}
+									className="w-full text-amber-500 hover:text-amber-500 border-amber-500/40"
+									title="Remove your bot from every room in this space"
+								>
+									<UserX className="h-3.5 w-3.5 mr-1.5" />
+									{botActionPending === "kick" ? "Removing…" : "Remove from space"}
+								</Button>
 							</div>
 						)}
 					</div>

@@ -49,18 +49,29 @@ export interface MemberListProps {
 	// it's a platform identity not a participant and shouldn't show
 	// up next to humans.
 	hiddenUserIds?: Set<string>;
-	// True when the viewer is the founder of the active room — gates
-	// the right-click "Kick / Ban bot" menu.  Mirrors the same gate
-	// that surfaces the founder-only kick/ban controls in
-	// ProfileSheet's "Room moderation" section.
+	// True when there's a parent space context available for the active
+	// room.  Required for either bot-moderation path; without a parent
+	// space the right-click kick/ban affordance is hidden because the
+	// engine endpoint works only at space scope.
 	canKickBanBots?: boolean;
-	// Invoked when the founder picks Kick or Ban from the right-click
-	// menu on a bot row.  Caller wires this to the same engine
-	// endpoint as ProfileSheet's bot moderation buttons.  Includes
-	// bots the viewer owns — Settings → Bots is for managing the
-	// bot's identity / config across rooms; the right-click menu is
-	// the per-room presence gesture, and "remove my bot from this
-	// room without deleting it globally" is a legitimate action.
+	// True iff the viewer is the founder of the active room's parent
+	// space.  Distinguishes the two right-click affordances:
+	//
+	//   - founder (any bot)     → "Kick from space" / "Ban from space"
+	//   - bot owner (own bot)   → "Remove from space"
+	//
+	// When neither holds for a given bot row, the moderation menu
+	// section is suppressed entirely.
+	isSpaceFounder?: boolean;
+	// Set of bot mxids the viewer owns.  Used to label / authorize
+	// the "Remove my bot from space" path for non-founder owners.
+	// Optional; when omitted, treated as empty (the right-click
+	// owner path is unavailable).
+	myOwnedBotMxids?: Set<string>;
+	// Invoked when the user picks Kick / Ban / Remove from the
+	// right-click menu on a bot row.  Caller wires this to the
+	// space-wide engine endpoint; the action string maps to the
+	// engine's `kick` / `ban` action (Remove is sent as `kick`).
 	onBotKickBan?(action: "kick" | "ban", botMxid: string): void | Promise<void>;
 	// Invoked when the user picks "Send DM" from the right-click
 	// menu.  Caller routes to the existing transport.startDm /
@@ -99,6 +110,8 @@ export function MemberList({
 	botMxids,
 	hiddenUserIds,
 	canKickBanBots,
+	isSpaceFounder,
+	myOwnedBotMxids,
 	onBotKickBan,
 	onStartDm,
 	roomAvatarUrl,
@@ -115,6 +128,7 @@ export function MemberList({
 		userId: string;
 		isBot: boolean;
 		isSelf: boolean;
+		isMyBot: boolean;
 	} | null>(null);
 	const [busyAction, setBusyAction] = useState<string | null>(null);
 
@@ -124,7 +138,8 @@ export function MemberList({
 	) {
 		e.preventDefault();
 		e.stopPropagation();
-		setContextMenu({ x: e.clientX, y: e.clientY, ...row });
+		const isMyBot = row.isBot && !!myOwnedBotMxids?.has(row.userId);
+		setContextMenu({ x: e.clientX, y: e.clientY, ...row, isMyBot });
 	}
 
 	async function handleAction(action: MemberAction) {
@@ -325,6 +340,8 @@ export function MemberList({
 					y={contextMenu.y}
 					isBot={contextMenu.isBot}
 					isSelf={contextMenu.isSelf}
+					isMyBot={contextMenu.isMyBot}
+					isSpaceFounder={!!isSpaceFounder}
 					canKickBan={!!canKickBanBots && !!onBotKickBan}
 					canDm={!!onStartDm}
 					busyAction={busyAction}
@@ -343,8 +360,12 @@ type MemberAction = "dm" | "profile" | "copy" | "kick" | "ban";
  *   - Anyone (non-self): View profile, Send DM (when canDm),
  *     Copy user ID
  *   - Self: View profile, Copy user ID (no DM-yourself)
- *   - Bot + viewer is room founder: extra Kick / Ban moderation
- *     items separated by a divider
+ *   - Bot + viewer is space founder (target is NOT viewer's own bot):
+ *     extra Kick / Ban from space moderation items
+ *   - Bot + target IS viewer's own bot + viewer is NOT the space
+ *     founder: "Remove from space" item (issued as a `kick` action
+ *     that the engine resolves into a voluntary leave under the
+ *     bot's own token)
  *
  * Portalled to document.body so it can render above the right
  * sidebar's clipping bounds and over the chat pane.  Dismissed by
@@ -357,6 +378,8 @@ function MemberContextMenu({
 	y,
 	isBot,
 	isSelf,
+	isMyBot,
+	isSpaceFounder,
 	canKickBan,
 	canDm,
 	busyAction,
@@ -367,6 +390,8 @@ function MemberContextMenu({
 	y: number;
 	isBot: boolean;
 	isSelf: boolean;
+	isMyBot: boolean;
+	isSpaceFounder: boolean;
 	canKickBan: boolean;
 	canDm: boolean;
 	busyAction: string | null;
@@ -410,7 +435,17 @@ function MemberContextMenu({
 	const top = Math.min(y, vh - menuH - 8);
 
 	const showDm = !isSelf && canDm;
-	const showKickBan = isBot && !isSelf && canKickBan;
+	// Founder branch: full Kick / Ban affordance against any bot
+	// that isn't the viewer's own.  (Their own bot in their own
+	// space is also fine to kick/ban under the engine endpoint, but
+	// the UX nudge is to manage own bots from Settings → Bots, so
+	// we suppress here to keep the menu purpose-built.)
+	const showFounderKickBan = isBot && !isSelf && canKickBan && isSpaceFounder && !isMyBot;
+	// Owner branch: "Remove my bot from this space" for bot owners
+	// who aren't also the space founder.  Mutually exclusive with
+	// showFounderKickBan — if the viewer is the founder we don't
+	// double-up.
+	const showOwnerRemove = isBot && !isSelf && canKickBan && isMyBot && !isSpaceFounder;
 
 	return createPortal(
 		<div
@@ -446,22 +481,34 @@ function MemberContextMenu({
 				onClick={() => onAction("copy")}
 				disabled={!!busyAction}
 			/>
-			{showKickBan && (
+			{showFounderKickBan && (
 				<>
 					<div className="my-1 h-px bg-border" aria-hidden />
 					<MenuItem
 						icon={<UserX className="h-4 w-4" />}
-						label={busyAction === "kick" ? "Kicking…" : "Kick bot from room"}
+						label={busyAction === "kick" ? "Kicking…" : "Kick bot from space"}
 						onClick={() => onAction("kick")}
 						disabled={!!busyAction}
 						tone="warn"
 					/>
 					<MenuItem
 						icon={<Ban className="h-4 w-4" />}
-						label={busyAction === "ban" ? "Banning…" : "Ban bot from room"}
+						label={busyAction === "ban" ? "Banning…" : "Ban bot from space"}
 						onClick={() => onAction("ban")}
 						disabled={!!busyAction}
 						tone="danger"
+					/>
+				</>
+			)}
+			{showOwnerRemove && (
+				<>
+					<div className="my-1 h-px bg-border" aria-hidden />
+					<MenuItem
+						icon={<UserX className="h-4 w-4" />}
+						label={busyAction === "kick" ? "Removing…" : "Remove my bot from space"}
+						onClick={() => onAction("kick")}
+						disabled={!!busyAction}
+						tone="warn"
 					/>
 				</>
 			)}

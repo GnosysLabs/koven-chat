@@ -1344,6 +1344,41 @@ export async function kickOrBanAs(opts: {
 }
 
 /**
+ * Have a user voluntarily leave a room under their own bearer.  Used
+ * by the space-wide bot removal path when the caller is the bot's
+ * OWNER (not the space founder) — we can't issue a PL-based kick
+ * because the owner has no power in the foreign space, but the bot
+ * itself can always leave on its own.  Same end state, different
+ * authorization model.
+ *
+ * Synapse 200s on success; rooms the user isn't in return 403
+ * (not a member) which we treat as a no-op success since the
+ * desired end state is "not a member" either way.
+ */
+export async function leaveRoomAs(opts: {
+	bearerToken: string;
+	roomId: string;
+	reason?: string;
+}): Promise<boolean> {
+	const path = `/_matrix/client/v3/rooms/${encodeURIComponent(opts.roomId)}/leave`;
+	const r = await userFetch(opts.bearerToken, path, {
+		method: "POST",
+		body: JSON.stringify(opts.reason ? { reason: opts.reason } : {}),
+	});
+	if (r.ok) return true;
+	// 403 "not a member" is the desired end state already.  Anything
+	// else (network, real auth failure, room doesn't exist) is a real
+	// error.
+	if (r.status === 403) {
+		const txt = await r.text().catch(() => "");
+		if (txt.includes("not in") || txt.includes("not a member")) return true;
+	}
+	const txt = await r.text().catch(() => "");
+	console.warn(`engine: leave ${opts.roomId} → ${r.status} ${txt.slice(0, 200)}`);
+	return false;
+}
+
+/**
  * Read a room's Koven icon emoji from the `chat.koven.room_icon`
  * state event.  Returns the trimmed emoji string when set + valid,
  * or null when the event doesn't exist / the content is malformed /
