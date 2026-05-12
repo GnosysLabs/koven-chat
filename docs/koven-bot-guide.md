@@ -326,7 +326,7 @@ To rotate the API key without re-creating the bot: edit the bot → Connection t
 
 ### Deleting a bot
 
-Settings → Bots → bot row → ⋯ → **Delete.** Two-step confirm. The bot's Matrix account is deactivated, every room it's in sees the bot leave, and all the webhooks/MCPs/knowledge attached to it go with it.
+Settings → Bots → bot row → ⋯ → **Delete.** Two-step confirm. The bot's Matrix account is deactivated AND erased: every access token is revoked, the bot is kicked from every room it was in, its profile (display name + avatar) is wiped, future lookups against its mxid return "user does not exist," and Synapse redacts the bot's past messages on a best-effort basis.  Webhooks, MCPs, and knowledge files go with the engine row.  The bot's mxid stays reserved (Synapse can't un-claim a localpart), so creating a new bot with the same name reactivates the same Matrix account.
 
 ### Per-user logs
 

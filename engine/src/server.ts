@@ -2155,18 +2155,21 @@ export function startServer(): void {
 					//    drops its sockets + crypto handles.
 					await stopOne(id);
 
-					// 2. Deactivate the bot's Synapse account so Synapse
-					//    auto-kicks it from every room it joined.  Without
-					//    this the bot persists as an inactive member in
-					//    every room it was invited to — exactly the bug
-					//    report.  `erase: false` keeps the bot's past
-					//    messages attributed (the BotsPane delete
-					//    confirmation says so explicitly); pass `true`
-					//    here only if we ever want bot-deletion to also
-					//    redact prior content.  Logged-but-non-fatal on
-					//    Synapse error so a transient admin-API hiccup
-					//    doesn't strand the engine row.
-					const deactivated = await deactivateUser(existing.mxid, false);
+					// 2. Deactivate the bot's Synapse account.  `erase: true`
+					//    is the same posture as a human account delete:
+					//    Synapse invalidates every access token, kicks
+					//    the bot from every room, wipes the profile
+					//    (display name + avatar), marks the user as
+					//    GDPR-erased so future lookups read as "does
+					//    not exist," AND emits redactions for past
+					//    messages on a best-effort basis.  Anything
+					//    less is half-deletion: a deactivated-but-not-
+					//    erased bot leaves its message history pinned
+					//    forever, which is what a user who clicks
+					//    Delete is trying to NOT do.  Logged-but-non-
+					//    fatal on Synapse error so a transient admin-
+					//    API hiccup doesn't strand the engine row.
+					const deactivated = await deactivateUser(existing.mxid, true);
 					if (!deactivated) {
 						console.warn(
 							`engine: bot ${existing.mxid} delete: deactivate failed; deleting engine row anyway`,

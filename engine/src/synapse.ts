@@ -80,18 +80,20 @@ export async function sendBotEvent(roomId: string, opts: SendOptions): Promise<s
 }
 
 /**
- * Deactivate a Synapse account via the admin API.  Two callers:
+ * Deactivate a Synapse account via the admin API.  Two callers,
+ * both use `erase=true` so the deactivation is a real wipe:
  *
- *   - Floor-violation suspension (erase=true): the user's homeserver
- *     account is wiped, they can no longer authenticate, all rooms
- *     auto-kick them, and Synapse emits redactions for their content
- *     on a best-effort basis.  This is the real ban — it doesn't
- *     matter what client they try to use afterward.
+ *   - Floor-violation suspension: the user's homeserver account is
+ *     wiped, they can no longer authenticate, all rooms auto-kick
+ *     them, and Synapse emits redactions for their content on a
+ *     best-effort basis.  This is the real ban, it doesn't matter
+ *     what client they try to use afterward.
  *
- *   - Bot deletion (erase=false): the bot's account is deactivated
- *     and Synapse handles the room departures, but past messages
- *     stay in place attributed to the (now deactivated) account.
- *     The BotsPane delete confirmation explicitly promises this.
+ *   - Bot deletion: same posture.  When a bot owner clicks Delete,
+ *     they want every trace gone, not a half-deleted account whose
+ *     past messages stay pinned to the rooms it had posted in.
+ *     Synapse handles room departures + past-message redactions +
+ *     profile wipe in one call.
  *
  * Requires the engine bot to have admin privileges on the homeserver.
  * The default Synapse setup grants admin to the user that owns the
