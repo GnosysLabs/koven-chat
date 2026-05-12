@@ -3699,7 +3699,22 @@ export function startServer(): void {
 					// will 404 the same way; it just lets us keep the
 					// pre-existing code path for the rare case it
 					// works.
-					let senderId: string;
+					//
+					// Third fallback: when both resolvers whiff, treat
+					// it as a self-delete attempt under the caller's
+					// own token.  This is the DM case — E2EE rooms
+					// give us no plaintext `posts` row AND the engine
+					// bot isn't a member, so neither lookup can ever
+					// succeed.  We're not lowering the security bar:
+					// Synapse's redaction rules already enforce "only
+					// the sender (or someone with redact PL) can
+					// redact", so if the caller is lying about owning
+					// the event the redaction call below fails and
+					// we surface that as a 403.  Bot-owner deletes in
+					// E2EE rooms remain unsupported here; the caller
+					// would need to know it's their bot's event from
+					// outside the room, which we can't verify.
+					let senderId: string | null;
 					const localSender = lookupPostUser(eventId);
 					if (localSender) {
 						senderId = localSender;
@@ -3708,21 +3723,23 @@ export function startServer(): void {
 						// in aggregate.ts skips state events).
 					} else {
 						const ev = await getEventSender(roomId, eventId);
-						if (!ev) {
-							return json({ errcode: "M_NOT_FOUND", error: "event not found" }, { status: 404 });
+						if (ev) {
+							// Refuse to redact non-message events.  Reactions,
+							// flags, redactions themselves all have their own
+							// retract paths; routing them through the trash
+							// button would let a user retract a flag they
+							// didn't submit, etc.
+							if (ev.type !== "m.room.message") {
+								return json({
+									errcode: "M_FORBIDDEN",
+									error: "only m.room.message events can be deleted via this endpoint",
+								}, { status: 403 });
+							}
+							senderId = ev.sender;
+						} else {
+							// Unknown — let the self-delete branch try.
+							senderId = null;
 						}
-						// Refuse to redact non-message events.  Reactions,
-						// flags, redactions themselves all have their own
-						// retract paths; routing them through the trash
-						// button would let a user retract a flag they
-						// didn't submit, etc.
-						if (ev.type !== "m.room.message") {
-							return json({
-								errcode: "M_FORBIDDEN",
-								error: "only m.room.message events can be deleted via this endpoint",
-							}, { status: 403 });
-						}
-						senderId = ev.sender;
 					}
 
 					// Authorization branch.  `kind` distinguishes which
@@ -3731,9 +3748,17 @@ export function startServer(): void {
 					let kind: "self" | "bot_owner";
 					let bearerForRedact: string;
 					let botId: number | null = null;
-					if (senderId === userId) {
+					const senderUnverified = senderId === null;
+					if (senderId === null || senderId === userId) {
+						// Self-delete — either we resolved the sender as
+						// the caller, or we couldn't resolve at all and
+						// are trusting the caller's implicit claim.  In
+						// the latter case Synapse will reject the redact
+						// if they're lying, which we map to 403 below.
 						kind = "self";
 						bearerForRedact = token;
+						// Pin senderId for the audit row.
+						senderId = userId;
 					} else {
 						const bot = getBotByMxid(senderId);
 						if (!bot || bot.owner_id !== userId) {
@@ -3756,6 +3781,17 @@ export function startServer(): void {
 						reason: kind === "self" ? "self_delete" : "bot_owner_delete",
 					});
 					if (!ok) {
+						// If we trusted the caller's self-claim because
+						// we couldn't see the room (E2EE DM, etc.) and
+						// Synapse rejected, the most likely reason is
+						// that the caller wasn't actually the sender —
+						// surface as 403 so the dialog reads correctly.
+						if (senderUnverified) {
+							return json({
+								errcode: "M_FORBIDDEN",
+								error: "you can only delete your own messages",
+							}, { status: 403 });
+						}
 						return json({ errcode: "M_UNKNOWN", error: "redaction failed" }, { status: 502 });
 					}
 
