@@ -32,9 +32,16 @@ export interface DmProfilePanelProps {
 	// Whether the other user is a registered bot — drives the BOT
 	// pill rendered next to their name.
 	isBot?: boolean;
+	// Whether the bot in question is one the VIEWER owns.  Hides the
+	// Block button entirely: blocking your own bot is incoherent (you
+	// already control its prompt + config, and the m.ignored_user_list
+	// entry would just confuse the bot's own ability to address you).
+	// "Delete conversation" still works — that's how you end a DM
+	// thread with your own bot if you want to start fresh.
+	isMyBot?: boolean;
 }
 
-export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenProfile, onRequestDelete, isBot }: DmProfilePanelProps) {
+export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenProfile, onRequestDelete, isBot, isMyBot }: DmProfilePanelProps) {
 	// `userId` lives on the profile record so we can detect "the
 	// cached profile is stale because we switched DMs" — without it,
 	// switching from a DM with @alice to a DM with @bob would render
@@ -151,37 +158,39 @@ export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenPro
 					</p>
 				)}
 
-				<div className="mt-5 pt-4 border-t border-border">
-					<button
-						type="button"
-						onClick={toggleBlock}
-						disabled={blocking}
-						className={cn(
-							"w-full flex items-center justify-center gap-2 px-2 py-1.5 rounded text-xs transition-colors",
-							isBlocked
-								? "text-muted-foreground hover:text-foreground hover:bg-accent"
-								: "text-muted-foreground hover:text-destructive hover:bg-destructive/10",
-							"disabled:opacity-50 disabled:cursor-not-allowed",
+				{!isMyBot && (
+					<div className="mt-5 pt-4 border-t border-border">
+						<button
+							type="button"
+							onClick={toggleBlock}
+							disabled={blocking}
+							className={cn(
+								"w-full flex items-center justify-center gap-2 px-2 py-1.5 rounded text-xs transition-colors",
+								isBlocked
+									? "text-muted-foreground hover:text-foreground hover:bg-accent"
+									: "text-muted-foreground hover:text-destructive hover:bg-destructive/10",
+								"disabled:opacity-50 disabled:cursor-not-allowed",
+							)}
+						>
+							{isBlocked ? (
+								<>
+									<UserCheck className="h-3.5 w-3.5" />
+									Unblock user
+								</>
+							) : (
+								<>
+									<Ban className="h-3.5 w-3.5" />
+									Block user
+								</>
+							)}
+						</button>
+						{blockError && (
+							<p className="mt-1.5 text-[10px] text-destructive leading-snug px-1">
+								{blockError}
+							</p>
 						)}
-					>
-						{isBlocked ? (
-							<>
-								<UserCheck className="h-3.5 w-3.5" />
-								Unblock user
-							</>
-						) : (
-							<>
-								<Ban className="h-3.5 w-3.5" />
-								Block user
-							</>
-						)}
-					</button>
-					{blockError && (
-						<p className="mt-1.5 text-[10px] text-destructive leading-snug px-1">
-							{blockError}
-						</p>
-					)}
-				</div>
+					</div>
+				)}
 
 				<div className="mt-2">
 					<button

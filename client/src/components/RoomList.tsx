@@ -84,6 +84,12 @@ export interface RoomListProps {
 	// smiley for a bot DM while the same conversation's chat
 	// header + profile show the bot robot — visibly inconsistent.
 	botMxids?: Set<UserId>;
+	// Subset of bot mxids the viewer owns.  Used to suppress the
+	// "Block user" right-click affordance on DM rows whose peer is
+	// the viewer's own bot — blocking your own bot is incoherent
+	// (you control its prompt/config and the m.ignored_user_list
+	// entry would just confuse the bot's ability to address you).
+	myOwnedBotMxids?: Set<UserId>;
 	// Admin drag-and-drop handler.  Called when an admin drags a room
 	// to a new position in the categorised list — either within its
 	// current category or into a different one.  Receives the moved
@@ -107,6 +113,7 @@ export function RoomList({
 	onSelectRoom, onCreateRoom, onAcceptInvite, onDeclineInvite,
 	roomsLoaded, transport, accessToken,
 	onEditRoom, onOpenProfile, onRequestDeleteDm, botMxids,
+	myOwnedBotMxids,
 	onMoveRoom,
 }: RoomListProps) {
 	const activeSpaceObj = activeSpace?.kind === "space"
@@ -269,6 +276,9 @@ export function RoomList({
 							onRequestDeleteDm={onRequestDeleteDm}
 							isBotPeer={
 								room.kind === "dm" && !!room.dmUserId && !!botMxids?.has(room.dmUserId)
+							}
+							isMyBotPeer={
+								room.kind === "dm" && !!room.dmUserId && !!myOwnedBotMxids?.has(room.dmUserId)
 							}
 						/>
 					))
@@ -754,7 +764,7 @@ function DraggableRoomRow(props: React.ComponentProps<typeof RoomRow>) {
 function RoomRow({
 	room, active, onSelect,
 	currentUserId, transport, accessToken, activeSpaceId,
-	onEditRoom, onOpenProfile, onRequestDeleteDm, isBotPeer,
+	onEditRoom, onOpenProfile, onRequestDeleteDm, isBotPeer, isMyBotPeer,
 }: {
 	room: Room;
 	active: boolean;
@@ -771,6 +781,10 @@ function RoomRow({
 	// avatar's DiceBear fallback style from fun-emoji ("user") to
 	// bottts ("bot") so the sidebar matches the rest of the UI.
 	isBotPeer?: boolean;
+	// True when this is a DM whose peer is a bot the viewer owns.
+	// Suppresses the right-click "Block user" affordance — see the
+	// reasoning on RoomListProps.myOwnedBotMxids.
+	isMyBotPeer?: boolean;
 }) {
 	// Right-click menu state.  Cursor-positioned, dismissed via the
 	// generic ContextMenu primitive's outside-mousedown handler.
@@ -911,7 +925,7 @@ function RoomRow({
 					onOpenProfile={room.kind === "dm" && room.dmUserId && onOpenProfile
 						? () => onOpenProfile(room.dmUserId as UserId)
 						: undefined}
-					onBlockDmUser={room.kind === "dm" && room.dmUserId
+					onBlockDmUser={room.kind === "dm" && room.dmUserId && !isMyBotPeer
 						? () => {
 							const target = room.dmUserId as UserId;
 							transport.ignoreUser(target).catch(err => {

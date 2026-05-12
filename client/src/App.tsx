@@ -2383,6 +2383,7 @@ export default function App() {
 					onOpenProfile={(userId) => setViewedUserId(userId)}
 					onRequestDeleteDm={openDeleteDmFor}
 					botMxids={botMxids}
+					myOwnedBotMxids={myOwnedBotMxids}
 					// True once initial sync has reached the "syncing"
 					// or "ready" state — at that point matrix-js-sdk
 					// has populated `state.rooms` with whatever the
@@ -2745,6 +2746,7 @@ export default function App() {
 							transport={transport}
 							ignoredUsers={ignoredUsers}
 							isBot={botMxids.has(activeRoom.dmUserId as UserId)}
+							isMyBot={myOwnedBotMxids.has(activeRoom.dmUserId as UserId)}
 							onOpenProfile={(userId) => setViewedUserId(userId)}
 							onRequestDelete={() => openDeleteDmFor(activeRoom.id as RoomId)}
 						/>
