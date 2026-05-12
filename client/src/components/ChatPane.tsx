@@ -256,6 +256,16 @@ export interface ChatPaneProps {
 	// blur / room change.  Best-effort, the parent forwards to
 	// transport.setMyTyping which itself is best-effort.
 	onTypingChange?(isTyping: boolean): void;
+	// Permalink scroll target.  When set, ChatPane scrolls to the
+	// referenced event (paginating older history backwards if it
+	// isn't loaded yet) and pulses a brief highlight on the row so
+	// the user can see where they landed.  Cleared via
+	// onScrolledToEvent once consumed.  Cross-room intents are
+	// gated on `roomId` matching the active room — if a user
+	// permalink-clicks into a different room, the parent flips the
+	// active room first and ChatPane's next mount sees the target.
+	scrollToEvent?: { roomId: RoomId; eventId: EventId } | null;
+	onScrolledToEvent?(): void;
 }
 
 // Threshold for "this message is part of the same group as the
@@ -294,6 +304,8 @@ export function ChatPane({
 	onEndPoll,
 	typingUserIds,
 	onTypingChange,
+	scrollToEvent,
+	onScrolledToEvent,
 }: ChatPaneProps) {
 	// Consensus flagging only works where the local engine can act:
 	//   - DMs are 1-on-1 — no quorum to gather, no consensus to reach.
@@ -582,6 +594,97 @@ export function ChatPane({
 		el.scrollTop = el.scrollHeight - pendingRestoreRef.current;
 		pendingRestoreRef.current = null;
 	}, [messages.length]);
+
+	// ─── Permalink scroll-to-event ─────────────────────────────────
+	// When the parent hands us a `scrollToEvent` target (typically
+	// from a /r/<roomId>/<eventId> share-link click), scroll the
+	// referenced row into view and pulse a 2-second highlight on the
+	// bubble so the user can see where they landed.  Two-phase:
+	//
+	//   1. If the event is already in the loaded `messages` list,
+	//      scroll + flash on the next animation frame (after React
+	//      has committed the layout).
+	//   2. If it's not loaded, fire onLoadMoreHistory to paginate
+	//      older events in.  The effect re-runs on the new messages
+	//      array; keeps walking back up to MAX_SCROLL_PAGINATIONS
+	//      times before giving up.
+	//
+	// Both terminal paths (found-and-scrolled / gave-up) call
+	// onScrolledToEvent so the parent clears its pending state and
+	// the effect doesn't fire again on subsequent renders.
+	const [flashingEventId, setFlashingEventId] = useState<EventId | null>(null);
+	const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const scrollTargetKeyRef = useRef<string | null>(null);
+	const scrollAttemptsRef = useRef(0);
+	const MAX_SCROLL_PAGINATIONS = 10;
+	useEffect(() => {
+		if (!scrollToEvent) {
+			scrollTargetKeyRef.current = null;
+			scrollAttemptsRef.current = 0;
+			return;
+		}
+		if (!room || scrollToEvent.roomId !== room.id) return;
+
+		const key = `${scrollToEvent.roomId}/${scrollToEvent.eventId}`;
+		if (scrollTargetKeyRef.current !== key) {
+			// New target — reset the pagination counter so we get a
+			// fresh budget per click.
+			scrollTargetKeyRef.current = key;
+			scrollAttemptsRef.current = 0;
+		}
+
+		const found = messages.some(m => m.id === scrollToEvent.eventId);
+		if (found) {
+			const id = scrollToEvent.eventId;
+			// Wait one frame so the DOM has the row mounted at its
+			// final position (the previous render may have just
+			// committed prepended events from a pagination pass).
+			const raf = requestAnimationFrame(() => {
+				const el = scrollRef.current?.querySelector(
+					`[data-message-id="${CSS.escape(id)}"]`,
+				);
+				if (el instanceof HTMLElement) {
+					el.scrollIntoView({ block: "center", behavior: "smooth" });
+					setFlashingEventId(id);
+					if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+					flashTimerRef.current = setTimeout(
+						() => setFlashingEventId(null),
+						2000,
+					);
+				}
+			});
+			onScrolledToEvent?.();
+			return () => cancelAnimationFrame(raf);
+		}
+
+		// Not loaded — try to paginate older history in.  Bail if
+		// we've already burned the budget, hit the start of the
+		// room, or another pagination is in flight (the loading-more
+		// effect will re-fire us when it commits).
+		if (scrollAttemptsRef.current >= MAX_SCROLL_PAGINATIONS) {
+			console.warn("scrollToEvent: gave up after pagination cap", scrollToEvent);
+			onScrolledToEvent?.();
+			return;
+		}
+		if (noMoreHistoryRef.current.has(scrollToEvent.roomId)) {
+			console.warn("scrollToEvent: hit start of room without finding event", scrollToEvent);
+			onScrolledToEvent?.();
+			return;
+		}
+		if (loadingMoreRef.current || !onLoadMoreHistory) return;
+		scrollAttemptsRef.current += 1;
+		loadingMoreRef.current = true;
+		void onLoadMoreHistory(room.id as RoomId).then((grew) => {
+			loadingMoreRef.current = false;
+			if (!grew) noMoreHistoryRef.current.add(scrollToEvent.roomId);
+			// State change on grew=true re-runs this effect with the
+			// newer messages list; grew=false flips noMoreHistoryRef
+			// and the next run takes the early-out branch above.
+		});
+	}, [scrollToEvent, room, messages, onLoadMoreHistory, onScrolledToEvent]);
+	useEffect(() => () => {
+		if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+	}, []);
 	useEffect(() => {
 		const el = scrollRef.current;
 		if (!el) return;
@@ -1251,6 +1354,7 @@ export function ChatPane({
 								// `myOwnedBotMxids` lives up here; cheap O(1) lookup.
 								isOwnedBot={!!myOwnedBotMxids?.has(m.sender)}
 								isHovered={hoveredMessageId === m.id}
+								isFlashing={flashingEventId === m.id}
 								onToggleReactionPill={(reaction) => {
 									if (reaction.myReactionId) onUnreact(reaction);
 									else onReact(m.id, reaction.key);
@@ -1639,7 +1743,7 @@ export function ChatPane({
 function MessageRow({
 	message, avatarMxc, continuesGroup, isFirst, flaggable, roomEncrypted,
 	reactions, flags, collapse, onReact, onReply, onFlag, onTogglePillFlag, onToggleReactionPill, isBot,
-	isOwnedBot, isHovered, onDelete,
+	isOwnedBot, isHovered, isFlashing, onDelete,
 	isDm, receiptsVersion, memberAvatars, memberNames, mentionsViewer, onMentionClick, botMxids, serviceMxids,
 	pollAggregate, viewerUserId, onPollVote, onPollEnd,
 	roomId, onQuote, onSendDmToSender, onBlockSender,
@@ -1684,6 +1788,11 @@ function MessageRow({
 	// on the scroll container.  See the comment there for why this
 	// has to live above the row instead of using per-row React events.
 	isHovered: boolean;
+	// True while the permalink-scroll highlight pulse is active on
+	// this specific row.  Drives a 2-second tinted background +
+	// left-accent border so the user sees where they landed after
+	// clicking a message link.
+	isFlashing: boolean;
 	// Trash button handler.  Provided only for rows the viewer is
 	// allowed to delete (own message OR owned-bot message); the
 	// gating logic lives in ChatPane.  When omitted, no trash icon.
@@ -1831,6 +1940,16 @@ function MessageRow({
 	const mentionHighlight = mentionsViewer
 		? "-mx-4 px-4 border-l-2 border-primary bg-primary/5"
 		: "";
+	// Permalink-arrival pulse.  When the user clicks a /r/<room>/<event>
+	// link, ChatPane scrolls this row into view and flips `isFlashing`
+	// true for 2 seconds.  We render a brief tinted background +
+	// left-accent border so the eye snaps to the destination.  Layered
+	// independently of `mentionHighlight`: if a message both pings the
+	// viewer AND is the permalink target, both highlights stack and
+	// the accent border just gets brighter (primary on primary).
+	const flashHighlight = isFlashing
+		? "-mx-4 px-4 border-l-2 border-primary bg-primary/15 transition-colors duration-500"
+		: "";
 
 	// Emotes (`/me`) render as a single italic line with no bubble — same
 	// shape as Matrix m.emote.  Avatar still gutters them so the layout
@@ -1839,7 +1958,7 @@ function MessageRow({
 		return (
 			<div
 				data-message-id={message.id}
-				className={cn("flex gap-3 items-start", rowPadding, mentionHighlight)}
+				className={cn("flex gap-3 items-start", rowPadding, mentionHighlight, flashHighlight)}
 			>
 				<AvatarSlot
 				mxc={avatarMxc}
@@ -1894,7 +2013,7 @@ function MessageRow({
 	return (
 		<div
 			data-message-id={message.id}
-			className={cn("flex gap-3 items-start", rowPadding, mentionHighlight)}
+			className={cn("flex gap-3 items-start", rowPadding, mentionHighlight, flashHighlight)}
 			onContextMenu={(e) => {
 				// Suppress when right-clicking inside an interactive
 				// element that has its own context menu (media, links).

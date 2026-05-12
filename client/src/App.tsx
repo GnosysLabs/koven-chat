@@ -72,7 +72,7 @@ import { applyTheme, loadSettings, saveSettings, type Settings } from "@/state/s
 import type { Room, Space, UserId } from "@koven/shared";
 import { ensureNotificationPermission, notify } from "@/lib/notifications";
 import { initialState, reduce } from "@/state/store";
-import type { RoomId, SpaceId } from "@koven/shared";
+import type { EventId, RoomId, SpaceId } from "@koven/shared";
 import { NotificationBell } from "@/components/NotificationBell";
 import { useNotifications } from "@/state/use-notifications";
 import { markRoomRead as apiMarkRoomRead } from "@/lib/notifications-api";
@@ -1167,6 +1167,16 @@ export default function App() {
 	// confusing if the user has since left the room or routed away).
 	const shareIntentConsumedRef = useRef(false);
 
+	// Permalink scroll target.  Set whenever a message-permalink
+	// share intent is consumed (the user clicked a /r/<room>/<event>
+	// URL).  Threaded to ChatPane, which scrolls the row into view,
+	// pulses a brief highlight, and calls back to clear this slot.
+	// Null = no pending scroll (steady-state).
+	const [pendingScrollEvent, setPendingScrollEvent] = useState<{
+		roomId: RoomId;
+		eventId: EventId;
+	} | null>(null);
+
 	// Deep-link confirm-before-join state.  Held in one slot so the
 	// JoinConfirmSheet's "loading metadata", "loaded, awaiting
 	// click", "joining", and "join failed" states can all flow
@@ -1241,6 +1251,18 @@ export default function App() {
 	const consumeShareIntent = useCallback(async (intent: ShareIntent) => {
 		if (!transport) return;
 		const target = intent.kind === "invite" ? intent.target : intent.roomId;
+		// Message permalinks: queue the scroll target up front.  Held
+		// in App state so it survives the navigate / room-load delay
+		// AND the JoinConfirmSheet detour if the user isn't a member
+		// of the target room yet.  ChatPane consumes it and clears
+		// via onScrolledToEvent once the row has been scrolled and
+		// flashed.  No-op for invite-kind intents.
+		if (intent.kind === "message") {
+			setPendingScrollEvent({
+				roomId: intent.roomId as RoomId,
+				eventId: intent.eventId as EventId,
+			});
+		}
 		// Fast path: the target is a Matrix id (starts with `!`) AND
 		// we already see it in our joined rooms / spaces.  Skip both
 		// the preview fetch and the confirm sheet — open the target
@@ -2512,6 +2534,8 @@ export default function App() {
 					botMxids={botMxids}
 					serviceMxids={serviceMxids}
 					myOwnedBotMxids={myOwnedBotMxids}
+					scrollToEvent={pendingScrollEvent}
+					onScrolledToEvent={() => setPendingScrollEvent(null)}
 					onDeleteMessage={async (eventId) => {
 						if (!creds?.access_token || !state.activeRoomId) {
 							throw new Error("Not connected");
