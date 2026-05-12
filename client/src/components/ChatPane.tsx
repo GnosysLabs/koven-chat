@@ -103,7 +103,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import { AlertTriangle, ArrowDown, BarChart3, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Images, Lock, Network, Paperclip, Play, Scale, Settings, X } from "lucide-react";
+import { AlertTriangle, ArrowDown, BarChart3, Check, CheckCheck, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Images, Lock, Network, Paperclip, Play, Scale, Settings, X } from "lucide-react";
 
 export interface ChatPaneProps {
 	room: Room | null;
@@ -3187,18 +3187,44 @@ function SeenIndicator({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [transport, roomId, eventId, receiptsVersion, botMxids]);
 
-	if (seen.length === 0) return null;
-
 	if (isDm) {
-		// DM: show "Read · 2:41 PM" subtle text.  Most recent reader's
-		// timestamp (in DMs there's only one possible reader anyway).
+		// DM: WhatsApp / iMessage-style tick marks.  The parent
+		// mounts us only on self + non-pending rows, so by the time
+		// we render the message is sent to Synapse:
+		//   - seen.length === 0 → delivered but not yet read by the
+		//     other party → single grey check
+		//   - seen.length > 0   → read → double green check, with
+		//     the read timestamp in the tooltip
+		// The double-check colour follows the room's accent rather
+		// than a hardcoded emerald so themed instances still look
+		// consistent; emerald is a sensible default for the dark
+		// theme Koven ships with.
+		if (seen.length === 0) {
+			return (
+				<span
+					className="inline-flex items-center text-muted-foreground/60 ml-0.5"
+					title="Delivered"
+					aria-label="Delivered"
+				>
+					<Check className="h-3.5 w-3.5" strokeWidth={2.5} />
+				</span>
+			);
+		}
 		const ts = seen[0]!.ts;
 		return (
-			<span className="text-[10px] text-muted-foreground/70 tabular-nums whitespace-nowrap">
-				Read · {formatChatTimestamp(ts)}
+			<span
+				className="inline-flex items-center text-emerald-500 ml-0.5"
+				title={`Read · ${formatChatTimestamp(ts)}`}
+				aria-label={`Read at ${formatChatTimestamp(ts)}`}
+			>
+				<CheckCheck className="h-3.5 w-3.5" strokeWidth={2.5} />
 			</span>
 		);
 	}
+
+	// Group rooms keep the empty-state null behaviour: nothing
+	// to show if no one else has read the message yet.
+	if (seen.length === 0) return null;
 
 	// Group room: avatar stack + count, click → modal.
 	const visible = seen.slice(0, 4);
