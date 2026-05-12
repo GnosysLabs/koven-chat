@@ -27,6 +27,7 @@
 import { useEffect, useRef, useState } from "react";
 import { BarChart3, CheckCircle2 } from "lucide-react";
 import type { Message, PollAggregate, UserId } from "@koven/shared";
+import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { cn } from "@/lib/utils";
 
 interface PollCardProps {
@@ -35,9 +36,15 @@ interface PollCardProps {
 	viewerUserId: UserId | undefined;
 	onVote(answerIds: string[]): void | Promise<void>;
 	onEnd(): void | Promise<void>;
+	// Member maps for rendering voter avatars under each option.
+	// Both come from the room's loaded member roster; mxids that
+	// aren't in either map fall back to MatrixAvatar's seed-based
+	// DiceBear avatar + the bare mxid label.
+	memberAvatars: Map<string, string | undefined>;
+	memberNames: Map<string, string>;
 }
 
-export function PollCard({ message, aggregate, viewerUserId, onVote, onEnd }: PollCardProps) {
+export function PollCard({ message, aggregate, viewerUserId, onVote, onEnd, memberAvatars, memberNames }: PollCardProps) {
 	const [submitting, setSubmitting] = useState(false);
 	// Re-render once a minute so countdown text stays accurate without
 	// per-card timers leaking memory.  Module-shared interval would be
@@ -99,11 +106,22 @@ export function PollCard({ message, aggregate, viewerUserId, onVote, onEnd }: Po
 	// tallies until then.
 	const showCounts = ended || pollDef.kind === "disclosed";
 	const multi = pollDef.maxSelections > 1;
+	// Voter-avatar rendering: gated on (a) the creator picking
+	// non-anonymous, and (b) showCounts being true (we don't reveal
+	// who voted for what until counts are visible — undisclosed polls
+	// stay opaque on both dimensions until end).
+	const showVoters = !pollDef.anonymous && showCounts;
+	const votersByAnswer = aggregate?.votersByAnswer ?? {};
+	const MAX_VISIBLE_VOTERS = 5;
 
 	async function pickAnswer(answerId: string) {
 		if (votingLocked || submitting) return;
 		let next: string[];
 		if (multi) {
+			// Multi-select toggle: clicking a picked option clears it,
+			// clicking an unpicked one adds it (overflow drops the
+			// oldest pick).  The toggle is the explicit affordance for
+			// multi polls — there's no separate clear button.
 			if (myAnswers.includes(answerId)) {
 				next = myAnswers.filter(a => a !== answerId);
 			} else if (myAnswers.length < pollDef.maxSelections) {
@@ -112,11 +130,31 @@ export function PollCard({ message, aggregate, viewerUserId, onVote, onEnd }: Po
 				next = [...myAnswers.slice(1), answerId];
 			}
 		} else {
-			next = myAnswers[0] === answerId ? [] : [answerId];
+			// Single-select: clicking your CURRENT pick is a no-op —
+			// the previous "click your pick to withdraw" behavior was
+			// a vote-loss footgun (users double-click or hover-click
+			// their own row and accidentally retract their vote, with
+			// no warning).  An explicit "Clear my vote" button below
+			// is now the only path to withdraw.  Clicking a DIFFERENT
+			// option still switches.
+			if (myAnswers[0] === answerId) return;
+			next = [answerId];
 		}
 		setSubmitting(true);
 		try {
 			await onVote(next);
+		} finally {
+			setSubmitting(false);
+		}
+	}
+
+	async function clearMyVote() {
+		if (votingLocked || submitting) return;
+		if (myAnswers.length === 0) return;
+		setSubmitting(true);
+		try {
+			// Empty answers = withdraw per spec.
+			await onVote([]);
 		} finally {
 			setSubmitting(false);
 		}
@@ -155,49 +193,82 @@ export function PollCard({ message, aggregate, viewerUserId, onVote, onEnd }: Po
 					const pct = totalVotes > 0 ? Math.round((count / totalVotes) * 100) : 0;
 					const picked = myAnswers.includes(a.id);
 					const isWinner = ended && totalVotes > 0 && count === Math.max(...Object.values(counts));
+					const voters = votersByAnswer[a.id] ?? [];
 					return (
-						<button
-							key={a.id}
-							type="button"
-							disabled={votingLocked || submitting}
-							onClick={() => void pickAnswer(a.id)}
-							className={cn(
-								"relative w-full text-left px-3 py-2 rounded-md border transition-colors overflow-hidden",
-								"flex items-center justify-between gap-3",
-								picked
-									? "border-primary/60 bg-primary/10"
-									: "border-border bg-background/40 hover:bg-accent/40",
-								votingLocked && "cursor-default",
-								submitting && "opacity-70",
-							)}
-						>
-							{showCounts && (
-								<div
-									className={cn(
-										"absolute inset-y-0 left-0 transition-[width] duration-300",
-										picked ? "bg-primary/20" : "bg-foreground/10",
-									)}
-									style={{ width: `${pct}%` }}
-									aria-hidden
-								/>
-							)}
-							<span className="relative flex items-center gap-2 min-w-0">
-								{picked && (
-									<CheckCircle2 className="h-3.5 w-3.5 text-primary shrink-0" />
+						<div key={a.id}>
+							<button
+								type="button"
+								disabled={votingLocked || submitting}
+								onClick={() => void pickAnswer(a.id)}
+								className={cn(
+									"relative w-full text-left px-3 py-2 rounded-md border transition-colors overflow-hidden",
+									"flex items-center justify-between gap-3",
+									picked
+										? "border-primary/60 bg-primary/10"
+										: "border-border bg-background/40 hover:bg-accent/40",
+									votingLocked && "cursor-default",
+									submitting && "opacity-70",
 								)}
-								<span className="text-sm truncate">{a.text}</span>
-								{isWinner && (
-									<span className="text-[10px] font-medium text-primary ml-1 shrink-0">
-										Winner
+							>
+								{showCounts && (
+									<div
+										className={cn(
+											"absolute inset-y-0 left-0 transition-[width] duration-300",
+											picked ? "bg-primary/20" : "bg-foreground/10",
+										)}
+										style={{ width: `${pct}%` }}
+										aria-hidden
+									/>
+								)}
+								<span className="relative flex items-center gap-2 min-w-0">
+									{picked && (
+										<CheckCircle2 className="h-3.5 w-3.5 text-primary shrink-0" />
+									)}
+									<span className="text-sm truncate">{a.text}</span>
+									{isWinner && (
+										<span className="text-[10px] font-medium text-primary ml-1 shrink-0">
+											Winner
+										</span>
+									)}
+								</span>
+								{showCounts && (
+									<span className="relative text-[11px] tabular-nums text-muted-foreground shrink-0">
+										{count} {count === 1 ? "vote" : "votes"} · {pct}%
 									</span>
 								)}
-							</span>
-							{showCounts && (
-								<span className="relative text-[11px] tabular-nums text-muted-foreground shrink-0">
-									{count} {count === 1 ? "vote" : "votes"} · {pct}%
-								</span>
+							</button>
+							{showVoters && voters.length > 0 && (
+								// Voter stack — small avatars + a "+N more"
+								// chip when the list overflows.  Hovering a
+								// row shows the voter's display name as a
+								// tooltip; we don't render the full names
+								// inline because long display names blow
+								// up the row height on rooms with talkative
+								// posters.
+								<div className="flex items-center gap-1 mt-1 ml-1">
+									<div className="flex -space-x-1.5">
+										{voters.slice(0, MAX_VISIBLE_VOTERS).map(v => (
+											// Wrap in a span so we can set the
+											// title attribute (MatrixAvatar
+											// doesn't forward arbitrary props).
+											<span key={v} title={memberNames.get(v) ?? v}>
+												<MatrixAvatar
+													mxc={memberAvatars.get(v)}
+													seed={v}
+													kind="user"
+													className="h-4 w-4 rounded-full ring-1 ring-muted/60"
+												/>
+											</span>
+										))}
+									</div>
+									{voters.length > MAX_VISIBLE_VOTERS && (
+										<span className="text-[10px] text-muted-foreground ml-1">
+											+{voters.length - MAX_VISIBLE_VOTERS} more
+										</span>
+									)}
+								</div>
 							)}
-						</button>
+						</div>
 					);
 				})}
 			</div>
@@ -214,6 +285,21 @@ export function PollCard({ message, aggregate, viewerUserId, onVote, onEnd }: Po
 						<span className={cn(expired && "text-amber-500/90")}>
 							{formatTimeRemaining(pollDef.endsAt - now)}
 						</span>
+					)}
+					{!votingLocked && myAnswers.length > 0 && (
+						// Explicit withdraw — only visible after voting.
+						// Replaces the old "click your pick to retract"
+						// pattern which caused accidental vote loss when
+						// users double-clicked or hover-clicked their
+						// own row.
+						<button
+							type="button"
+							onClick={() => void clearMyVote()}
+							disabled={submitting}
+							className="text-muted-foreground hover:text-foreground disabled:opacity-50"
+						>
+							Clear my vote
+						</button>
 					)}
 					{!votingLocked && isCreator && (
 						<button

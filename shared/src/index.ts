@@ -208,6 +208,15 @@ export interface PollDescriptor {
 	 * disable voting after this time and the creator's client emits
 	 * m.poll.end automatically. */
 	endsAt?: number;
+	/** When true, voters' identities are hidden in the UI — only
+	 * aggregate counts are shown.  When false (default), Koven
+	 * renders the avatar stack of who voted for what under each
+	 * option.  Note: this is presentation-only, NOT a privacy
+	 * guarantee — the underlying m.poll.response events still carry
+	 * a `sender` and any client (Element, etc.) can read them.
+	 * Use undisclosed-until-end for hidden vote *counts*; this flag
+	 * just controls voter-identity rendering in Koven. */
+	anonymous?: boolean;
 }
 
 export interface Message {
@@ -313,6 +322,11 @@ export interface PollAggregate {
 	/** Vote counts by answer id.  For disclosed polls this updates
 	 * live; for undisclosed it stays at zero until `endedAt` lands. */
 	counts: Record<string, number>;
+	/** Per-answer voter lists.  Empty arrays for unvoted answers.
+	 * Drives the avatar stack rendered under each option when the
+	 * poll isn't anonymous.  Same liveness as `counts` (live for
+	 * disclosed, withheld until end for undisclosed). */
+	votersByAnswer: Record<string, UserId[]>;
 	/** Answer ids the viewer has voted for (empty when not voted). */
 	myAnswers: string[];
 	/** Event id of the viewer's most recent m.poll.response — used to

@@ -237,6 +237,8 @@ export interface ChatPaneProps {
 		/** Optional auto-close time (ms since epoch).  Set when the
 		 * creator picked a finite duration in the create dialog. */
 		endsAt?: number;
+		/** Hide voter identities in the UI (default false). */
+		anonymous?: boolean;
 	}): Promise<void> | void;
 	// Cast / change a vote on a poll.  Empty `answerIds` withdraws
 	// the vote.  Receives the poll start event id (== the message id).
@@ -2102,6 +2104,7 @@ function MessageRow({
 							<MessageBubble
 								message={message}
 								memberNames={memberNames}
+								memberAvatars={memberAvatars}
 								onMentionClick={onMentionClick}
 								pollAggregate={pollAggregate}
 								viewerUserId={viewerUserId}
@@ -2390,6 +2393,7 @@ function MessageBubble({
 	onPollVote,
 	onPollEnd,
 	isBot,
+	memberAvatars,
 }: {
 	message: Message;
 	memberNames: Map<string, string>;
@@ -2398,6 +2402,7 @@ function MessageBubble({
 	viewerUserId?: UserId;
 	onPollVote?(pollId: EventId, answerIds: string[]): void | Promise<void>;
 	onPollEnd?(pollId: EventId): void | Promise<void>;
+	memberAvatars: Map<string, string | undefined>;
 	// Bots stream their replies as a sequence of m.replace edits so the
 	// LLM's tokens land in real-time, which means the resulting message
 	// always carries `edited: true` once the stream completes.  The
@@ -2418,6 +2423,8 @@ function MessageBubble({
 				viewerUserId={viewerUserId}
 				onVote={(answerIds) => onPollVote?.(message.id, answerIds)}
 				onEnd={() => onPollEnd?.(message.id)}
+				memberAvatars={memberAvatars}
+				memberNames={memberNames}
 			/>
 		);
 	}

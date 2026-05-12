@@ -37,6 +37,16 @@ export interface FlagRef {
 	sender: UserId;
 }
 
+// Reverse index for poll responses: response-event-id → { which poll,
+// who voted }.  Used by `poll_response_redacted` to roll back a vote
+// when its m.poll.response event is redacted (e.g. the voter manually
+// retracted their vote via "Delete message" on the response).  Without
+// this, redactions would leave stale counts in pollsByMessage.
+export interface PollResponseRef {
+	pollId: EventId;
+	voter: UserId;
+}
+
 // What's selected in the SpaceBar.  Several virtual selections flank
 // real user-created spaces:
 //   - "explore": homeserver-wide directory of public spaces + rooms
@@ -105,6 +115,10 @@ export interface AppState {
 	// Internal-only; PollCard reads pollsByMessage and never touches
 	// this directly.
 	pollVotesIndex: PollVotesIndex;
+	// Reverse index: response-event-id → { pollId, voter }.  Used to
+	// roll back a vote when a poll-response event is redacted; without
+	// this the count would stay inflated until the page reloaded.
+	pollResponseRefs: Map<EventId, PollResponseRef>;
 	// Per-room counter incremented every time matrix-js-sdk fires
 	// Room.Receipt.  ChatPane / SeenIndicator components read the
 	// counter for the active room to know they need to re-query
@@ -134,6 +148,7 @@ export const initialState: AppState = {
 	collapsesByMessage: new Map(),
 	pollsByMessage: new Map(),
 	pollVotesIndex: new Map(),
+	pollResponseRefs: new Map(),
 	receiptsVersionByRoom: new Map(),
 	activeRoomId: null,
 	// Land on DMs after login.  Spaces overview made the post-login
@@ -163,6 +178,7 @@ export type Action =
 	| { type: "collapses_loaded"; collapses: CollapseEventLite[] }
 	| { type: "collapse_arrived"; collapse: CollapseEventLite }
 	| { type: "poll_response_arrived"; response: PollResponseEvent; myUserId: UserId }
+	| { type: "poll_response_redacted"; responseEventId: EventId }
 	| { type: "poll_end_arrived"; end: PollEndEvent }
 	| { type: "set_active_room"; roomId: RoomId | null }
 	| { type: "set_active_space"; space: ActiveSpace }
@@ -346,6 +362,9 @@ export function reduce(state: AppState, action: Action): AppState {
 		case "poll_response_arrived":
 			return applyPollResponse(state, action.response, action.myUserId);
 
+		case "poll_response_redacted":
+			return applyPollResponseRedaction(state, action.responseEventId);
+
 		case "poll_end_arrived":
 			return applyPollEnd(state, action.end);
 
@@ -493,15 +512,27 @@ function applyCollapse(state: AppState, c: CollapseEventLite): AppState {
 	return { ...state, collapsesByMessage };
 }
 
-/** Recompute a poll's counts from scratch given its voter→answers
- * map.  Cheap (votes are bounded by member count) and avoids subtle
- * desync bugs from incremental count adjustments. */
-function recomputeCounts(votes: Map<UserId, string[]>): Record<string, number> {
+/** Recompute a poll's counts + per-answer voter lists from scratch
+ * given its voter→answers map.  Cheap (votes are bounded by member
+ * count) and avoids subtle desync bugs from incremental adjustments.
+ *
+ * Voter lists are sorted by mxid for stable rendering — the avatar
+ * stack would otherwise reshuffle on every vote change. */
+function recomputePollTallies(
+	votes: Map<UserId, string[]>,
+): { counts: Record<string, number>; votersByAnswer: Record<string, UserId[]> } {
 	const counts: Record<string, number> = {};
-	for (const answers of votes.values()) {
-		for (const a of answers) counts[a] = (counts[a] ?? 0) + 1;
+	const votersByAnswer: Record<string, UserId[]> = {};
+	for (const [voter, answers] of votes.entries()) {
+		for (const a of answers) {
+			counts[a] = (counts[a] ?? 0) + 1;
+			(votersByAnswer[a] ??= []).push(voter);
+		}
 	}
-	return counts;
+	for (const a of Object.keys(votersByAnswer)) {
+		votersByAnswer[a]!.sort();
+	}
+	return { counts, votersByAnswer };
 }
 
 function applyPollResponse(
@@ -511,9 +542,11 @@ function applyPollResponse(
 ): AppState {
 	const pollVotesIndex = new Map(state.pollVotesIndex);
 	const pollsByMessage = new Map(state.pollsByMessage);
+	const pollResponseRefs = new Map(state.pollResponseRefs);
 	const existing = pollsByMessage.get(r.pollId) ?? {
 		pollId: r.pollId,
 		counts: {},
+		votersByAnswer: {},
 		myAnswers: [],
 		myResponseEventId: undefined,
 	} as PollAggregate;
@@ -525,7 +558,6 @@ function applyPollResponse(
 	// "Last response per voter wins."  Only adopt this response if its
 	// timestamp is newer than the voter's previous one — out-of-order
 	// delivery (federation backfill) shouldn't clobber a fresher vote.
-	const prevVote = voters.get(r.voter);
 	const prevTimestamp = (existing as any)._lastVoteTs?.[r.voter] as number | undefined;
 	if (prevTimestamp !== undefined && r.timestamp < prevTimestamp) return state;
 
@@ -537,7 +569,7 @@ function applyPollResponse(
 	}
 	pollVotesIndex.set(r.pollId, voters);
 
-	const counts = recomputeCounts(voters);
+	const { counts, votersByAnswer } = recomputePollTallies(voters);
 	const myAnswers = r.voter === myUserId
 		? r.answerIds
 		: existing.myAnswers;
@@ -547,6 +579,7 @@ function applyPollResponse(
 	pollsByMessage.set(r.pollId, {
 		...existing,
 		counts,
+		votersByAnswer,
 		myAnswers,
 		myResponseEventId,
 	});
@@ -560,10 +593,51 @@ function applyPollResponse(
 		...(aggWithTs._lastVoteTs ?? {}),
 		[r.voter]: r.timestamp,
 	};
-	// noop reference so prevVote isn't unused; readability above
-	void prevVote;
 
-	return { ...state, pollsByMessage, pollVotesIndex };
+	// Index this response so a future redaction can roll the vote
+	// back.  We only need to remember the LATEST response event id
+	// per voter — earlier responses have been superseded, so even if
+	// one of those older event ids gets redacted, the current vote
+	// is unaffected.  Map.set overwrites, which is the behavior we
+	// want.
+	pollResponseRefs.set(r.eventId, { pollId: r.pollId, voter: r.voter });
+
+	return { ...state, pollsByMessage, pollVotesIndex, pollResponseRefs };
+}
+
+/** A poll-response event got redacted (voter manually deleted their
+ * own m.poll.response, or an admin redacted it).  Removes the
+ * voter's contribution to the poll if this redacted event was their
+ * latest response.  No-op if we never indexed the response (e.g.
+ * already superseded by a newer one — only the latest is in
+ * pollResponseRefs). */
+function applyPollResponseRedaction(state: AppState, responseEventId: EventId): AppState {
+	const ref = state.pollResponseRefs.get(responseEventId);
+	if (!ref) return state;
+	const pollResponseRefs = new Map(state.pollResponseRefs);
+	pollResponseRefs.delete(responseEventId);
+
+	const pollVotesIndex = new Map(state.pollVotesIndex);
+	const voters = new Map(pollVotesIndex.get(ref.pollId) ?? new Map<UserId, string[]>());
+	voters.delete(ref.voter);
+	pollVotesIndex.set(ref.pollId, voters);
+
+	const pollsByMessage = new Map(state.pollsByMessage);
+	const existing = pollsByMessage.get(ref.pollId);
+	if (!existing) return { ...state, pollResponseRefs, pollVotesIndex };
+
+	const { counts, votersByAnswer } = recomputePollTallies(voters);
+	pollsByMessage.set(ref.pollId, {
+		...existing,
+		counts,
+		votersByAnswer,
+		// Clear the viewer's vote echo if the redaction was theirs.
+		myAnswers: existing.myResponseEventId === responseEventId ? [] : existing.myAnswers,
+		myResponseEventId: existing.myResponseEventId === responseEventId
+			? undefined
+			: existing.myResponseEventId,
+	});
+	return { ...state, pollsByMessage, pollVotesIndex, pollResponseRefs };
 }
 
 function applyPollEnd(state: AppState, e: PollEndEvent): AppState {
@@ -571,6 +645,7 @@ function applyPollEnd(state: AppState, e: PollEndEvent): AppState {
 	const existing = pollsByMessage.get(e.pollId) ?? {
 		pollId: e.pollId,
 		counts: {},
+		votersByAnswer: {},
 		myAnswers: [],
 	} as PollAggregate;
 

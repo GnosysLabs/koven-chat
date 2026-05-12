@@ -807,6 +807,10 @@ export default function App() {
 				response: ev,
 				myUserId: creds.user_id as UserId,
 			}),
+			onPollResponseRedacted: (_roomId, responseEventId) => dispatch({
+				type: "poll_response_redacted",
+				responseEventId,
+			}),
 			onPollEnd: (ev) => dispatch({
 				type: "poll_end_arrived",
 				end: ev,

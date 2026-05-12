@@ -315,6 +315,12 @@ export interface MatrixHandlers {
 	onMessageRedacted(roomId: RoomId, eventId: EventId): void;
 	onReaction(reaction: ReactionEvent, options: { live: boolean }): void;
 	onReactionRedacted(roomId: RoomId, reactionEventId: EventId): void;
+	/// Fires when an m.poll.response event is redacted (voter
+	/// retracted their vote via "Delete message," or an admin
+	/// scrubbed it).  No-op at the reducer if the redaction targets
+	/// an id we never indexed as a poll response — same shape as
+	/// reactions / flags.
+	onPollResponseRedacted(roomId: RoomId, responseEventId: EventId): void;
 	onFlag(flag: FlagEventLite, options: { live: boolean }): void;
 	onFlagRedacted(roomId: RoomId, flagEventId: EventId): void;
 	onCollapse(collapse: CollapseEventLite, options: { live: boolean }): void;
@@ -2179,6 +2185,11 @@ export class MatrixTransport {
 			 * poll as ended after this timestamp even if no m.poll.end
 			 * has landed yet. */
 			endsAt?: number;
+			/** Hide voter identities in the Koven UI.  Stored under
+			 * the koven custom namespace — other clients (Element,
+			 * etc.) won't render Koven's voter-avatar stack anyway, so
+			 * the flag is presentation-only and Koven-specific. */
+			anonymous?: boolean;
 		},
 	): Promise<EventId> {
 		const c = this.requireClient();
@@ -2210,6 +2221,13 @@ export class MatrixTransport {
 		// for everyone.
 		if (typeof opts.endsAt === "number" && Number.isFinite(opts.endsAt)) {
 			pollContent["chat.koven.poll.ends_at"] = opts.endsAt;
+		}
+		// Anonymity is presentation-only and lives under our own
+		// namespace; spec-pure clients ignore the field, our client
+		// reads it back from message.poll.anonymous to gate the
+		// voter-avatar stack.
+		if (opts.anonymous) {
+			pollContent["chat.koven.poll.anonymous"] = true;
 		}
 		// Body fallback for clients that don't render polls — they see
 		// the question as a plain text message.  Element does this too.
@@ -5443,6 +5461,9 @@ export class MatrixTransport {
 		const endsAt = typeof endsAtRaw === "number" && Number.isFinite(endsAtRaw)
 			? endsAtRaw
 			: undefined;
+		// Anonymity is our custom field — absent on polls from spec-
+		// pure clients (treat as non-anonymous, the friendlier default).
+		const anonymous = pollBody?.["chat.koven.poll.anonymous"] === true;
 		return {
 			id: eventId as EventId,
 			roomId: room.roomId as RoomId,
@@ -5458,6 +5479,7 @@ export class MatrixTransport {
 				kind: pollKind,
 				maxSelections,
 				endsAt,
+				anonymous,
 			},
 		};
 	}
@@ -5622,17 +5644,22 @@ export class MatrixTransport {
 				(typeof ev.redacts === "string" ? ev.redacts : undefined) ??
 				(typeof content?.redacts === "string" ? content.redacts : undefined);
 			if (redactedId) {
-				// Dispatch to all three target-type reducers in parallel:
+				// Dispatch to every target-type reducer in parallel:
 				// we don't know whether the redaction targets a message,
-				// a reaction, or a flag, and the reducers each no-op if
-				// the id isn't in their map.  Without the message-side
-				// dispatch the bubble would stay rendered until the user
-				// refreshed (matrix-js-sdk applies the redaction to its
-				// internal event copy, but our local message-list
-				// snapshot is what actually drives the timeline render).
+				// a reaction, a flag, or a poll response, and the
+				// reducers each no-op if the id isn't in their map.
+				// Without the message-side dispatch the bubble would
+				// stay rendered until the user refreshed (matrix-js-sdk
+				// applies the redaction to its internal event copy, but
+				// our local message-list snapshot is what actually
+				// drives the timeline render).  The poll-response path
+				// keeps live vote counts honest when a voter manually
+				// retracts their vote via "Delete message" on the
+				// response.
 				this.handlers.onMessageRedacted(room.roomId as RoomId, redactedId as EventId);
 				this.handlers.onReactionRedacted(room.roomId as RoomId, redactedId as EventId);
 				this.handlers.onFlagRedacted(room.roomId as RoomId, redactedId as EventId);
+				this.handlers.onPollResponseRedacted(room.roomId as RoomId, redactedId as EventId);
 			}
 			return;
 		}

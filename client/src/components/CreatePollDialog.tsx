@@ -48,6 +48,7 @@ interface CreatePollDialogProps {
 		kind: "disclosed" | "undisclosed";
 		maxSelections: number;
 		endsAt?: number;
+		anonymous?: boolean;
 	}): Promise<void> | void;
 }
 
@@ -69,6 +70,11 @@ export function CreatePollDialog({ open, onOpenChange, onSubmit }: CreatePollDia
 	const [question, setQuestion] = useState("");
 	const [answers, setAnswers] = useState<string[]>(["", ""]);
 	const [disclosed, setDisclosed] = useState(true);
+	// Anonymity is OFF by default — Koven shows the small avatar
+	// stack of who voted for what under each option, which makes
+	// polls feel like real conversation ("oh, Alice picked option B
+	// too").  Creators who explicitly want a private poll opt in.
+	const [anonymous, setAnonymous] = useState(false);
 	const [duration, setDuration] = useState<DurationKey>("none");
 	const [submitting, setSubmitting] = useState(false);
 	const [error, setError] = useState<string | null>(null);
@@ -84,6 +90,7 @@ export function CreatePollDialog({ open, onOpenChange, onSubmit }: CreatePollDia
 		setQuestion("");
 		setAnswers(["", ""]);
 		setDisclosed(true);
+		setAnonymous(false);
 		setDuration("none");
 		setError(null);
 	}
@@ -129,6 +136,7 @@ export function CreatePollDialog({ open, onOpenChange, onSubmit }: CreatePollDia
 				kind: disclosed ? "disclosed" : "undisclosed",
 				maxSelections: 1,
 				endsAt: durationMs !== null ? Date.now() + durationMs : undefined,
+				anonymous,
 			});
 			close();
 		} catch (err) {
@@ -214,6 +222,23 @@ export function CreatePollDialog({ open, onOpenChange, onSubmit }: CreatePollDia
 							type="checkbox"
 							checked={disclosed}
 							onChange={(e) => setDisclosed(e.target.checked)}
+							className="h-4 w-4 accent-primary"
+						/>
+					</label>
+
+					<label className="flex items-center justify-between gap-3 cursor-pointer">
+						<div>
+							<div className="text-sm">Anonymous</div>
+							<div className="text-[10px] text-muted-foreground leading-snug">
+								{anonymous
+									? "Voter names are hidden in Koven's UI."
+									: "Voter avatars appear under each option."}
+							</div>
+						</div>
+						<input
+							type="checkbox"
+							checked={anonymous}
+							onChange={(e) => setAnonymous(e.target.checked)}
 							className="h-4 w-4 accent-primary"
 						/>
 					</label>
