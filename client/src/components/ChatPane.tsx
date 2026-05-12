@@ -3172,6 +3172,15 @@ function SeenIndicator({
 		const filtered = all.filter(s => {
 			if (enginePrefix && s.userId === enginePrefix) return false;
 			if (botMxids && botMxids.has(s.userId)) return false;
+			// Filter by mxid pattern too.  A deleted bot drops out
+			// of botMxids (the engine roster), but its old m.read
+			// receipts persist server-side until everyone in the
+			// room moves their own read marker past those events.
+			// Without this, a deleted bot keeps showing up as a
+			// "seen" face on historical messages indefinitely.
+			// Bot mxids are reserved-namespace localparts in our
+			// Synapse config; no human can have one.
+			if (/^@bot-/.test(s.userId)) return false;
 			return true;
 		});
 		return filtered;

@@ -55,7 +55,7 @@ import { EncryptionUnlockSheet } from "@/components/EncryptionUnlockSheet";
 import { SuspendedBanner } from "@/components/SuspendedBanner";
 import { ModLogSheet } from "@/components/ModLogSheet";
 import { FloorReviewSheet } from "@/components/FloorReviewSheet";
-import { botKickBan, deleteOwnMessage, fetchAdminStatus, fetchFloorQueue, fetchMyStatus, fetchRoomParents, flagRoom, type SuspensionSummary } from "@/lib/instance";
+import { botKickBan, botKickBanFromSpace, deleteOwnMessage, fetchAdminStatus, fetchFloorQueue, fetchMyStatus, fetchRoomParents, flagRoom, type SuspensionSummary } from "@/lib/instance";
 import { fetchIntegrationsStatus } from "@/lib/klipy";
 import { ENGINE_URL } from "@/lib/urls";
 import { setAppBadge } from "@/lib/appBadge";
@@ -3012,32 +3012,49 @@ export default function App() {
 				ignoredUsers={ignoredUsers}
 				isBot={!!viewedUserId && botMxids.has(viewedUserId)}
 				// Bot kick/ban is a founder-only carve-out from the
-				// consensus model.  We expose the affordance in the
-				// profile sheet only when the viewer is the founder
-				// of the currently-active room (`creatorId` from the
-				// m.room.create event).  Anywhere else (DMs, federated
-				// rooms, viewing in a room you didn't create) the
-				// affordance stays hidden — including for instance
-				// admins; admin-delete is a separate capability.
-				canKickBanBots={!!(activeRoom?.creatorId && creds.user_id && activeRoom.creatorId === creds.user_id)}
+				// consensus model.  We expose the affordance only
+				// when the viewer is the founder of the active
+				// room's PARENT SPACE (not the room itself), because
+				// the action is space-wide: it kicks/bans the bot
+				// from every joinable child room in one call.  A
+				// per-room kick on a bot is rarely what the user
+				// wants ("oh this bot is fine in #general but not
+				// #random" almost never happens), and walking every
+				// room to ban a misbehaving bot is exactly the UX
+				// frustration this change exists to fix.
+				//
+				// Hidden in DMs, federated rooms, rooms not in a
+				// space, and rooms whose parent space the viewer
+				// didn't create.  Admins don't get the affordance
+				// either; admin-delete is a separate capability.
+				canKickBanBots={(() => {
+					if (!creds.user_id || !activeRoom) return false;
+					const parentSpaceId = activeRoom.parentSpaceIds[0];
+					if (!parentSpaceId) return false;
+					const parentSpace = state.spaces.find(s => s.id === parentSpaceId);
+					return !!parentSpace?.creatorId && parentSpace.creatorId === creds.user_id;
+				})()}
 				// Suppress kick/ban affordance when the bot in question
-				// is one the viewer owns.  Founder-of-room === bot-
+				// is one the viewer owns.  Founder-of-space === bot-
 				// owner is allowed (the affordance just hides);
 				// they can manage the bot from Settings → Bots.
 				isMyBot={!!viewedUserId && myOwnedBotMxids.has(viewedUserId)}
 				onBotMembership={async (action, botMxid) => {
-					if (!creds?.access_token || !state.activeRoomId) return;
+					if (!creds?.access_token || !activeRoom) return;
+					const parentSpaceId = activeRoom.parentSpaceIds[0];
+					if (!parentSpaceId) return;
 					try {
-						await botKickBan(
+						await botKickBanFromSpace(
 							creds.access_token,
-							state.activeRoomId,
+							parentSpaceId,
 							botMxid,
 							action,
 						);
-						// Synapse emits the membership transition back
-						// through sync; the member list and chat header
-						// pick it up on the next reducer pass.  No
-						// manual state poke required.
+						// Synapse emits the membership transitions
+						// back through sync; member lists across
+						// every affected room pick them up on the
+						// next reducer pass.  No manual state poke
+						// required.
 					} catch (e) {
 						// Re-throw so the sheet can show the error
 						// inline; App.tsx still receives it via the

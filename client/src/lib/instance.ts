@@ -476,6 +476,45 @@ export async function botKickBan(
 	return await r.json() as { ok: true; action: "kick" | "ban" };
 }
 
+/**
+ * Space-wide kick or ban: silence a bot across the space and every
+ * child room in one call.  The engine verifies the caller is the
+ * space creator and the target is a bot on this instance; per-room
+ * kick is performed with the caller's bearer token via Matrix's
+ * normal PL check, so rooms the founder doesn't have PL 100 in
+ * (e.g. "Add existing room" with a different creator) are skipped
+ * server-side.  Returns counts for both the affected and skipped
+ * subsets of rooms.
+ */
+export async function botKickBanFromSpace(
+	accessToken: string,
+	spaceId: string,
+	botMxid: string,
+	action: "kick" | "ban",
+): Promise<{ ok: true; action: "kick" | "ban"; succeeded: number; failed: number; total: number }> {
+	const r = await fetch(
+		`${ENGINE_URL}/api/spaces/${encodeURIComponent(spaceId)}/bots/${encodeURIComponent(botMxid)}/${action}`,
+		{
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${accessToken}`,
+				"Content-Type": "application/json",
+			},
+		},
+	);
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		throw new Error(`${action} from space failed: ${r.status} ${txt.slice(0, 200)}`);
+	}
+	return await r.json() as {
+		ok: true;
+		action: "kick" | "ban";
+		succeeded: number;
+		failed: number;
+		total: number;
+	};
+}
+
 // ─── Room-target flagging (offensive room name pipeline) ─────────────
 
 export interface CollapsedRoom {

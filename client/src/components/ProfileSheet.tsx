@@ -773,7 +773,7 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 							// hidden menu.
 							<div className="pt-3 border-t border-border space-y-2">
 								<div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-									Room moderation
+									Space moderation
 								</div>
 								<div className="flex gap-2">
 									<Button
@@ -783,10 +783,10 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 										onClick={() => handleBotAction("kick")}
 										disabled={!!botActionPending || loading}
 										className="flex-1 text-amber-500 hover:text-amber-500 border-amber-500/40"
-										title="Kick this bot from the room (it can rejoin if reinvited)"
+										title="Kick this bot from every room in the space (it can rejoin if reinvited)"
 									>
 										<UserX className="h-3.5 w-3.5 mr-1.5" />
-										{botActionPending === "kick" ? "Kicking…" : "Kick bot"}
+										{botActionPending === "kick" ? "Kicking…" : "Kick bot from space"}
 									</Button>
 									<Button
 										type="button"
@@ -795,10 +795,10 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 										onClick={() => handleBotAction("ban")}
 										disabled={!!botActionPending || loading}
 										className="flex-1 text-destructive hover:text-destructive border-destructive/40"
-										title="Ban this bot from the room (it cannot rejoin until unbanned)"
+										title="Ban this bot from every room in the space (it cannot rejoin until unbanned)"
 									>
 										<Ban className="h-3.5 w-3.5 mr-1.5" />
-										{botActionPending === "ban" ? "Banning…" : "Ban bot"}
+										{botActionPending === "ban" ? "Banning…" : "Ban bot from space"}
 									</Button>
 								</div>
 							</div>

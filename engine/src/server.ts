@@ -3742,8 +3742,119 @@ export function startServer(): void {
 			}
 
 			// ─── Founder bot kick/ban ───────────────────────────────
+			// POST /api/spaces/:spaceId/bots/:botMxid/kick
+			// POST /api/spaces/:spaceId/bots/:botMxid/ban
+			//
+			// Space-wide bot moderation: silence a bot across the
+			// space and every joinable child room in one call,
+			// instead of forcing the founder to walk every channel
+			// and click kick / ban individually.  Auth is the
+			// SPACE creator (not the per-room creator) since the
+			// space founder is the only single principal who has
+			// authority over the whole community.  For each target
+			// room (the space itself + every child), the founder's
+			// bearer token issues the kick/ban via Matrix's normal
+			// power-level check.  Rooms the founder doesn't have
+			// PL 100 in (e.g. an "Add existing room" link with a
+			// different creator) are logged + skipped, best-
+			// effort across the cascade.
+			//
+			// Mod-log entries are recorded per affected room so the
+			// audit trail mirrors what would have happened if the
+			// founder had clicked kick/ban in each room separately.
+			{
+				const m = path.match(/^\/api\/spaces\/([^/]+)\/bots\/([^/]+)\/(kick|ban)$/);
+				if (req.method === "POST" && m) {
+					const token = extractToken(req);
+					const userId = await whoami(token);
+					if (!userId || !token) {
+						return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+					}
+					const spaceId = decodeURIComponent(m[1]!);
+					const botMxid = decodeURIComponent(m[2]!);
+					const action = m[3] as "kick" | "ban";
+
+					// Confirm target IS a space; the per-room endpoint
+					// below handles non-space rooms.
+					try {
+						if (!(await isSpaceRoom(spaceId))) {
+							return json({ errcode: "M_INVALID_PARAM", error: "target is not a space" }, { status: 400 });
+						}
+					} catch {
+						return json({ errcode: "M_NOT_FOUND", error: "space not found" }, { status: 404 });
+					}
+
+					const spaceState = await getRoomNameAndCreator(spaceId);
+					if (!spaceState || !spaceState.creator) {
+						return json({ errcode: "M_NOT_FOUND", error: "space not found" }, { status: 404 });
+					}
+					if (spaceState.creator !== userId) {
+						return json({
+							errcode: "M_FORBIDDEN",
+							error: "only the space founder can kick/ban bots from the space",
+						}, { status: 403 });
+					}
+
+					const bot = getBotByMxid(botMxid);
+					if (!bot) {
+						return json({
+							errcode: "M_FORBIDDEN",
+							error: "target is not a bot on this instance",
+						}, { status: 403 });
+					}
+					if (bot.owner_id === userId) {
+						return json({
+							errcode: "M_FORBIDDEN",
+							error: "you can't kick or ban a bot you own; manage it from Settings → Bots instead",
+						}, { status: 403 });
+					}
+
+					// Targets: the space itself, then every declared
+					// child room.  Including the space matters for
+					// ban (the bot might be a direct space member
+					// even if it's never in any child).  Kick on a
+					// room the bot isn't in just no-ops at Synapse;
+					// ban on a not-yet-member is forward-looking and
+					// blocks future joins.
+					const childIds = await getSpaceChildRoomIds(spaceId).catch(() => [] as string[]);
+					const targets = [spaceId, ...childIds];
+
+					let succeeded = 0;
+					let failed = 0;
+					for (const roomId of targets) {
+						const ok = await kickOrBanAs({
+							bearerToken: token,
+							roomId,
+							targetUserId: botMxid,
+							kind: action,
+							reason: action === "kick"
+								? "founder_kick_bot_space"
+								: "founder_ban_bot_space",
+						});
+						if (ok) {
+							succeeded++;
+							recordBotMembershipAction({
+								roomId,
+								botMxid,
+								botOwner: bot.owner_id,
+								action,
+								founder: userId,
+							});
+						} else {
+							failed++;
+						}
+					}
+					return json({ ok: true, action, succeeded, failed, total: targets.length });
+				}
+			}
+
 			// POST /api/rooms/:roomId/bots/:botMxid/kick
 			// POST /api/rooms/:roomId/bots/:botMxid/ban
+			//
+			// Per-room kick/ban.  Retained for non-space rooms +
+			// programmatic callers that want surgical action on
+			// one room.  The space-wide endpoint above is what the
+			// SPA wires to the profile-sheet button now.
 			//
 			// Carved out of the consensus model: bots aren't people,
 			// so a misbehaving / spammy bot doesn't get the same
