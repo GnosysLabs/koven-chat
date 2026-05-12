@@ -2329,6 +2329,14 @@ export default function App() {
 							dispatch({ type: "error", message: err instanceof Error ? err.message : String(err) });
 						});
 					}}
+					onReorderSpaces={async (order) => {
+						if (!transport) return;
+						try {
+							await transport.setMySpaceOrder(order);
+						} catch (e) {
+							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+						}
+					}}
 				/>
 				</div>
 				{state.activeSpace?.kind === "bots" ? (
@@ -2429,6 +2437,25 @@ export default function App() {
 						if (!transport) return;
 						try {
 							await transport.declineInvite(roomId);
+						} catch (e) {
+							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+						}
+					}}
+					onMoveRoom={async (spaceId, roomId, order, category) => {
+						if (!transport) return;
+						try {
+							// Writes BOTH the new order key AND the
+							// (possibly changed) category in a single
+							// `m.space.child` state event — avoids the
+							// glitch where moving a room across
+							// categories would briefly show it in the
+							// old category between the two writes.
+							await transport.setRoomOrderAndCategoryInSpace(
+								spaceId as SpaceId,
+								roomId,
+								order,
+								category ?? undefined,
+							);
 						} catch (e) {
 							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
 						}

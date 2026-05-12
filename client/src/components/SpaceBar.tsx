@@ -14,6 +14,15 @@ import { buildInviteUrl } from "@/lib/inviteLink";
 import type { StoredAccount } from "@/lib/accounts";
 import type { ActiveSpace } from "@/state/store";
 import type { MatrixTransport } from "@/lib/matrix";
+import {
+	DndContext, PointerSensor, useSensor, useSensors,
+	closestCenter, type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+	SortableContext, useSortable, verticalListSortingStrategy,
+	arrayMove,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 export interface SpaceBarProps {
 	currentUserId: string | null;
@@ -64,6 +73,12 @@ export interface SpaceBarProps {
 	onAddExistingRoomToSpace?(spaceId: SpaceId): void;
 	onLeaveSpace?(spaceId: SpaceId): void;
 	onDeleteSpace?(spaceId: SpaceId): void;
+	// Drag-and-drop reorder of the SpaceBar.  Receives the new ordered
+	// list of space ids after a drop; caller persists to account_data
+	// via `transport.setMySpaceOrder`.  Optional — when omitted, tiles
+	// aren't draggable (the rail is per-user, no PL gate needed, so
+	// the parent always passes a handler when transport is connected).
+	onReorderSpaces?(spaceIds: SpaceId[]): Promise<void> | void;
 }
 
 export function SpaceBar({
@@ -93,6 +108,7 @@ export function SpaceBar({
 	onAddExistingRoomToSpace,
 	onLeaveSpace,
 	onDeleteSpace,
+	onReorderSpaces,
 }: SpaceBarProps) {
 	const showSwitcher = !!(accounts && onSwitchAccount && onAddAccount && onSignOutAccount);
 	// Per-tile right-click menu.  Single state object {space, x, y}
@@ -111,6 +127,49 @@ export function SpaceBar({
 		if (dmsActive) return false;
 		return rooms.some(r => r.kind === "dm" && (r.isInvite || r.unreadCount > 0 || r.highlightCount > 0));
 	}, [rooms, dmsActive]);
+
+	// dnd-kit setup for reordering space tiles.  6px activation
+	// distance so a normal tile click never accidentally starts a
+	// drag.  Single SortableContext over the spaces list.
+	const sensors = useSensors(useSensor(PointerSensor, {
+		activationConstraint: { distance: 6 },
+	}));
+	function handleDragEnd(e: DragEndEvent) {
+		const { active, over } = e;
+		if (!over || active.id === over.id || !onReorderSpaces) return;
+		const oldIdx = spaces.findIndex(s => s.id === active.id);
+		const newIdx = spaces.findIndex(s => s.id === over.id);
+		if (oldIdx < 0 || newIdx < 0) return;
+		const next = arrayMove(spaces, oldIdx, newIdx).map(s => s.id as SpaceId);
+		void onReorderSpaces(next);
+	}
+
+	const spaceTiles = spaces.map(space => {
+		const active = activeSpace?.kind === "space" && activeSpace.id === space.id;
+		// Attention dot for spaces: any child room with an
+		// unread, highlight, or pending invite — but only
+		// when this space isn't currently selected.
+		const spaceAttention = !active && rooms.some(r =>
+			r.parentSpaceIds.includes(space.id) &&
+			(r.isInvite || r.unreadCount > 0 || r.highlightCount > 0),
+		);
+		return (
+			<SortableSpaceTile
+				key={space.id}
+				space={space}
+				active={active}
+				dot={spaceAttention}
+				draggable={!!onReorderSpaces}
+				onClick={() => onSelectSpace(space.id)}
+				onContextMenu={(e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					setSpaceCtxMenu({ space, x: e.clientX, y: e.clientY });
+				}}
+			/>
+		);
+	});
+
 	return (
 		<aside className="w-[68px] shrink-0 bg-card border-r border-border flex flex-col items-center py-2 gap-2">
 			{showSwitcher ? (
@@ -175,33 +234,22 @@ export function SpaceBar({
 			</TileButton>
 
 			<div className="flex-1 w-full overflow-y-auto flex flex-col items-center gap-2">
-				{spaces.map(space => {
-					const active = activeSpace?.kind === "space" && activeSpace.id === space.id;
-					// Attention dot for spaces: any child room with an
-					// unread, highlight, or pending invite — but only
-					// when this space isn't currently selected.
-					const spaceAttention = !active && rooms.some(r =>
-						r.parentSpaceIds.includes(space.id) &&
-						(r.isInvite || r.unreadCount > 0 || r.highlightCount > 0),
-					);
-					return (
-						<TileButton
-							key={space.id}
-							active={active}
-							onClick={() => onSelectSpace(space.id)}
-							onContextMenu={(e) => {
-								e.preventDefault();
-								e.stopPropagation();
-								setSpaceCtxMenu({ space, x: e.clientX, y: e.clientY });
-							}}
-							title={space.name}
-							ariaLabel={space.name}
-							dot={spaceAttention}
+				{onReorderSpaces ? (
+					<DndContext
+						sensors={sensors}
+						collisionDetection={closestCenter}
+						onDragEnd={handleDragEnd}
+					>
+						<SortableContext
+							items={spaces.map(s => s.id)}
+							strategy={verticalListSortingStrategy}
 						>
-							<SpaceTileAvatar space={space} />
-						</TileButton>
-					);
-				})}
+							{spaceTiles}
+						</SortableContext>
+					</DndContext>
+				) : (
+					spaceTiles
+				)}
 				<TileButton
 					title="Create a space"
 					ariaLabel="Create a space"
@@ -331,6 +379,56 @@ const TileButton = forwardRef<HTMLButtonElement, TileButtonProps>(
 	),
 );
 TileButton.displayName = "TileButton";
+
+/** Sortable wrapper around `TileButton`.  When `draggable` is false
+ * (caller doesn't pass `onReorderSpaces`) we render a plain
+ * TileButton so pointer events fall through normally — useful for
+ * test contexts or any environment without a live transport. */
+function SortableSpaceTile({
+	space, active, dot, draggable, onClick, onContextMenu,
+}: {
+	space: Space;
+	active: boolean;
+	dot: boolean;
+	draggable: boolean;
+	onClick(): void;
+	onContextMenu(e: React.MouseEvent): void;
+}) {
+	const sortable = useSortable({ id: space.id, disabled: !draggable });
+	const style = {
+		transform: CSS.Transform.toString(sortable.transform),
+		transition: sortable.transition,
+		opacity: sortable.isDragging ? 0.5 : 1,
+	};
+	if (!draggable) {
+		return (
+			<TileButton
+				active={active}
+				dot={dot}
+				onClick={onClick}
+				onContextMenu={onContextMenu}
+				title={space.name}
+				ariaLabel={space.name}
+			>
+				<SpaceTileAvatar space={space} />
+			</TileButton>
+		);
+	}
+	return (
+		<div ref={sortable.setNodeRef} style={style} {...sortable.attributes} {...sortable.listeners}>
+			<TileButton
+				active={active}
+				dot={dot}
+				onClick={onClick}
+				onContextMenu={onContextMenu}
+				title={space.name}
+				ariaLabel={space.name}
+			>
+				<SpaceTileAvatar space={space} />
+			</TileButton>
+		</div>
+	);
+}
 
 function IconButton({
 	children, onClick, title, ariaLabel, dot, dotClass,

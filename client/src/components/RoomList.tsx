@@ -11,7 +11,7 @@
 //     category display order comes from the parent space's
 //     `chat.koven.space.categories` state event.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
 import { COLLAPSED_NAME } from "@/lib/collapsedRooms";
 import type { Room, RoomId, Space, UserId } from "@koven/shared";
@@ -22,6 +22,16 @@ import { ContextMenu, type ContextMenuItem } from "@/components/ui/context-menu"
 import { getRoomNotifyLevel, onNotifyPrefsChanged } from "@/lib/notifyPrefs";
 import type { ActiveSpace } from "@/state/store";
 import type { MatrixTransport } from "@/lib/matrix";
+import {
+	DndContext, PointerSensor, useSensor, useSensors,
+	closestCenter, DragOverlay,
+	type DragEndEvent, type DragStartEvent,
+} from "@dnd-kit/core";
+import {
+	SortableContext, useSortable, verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { orderKeyBetween } from "@/lib/orderKeys";
 
 export interface RoomListProps {
 	rooms: Room[];
@@ -80,7 +90,23 @@ export interface RoomListProps {
 	// smiley for a bot DM while the same conversation's chat
 	// header + profile show the bot robot — visibly inconsistent.
 	botMxids?: Set<UserId>;
+	// Admin drag-and-drop handler.  Called when an admin drags a room
+	// to a new position in the categorised list — either within its
+	// current category or into a different one.  Receives the moved
+	// room's id, the precomputed order key for its new position, and
+	// the destination category id (`null` for the implicit
+	// uncategorised bucket).  Optional — when omitted, rooms aren't
+	// draggable.  The caller is responsible for the PL gate (only
+	// admins should pass a handler).
+	onMoveRoom?(spaceId: RoomId, roomId: RoomId, order: string, category: string | null): Promise<void> | void;
 }
+
+// Power-level threshold for editing space-wide state events
+// (`m.space.child`, `chat.koven.space.categories`).  Matches the
+// state_default Synapse uses out of the box; Koven's createSpace
+// sets it to 100 so in practice founder-only on Koven-created
+// spaces.
+const ADMIN_PL_THRESHOLD = 50;
 
 export function RoomList({
 	rooms, spaces, activeSpace, activeRoomId, currentUserId,
@@ -88,6 +114,7 @@ export function RoomList({
 	collapsedRoomIds,
 	roomsLoaded, transport, accessToken,
 	onEditRoom, onOpenProfile, onRequestDeleteDm, botMxids,
+	onMoveRoom,
 }: RoomListProps) {
 	const activeSpaceObj = activeSpace?.kind === "space"
 		? spaces.find(s => s.id === activeSpace.id) ?? null
@@ -112,6 +139,15 @@ export function RoomList({
 	const flatDmList = activeSpace?.kind === "dms"
 		? joinedRooms.slice().sort((a, b) => recencyOf(b) - recencyOf(a))
 		: joinedRooms;
+	// Admin drag-and-drop gate: only PL ≥ 50 in the active space, and
+	// only when the parent supplied an `onMoveRoom` handler (App.tsx
+	// hands it down whenever a real space is active).  Non-admins see
+	// no drag affordances — drag handles are hidden + pointer events
+	// fall through to normal click.
+	const canDragRooms = activeSpace?.kind === "space"
+		&& !!activeSpaceObj
+		&& (activeSpaceObj.myPowerLevel ?? 0) >= ADMIN_PL_THRESHOLD
+		&& !!onMoveRoom;
 
 	// Showcase the active space's uploaded avatar at the top of the
 	// room list, parallel to MemberList's room-banner.  Skipped for
@@ -209,17 +245,19 @@ export function RoomList({
 					// admin-defined category with its header.
 					<RoomGroupedList
 						groups={groups}
+						spaceId={activeSpaceObj!.id}
 						activeRoomId={activeRoomId}
 						collapsedRoomIds={collapsedRoomIds}
 						currentUserId={currentUserId}
 						transport={transport ?? null}
 						accessToken={accessToken ?? null}
-						activeSpaceId={activeSpaceObj?.id ?? null}
 						onSelectRoom={onSelectRoom}
 						onEditRoom={onEditRoom}
 						onOpenProfile={onOpenProfile}
 						onRequestDeleteDm={onRequestDeleteDm}
 						botMxids={botMxids}
+						canDrag={canDragRooms}
+						onMoveRoom={onMoveRoom}
 					/>
 				) : (
 					// Flat list for DMs (already recency-sorted) and any
@@ -422,26 +460,36 @@ function DmPresenceDot({ presence }: { presence: Room["dmPresence"] }) {
 /** Renders a list of `RoomGroup`s — the uncategorised bucket at the
  * top with no header, then each admin-defined category with a
  * collapse/expand header.  Empty categories still render (header
- * only) so admins always have a drop target for the upcoming drag-
- * and-drop UI; rendering them with a "No channels yet" footnote
- * felt noisier than just leaving the header. */
+ * only) so admins always have a drop target via drag-and-drop.
+ *
+ * When `canDrag` is true (caller passed `onMoveRoom` AND viewer has
+ * the PL), every room becomes a sortable item.  dnd-kit manages a
+ * single `DndContext` across all categories so a room can be dragged
+ * BETWEEN categories with the same gesture (Discord pattern).
+ *
+ * For non-admins (or non-space tabs) we render without the DnD
+ * wrapper so pointer events fall through normally — clicks land on
+ * the row button, no drag activation distance to fight. */
 function RoomGroupedList({
-	groups, activeRoomId, collapsedRoomIds,
-	currentUserId, transport, accessToken, activeSpaceId,
+	groups, spaceId, activeRoomId, collapsedRoomIds,
+	currentUserId, transport, accessToken,
 	onSelectRoom, onEditRoom, onOpenProfile, onRequestDeleteDm, botMxids,
+	canDrag, onMoveRoom,
 }: {
 	groups: RoomGroup[];
+	spaceId: RoomId;
 	activeRoomId: RoomId | null;
 	collapsedRoomIds?: Set<string>;
 	currentUserId: UserId;
 	transport: MatrixTransport | null;
 	accessToken: string | null;
-	activeSpaceId: string | null;
 	onSelectRoom(roomId: RoomId): void;
 	onEditRoom?(roomId: RoomId): void;
 	onOpenProfile?(userId: UserId): void;
 	onRequestDeleteDm?(roomId: RoomId): void;
 	botMxids?: Set<UserId>;
+	canDrag: boolean;
+	onMoveRoom?(spaceId: RoomId, roomId: RoomId, order: string, category: string | null): Promise<void> | void;
 }) {
 	const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
 	const toggle = (id: string) => {
@@ -451,7 +499,86 @@ function RoomGroupedList({
 			return next;
 		});
 	};
-	return (
+
+	// Drag state — what's currently being dragged, used by DragOverlay
+	// to render a floating preview of the lifted row.
+	const [activeDragId, setActiveDragId] = useState<string | null>(null);
+	const activeDraggedRoom = useMemo(() => {
+		if (!activeDragId) return null;
+		for (const g of groups) {
+			const r = g.rooms.find(r => r.id === activeDragId);
+			if (r) return r;
+		}
+		return null;
+	}, [activeDragId, groups]);
+
+	// 6px activation distance — far enough that a normal click on a
+	// room row never accidentally starts a drag.  dnd-kit's default
+	// is 0 (instant), which fights every click.
+	const sensors = useSensors(useSensor(PointerSensor, {
+		activationConstraint: { distance: 6 },
+	}));
+
+	// Lookup: which group does each room id live in?  Used by the
+	// drop handler to figure out the destination category + the
+	// new neighbour anchors for the order-key computation.
+	const groupByRoomId = useMemo(() => {
+		const m = new Map<string, RoomGroup>();
+		for (const g of groups) {
+			for (const r of g.rooms) m.set(r.id, g);
+		}
+		return m;
+	}, [groups]);
+
+	function handleDragStart(e: DragStartEvent) {
+		setActiveDragId(String(e.active.id));
+	}
+
+	function handleDragEnd(e: DragEndEvent) {
+		setActiveDragId(null);
+		const { active, over } = e;
+		if (!over || !onMoveRoom) return;
+		const draggedId = String(active.id) as RoomId;
+		// `over.id` is either another room's id (drop on a sibling)
+		// or a group sentinel of the shape "group:<id>" (drop on a
+		// category header or empty body).  Translate either into a
+		// destination group + insertion index.
+		const overIdStr = String(over.id);
+		let destGroup: RoomGroup | undefined;
+		let destIdx: number;
+		if (overIdStr.startsWith("group:")) {
+			const groupKey = overIdStr.slice("group:".length);
+			destGroup = groups.find(g => (g.id ?? "__uncategorised__") === groupKey);
+			destIdx = destGroup?.rooms.length ?? 0;
+		} else {
+			const overRoomId = overIdStr;
+			destGroup = groupByRoomId.get(overRoomId);
+			if (!destGroup) return;
+			destIdx = destGroup.rooms.findIndex(r => r.id === overRoomId);
+		}
+		if (!destGroup) return;
+
+		// Compute the order key of the new slot.  Anchors are the rooms
+		// IMMEDIATELY before and after the insertion point in the
+		// destination group, EXCLUDING the dragged room itself (if it's
+		// already in this group at a different index).
+		const without = destGroup.rooms.filter(r => r.id !== draggedId);
+		const insertAt = Math.min(destIdx, without.length);
+		const before = without[insertAt - 1];
+		const after = without[insertAt];
+		const beforeKey = before?.spaceChildMeta?.[spaceId]?.order;
+		const afterKey = after?.spaceChildMeta?.[spaceId]?.order;
+		let newKey: string;
+		try {
+			newKey = orderKeyBetween(beforeKey, afterKey);
+		} catch (err) {
+			console.warn("order-key generation failed; keeping original order", err);
+			return;
+		}
+		void onMoveRoom(spaceId, draggedId, newKey, destGroup.id);
+	}
+
+	const body = (
 		<>
 			{groups.map((group) => {
 				const headerKey = group.id ?? "__uncategorised__";
@@ -472,29 +599,168 @@ function RoomGroupedList({
 								<span className="truncate">{group.name}</span>
 							</button>
 						)}
-						{isOpen && group.rooms.map(room => (
-							<RoomRow
-								key={room.id}
-								room={room}
-								active={room.id === activeRoomId}
-								collapsed={!!collapsedRoomIds?.has(room.id)}
-								onSelect={() => onSelectRoom(room.id)}
-								currentUserId={currentUserId}
-								transport={transport}
-								accessToken={accessToken}
-								activeSpaceId={activeSpaceId}
-								onEditRoom={onEditRoom}
-								onOpenProfile={onOpenProfile}
-								onRequestDeleteDm={onRequestDeleteDm}
-								isBotPeer={
-									room.kind === "dm" && !!room.dmUserId && !!botMxids?.has(room.dmUserId)
-								}
-							/>
-						))}
+						{isOpen && (
+							<CategoryDropZone
+								groupKey={headerKey}
+								rooms={group.rooms}
+								canDrag={canDrag}
+							>
+								{group.rooms.map(room => (
+									canDrag ? (
+										<DraggableRoomRow
+											key={room.id}
+											room={room}
+											active={room.id === activeRoomId}
+											collapsed={!!collapsedRoomIds?.has(room.id)}
+											onSelect={() => onSelectRoom(room.id)}
+											currentUserId={currentUserId}
+											transport={transport}
+											accessToken={accessToken}
+											activeSpaceId={spaceId}
+											onEditRoom={onEditRoom}
+											onOpenProfile={onOpenProfile}
+											onRequestDeleteDm={onRequestDeleteDm}
+											isBotPeer={
+												room.kind === "dm" && !!room.dmUserId && !!botMxids?.has(room.dmUserId)
+											}
+										/>
+									) : (
+										<RoomRow
+											key={room.id}
+											room={room}
+											active={room.id === activeRoomId}
+											collapsed={!!collapsedRoomIds?.has(room.id)}
+											onSelect={() => onSelectRoom(room.id)}
+											currentUserId={currentUserId}
+											transport={transport}
+											accessToken={accessToken}
+											activeSpaceId={spaceId}
+											onEditRoom={onEditRoom}
+											onOpenProfile={onOpenProfile}
+											onRequestDeleteDm={onRequestDeleteDm}
+											isBotPeer={
+												room.kind === "dm" && !!room.dmUserId && !!botMxids?.has(room.dmUserId)
+											}
+										/>
+									)
+								))}
+							</CategoryDropZone>
+						)}
 					</div>
 				);
 			})}
 		</>
+	);
+
+	if (!canDrag) return body;
+
+	return (
+		<DndContext
+			sensors={sensors}
+			collisionDetection={closestCenter}
+			onDragStart={handleDragStart}
+			onDragEnd={handleDragEnd}
+			onDragCancel={() => setActiveDragId(null)}
+		>
+			{body}
+			<DragOverlay>
+				{activeDraggedRoom ? (
+					<div className="opacity-90">
+						<RoomRow
+							room={activeDraggedRoom}
+							active={false}
+							collapsed={!!collapsedRoomIds?.has(activeDraggedRoom.id)}
+							onSelect={() => { /* preview-only */ }}
+							currentUserId={currentUserId}
+							transport={null}
+							accessToken={null}
+							activeSpaceId={spaceId}
+							isBotPeer={
+								activeDraggedRoom.kind === "dm" && !!activeDraggedRoom.dmUserId
+								&& !!botMxids?.has(activeDraggedRoom.dmUserId)
+							}
+						/>
+					</div>
+				) : null}
+			</DragOverlay>
+		</DndContext>
+	);
+}
+
+/** Wraps each category's room list in a SortableContext.  Even
+ * empty categories get one so they're a valid drop target when an
+ * admin drags a room into a freshly-created category. */
+function CategoryDropZone({
+	groupKey, rooms, canDrag, children,
+}: {
+	groupKey: string;
+	rooms: Room[];
+	canDrag: boolean;
+	children: React.ReactNode;
+}) {
+	const items = useMemo(() => {
+		const ids: string[] = rooms.map(r => r.id);
+		// Sentinel for the empty drop zone — without an item id in the
+		// SortableContext, an empty category can't accept drops at all.
+		// dnd-kit treats the sentinel as a drop target whose id we
+		// recognise in the parent's handleDragEnd via the "group:"
+		// prefix.
+		ids.push(`group:${groupKey}`);
+		return ids;
+	}, [rooms, groupKey]);
+	if (!canDrag) return <>{children}</>;
+	return (
+		<SortableContext items={items} strategy={verticalListSortingStrategy}>
+			{children}
+			{rooms.length === 0 && (
+				// Empty category gets a visible-but-discreet drop hint.
+				// `useSortable` on the group sentinel id makes it an
+				// addressable drop target; styling is intentionally
+				// minimal so it doesn't shout in the steady state.
+				<EmptyCategorySentinel groupKey={groupKey} />
+			)}
+		</SortableContext>
+	);
+}
+
+function EmptyCategorySentinel({ groupKey }: { groupKey: string }) {
+	const sortable = useSortable({ id: `group:${groupKey}` });
+	const style = {
+		transform: CSS.Transform.toString(sortable.transform),
+		transition: sortable.transition,
+	};
+	return (
+		<div
+			ref={sortable.setNodeRef}
+			style={style}
+			className="text-[10px] text-muted-foreground/60 italic px-2 py-2"
+		>
+			Drag a channel here
+		</div>
+	);
+}
+
+/** Sortable wrapper around `RoomRow`.  Sets up the dnd-kit drag
+ * source + provides a tiny drag handle on the left edge of the row
+ * (visible only on hover for admins).  The whole row is the drag
+ * target so admins can grab anywhere; the handle is just a visual
+ * affordance. */
+function DraggableRoomRow(props: React.ComponentProps<typeof RoomRow>) {
+	const sortable = useSortable({ id: props.room.id });
+	const style = {
+		transform: CSS.Transform.toString(sortable.transform),
+		transition: sortable.transition,
+		opacity: sortable.isDragging ? 0.4 : 1,
+	};
+	return (
+		<div
+			ref={sortable.setNodeRef}
+			style={style}
+			{...sortable.attributes}
+			{...sortable.listeners}
+		>
+			<RoomRow {...props} />
+		</div>
 	);
 }
 
