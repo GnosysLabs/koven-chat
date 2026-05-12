@@ -1,15 +1,12 @@
 // Translate raw Matrix events out of an /transactions push into the
-// rows our reputation calculation cares about.  Anything we don't
-// recognize is silently ignored — appservices receive every event
-// type the homeserver knows about, including invites, presence, etc.
+// rows the engine cares about.  Anything we don't recognize is
+// silently ignored — appservices receive every event type the
+// homeserver knows about, including invites, presence, etc.
 
 import {
 	claimFounderNumber,
-	createSuspension,
 	deletePost,
 	deleteReaction,
-	findPendingSuspensionByFlag,
-	getActiveSuspension,
 	insertFlag,
 	insertPost,
 	insertReaction,
@@ -17,7 +14,6 @@ import {
 	markFlagRetracted,
 	markRoomAsDm,
 	recordRoomCreation,
-	updateSuspensionStatus,
 	upsertRoomMember,
 } from "./db";
 import { fanOutMember, fanOutMessage } from "./notification-fanout";
@@ -207,30 +203,6 @@ function handleFlag(ev: MatrixEvent): void {
 		rationale: typeof c?.rationale === "string" ? (c.rationale as string) : undefined,
 		ts: ev.origin_server_ts,
 	});
-
-	// Floor-violation flags suspend the target's account immediately,
-	// pending admin review.  We need the target message's author to
-	// know who to suspend; lookupPostUser hits the posts index, which
-	// covers any non-encrypted message the engine has seen.  Encrypted
-	// rooms (DMs) won't have the message indexed, so floor-flagging
-	// inside an encrypted DM falls through silently — that's the right
-	// outcome since the engine couldn't moderate that room anyway.
-	if (category === "floor_violation") {
-		const targetUser = lookupPostUser(target);
-		if (!targetUser) return;
-		// One pending/confirmed suspension at a time per user.  If they
-		// already have one open, the new flag is captured in the flags
-		// table but doesn't create a duplicate suspension row.
-		if (getActiveSuspension(targetUser)) return;
-		createSuspension({
-			user_id: targetUser,
-			reason: "floor_violation",
-			flag_event_id: ev.event_id,
-			target_event_id: target,
-			target_room_id: ev.room_id,
-			flagger: ev.sender,
-		});
-	}
 }
 
 function handleMessage(ev: MatrixEvent): void {
@@ -268,8 +240,8 @@ function handleReaction(ev: MatrixEvent): void {
 	const targetUserId = lookupPostUser(rel.event_id);
 	if (!targetUserId) return;
 
-	// Don't credit self-reactions toward your own reputation.  Matrix
-	// allows it, but it would obviously be game-able.
+	// Don't credit self-reactions.  Matrix allows it, but it would
+	// obviously be game-able.
 	if (targetUserId === ev.sender) return;
 
 	insertReaction({
@@ -301,27 +273,5 @@ function handleRedaction(ev: MatrixEvent): void {
 	// and the retraction in chronological order.
 	deletePost(target);
 	deleteReaction(target);
-	const wasFlag = markFlagRetracted(target, ev.origin_server_ts, ev.sender);
-
-	// Floor-violation cascade: if this flag was the one that opened a
-	// pending suspension, auto-reverse the suspension now.  The
-	// flagger withdrew the accusation, so it's incoherent to keep
-	// the target paused waiting on admin review of an accusation
-	// that no longer exists.  We use a sentinel reviewer string
-	// (not a mxid) so the admin queue can render this as system-
-	// initiated rather than as some user's review action — same
-	// pattern as `purgeUserState` which uses "self_deactivate".
-	// Confirmed suspensions stay confirmed: once an admin signed
-	// off, retracting the flag doesn't undo that decision.
-	if (wasFlag) {
-		const pending = findPendingSuspensionByFlag(target);
-		if (pending) {
-			updateSuspensionStatus(
-				pending.id,
-				"reversed",
-				"self_retracted",
-				"auto-reversed: originating flag was retracted",
-			);
-		}
-	}
+	markFlagRetracted(target, ev.origin_server_ts, ev.sender);
 }

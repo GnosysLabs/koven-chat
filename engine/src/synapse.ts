@@ -1,6 +1,6 @@
 // Outbound HTTP to Synapse, scoped to the operations the engine bot
-// needs to perform: joining rooms it's seen activity in, and sending
-// `chat.koven.collapse.v1` events into them.
+// needs to perform: joining rooms it's seen activity in, redacting
+// events on behalf of users, admin actions, etc.
 //
 // All requests use appservice authentication: pass the as_token, plus
 // `?user_id=@engine:...` to act as the bot.  Synapse trusts the
@@ -60,8 +60,8 @@ function nextTxnId(): string {
 /**
  * Send a regular timeline event as the engine bot.  We use timeline
  * (not state) because state events default to power level 50 and the
- * bot joins rooms with power level 0; a normal event keeps the
- * collapse pipeline working without a power-level handshake.
+ * bot joins rooms with power level 0; a normal event lets us write
+ * without a power-level handshake.
  */
 export async function sendBotEvent(roomId: string, opts: SendOptions): Promise<string | null> {
 	const txnId = nextTxnId();
@@ -80,20 +80,14 @@ export async function sendBotEvent(roomId: string, opts: SendOptions): Promise<s
 }
 
 /**
- * Deactivate a Synapse account via the admin API.  Two callers,
- * both use `erase=true` so the deactivation is a real wipe:
+ * Deactivate a Synapse account via the admin API.  Callers use
+ * `erase=true` so the deactivation is a real wipe — the user can no
+ * longer authenticate, all rooms auto-kick them, and Synapse emits
+ * redactions for their content on a best-effort basis.
  *
- *   - Floor-violation suspension: the user's homeserver account is
- *     wiped, they can no longer authenticate, all rooms auto-kick
- *     them, and Synapse emits redactions for their content on a
- *     best-effort basis.  This is the real ban, it doesn't matter
- *     what client they try to use afterward.
- *
- *   - Bot deletion: same posture.  When a bot owner clicks Delete,
- *     they want every trace gone, not a half-deleted account whose
- *     past messages stay pinned to the rooms it had posted in.
- *     Synapse handles room departures + past-message redactions +
- *     profile wipe in one call.
+ * Used by bot deletion (owner clicks Delete) and admin moderation
+ * actions.  Synapse handles room departures + past-message
+ * redactions + profile wipe in one call.
  *
  * Requires the engine bot to have admin privileges on the homeserver.
  * The default Synapse setup grants admin to the user that owns the
@@ -709,13 +703,12 @@ export async function getJoinedMembers(roomId: string): Promise<string[]> {
  * Like `getJoinedMembers` but INCLUDES bots.  Use for cascades that
  * need to mirror a space's full participant set into child rooms:
  * the human-only filter on the regular helper is correct for
- * member-count UI / call participant lists / suspension targets,
- * but it silently dropped bots out of the "new child → existing
- * members" cascade so new rooms in a space were created without
- * the space's bots in them.  This variant still excludes the
- * engine appservice user because it isn't a participant (it
- * joins rooms on its own via joinRoomIfNeeded when it needs to
- * write moderation events).
+ * member-count UI / call participant lists, but it silently dropped
+ * bots out of the "new child → existing members" cascade so new
+ * rooms in a space were created without the space's bots in them.
+ * This variant still excludes the engine appservice user because it
+ * isn't a participant (it joins rooms on its own via joinRoomIfNeeded
+ * when it needs to write moderation events).
  */
 export async function getAllJoinedMembers(roomId: string): Promise<string[]> {
 	const path = `/_synapse/admin/v1/rooms/${encodeURIComponent(roomId)}/members`;
@@ -736,17 +729,11 @@ export async function getAllJoinedMembers(roomId: string): Promise<string[]> {
 
 /**
  * Read a room's current m.room.name + m.room.create from a single
- * /state pull.  Used by the room-flag pipeline:
- *   - `name` becomes `original_name` on the collapse row so an admin
- *     reverse can restore it verbatim.
- *   - `creator` is the user id we point a floor-violation suspension
- *     at — the room's founder is on the hook for what they named it.
- *
- * Returns null on any error (room not found, network glitch, etc.) so
- * callers don't have to special-case "couldn't read state."  Either
- * field may be undefined inside the result if the corresponding state
- * event is absent (a freshly-created room without an m.room.name yet,
- * for instance).
+ * /state pull.  Returns null on any error (room not found, network
+ * glitch, etc.) so callers don't have to special-case "couldn't read
+ * state."  Either field may be undefined inside the result if the
+ * corresponding state event is absent (a freshly-created room without
+ * an m.room.name yet, for instance).
  */
 export async function getRoomNameAndCreator(roomId: string): Promise<{
 	name?: string;
@@ -772,17 +759,6 @@ export async function getRoomNameAndCreator(roomId: string): Promise<{
  * `'public'` makes it discoverable in Explore + via federation peers'
  * directory queries; `'private'` removes it from both surfaces (the
  * room still works for existing members, just stops being broadcast).
- *
- * Used by the offensive-room-name pipeline:
- *   - On room collapse, the engine sets visibility='private' so the
- *     name stops being advertised — federation peers no longer see
- *     it in their Explore-equivalent, completing the local-SPA
- *     filter as a defense-in-depth pair.
- *   - On admin reverse, the engine sets visibility='public' to
- *     re-list the room.  Edge case: rooms that were already private
- *     before being flagged get re-published to public on reverse —
- *     acceptable for v1 since offensive-name attacks land on
- *     publicly-discoverable rooms by definition.
  *
  * Auth uses the admin token rather than the appservice as_token
  * because the directory endpoint is owned by the room (not appservice

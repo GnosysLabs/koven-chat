@@ -1,13 +1,16 @@
 // Entry point.  Initializes the DB (side-effect of importing it),
-// kicks off the recurring weight + collapse tick, and brings the HTTP
+// kicks off the recurring housekeeping tick, and brings the HTTP
 // server up.
+//
+// The consensus-moderation pipeline (reputation weights + auto-
+// collapse evaluation) used to run from this tick; both are gone
+// now.  Koven moderation is admin-driven via standard Matrix
+// kick/ban/redact, with flags surfacing to an admin review queue.
 
 import { config } from "./config";
 import "./db";
 import { startServer } from "./server";
-import { tick } from "./weight";
 import { gcMcpScratchDirs } from "./mcp/janitor";
-import { evaluateCollapses } from "./collapse";
 import { bootstrapAdminIfNeeded } from "./admins";
 import { startAllBots, stopAllBots } from "./bot_manager";
 import { adminListLocalUsersByRegistration, registerAppserviceUser } from "./synapse";
@@ -107,19 +110,11 @@ let mcpJanitorTickCount = 0;
 const MCP_JANITOR_INTERVAL_TICKS = 60; // run roughly every hour at default 1-min tick
 
 async function fullTick(): Promise<void> {
-	// Weights first so freshly-arrived flaggers have a current weight
-	// when the collapse evaluator reads from the weights table.
-	const users = tick();
 	// Promote the first user we've seen if no admin exists yet.  Cheap
-	// — early-returns once an admin is set.
+	// — early-returns once an admin is set.  The previous tick also
+	// ran weight recomputation + the consensus-collapse evaluator;
+	// both went away when Koven switched to admin-driven moderation.
 	bootstrapAdminIfNeeded();
-	const collapses = await evaluateCollapses().catch(err => {
-		console.error("engine: evaluateCollapses failed", err);
-		return 0;
-	});
-	if (users > 0 || collapses > 0) {
-		console.log(`engine: tick — ${users} users, ${collapses} new collapses`);
-	}
 	// MCP scratch-dir janitor.  Cheap (just stat + readdir) but no
 	// reason to run every minute — once an hour is plenty for a
 	// 30-day idle window.

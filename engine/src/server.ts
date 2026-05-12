@@ -3,8 +3,6 @@
 //   PUT  /_matrix/app/v1/transactions/{txnId}    — Synapse pushes events
 //   GET  /_matrix/app/v1/users/{userId}          — namespace ownership probe
 //   GET  /_matrix/app/v1/rooms/{roomAlias}       — namespace ownership probe
-//   GET  /api/weight/:userId                     — engine-native: reputation read
-//   GET  /api/weight                             — bulk read for the active client
 //   GET  /api/instance                           — public instance config (login branding)
 //   PUT  /api/instance                           — admin-only: update config
 //   POST /api/instance/login-bg                  — admin-only: upload login background
@@ -29,11 +27,8 @@ import {
 	bindEmailToUser,
 	bootstrapEmailBinding,
 	botMembershipActionsForRoom,
-	collapsesForRoom,
 	countBotsByOwner,
-	countFalseFlagsByUser,
 	createBot,
-	createSuspension,
 	deleteAllNotifications,
 	deleteBio,
 	deleteBot,
@@ -45,14 +40,10 @@ import {
 	markRoomNotificationsRead,
 	unreadNotificationCount,
 	deleteInstanceConfig,
-	deleteRoomCollapse,
 	flagsForRoom,
 	flagsForTarget,
-	getActiveSuspension,
 	getBotById,
 	getBotByMxid,
-	getRoomCollapse,
-	getSuspensionById,
 	grantAdmin,
 	insertFlag,
 	isAdmin,
@@ -64,8 +55,6 @@ import {
 	listAllBotMxids,
 	listAllBotsPublic,
 	listBotsByOwner,
-	listPendingSuspensions,
-	listRoomCollapses,
 	lookupUserByEmail,
 	markAuthCodeUsed,
 	markFlagRetracted,
@@ -78,13 +67,11 @@ import {
 	deleteBotMcpServer,
 	readBio,
 	readInstanceConfig,
-	readWeight,
 	recordBotMembershipAction,
 	recordSelfDeletion,
 	revokeAdmin,
 	selfDeletionsForRoom,
 	setBotAvatarMxc,
-	suspensionsForRoom,
 	addBotKnowledge,
 	listBotKnowledge,
 	deleteBotKnowledge,
@@ -103,7 +90,6 @@ import {
 	type OutboundHeader,
 	touchEmailLogin,
 	updateBot,
-	updateSuspensionStatus,
 	verifyAuthCode,
 	writeBio,
 	writeInstanceConfig,
@@ -114,7 +100,6 @@ import {
 	rememberCallParticipant,
 	forgetCallParticipantsByUserInRoom,
 } from "./db";
-import { evaluateCollapses } from "./collapse";
 import { deliverWebhook } from "./webhooks";
 import {
 	joinCall,
@@ -151,7 +136,6 @@ import {
 	repairRoomInvitePL,
 	redactEventAs,
 	setProfileAvatar,
-	setRoomDirectoryVisibility,
 	uploadMedia,
 } from "./synapse";
 import { openSecret, sealSecret } from "./secret_box";
@@ -159,18 +143,8 @@ import { sendLoginCodeEmail } from "./email";
 import { extractToken, whoami } from "./auth";
 import { extractKnowledgeText } from "./knowledge_extract";
 import { reconcileOne, startOne, stopOne } from "./bot_manager";
-import { WEIGHT_FLOOR } from "./weight";
 import { parseMcpConfig } from "./mcp/parse_config";
 import { pinStdioPackageVersion } from "./mcp/version_pin";
-
-const DAY_MS = 24 * 60 * 60 * 1000;
-// Auto-suspend the flagger if they've had this many floor flags
-// reversed by an admin within the rolling window, OR this many
-// total ever.  Hardcoded for v1; movable to instance_config later
-// if values prove contentious.
-const FALSE_FLAG_WINDOW_THRESHOLD = 2;
-const FALSE_FLAG_WINDOW_MS = 30 * DAY_MS;
-const FALSE_FLAG_TOTAL_THRESHOLD = 3;
 
 const seenTransactions = new Set<string>();
 
@@ -806,29 +780,6 @@ export function startServer(): void {
 				return new Response(null, { status: 204, headers: corsHeaders() });
 			}
 
-			// Engine-native API for clients.
-			if (req.method === "GET" && path === "/api/weight") {
-				const userId = url.searchParams.get("user_id");
-				if (!userId) return json({ error: "user_id required" }, { status: 400 });
-				const w = readWeight(userId);
-				// Unseen users get the canonical floor (0.5), not a 1.0
-				// fallback.  GOVERNANCE.md / weight.ts both define
-				// brand-new accounts as sitting at the floor; returning
-				// 1.0 here misclassified them in client-side renderers
-				// as "1 red tick / above-floor" until the periodic
-				// engine tick eventually wrote a real row, which left
-				// stale 1.0s in the SPA's reputation cache for up to a
-				// minute.
-				if (!w) return json({ user_id: userId, weight: WEIGHT_FLOOR, unseen: true });
-				return json(w);
-			}
-			if (req.method === "GET" && path.startsWith("/api/weight/")) {
-				const userId = decodeURIComponent(path.slice("/api/weight/".length));
-				const w = readWeight(userId);
-				if (!w) return json({ user_id: userId, weight: WEIGHT_FLOOR, unseen: true });
-				return json(w);
-			}
-
 			// Health check — handy for `curl localhost:9000/healthz`.
 			if (req.method === "GET" && path === "/healthz") {
 				return json({ ok: true });
@@ -1131,11 +1082,6 @@ export function startServer(): void {
 			// adds the room to the public-rooms directory.  Returns:
 			//
 			//   { allowed: true }                           — proceed
-			//   { allowed: false, reason: "rate_limited",    — deny
-			//     count, threshold, retry_after_sec }
-			//   { allowed: false, reason: "suspended" }     — deny
-			//   { allowed: false, reason: "low_reputation",  — deny
-			//     weight, threshold }
 			//
 			// Auth: the engine's appservice token (same secret already
 			// shared with Synapse via the appservice yaml).  Refused
@@ -1154,30 +1100,14 @@ export function startServer(): void {
 				if (!userId.startsWith("@") || !userId.includes(":")) {
 					return json({ errcode: "M_INVALID_PARAM", error: "user_id required" }, { status: 400 });
 				}
-				// Admins are always allowed to publish.  This also covers
-				// the engine's own bot user when the engine reverses a
-				// collapse via setRoomDirectoryVisibility — that call
-				// fires `user_may_publish_room` too.
+				// Admins are always allowed to publish.
 				if (isAdmin(userId)) {
 					return json({ allowed: true, reason: "admin" });
 				}
-				// Suspended accounts cannot publish anything new.  A
-				// confirmed-suspension user is essentially read-only on
-				// the platform; allowing them to elevate visibility on
-				// rooms they made before pausing would be incoherent.
-				if (getActiveSuspension(userId)) {
-					return json({ allowed: false, reason: "suspended" });
-				}
 
 				// Discord-style: no rate-limit on room or space creation.
-				// The earlier reputation-tiered cap was justified by fear
-				// of Explore being flooded with garbage rooms, but under
-				// the Discord-style invariant every room lives inside a
-				// space and never appears in Explore directly — only
-				// spaces do.  Creators still ramp up their reputation
-				// for OTHER actions; we just don't punish them for
-				// shaping their own server.  Admin + suspended checks
-				// (above) still apply.
+				// Every room lives inside a space and never appears in
+				// Explore directly — only spaces do.
 				return json({ allowed: true });
 			}
 
@@ -1229,16 +1159,15 @@ export function startServer(): void {
 
 			// Self-cleanup endpoint, called by the client right before
 			// it asks Synapse to deactivate the account.  Drops the
-			// user's reputation row and active suspension (if any).
-			// Audit-trail rows (flags they submitted, collapses they
-			// voted into, mod-log entries) are LEFT IN PLACE: those
+			// user's bio + email binding.  Audit-trail rows (flags they
+			// submitted, mod-log entries) are LEFT IN PLACE: those
 			// describe community decisions and shouldn't disappear
 			// just because the actor walked away.
 			//
 			// Refuses if the caller is the only admin: deactivating the
-			// last admin would make floor-violation review impossible.
-			// The client checks /api/instance/me's is_only_admin first,
-			// but we re-check here so a stale client can't bypass.
+			// last admin would make moderation impossible.  The client
+			// checks /api/instance/me's is_only_admin first, but we
+			// re-check here so a stale client can't bypass.
 			if (req.method === "POST" && path === "/api/me/purge") {
 				const userId = await whoami(extractToken(req));
 				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
@@ -1250,28 +1179,6 @@ export function startServer(): void {
 				}
 				purgeUserState(userId);
 				return json({ ok: true });
-			}
-
-			// ─── Suspension state ────────────────────────────────────
-			// "Is my account paused?" — the client polls this on boot
-			// and periodically.  When suspended, the UI gates compose,
-			// DM creation, and room/space creation.  Read remains
-			// allowed because Synapse doesn't kick the user out of
-			// rooms (deactivation only happens on admin-confirm).
-			if (req.method === "GET" && path === "/api/me/status") {
-				const userId = await whoami(extractToken(req));
-				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
-				const susp = getActiveSuspension(userId);
-				return json({
-					user_id: userId,
-					suspended: !!susp,
-					suspension: susp ? {
-						id: susp.id,
-						reason: susp.reason,
-						status: susp.status,
-						created_at: susp.created_at,
-					} : null,
-				});
 			}
 
 			// ─── Notifications (in-app bell) ─────────────────────────
@@ -1743,21 +1650,13 @@ export function startServer(): void {
 
 			// GET /api/me/publish-quota?kind=room|space
 			//
-			// Vestigial endpoint.  The Discord-style invariant removed
-			// the per-tier daily-creation cap (rooms now live inside a
-			// space's privacy boundary, so flooding Explore is no
-			// longer a vector — the only thing in Explore is spaces
-			// the founder explicitly published).  We keep the route
-			// alive so older client builds don't break, but it just
-			// returns `allowed: true` for everyone except suspended
-			// accounts.  Safe to delete once every shipped client is
-			// past the cutover.
+			// Vestigial endpoint kept alive so older client builds
+			// don't break.  Returns `allowed: true` unconditionally.
+			// Safe to delete once every shipped client is past the
+			// cutover.
 			if (req.method === "GET" && path === "/api/me/publish-quota") {
 				const userId = await whoami(extractToken(req));
 				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
-				if (getActiveSuspension(userId)) {
-					return json({ allowed: false, reason: "suspended" });
-				}
 				return json({ allowed: true });
 			}
 
@@ -2870,163 +2769,25 @@ export function startServer(): void {
 				});
 			}
 
-			// ─── Admin: floor-violation review queue ─────────────────
-			// Admin sees pending floor-violation suspensions and either
-			// confirms (deactivates the account) or reverses (lifts
-			// the suspension and triggers the false-flag punishment
-			// pipeline against the flagger).
-			if (req.method === "GET" && path === "/api/admin/floor-queue") {
-				const auth = await requireAdmin(req);
-				if (auth instanceof Response) return auth;
-				return json({ pending: listPendingSuspensions() });
-			}
-
-			// POST /api/admin/floor-queue/:id/confirm
-			//      /api/admin/floor-queue/:id/reverse   — lift + penalize flagger
-			//      /api/admin/floor-queue/:id/dismiss   — lift, no flagger penalty
-			//
-			// `reverse` and `dismiss` both lift the target user's
-			// suspension and undo any room-target collapse the
-			// original flag installed.  The difference is what they
-			// say about the flagger:
-			//   - reverse: "this was a false report, count it against
-			//              the flagger's auto-suspend threshold and
-			//              clamp their reputation."
-			//   - dismiss: "this report was a good-faith mistake, but
-			//              the admin disagreed.  No penalty."
-			// The mod log records WHICH action the admin chose so
-			// users can see who's distinguishing the cases.
+			// `/api/admin/floor-queue` (+ confirm / reverse / dismiss
+			// subroutes) used to live here.  All gone — the consensus
+			// pipeline that created suspension rows from floor-
+			// violation flags is gone, so there's nothing to confirm
+			// or reverse.  Admins act on flags directly now: see the
+			// `/api/admin/reports` endpoints + the kick / ban / redact
+			// primitives elsewhere in this file.
 			{
-				const m = path.match(/^\/api\/admin\/floor-queue\/(\d+)\/(confirm|reverse|dismiss)$/);
-				if (req.method === "POST" && m) {
-					const auth = await requireAdmin(req);
-					if (auth instanceof Response) return auth;
-					const id = Number(m[1]);
-					const action = m[2] as "confirm" | "reverse" | "dismiss";
-					const susp = getSuspensionById(id);
-					if (!susp) return json({ errcode: "M_NOT_FOUND" }, { status: 404 });
-					if (susp.status !== "pending") {
-						return json({ errcode: "M_INVALID_PARAM", error: "already reviewed" }, { status: 409 });
-					}
-					const body = (await req.json().catch(() => ({}))) as { note?: string };
-					const note = typeof body.note === "string" ? body.note.slice(0, 1000) : null;
-
-					if (action === "confirm") {
-						// Permanent ban via Synapse admin API.  We mark
-						// the suspension confirmed regardless of whether
-						// the deactivate call succeeds — failure here
-						// (admin token misconfigured, account already
-						// deactivated) shouldn't block the audit trail.
-						// Operator can re-run deactivate manually if needed.
-						const ok = await deactivateUser(susp.user_id);
-						updateSuspensionStatus(id, "confirmed", auth.userId, note);
-						return json({ id, status: "confirmed", deactivated: ok });
-					}
-
-					// Both reverse and dismiss lift the target user's
-					// suspension.  Status differs so the false-flag
-					// counter (which only counts `status='reversed'`
-					// rows) cleanly excludes good-faith dismissals.
-					const newStatus = action === "reverse" ? "reversed" : "dismissed";
-					updateSuspensionStatus(id, newStatus, auth.userId, note);
-
-					// Room-target floor cases (`target_room_id` set,
-					// `target_event_id` null) also installed a room
-					// collapse via the evaluator at flag time.  Undo
-					// that here so the SPA stops overriding the name
-					// and Explore re-includes the room.  Flag rows
-					// stay in place — append-only audit trail — only
-					// the collapse decision is reversed.  The Layer 4
-					// directory hide is undone in lockstep so the
-					// room is rediscoverable via federation again.
-					// Same restore behaviour for both reverse and
-					// dismiss — the only difference between them is
-					// the flagger penalty, not the target restoration.
-					let restoredRoom: string | null = null;
-					if (
-						susp.reason === "floor_violation" &&
-						susp.target_room_id &&
-						!susp.target_event_id
-					) {
-						const removed = deleteRoomCollapse(susp.target_room_id);
-						if (removed) {
-							restoredRoom = susp.target_room_id;
-							void setRoomDirectoryVisibility(susp.target_room_id, "public")
-								.catch(err => console.warn(
-									`engine: directory restore for ${susp.target_room_id} threw`, err,
-								));
-						}
-					}
-
-					// Dismiss path stops here — no flagger penalty,
-					// no auto-suspension cascade.  The admin signaled
-					// this was a good-faith report that turned out to
-					// be wrong, and we trust that judgment.
-					if (action === "dismiss") {
-						return json({
-							id,
-							status: "dismissed",
-							restored_room: restoredRoom,
-						});
-					}
-
-					// Reverse-only from here down: false-flag cascade.
-					// Skip for repeated_false_flag suspensions (the
-					// flagger field is null there) and for any
-					// suspension where we never recorded a flagger.
-					if (susp.reason !== "floor_violation" || !susp.flagger) {
-						return json({
-							id,
-							status: "reversed",
-							restored_room: restoredRoom,
-							auto_suspended_flagger: false,
-						});
-					}
-
-					// Counts include the row we just reversed.
-					const totalReversed = countFalseFlagsByUser(susp.flagger);
-					const recentReversed = countFalseFlagsByUser(
-						susp.flagger,
-						Date.now() - FALSE_FLAG_WINDOW_MS,
-					);
-					const tripped =
-						recentReversed >= FALSE_FLAG_WINDOW_THRESHOLD ||
-						totalReversed >= FALSE_FLAG_TOTAL_THRESHOLD;
-
-					let autoSuspended = false;
-					if (tripped && !getActiveSuspension(susp.flagger)) {
-						createSuspension({
-							user_id: susp.flagger,
-							reason: "repeated_false_floor_flags",
-							flag_event_id: null,
-							target_event_id: null,
-							target_room_id: null,
-							flagger: null,
-						});
-						autoSuspended = true;
-					}
-					return json({
-						id,
-						status: "reversed",
-						flagger: susp.flagger,
-						flagger_reversed_total: totalReversed,
-						flagger_reversed_30d: recentReversed,
-						auto_suspended_flagger: autoSuspended,
-						restored_room: restoredRoom,
-					});
+				const m = path.match(/^\/api\/admin\/floor-queue(\/.*)?$/);
+				if (m) {
+					return json({ errcode: "M_GONE", error: "floor queue is gone; use /api/admin/reports" }, { status: 410 });
 				}
 			}
 
-			// ─── Room-target flags (offensive room name pipeline) ──
+			// ─── Room-target flags (report a room) ─────────────────
 			//
 			// Submit / retract a flag against the room itself (its name +
-			// topic), as opposed to a single message inside it.  Same
-			// flag categories as message flags, same consensus pipeline:
-			// distinct flaggers above the room's dynamic threshold OR
-			// any single floor-violation flag fast-tracks the collapse
-			// (handled by collapse.ts).  Floor-violation room flags
-			// also create a suspension row pointing at the room's
-			// creator — they're the one accountable for the name.
+			// topic), as opposed to a single message inside it.  Recorded
+			// in the flags table; admins review via the report queue.
 			//
 			// Flagging happens over HTTP rather than as a Matrix wire
 			// event because room flags need to work from Explore (where
@@ -3043,11 +2804,6 @@ export function startServer(): void {
 					}
 					const userId = await whoami(extractToken(req));
 					if (!userId) return json({ errcode: "M_MISSING_TOKEN", error: "auth required" }, { status: 401 });
-					// Flagging while paused is incoherent — a paused user
-					// shouldn't be able to push the consensus pipeline.
-					if (getActiveSuspension(userId)) {
-						return json({ errcode: "M_FORBIDDEN", error: "account suspended" }, { status: 403 });
-					}
 
 					if (req.method === "POST") {
 						const body = (await req.json().catch(() => null)) as
@@ -3077,32 +2833,6 @@ export function startServer(): void {
 							ts,
 							target_kind: "room",
 						});
-
-						// Floor-violation: open a suspension on the room's
-						// creator pending admin review.  Same shape as the
-						// message-floor path so the existing /api/admin/
-						// floor-queue surfaces both kinds in one feed.
-						if (category === "floor_violation") {
-							const state = await getRoomNameAndCreator(roomId);
-							const creator = state?.creator;
-							if (creator && !getActiveSuspension(creator)) {
-								createSuspension({
-									user_id: creator,
-									reason: "floor_violation",
-									flag_event_id: flagEventId,
-									target_event_id: null,        // no message in scope
-									target_room_id: roomId,
-									flagger: userId,
-								});
-							}
-						}
-
-						// Kick the collapse evaluator immediately so users
-						// see the consensus action (when thresholds are
-						// already met) without waiting for the next tick.
-						void evaluateCollapses().catch(err =>
-							console.warn("engine: post-flag collapse eval failed", err),
-						);
 
 						return json({ ok: true, event_id: flagEventId, ts });
 					}
@@ -3453,17 +3183,6 @@ export function startServer(): void {
 				return json({ icons, nsfw });
 			}
 
-			// ─── Currently-collapsed rooms list (public) ───────────
-			// SPA polls this on Explore + room-list refresh to:
-			//   1. Hide collapsed rooms from the Explore directory.
-			//   2. Override room-name rendering to "Name Removed by
-			//      Community Review" everywhere (sidebar, header,
-			//      member sheets, etc.) without mutating m.room.name
-			//      itself — the original is preserved on the engine
-			//      so an admin reverse restores it verbatim.
-			// Public read: the override is meaningful only if every
-			// client honours it, so unauthenticated GET is fine and
-			// federation-friendly.
 			// GET /api/rooms/:roomId/parents
 			//
 			// Returns the parent space ids declared on a room via
@@ -3516,28 +3235,11 @@ export function startServer(): void {
 				}
 			}
 
-			if (req.method === "GET" && path === "/api/rooms/collapsed") {
-				const rows = listRoomCollapses();
-				return json({
-					rooms: rows.map(r => ({
-						room_id: r.room_id,
-						collapsed_at: r.collapsed_at,
-						categories: r.categories,
-						fast_track: r.fast_track,
-						// `original_name` is intentionally NOT included
-						// in the public response — surfacing the
-						// collapsed name via an unauthenticated endpoint
-						// would defeat the purpose of hiding it.  Admins
-						// see it via /api/admin/floor-queue when the
-						// case is open.
-					})),
-				});
-			}
-
 			// ─── Per-room public mod log ─────────────────────────────
-			// Aggregates flags + collapses + suspensions originating in
-			// the room into one chronological feed.  Public read; the
-			// whole point of the audit log is anyone can inspect it.
+			// Aggregates flags + self-deletions + bot-membership actions
+			// originating in the room into one chronological feed.
+			// Public read; the whole point of the audit log is anyone
+			// can inspect it.
 			{
 				const m = path.match(/^\/api\/rooms\/([^/]+)\/mod-log$/);
 				if (req.method === "GET" && m) {
@@ -3594,30 +3296,10 @@ export function startServer(): void {
 							});
 						}
 					}
-					const collapses = collapsesForRoom(roomId).map(c => ({
-						kind: "collapse" as const,
-						ts: c.collapsed_at,
-						target_event_id: c.target_event_id,
-						flagger_count: c.flagger_count,
-						weighted_score: c.weighted_score,
-						categories: c.categories,
-					}));
-					const suspensions = suspensionsForRoom(roomId).map(s => ({
-						kind: "suspension" as const,
-						ts: s.created_at,
-						id: s.id,
-						user_id: s.user_id,
-						reason: s.reason,
-						flagger: s.flagger,
-						target_event_id: s.target_event_id,
-						status: s.status,
-						reviewed_at: s.reviewed_at,
-						reviewed_by: s.reviewed_by,
-					}));
 					// Voluntary takedowns: trash-button deletions of own
-					// or owned-bot messages.  Distinct from collapses
-					// (community-driven) and from flag retractions
-					// (which target the FLAG event, not the message).
+					// or owned-bot messages.  Distinct from flag
+					// retractions (which target the FLAG event, not the
+					// message).
 					const selfDeletions = selfDeletionsForRoom(roomId).map(d => ({
 						kind: "self_deletion" as const,
 						ts: d.created_at,
@@ -3626,10 +3308,10 @@ export function startServer(): void {
 						target_sender: d.target_sender,
 						deletion_kind: d.kind,
 					}));
-					// Founder-initiated bot removals.  Carved out of the
-					// consensus model on principle (bots aren't people)
-					// but logged here so the room can see who silenced
-					// what.
+					// Founder-initiated bot removals.  Bots aren't people,
+					// so the room's founder is the right authority to
+					// silence them — logged here so the room can see who
+					// silenced what.
 					const botActions = botMembershipActionsForRoom(roomId).map(a => ({
 						kind: "bot_membership" as const,
 						ts: a.created_at,
@@ -3638,7 +3320,7 @@ export function startServer(): void {
 						action: a.action,
 						founder: a.founder,
 					}));
-					const merged = [...flags, ...collapses, ...suspensions, ...selfDeletions, ...botActions]
+					const merged = [...flags, ...selfDeletions, ...botActions]
 						.sort((a, b) => b.ts - a.ts);
 					return json({ room_id: roomId, entries: merged });
 				}
@@ -3953,10 +3635,8 @@ export function startServer(): void {
 			// one room.  The space-wide endpoint above is what the
 			// SPA wires to the profile-sheet button now.
 			//
-			// Carved out of the consensus model: bots aren't people,
-			// so a misbehaving / spammy bot doesn't get the same
-			// flag-and-vote protection humans do.  The room's
-			// founder can silence one unilaterally.
+			// Bots aren't people: the room's founder can silence a
+			// misbehaving / spammy bot unilaterally.
 			//
 			// Authorization is double-gated:
 			//   1. We resolve the room's m.room.create.creator and
@@ -3997,8 +3677,8 @@ export function startServer(): void {
 					const bot = getBotByMxid(botMxid);
 					if (!bot) {
 						// Refuse on non-bot targets even from the
-						// founder — humans go through the consensus
-						// flag flow, full stop.
+						// founder — humans must go through standard
+						// admin moderation, full stop.
 						return json({
 							errcode: "M_FORBIDDEN",
 							error: "target is not a bot on this instance",
@@ -4439,7 +4119,6 @@ export function startServer(): void {
 				if (seenTransactions.has(txnId)) return json({});
 				const body = (await req.json()) as { events?: MatrixEvent[] };
 				const events = body.events ?? [];
-				let sawFlag = false;
 				const newSpaceChildren: { spaceId: string; childId: string; sender: string }[] = [];
 				// Newly-joined-a-room events for LOCAL users.  We collect
 				// every `m.room.member` join for a user on our homeserver
@@ -4454,8 +4133,8 @@ export function startServer(): void {
 				// Rooms we just learned about and haven't joined yet.
 				// Eager-join @engine to every room with timeline
 				// activity so it's present whenever we later need to
-				// write into the room (collapses, censures, repair-
-				// permissions, etc.).  joinRoomIfNeeded is idempotent
+				// write into the room (repair-permissions, etc.).
+				// joinRoomIfNeeded is idempotent
 				// and DB-cached, so this is a no-op past the first
 				// event per room.  We collect the unique room ids
 				// here and fire the joins async after responding to
@@ -4464,7 +4143,6 @@ export function startServer(): void {
 				for (const ev of events) {
 					try {
 						applyEvent(ev);
-						if (ev.type === "chat.koven.flag.v1") sawFlag = true;
 						if (ev.room_id) roomsToJoin.add(ev.room_id);
 						// Capture m.space.child events with non-empty `via` for
 						// the post-loop auto-join cascade.  We do the actual
@@ -4506,15 +4184,8 @@ export function startServer(): void {
 						console.error("engine: applyEvent failed", err, ev);
 					}
 				}
-				// If this batch contained any flags, kick off a collapse
-				// evaluation immediately rather than waiting for the next
-				// tick.  Don't await — we want the transaction response
-				// to go back to Synapse promptly.
-				if (sawFlag) {
-					evaluateCollapses().catch(err => {
-						console.error("engine: post-transaction evaluateCollapses failed", err);
-					});
-				}
+				// Flags surface in the admin review queue; there is no
+				// engine-side evaluation here.
 				// Eager engine-bot joins.  Fire-and-forget so the
 				// transaction response goes back to Synapse without
 				// waiting on the join round-trips.  Public rooms

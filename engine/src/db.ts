@@ -1,15 +1,10 @@
 // SQLite schema for the engine.  Stores the raw observations the
-// reputation calculation needs — message posts and incoming reactions
-// — keyed so we can window them by recency.
+// engine needs — message posts, incoming reactions, flags, room
+// creations, etc.
 //
 // Idempotency is handled at write time via INSERT OR IGNORE on the
 // event_id PKs, so re-delivery of a transaction (Matrix retries until
 // it gets a 200) doesn't double-count anything.
-//
-// Why not just compute weight from a single events table?  Because
-// reactions and posts have different decay windows in the spec
-// (90d vs 30d) and storing them separately makes the windowed COUNTs
-// trivial.
 
 import { Database } from "bun:sqlite";
 import { config } from "./config";
@@ -50,25 +45,12 @@ db.exec(`
 	-- reaction, we look up which row to delete by the redacted event id.
 	-- Posts can be redacted too — same deal.
 
-	-- Latest computed weight per user — replaced on each tick so the
-	-- HTTP read path is a single point lookup, no recompute on read.
-	CREATE TABLE IF NOT EXISTS weights (
-		user_id        TEXT PRIMARY KEY,
-		weight         REAL NOT NULL,
-		posts_30d      INTEGER NOT NULL,
-		reactions_90d  INTEGER NOT NULL,
-		age_days       REAL NOT NULL,
-		computed_at    INTEGER NOT NULL
-	);
-
 	-- Per-flag rows — one per chat.koven.flag.v1 event observed.
-	-- Aggregated on each tick to detect collapse-threshold crossings.
-	-- Append-only: when a user retracts their flag (by redacting the
-	-- flag event), we mark the row with retracted_at + retracted_by
-	-- rather than deleting it.  The mod log surfaces both the
-	-- original flag and the retraction as distinct entries; the
-	-- consensus evaluator filters retracted rows out of its tally so
-	-- a withdrawn flag no longer contributes to the collapse score.
+	-- Surfaced to admins via the report queue.  Append-only: when a
+	-- user retracts their flag (by redacting the flag event), we mark
+	-- the row with retracted_at + retracted_by rather than deleting
+	-- it.  The mod log surfaces both the original flag and the
+	-- retraction as distinct entries.
 	CREATE TABLE IF NOT EXISTS flags (
 		event_id        TEXT PRIMARY KEY,
 		target_event_id TEXT NOT NULL,
@@ -81,17 +63,6 @@ db.exec(`
 		retracted_by    TEXT                 -- mxid that issued the retracting redaction
 	);
 	CREATE INDEX IF NOT EXISTS idx_flags_target ON flags(target_event_id);
-
-	-- Targets we've already collapsed.  Idempotency: once collapsed,
-	-- we don't re-emit the collapse event even if more flags arrive.
-	CREATE TABLE IF NOT EXISTS collapses (
-		target_event_id TEXT PRIMARY KEY,
-		room_id         TEXT NOT NULL,
-		collapsed_at    INTEGER NOT NULL,
-		flagger_count   INTEGER NOT NULL,
-		weighted_score  REAL NOT NULL,
-		categories      TEXT NOT NULL  -- JSON array of FlagCategory
-	);
 
 	-- Rooms the engine bot has joined.  Used to skip the join HTTP call
 	-- on every event after first contact.
@@ -229,32 +200,6 @@ db.exec(`
 		PRIMARY KEY (user_id, integration)
 	);
 
-	-- Floor-violation suspensions.  Created automatically when the
-	-- engine observes a chat.koven.flag.v1 with category=floor_violation
-	-- (target's account is paused pending admin review), or directly
-	-- by the engine itself for a flagger who's submitted too many
-	-- reversed floor flags.  Status transitions are append-only via
-	-- update of one row: pending → confirmed (account deactivated via
-	-- Synapse admin API) or pending → reversed (account restored, and
-	-- this row becomes a "false flag" record against the flagger).
-	CREATE TABLE IF NOT EXISTS suspensions (
-		id              INTEGER PRIMARY KEY AUTOINCREMENT,
-		user_id         TEXT NOT NULL,             -- the suspended account
-		reason          TEXT NOT NULL,             -- 'floor_violation' | 'repeated_false_floor_flags' | 'repeated_room_collapses'
-		flag_event_id   TEXT,                      -- the m.room flag event that triggered this (NULL for repeat-flagger cases)
-		target_event_id TEXT,                      -- the message that was floor-flagged
-		target_room_id  TEXT,                      -- where it happened
-		flagger         TEXT,                      -- who reported it (NULL when reason = 'repeated_false_floor_flags')
-		status          TEXT NOT NULL,             -- 'pending' | 'confirmed' | 'reversed' | 'dismissed'
-		created_at      INTEGER NOT NULL,
-		reviewed_at     INTEGER,                   -- admin action timestamp
-		reviewed_by     TEXT,                      -- admin user id who took the action
-		admin_note      TEXT                       -- optional context attached at review time
-	);
-	CREATE INDEX IF NOT EXISTS idx_suspensions_user_status ON suspensions(user_id, status);
-	CREATE INDEX IF NOT EXISTS idx_suspensions_status      ON suspensions(status);
-	CREATE INDEX IF NOT EXISTS idx_suspensions_flagger     ON suspensions(flagger, status);
-
 	-- Email-to-account binding for the email-code login flow.  One row
 	-- per (email, user_id) pair.  Email is unique: an address binds to
 	-- exactly one Matrix account on this homeserver.  No password is
@@ -328,17 +273,9 @@ db.exec(`
 
 	-- User-initiated message deletions.  Append-only audit row written
 	-- whenever someone redacts a message that they sent themselves, OR
-	-- redacts a bot's message because they own that bot.  Distinct from
-	-- the consensus collapse pipeline:
-	--
-	--   * collapses records community-driven hides: a flag tally
-	--     crossed the threshold, the engine emitted a public collapse
-	--     event, the message stays attributed to its sender.
-	--   * self_deletions records voluntary takedowns: the sender (or
-	--     a bot owner) chose to redact their own content.  No flags
-	--     were involved; the audit row exists purely so the room
-	--     mod log can show '@alice deleted a message' as a transparency
-	--     measure.
+	-- redacts a bot's message because they own that bot.  The audit
+	-- row exists purely so the room mod log can show '@alice deleted
+	-- a message' as a transparency measure.
 	--
 	-- We don't store the message text — Matrix already deleted it from
 	-- the federated history via the redaction event.  The mod log only
@@ -369,15 +306,12 @@ db.exec(`
 	CREATE INDEX IF NOT EXISTS idx_self_deletions_room_ts
 		ON self_deletions(room_id, created_at DESC);
 
-	-- Founder-initiated kick/ban of a bot member.  The free-speech
-	-- protections that block founders from unilaterally removing humans
-	-- (rooms enforce kick/ban PL=100 + the consensus pipeline routes
-	-- around it) deliberately don't extend to bots: bots aren't people,
+	-- Founder-initiated kick/ban of a bot member.  Bots aren't people,
 	-- a misbehaving bot doesn't have a free-speech interest, and the
-	-- room's founder is the right authority to silence it without
-	-- spinning up the consensus machinery.  This table records every
-	-- such action so the audit trail still exists — the founder can
-	-- do it without permission, but the room can see they did.
+	-- room's founder is the right authority to silence it.  This table
+	-- records every such action so the audit trail still exists — the
+	-- founder can do it without permission, but the room can see they
+	-- did.
 	CREATE TABLE IF NOT EXISTS bot_membership_actions (
 		id          INTEGER PRIMARY KEY AUTOINCREMENT,
 		room_id     TEXT NOT NULL,
@@ -666,27 +600,6 @@ ensureColumns("flags", [
 	// shape on the table without sentinels.
 	{ name: "target_kind", ddl: "target_kind TEXT NOT NULL DEFAULT 'message'" },
 ]);
-ensureColumns("collapses", [
-	// Same discriminator as flags.  `'room'` collapses are the
-	// per-room "name removed by community review" pipeline.
-	{ name: "target_kind", ddl: "target_kind TEXT NOT NULL DEFAULT 'message'" },
-	// For room collapses, the m.room.name value at the moment of
-	// collapse — kept so an admin reverse can restore the verbatim
-	// original name without a separate lookup against Synapse state.
-	// NULL for message collapses.
-	{ name: "original_name", ddl: "original_name TEXT" },
-	// Mirrors the wire field: true if a floor-violation flag triggered
-	// the collapse (single-flag fast-track), false if it crossed the
-	// distinct-flagger + weighted-score thresholds.
-	{ name: "fast_track", ddl: "fast_track INTEGER NOT NULL DEFAULT 0" },
-	// For room collapses, the room's creator (sender of m.room.create)
-	// at collapse time.  Stored so the engine can count "how many
-	// rooms this user has had collapsed against them" without a
-	// per-evaluation network round-trip back to Synapse — pattern
-	// signal for the auto-suspend accumulator.  NULL for message
-	// collapses + for legacy rows where we couldn't read state.
-	{ name: "creator_id", ddl: "creator_id TEXT" },
-]);
 ensureColumns("bots", [
 	// JSON array of trigger phrases — see CREATE TABLE comment above.
 	{ name: "triggers", ddl: "triggers TEXT NOT NULL DEFAULT '[]'" },
@@ -767,12 +680,12 @@ db.exec(`
 `);
 ensureColumns("room_creations", [
 	// Discriminate between regular chat rooms and Matrix spaces so the
-	// publish-rate gate can apply parallel ladders — same per-
-	// reputation-tier daily caps, but spaces and rooms each get their
-	// own counter so creating a server doesn't burn through your
-	// channel quota.  Default 'room' for legacy rows: existing entries
-	// from before this migration are treated as rooms (which they
-	// mostly were; the few miscategorized space rows age out in 24h).
+	// publish-rate gate can apply parallel ladders — spaces and rooms
+	// each get their own counter so creating a server doesn't burn
+	// through your channel quota.  Default 'room' for legacy rows:
+	// existing entries from before this migration are treated as rooms
+	// (which they mostly were; the few miscategorized space rows age
+	// out in 24h).
 	{ name: "kind", ddl: "kind TEXT NOT NULL DEFAULT 'room'" },
 ]);
 ensureColumns("bot_mcp_servers", [
@@ -808,15 +721,6 @@ export type ReactionRow = {
 	target_event_id: string;
 	key: string;
 	ts: number;
-};
-
-export type WeightRow = {
-	user_id: string;
-	weight: number;
-	posts_30d: number;
-	reactions_90d: number;
-	age_days: number;
-	computed_at: number;
 };
 
 const upsertUserStmt = db.prepare(`
@@ -869,73 +773,6 @@ export function deleteReaction(eventId: string): void {
 	deleteReactionStmt.run(eventId);
 }
 
-const writeWeightStmt = db.prepare(`
-	INSERT INTO weights (user_id, weight, posts_30d, reactions_90d, age_days, computed_at)
-	VALUES (?, ?, ?, ?, ?, ?)
-	ON CONFLICT(user_id) DO UPDATE SET
-		weight        = excluded.weight,
-		posts_30d     = excluded.posts_30d,
-		reactions_90d = excluded.reactions_90d,
-		age_days      = excluded.age_days,
-		computed_at   = excluded.computed_at
-`);
-
-export function writeWeight(row: WeightRow): void {
-	writeWeightStmt.run(
-		row.user_id,
-		row.weight,
-		row.posts_30d,
-		row.reactions_90d,
-		row.age_days,
-		row.computed_at,
-	);
-}
-
-const readWeightStmt = db.prepare(`SELECT * FROM weights WHERE user_id = ?`);
-export function readWeight(userId: string): WeightRow | null {
-	return (readWeightStmt.get(userId) as WeightRow | undefined) ?? null;
-}
-
-const readAllUserIdsStmt = db.prepare(`SELECT user_id, first_seen_ts FROM users`);
-export function readAllUsers(): { user_id: string; first_seen_ts: number }[] {
-	return readAllUserIdsStmt.all() as { user_id: string; first_seen_ts: number }[];
-}
-
-const countPostsStmt = db.prepare(`SELECT COUNT(*) as n FROM posts WHERE user_id = ? AND ts >= ?`);
-export function countPostsSince(userId: string, sinceTs: number): number {
-	const row = countPostsStmt.get(userId, sinceTs) as { n: number };
-	return row.n;
-}
-
-const countReactionsStmt = db.prepare(
-	`SELECT COUNT(*) as n FROM reactions WHERE target_user_id = ? AND ts >= ?`,
-);
-export function countReactionsSince(userId: string, sinceTs: number): number {
-	const row = countReactionsStmt.get(userId, sinceTs) as { n: number };
-	return row.n;
-}
-
-// Sum the current weights of users who have posted in this room
-// since a cutoff timestamp.  Drives the per-room dynamic collapse
-// threshold: rooms with a bigger active community require bigger
-// weighted consensus to collapse a message.
-//
-// "Active" is measured by post recency, not membership.  A 5000-
-// member room where only 30 people actually talk has the threshold
-// scaled to those 30, not the 5000 lurkers.  This keeps the gate
-// proportional to who's actually around to flag.
-const roomActiveWeightStmt = db.prepare(`
-	SELECT COALESCE(SUM(w.weight), 0) AS total
-	FROM weights w
-	WHERE w.user_id IN (
-		SELECT DISTINCT user_id FROM posts WHERE room_id = ? AND ts >= ?
-	)
-`);
-export function roomActiveWeight(roomId: string, sinceTs: number): number {
-	const row = roomActiveWeightStmt.get(roomId, sinceTs) as { total: number };
-	return row.total ?? 0;
-}
-
 // ─── Flags ───────────────────────────────────────────────────────────
 
 export type FlagTargetKind = "message" | "room";
@@ -956,9 +793,8 @@ export type FlagRow = {
 	// inserted before the room-flag pipeline existed.
 	target_kind?: FlagTargetKind;
 	// NULL until the flag is retracted (the flagger redacts the
-	// chat.koven.flag.v1 event).  Once set, the row is excluded from
-	// consensus calculations but kept on disk so the mod log can
-	// surface both the original flag and the retraction.
+	// chat.koven.flag.v1 event).  Once set, the row is kept on disk so
+	// the mod log can surface both the original flag and the retraction.
 	retracted_at?: number | null;
 	retracted_by?: string | null;
 };
@@ -994,45 +830,20 @@ export function insertFlag(row: FlagRow): void {
 
 /** Mark a flag as retracted.  Returns true if a non-retracted flag
  * row existed and was updated, false otherwise (no row, or already
- * retracted).  Caller uses the boolean to decide whether to fan out
- * follow-up effects (e.g. auto-cancelling a still-pending floor-
- * violation suspension). */
+ * retracted). */
 export function markFlagRetracted(eventId: string, retractedAt: number, retractedBy: string): boolean {
 	const r = markFlagRetractedStmt.run(retractedAt, retractedBy, eventId);
 	return r.changes > 0;
 }
 
-// Distinct flagger/category breakdown for one target — drives the
-// collapse threshold check.  Retracted flags are excluded: a
-// withdrawn flag shouldn't push the target past the collapse line.
+// Distinct flagger/category breakdown for one target.  Retracted
+// flags are excluded.  Surfaced to admins reviewing the report queue.
 const flagsForTargetStmt = db.prepare(`
 	SELECT flagger, category FROM flags
 	WHERE target_event_id = ? AND retracted_at IS NULL
 `);
 export function flagsForTarget(targetEventId: string): { flagger: string; category: string }[] {
 	return flagsForTargetStmt.all(targetEventId) as { flagger: string; category: string }[];
-}
-
-// All target_event_ids that currently have at least one active
-// (non-retracted) flag.  Used by the collapse evaluator to scan
-// candidates each tick — a target whose only flags are all
-// retracted shouldn't be re-evaluated.  `target_kind` is surfaced so
-// the evaluator knows whether to emit a message-collapse or a
-// room-collapse on threshold crossing.
-const flaggedTargetsStmt = db.prepare(`
-	SELECT DISTINCT target_event_id, room_id, target_kind FROM flags
-	WHERE retracted_at IS NULL
-`);
-export function listFlaggedTargets(): {
-	target_event_id: string;
-	room_id: string;
-	target_kind: FlagTargetKind;
-}[] {
-	return flaggedTargetsStmt.all() as Array<{
-		target_event_id: string;
-		room_id: string;
-		target_kind: FlagTargetKind;
-	}>;
 }
 
 // All flags submitted in a given room, newest first.  Drives the
@@ -1045,176 +856,7 @@ export function flagsForRoom(roomId: string): FlagRow[] {
 	return flagsForRoomStmt.all(roomId) as FlagRow[];
 }
 
-// ─── Collapses ───────────────────────────────────────────────────────
-
-export type CollapseRow = {
-	target_event_id: string;
-	room_id: string;
-	collapsed_at: number;
-	flagger_count: number;
-	weighted_score: number;
-	categories: string[];
-	// Discriminator: 'message' (default) or 'room'.  When 'room', the
-	// `target_event_id` and `room_id` columns hold the same value (the
-	// target room id).
-	target_kind?: FlagTargetKind;
-	// For target_kind='room' only: m.room.name verbatim at the moment
-	// of collapse, kept so admin reverse can restore it.  NULL/empty
-	// for message collapses.
-	original_name?: string | null;
-	// True if a floor-violation flag triggered the collapse (single-
-	// flag fast-track) rather than the distinct-flagger + weighted-
-	// score thresholds.  Mirrors the wire field.
-	fast_track?: boolean;
-	// For target_kind='room' only: the room's creator at collapse
-	// time.  Drives the per-creator collapse count for the
-	// auto-suspend accumulator — counted via countRoomCollapsesByCreator
-	// below.  NULL for message rows + for legacy rows where state
-	// wasn't readable.
-	creator_id?: string | null;
-};
-
-const insertCollapseStmt = db.prepare(`
-	INSERT OR IGNORE INTO collapses
-	(target_event_id, room_id, collapsed_at, flagger_count, weighted_score, categories, target_kind, original_name, fast_track, creator_id)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`);
-const hasCollapseStmt = db.prepare(`SELECT 1 FROM collapses WHERE target_event_id = ?`);
-
-export function insertCollapse(row: CollapseRow): void {
-	insertCollapseStmt.run(
-		row.target_event_id,
-		row.room_id,
-		row.collapsed_at,
-		row.flagger_count,
-		row.weighted_score,
-		JSON.stringify(row.categories),
-		row.target_kind ?? "message",
-		row.original_name ?? null,
-		row.fast_track ? 1 : 0,
-		row.creator_id ?? null,
-	);
-}
-
-// Count how many room-target collapses the engine has recorded
-// against `creatorId`.  When `sinceTs` is set, only collapses on or
-// after that timestamp count — used to pair a "rolling window" check
-// alongside the "ever" total in the auto-suspend accumulator.  Excludes
-// rows where creator_id is null (couldn't read state at collapse time)
-// so the count never inflates from data we're not sure about.
-const countRoomCollapsesByCreatorEverStmt = db.prepare(`
-	SELECT COUNT(*) AS n FROM collapses
-	WHERE target_kind = 'room' AND creator_id = ?
-`);
-const countRoomCollapsesByCreatorSinceStmt = db.prepare(`
-	SELECT COUNT(*) AS n FROM collapses
-	WHERE target_kind = 'room' AND creator_id = ? AND collapsed_at >= ?
-`);
-export function countRoomCollapsesByCreator(creatorId: string, sinceTs?: number): number {
-	const row = (sinceTs === undefined
-		? countRoomCollapsesByCreatorEverStmt.get(creatorId)
-		: countRoomCollapsesByCreatorSinceStmt.get(creatorId, sinceTs)
-	) as { n: number } | undefined;
-	return row?.n ?? 0;
-}
-
-export function hasCollapse(targetEventId: string): boolean {
-	return !!hasCollapseStmt.get(targetEventId);
-}
-
-// Collapses recorded in a given room, newest first.  Drives the
-// per-room mod log.
-const collapsesForRoomStmt = db.prepare(`
-	SELECT * FROM collapses WHERE room_id = ? ORDER BY collapsed_at DESC
-`);
-export function collapsesForRoom(roomId: string): CollapseRow[] {
-	const rows = collapsesForRoomStmt.all(roomId) as Array<
-		Omit<CollapseRow, "categories" | "fast_track"> & { categories: string; fast_track: number }
-	>;
-	return rows.map(r => ({
-		...r,
-		categories: JSON.parse(r.categories) as string[],
-		fast_track: !!r.fast_track,
-	}));
-}
-
-// All currently-collapsed rooms, for the public /api/rooms/collapsed
-// endpoint the SPA polls to override room-name display + filter
-// Explore.  Returns minimal columns so the response is cheap to
-// serialise even on instances with thousands of collapses.
-const listRoomCollapsesStmt = db.prepare(`
-	SELECT target_event_id AS room_id, original_name, collapsed_at, categories, fast_track
-	FROM collapses
-	WHERE target_kind = 'room'
-	ORDER BY collapsed_at DESC
-`);
-export function listRoomCollapses(): Array<{
-	room_id: string;
-	original_name: string | null;
-	collapsed_at: number;
-	categories: string[];
-	fast_track: boolean;
-}> {
-	const rows = listRoomCollapsesStmt.all() as Array<{
-		room_id: string;
-		original_name: string | null;
-		collapsed_at: number;
-		categories: string;
-		fast_track: number;
-	}>;
-	return rows.map(r => ({
-		...r,
-		categories: JSON.parse(r.categories) as string[],
-		fast_track: !!r.fast_track,
-	}));
-}
-
-// Lookup the original name + collapse metadata for a single room.
-// Used by the SPA when rendering a room the user is already a member
-// of (the room's m.room.name still holds the offensive original; we
-// override the display from this row).  Returns null if the room is
-// not currently collapsed.
-const getRoomCollapseStmt = db.prepare(`
-	SELECT target_event_id AS room_id, original_name, collapsed_at, categories, fast_track
-	FROM collapses
-	WHERE target_kind = 'room' AND target_event_id = ?
-`);
-export function getRoomCollapse(roomId: string): {
-	room_id: string;
-	original_name: string | null;
-	collapsed_at: number;
-	categories: string[];
-	fast_track: boolean;
-} | null {
-	const row = getRoomCollapseStmt.get(roomId) as {
-		room_id: string;
-		original_name: string | null;
-		collapsed_at: number;
-		categories: string;
-		fast_track: number;
-	} | undefined;
-	if (!row) return null;
-	return {
-		...row,
-		categories: JSON.parse(row.categories) as string[],
-		fast_track: !!row.fast_track,
-	};
-}
-
-// Remove a room collapse — used by the admin "reverse" flow when an
-// admin decides a floor-flagged room shouldn't have been hidden.  The
-// flag rows stay (audit trail); only the collapse decision is undone,
-// so the SPA stops overriding the display name and Explore re-includes
-// the room.  No-op if the row doesn't exist.
-const deleteRoomCollapseStmt = db.prepare(`
-	DELETE FROM collapses WHERE target_kind = 'room' AND target_event_id = ?
-`);
-export function deleteRoomCollapse(roomId: string): boolean {
-	const r = deleteRoomCollapseStmt.run(roomId);
-	return r.changes > 0;
-}
-
-// ─── Room creations (rate-limit + reputation gate) ──────────────────
+// ─── Room creations (rate-limit gate) ──────────────────────────────
 
 const recordRoomCreationStmt = db.prepare(`
 	INSERT OR IGNORE INTO room_creations (room_id, creator_id, created_at, visibility, kind)
@@ -2223,142 +1865,6 @@ export function listRoomsWithActiveCalls(): string[] {
 	return rows.map(r => r.room_id);
 }
 
-// ─── Suspensions ────────────────────────────────────────────────────
-
-export type SuspensionStatus = "pending" | "confirmed" | "reversed" | "dismissed";
-export type SuspensionReason =
-	| "floor_violation"
-	| "repeated_false_floor_flags"
-	| "repeated_room_collapses";
-
-export interface SuspensionRow {
-	id: number;
-	user_id: string;
-	reason: SuspensionReason;
-	flag_event_id: string | null;
-	target_event_id: string | null;
-	target_room_id: string | null;
-	flagger: string | null;
-	status: SuspensionStatus;
-	created_at: number;
-	reviewed_at: number | null;
-	reviewed_by: string | null;
-	admin_note: string | null;
-}
-
-const insertSuspensionStmt = db.prepare(`
-	INSERT INTO suspensions
-		(user_id, reason, flag_event_id, target_event_id, target_room_id, flagger, status, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
-`);
-
-const getActiveSuspensionStmt = db.prepare(`
-	SELECT * FROM suspensions
-	WHERE user_id = ? AND status IN ('pending', 'confirmed')
-	ORDER BY created_at DESC
-	LIMIT 1
-`);
-
-const listPendingSuspensionsStmt = db.prepare(`
-	SELECT * FROM suspensions
-	WHERE status = 'pending'
-	ORDER BY created_at ASC
-`);
-
-const getSuspensionByIdStmt = db.prepare(`
-	SELECT * FROM suspensions WHERE id = ?
-`);
-
-// Find the still-pending suspension (if any) created by a specific
-// chat.koven.flag.v1 event.  Used by the flag-retraction handler to
-// auto-reverse a suspension whose originating flag was withdrawn
-// before an admin reviewed it.
-const findPendingSuspensionByFlagStmt = db.prepare(`
-	SELECT * FROM suspensions
-	WHERE flag_event_id = ? AND status = 'pending'
-	LIMIT 1
-`);
-export function findPendingSuspensionByFlag(flagEventId: string): SuspensionRow | null {
-	return (findPendingSuspensionByFlagStmt.get(flagEventId) as SuspensionRow | undefined) ?? null;
-}
-
-const updateSuspensionStmt = db.prepare(`
-	UPDATE suspensions
-	SET status = ?, reviewed_at = ?, reviewed_by = ?, admin_note = ?
-	WHERE id = ?
-`);
-
-// Counts how many of this user's prior floor flags ended up reversed
-// by an admin — i.e. were determined to be false reports.  Used to
-// trigger the auto-suspension rule (2-in-30-days, 3-ever).
-const countFalseFlagsByUserStmt = db.prepare(`
-	SELECT COUNT(*) as n FROM suspensions
-	WHERE flagger = ? AND status = 'reversed' AND reason = 'floor_violation'
-`);
-const countFalseFlagsByUserSinceStmt = db.prepare(`
-	SELECT COUNT(*) as n FROM suspensions
-	WHERE flagger = ? AND status = 'reversed' AND reason = 'floor_violation' AND created_at >= ?
-`);
-
-export function createSuspension(opts: {
-	user_id: string;
-	reason: SuspensionReason;
-	flag_event_id?: string | null;
-	target_event_id?: string | null;
-	target_room_id?: string | null;
-	flagger?: string | null;
-}): number {
-	const r = insertSuspensionStmt.run(
-		opts.user_id,
-		opts.reason,
-		opts.flag_event_id ?? null,
-		opts.target_event_id ?? null,
-		opts.target_room_id ?? null,
-		opts.flagger ?? null,
-		Date.now(),
-	);
-	return Number(r.lastInsertRowid);
-}
-
-export function getActiveSuspension(userId: string): SuspensionRow | null {
-	return (getActiveSuspensionStmt.get(userId) as SuspensionRow | undefined) ?? null;
-}
-
-export function listPendingSuspensions(): SuspensionRow[] {
-	return listPendingSuspensionsStmt.all() as SuspensionRow[];
-}
-
-export function getSuspensionById(id: number): SuspensionRow | null {
-	return (getSuspensionByIdStmt.get(id) as SuspensionRow | undefined) ?? null;
-}
-
-export function updateSuspensionStatus(
-	id: number,
-	status: SuspensionStatus,
-	reviewedBy: string,
-	adminNote: string | null,
-): void {
-	updateSuspensionStmt.run(status, Date.now(), reviewedBy, adminNote, id);
-}
-
-export function countFalseFlagsByUser(userId: string, sinceMs?: number): number {
-	const row = sinceMs === undefined
-		? (countFalseFlagsByUserStmt.get(userId) as { n: number })
-		: (countFalseFlagsByUserSinceStmt.get(userId, sinceMs) as { n: number });
-	return row.n;
-}
-
-// All suspensions (any status) for a given room — used by the
-// per-room mod log to render its history.
-const suspensionsForRoomStmt = db.prepare(`
-	SELECT * FROM suspensions
-	WHERE target_room_id = ?
-	ORDER BY created_at DESC
-`);
-export function suspensionsForRoom(roomId: string): SuspensionRow[] {
-	return suspensionsForRoomStmt.all(roomId) as SuspensionRow[];
-}
-
 // ─── User-initiated message deletions ──────────────────────────────
 // Audit rows for the trash-button flow.  Row gets inserted from
 // /api/rooms/:room_id/messages/:event_id/delete after the engine has
@@ -2467,36 +1973,22 @@ export function botMembershipActionsForRoom(roomId: string): BotMembershipAction
 // Called from the /api/me/purge endpoint right before the client tells
 // Synapse to deactivate the account.  Drops:
 //
-//   - reputation row (their weight is no longer relevant)
 //   - bio (they wrote it; no audit purpose)
-//   - any active suspension on THEIR account (cancelled, since they're
-//     about to be deactivated themselves; no point holding a pending
-//     case against them, the admin queue would dangle)
+//   - email binding (so the address frees up for a future account)
 //
 // Intentionally LEAVES IN PLACE:
 //   - posts / reactions they authored (referenced by the timeline)
 //   - flags they submitted (part of the public mod log)
-//   - collapses they voted into (community decisions stand)
 //   - admin-grant rows (audit trail)
 //   - the `users` row itself (first-seen-ts is referenced by other
 //     joins; cheaper to leave a bare row than chase foreign keys)
 //
 // Synapse's `erase: true` on the deactivate call handles the actual
 // content scrubbing on the homeserver side: message bodies become
-// empty redactions there.  The engine cleanup here is just the
-// reputation + suspension half.
-
-const deleteWeightStmt = db.prepare(`DELETE FROM weights WHERE user_id = ?`);
-const cancelActiveSuspensionStmt = db.prepare(`
-	UPDATE suspensions
-	SET status = 'reversed', reviewed_at = ?, reviewed_by = 'self_deactivate', admin_note = 'auto-cancelled on self-deactivation'
-	WHERE user_id = ? AND status = 'pending'
-`);
+// empty redactions there.
 
 export function purgeUserState(userId: string): void {
-	deleteWeightStmt.run(userId);
 	deleteBioStmt.run(userId);
-	cancelActiveSuspensionStmt.run(Date.now(), userId);
 	deleteEmailBindingForUserStmt.run(userId);
 }
 
