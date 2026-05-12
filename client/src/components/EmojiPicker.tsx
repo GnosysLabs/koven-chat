@@ -29,12 +29,12 @@ interface EmojiSelection {
 	id?: string;
 }
 
-export function EmojiPicker({ value, onChange, trigger, align = "start" }: EmojiPickerProps) {
-	const [open, setOpen] = useState(false);
+/** Live-theme hook used by both the popover-wrapped and inline
+ * picker variants below.  Watches the documentElement's class /
+ * data-theme attributes (Settings → Appearance flips these) so the
+ * picker swaps palettes without a remount. */
+function useEmojiTheme(): "light" | "dark" {
 	const [theme, setTheme] = useState<"light" | "dark">(() => detectDarkTheme() ? "dark" : "light");
-
-	// Pick up live theme switches (Settings → Appearance) so the
-	// picker swaps palettes without a popover re-mount.
 	useEffect(() => {
 		const root = document.documentElement;
 		const observer = new MutationObserver(() => {
@@ -43,6 +43,39 @@ export function EmojiPicker({ value, onChange, trigger, align = "start" }: Emoji
 		observer.observe(root, { attributes: true, attributeFilter: ["class", "data-theme"] });
 		return () => observer.disconnect();
 	}, []);
+	return theme;
+}
+
+/** Inline emoji-mart picker without a popover wrapper.  Use this
+ * when the caller is already rendering its own popover / dialog /
+ * sheet and wants emoji-mart embedded inside.  See `EmojiPicker`
+ * for the standalone popover-trigger variant.
+ *
+ * `onPick` fires with the native unicode glyph (no spritesheet
+ * URL, just the codepoint sequence) so callers can drop it
+ * straight into chat text, room icons, reaction events, etc. */
+export function InlineEmojiPicker({
+	value,
+	onPick,
+}: {
+	value?: string;
+	onPick(emoji: string): void;
+}) {
+	const theme = useEmojiTheme();
+	return (
+		<EmojiMartWrapper
+			theme={theme}
+			value={value}
+			onPick={(selection) => {
+				if (selection?.native) onPick(selection.native);
+			}}
+		/>
+	);
+}
+
+export function EmojiPicker({ value, onChange, trigger, align = "start" }: EmojiPickerProps) {
+	const [open, setOpen] = useState(false);
+	const theme = useEmojiTheme();
 
 	function pick(selection: EmojiSelection) {
 		if (selection?.native) {
