@@ -11,10 +11,8 @@ import {
 	PopoverTrigger,
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-import { Flag, Plus, Reply, SmilePlus, Trash2 } from "lucide-react";
+import { Flag, Reply, SmilePlus, Trash2 } from "lucide-react";
 import { InlineEmojiPicker } from "@/components/EmojiPicker";
-
-const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "🔥", "😮", "🙏", "👀"];
 
 export interface MessageActionsProps {
 	onReact(emoji: string): void;
@@ -52,23 +50,12 @@ export function MessageActions({
 	const reactOpen = reactOpenProp ?? internalReactOpen;
 	const setReactOpen = onReactOpenChange ?? setInternalReactOpen;
 
-	// "quick" → 8-button row of common reactions (fast path).
-	// "full"  → emoji-mart picker with search + the entire Unicode
-	//           CLDR set.  Clicking the "+" tile flips the popover
-	//           into full mode; closing the popover resets back to
-	//           quick so the next open starts on the fast path.
-	const [pickerMode, setPickerMode] = useState<"quick" | "full">("quick");
-	const handleReactOpenChange = (open: boolean) => {
-		setReactOpen(open);
-		if (!open) setPickerMode("quick");
-	};
-
 	return (
 		<div className={cn(
 			"flex items-center gap-0.5 p-0.5 rounded-md border border-border bg-card shadow-sm",
 			className
 		)}>
-			<Popover open={reactOpen} onOpenChange={handleReactOpenChange}>
+			<Popover open={reactOpen} onOpenChange={setReactOpen}>
 				<PopoverTrigger asChild>
 					<button
 						type="button"
@@ -82,58 +69,26 @@ export function MessageActions({
 				<PopoverContent
 					side="top"
 					align="end"
-					className={cn(
-						// Quick mode is a tight 8-button row; full mode
-						// hands sizing entirely to emoji-mart so the
-						// picker can paint its own ~360x450 surface.
-						pickerMode === "quick" ? "w-auto p-1.5" : "p-0 border-0 bg-transparent shadow-none w-auto",
-					)}
+					// Hand sizing entirely to emoji-mart.  The picker
+					// paints its own ~360x450 surface with search,
+					// categories, and a Frequently-Used row at the
+					// top that effectively replaces the old hardcoded
+					// quick-react buttons (with the user's actual
+					// most-used emojis instead of our 8 guesses).
+					className="p-0 border-0 bg-transparent shadow-none w-auto"
 					sideOffset={4}
 					// Trap wheel + touch inside the picker so the
 					// surrounding chat pane doesn't intercept scroll.
-					onWheel={e => pickerMode === "full" && e.stopPropagation()}
-					onTouchMove={e => pickerMode === "full" && e.stopPropagation()}
+					onWheel={e => e.stopPropagation()}
+					onTouchMove={e => e.stopPropagation()}
 					collisionPadding={16}
 				>
-					{pickerMode === "quick" ? (
-						<div className="flex gap-0.5">
-							{QUICK_EMOJI.map(e => (
-								<button
-									key={e}
-									type="button"
-									onClick={() => {
-										onReact(e);
-										handleReactOpenChange(false);
-									}}
-									className="h-7 w-7 rounded hover:bg-accent text-base leading-none transition-colors"
-									title={`React with ${e}`}
-								>
-									{e}
-								</button>
-							))}
-							{/* Escape hatch to the full emoji-mart picker.
-							    Same popover (no flicker swap), just
-							    different content, which keeps focus
-							    inside the Radix portal so keyboard
-							    nav still works. */}
-							<button
-								type="button"
-								onClick={() => setPickerMode("full")}
-								className="h-7 w-7 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors flex items-center justify-center"
-								title="More emoji"
-								aria-label="More emoji"
-							>
-								<Plus className="h-3.5 w-3.5" />
-							</button>
-						</div>
-					) : (
-						<InlineEmojiPicker
-							onPick={(emoji) => {
-								onReact(emoji);
-								handleReactOpenChange(false);
-							}}
-						/>
-					)}
+					<InlineEmojiPicker
+						onPick={(emoji) => {
+							onReact(emoji);
+							setReactOpen(false);
+						}}
+					/>
 				</PopoverContent>
 			</Popover>
 
