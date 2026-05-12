@@ -18,14 +18,21 @@ use tauri_plugin_updater::UpdaterExt;
 #[cfg(target_os = "macos")]
 use tauri::menu::{AboutMetadataBuilder, MenuBuilder, SubmenuBuilder};
 
-// macOS rounded-corner plugin (cloudworxx/tauri-plugin-mac-rounded-corners).
-// Copied into ./plugins/mac_rounded_corners.rs by the npm postinstall hook;
-// exposes #[tauri::command]s the SPA invokes to set the NSWindow's
-// contentView layer corner radius via Cocoa.
-#[cfg(target_os = "macos")]
+// Per-OS native chrome plugins.
+//
+// `mac_rounded_corners` (cloudworxx/tauri-plugin-mac-rounded-corners,
+// copied into ./plugins/ by the npm postinstall hook): rounds the
+// NSWindow's contentView layer + hides the OS traffic lights so the
+// SPA can render its own at pixel-perfect coordinates.
+//
+// `windows_rounded_corners`: one DWM call to opt the chromeless
+// Windows main window into Win11's rounded-corner treatment.  No-op
+// on Win10.
 mod plugins;
 #[cfg(target_os = "macos")]
 use plugins::mac_rounded_corners;
+#[cfg(target_os = "windows")]
+use plugins::windows_rounded_corners;
 
 /// Close the floating splash window + reveal the (already styled)
 /// main window.  Invoked from the SPA's main.tsx after the
@@ -620,9 +627,10 @@ pub fn run() {
 				// with mutter and never re-reads it.
 				.visible(false);
 
-			// macOS: kill ALL native chrome and render our own title
-			// bar in the SPA.  Tauri's stock options (Visible /
-			// Transparent / Overlay) all have problems for our case:
+			// macOS + Windows: kill ALL native chrome and render our
+			// own title bar in the SPA.  Tauri's stock options
+			// (Visible / Transparent / Overlay) all have problems
+			// for our case:
 			//
 			//   * Visible — chunky opaque bar with "Koven" text
 			//     centered.  Doesn't blend with the dark gradient,
@@ -631,32 +639,43 @@ pub fn run() {
 			//     invisible.  Past attempts had drag-region issues
 			//     where clicks on the SPA's leftmost column ate the
 			//     drag handle.
-			//   * Overlay — no allocated chrome, traffic lights
-			//     overlay the SpaceBar.  Same drag problem.
+			//   * Overlay (macOS only) — no allocated chrome,
+			//     traffic lights overlay the SpaceBar.  Same drag
+			//     problem.
 			//
 			// `decorations(false)` removes everything: no traffic
-			// lights, no title bar, no chrome.  The SPA fills the
-			// entire window edge-to-edge.  We then render a custom
-			// `<DesktopTitleBar />` inside the SPA (see
-			// client/src/components/DesktopTitleBar.tsx) that:
+			// lights / title-bar buttons, no title bar, no chrome.
+			// The SPA fills the entire window edge-to-edge.  We
+			// then render a custom `<DesktopTitleBar />` inside the
+			// SPA (see client/src/components/DesktopTitleBar.tsx)
+			// that:
 			//
-			//   * Draws our own three macOS-style traffic-light
-			//     buttons that call window.close() / minimize() /
-			//     toggleMaximize() via the Tauri JS API,
-			//   * Carries `data-tauri-drag-region` on the strip
-			//     between the buttons and the right edge so window
-			//     drag still works the way users expect.
+			//   * Draws platform-appropriate window controls —
+			//     macOS-style traffic lights on the LEFT, Windows-
+			//     style min/max/close on the RIGHT — wired to
+			//     window.close() / minimize() / toggleMaximize()
+			//     via the Tauri JS API.
+			//   * Carries `data-tauri-drag-region` across the strip
+			//     between the controls and the rest of the chrome
+			//     so window drag still works the way users expect.
 			//
-			// Linux + Windows keep default decorations — they have
-			// less ugly defaults and the drag-region story would be
-			// more work for less benefit.  Custom chrome on Mac
-			// only.
-			#[cfg(target_os = "macos")]
+			// Trade-offs on Windows with `decorations(false)`: Aero
+			// Snap (drop-to-edge to dock) and Win11 Snap Layouts
+			// (hover the maximize button → snap popover) are lost
+			// until we restore them with manual WM_NCCALCSIZE /
+			// WM_NCHITTEST handling.  Acceptable starting point —
+			// the corner-rounding is the load-bearing visual.
+			//
+			// Linux keeps default decorations — distros vary too
+			// much (GTK CSD, KWin, mutter, etc.) for one custom
+			// chrome to look right everywhere.
+			#[cfg(any(target_os = "macos", target_os = "windows"))]
 			{
-				// Strip native chrome (no traffic lights from OS, no
-				// title bar).  Window stays OPAQUE — we'll round its
-				// corners via NSView.layer.cornerRadius in a post-
-				// build step.  `transparent(true)` is documented as
+				// Strip native chrome (no traffic lights / no system
+				// title-bar buttons).  Window stays OPAQUE on both
+				// platforms — we'll round its corners via Cocoa
+				// layer mask (macOS) or DWMWA_WINDOW_CORNER_PREFERENCE
+				// (Win11).  `transparent(true)` is documented as
 				// actively breaking layer corner-masking on macOS
 				// (Tauri issue #14165), so don't go there.
 				builder = builder.decorations(false);
@@ -884,10 +903,23 @@ pub fn run() {
 
 			// On macOS the main window stays hidden until the SPA
 			// invokes `reveal_app` — the splash window is what the
-			// user sees during boot.  On Linux / Windows there's no
-			// splash, so show the main window now (icon attached,
-			// content loading; native chrome handles the launch
-			// look).
+			// user sees during boot, and the corner-radius / hide-
+			// traffic-lights dance has to happen on the main HWND
+			// after Cocoa has finished laying it out.
+			//
+			// On Windows we apply DWM corner rounding BEFORE the
+			// first show() so the window's first frame paints with
+			// the rounded shape — otherwise the user briefly sees a
+			// sharp-cornered square before DWM masks it.  Win10
+			// silently no-ops (the API ignores unknown attrs), so
+			// the call is safe to make unconditionally.
+			//
+			// On Linux there's no splash and no native rounding to
+			// apply — just show.
+			#[cfg(target_os = "windows")]
+			{
+				windows_rounded_corners::apply_rounded_corners(&win);
+			}
 			#[cfg(not(target_os = "macos"))]
 			{
 				if let Err(err) = win.show() {

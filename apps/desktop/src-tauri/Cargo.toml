@@ -1,6 +1,6 @@
 [package]
 name = "koven-desktop"
-version = "0.20.8"
+version = "0.20.9"
 description = "Koven desktop shell — Tauri WebView wrapping client.koven.chat with native window chrome, OS-routed external links, and a minisign-signed in-app updater."
 authors = ["Gnosys Labs"]
 edition = "2021"
@@ -90,6 +90,16 @@ url = "2"
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"
 objc = "0.2.7"
+
+# Windows-only: one DWM call (DwmSetWindowAttribute with
+# DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND) to opt the
+# chromeless main window into Win11's rounded-corner treatment.
+# Silent no-op on Win10 — the API ignores attributes it doesn't
+# recognise.  We pull `windows-sys` rather than the higher-level
+# `windows` crate because we use exactly one function and one
+# constant; the raw bindings keep the dependency surface small.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
 
 # Smaller release binary — strip symbols, opt for size.  Tauri bundles
 # webview2 / webkit on the host so the binary itself is dominated by

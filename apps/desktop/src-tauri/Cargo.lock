@@ -2058,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "koven-desktop"
-version = "0.20.3"
+version = "0.20.8"
 dependencies = [
  "cocoa",
  "log",
@@ -2076,6 +2076,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "url",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

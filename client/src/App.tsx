@@ -2062,8 +2062,17 @@ export default function App() {
 	// hairline divider between chrome and content, and (c) hosts
 	// the centered Koven mark.  Login + early-return screens skip
 	// the gutter so their backgrounds extend edge-to-edge.
+	// The custom-chrome platforms — Mac + Windows now both ship
+	// without an OS title bar (decorations(false) in lib.rs).  The
+	// 40px chrome gutter below renders for both so window controls
+	// (traffic lights on mac, min/max/close on Windows) have a
+	// strip to live in and the Koven mark stays centred above the
+	// content.  Linux falls through to its native GTK/KDE chrome.
 	const isMacDesktop = typeof window !== "undefined"
 		&& (window as { __KOVEN_PLATFORM__?: string }).__KOVEN_PLATFORM__ === "macos";
+	const isWindowsDesktop = typeof window !== "undefined"
+		&& (window as { __KOVEN_PLATFORM__?: string }).__KOVEN_PLATFORM__ === "windows";
+	const isCustomChromeDesktop = isMacDesktop || isWindowsDesktop;
 
 	return (
 		<TransportContext.Provider value={transport}>
@@ -2118,7 +2127,7 @@ export default function App() {
 			    deliberately leaves the top empty so its background
 			    image extends edge-to-edge under the floating
 			    traffic lights. */}
-			{isMacDesktop && (
+			{isCustomChromeDesktop && (
 				<div className="h-10 shrink-0 border-b border-border flex items-center justify-center relative">
 					<img
 						src="/favicon.png"
