@@ -46,6 +46,7 @@ import { CreateSpaceSheet } from "@/components/CreateSpaceSheet";
 import { MobileBlockScreen } from "@/components/MobileBlockScreen";
 import { StartDmSheet } from "@/components/StartDmSheet";
 import { SpaceEditSheet } from "@/components/SpaceEditSheet";
+import { SpaceCategoriesSheet } from "@/components/SpaceCategoriesSheet";
 import { RoomEditSheet } from "@/components/RoomEditSheet";
 import { InviteSheet } from "@/components/InviteSheet";
 import { ProfileSheet } from "@/components/ProfileSheet";
@@ -314,6 +315,9 @@ export default function App() {
 	const [pendingInvitesOpen, setPendingInvitesOpen] = useState(false);
 	const [editingSpaceId, setEditingSpaceId] = useState<SpaceId | null>(null);
 	const [editingRoomId, setEditingRoomId] = useState<RoomId | null>(null);
+	// Categories editor — opened from the SpaceTile right-click menu
+	// or the SpaceLanding admin affordance.  Null when closed.
+	const [categoriesSpaceId, setCategoriesSpaceId] = useState<SpaceId | null>(null);
 	// Target of the active invite dialog: a room or space id.  Null
 	// keeps the dialog closed.
 	const [invitingRoomId, setInvitingRoomId] = useState<RoomId | null>(null);
@@ -2280,6 +2284,7 @@ export default function App() {
 					transport={transport}
 					accessToken={creds.access_token}
 					onEditSpace={(id) => setEditingSpaceId(id)}
+					onManageCategories={(id) => setCategoriesSpaceId(id)}
 					onAddRoomToSpace={(id) => {
 						dispatch({ type: "set_active_space", space: { kind: "space", id } });
 						void openCreateRoomGated();
@@ -2531,6 +2536,9 @@ export default function App() {
 						}}
 						onOpenSettings={() => {
 							if (state.activeSpace?.kind === "space") setEditingSpaceId(state.activeSpace.id);
+						}}
+						onManageCategories={() => {
+							if (state.activeSpace?.kind === "space") setCategoriesSpaceId(state.activeSpace.id);
 						}}
 						onStartDm={() => setStartDmOpen(true)}
 						onSelectRoom={navigateToRoom}
@@ -3013,6 +3021,14 @@ export default function App() {
 				onStarted={(roomId) => {
 					dispatch({ type: "set_active_space", space: { kind: "dms" } });
 					dispatch({ type: "set_active_room", roomId: roomId as RoomId });
+				}}
+			/>
+			<SpaceCategoriesSheet
+				space={categoriesSpaceId ? state.spaces.find(s => s.id === categoriesSpaceId) ?? null : null}
+				onClose={() => setCategoriesSpaceId(null)}
+				onSave={async (spaceId, categories) => {
+					if (!transport) throw new Error("Not connected");
+					await transport.setSpaceCategories(spaceId, categories);
 				}}
 			/>
 			<SpaceEditSheet

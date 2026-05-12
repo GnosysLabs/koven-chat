@@ -8,7 +8,7 @@
 import { useMemo } from "react";
 import { ContextMenu, type ContextMenuItem } from "@/components/ui/context-menu";
 import {
-	Bell, BellOff, Check, Copy, LogOut, Pencil, Plus, Trash2, User as UserIcon,
+	Bell, BellOff, Check, Copy, Folder, LogOut, Pencil, Plus, Trash2, User as UserIcon,
 } from "lucide-react";
 import type { Room, Space, UserId } from "@koven/shared";
 import {
@@ -29,6 +29,10 @@ export interface SpaceTileContextMenuProps {
 	onCopyId(): void;
 	onCopyInviteLink(): void;
 	onEdit?(): void;
+	// Founder/admin entry into the category manager — opens the
+	// SpaceCategoriesSheet for this space.  Optional (older callers
+	// without the wiring just skip the menu item).
+	onManageCategories?(): void;
 	onAddRoom?(): void;
 	onAddExistingRoom?(): void;
 	onLeave(): void;
@@ -39,7 +43,7 @@ export interface SpaceTileContextMenuProps {
 export function SpaceTileContextMenu({
 	x, y, space, currentUserId, accessToken, roomsInSpace,
 	onMarkAllRead, onCopyId, onCopyInviteLink,
-	onEdit, onAddRoom, onAddExistingRoom, onLeave, onDelete,
+	onEdit, onManageCategories, onAddRoom, onAddExistingRoom, onLeave, onDelete,
 	onClose,
 }: SpaceTileContextMenuProps) {
 	const isFounder = !!space.creatorId && space.creatorId === currentUserId;
@@ -125,6 +129,13 @@ export function SpaceTileContextMenu({
 					onClick: onEdit,
 				});
 			}
+			if (onManageCategories) {
+				out.push({
+					label: "Manage categories…",
+					icon: <Folder className="h-4 w-4" />,
+					onClick: onManageCategories,
+				});
+			}
 			if (onAddRoom) {
 				out.push({
 					label: "Create room here…",
@@ -164,7 +175,7 @@ export function SpaceTileContextMenu({
 	}, [
 		isFounder, roomsInSpace, accessToken,
 		onMarkAllRead, onCopyId, onCopyInviteLink,
-		onEdit, onAddRoom, onAddExistingRoom, onLeave, onDelete,
+		onEdit, onManageCategories, onAddRoom, onAddExistingRoom, onLeave, onDelete,
 	]);
 
 	void space;

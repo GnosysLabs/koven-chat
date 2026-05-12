@@ -69,6 +69,7 @@ export interface SpaceBarProps {
 	accessToken?: string | null;
 	onMarkAllReadInSpace?(spaceId: SpaceId): void;
 	onEditSpace?(spaceId: SpaceId): void;
+	onManageCategories?(spaceId: SpaceId): void;
 	onAddRoomToSpace?(spaceId: SpaceId): void;
 	onAddExistingRoomToSpace?(spaceId: SpaceId): void;
 	onLeaveSpace?(spaceId: SpaceId): void;
@@ -104,6 +105,7 @@ export function SpaceBar({
 	accessToken,
 	onMarkAllReadInSpace,
 	onEditSpace,
+	onManageCategories,
 	onAddRoomToSpace,
 	onAddExistingRoomToSpace,
 	onLeaveSpace,
@@ -310,6 +312,7 @@ export function SpaceBar({
 						void navigator.clipboard.writeText(buildInviteUrl(spaceCtxMenu.space.id));
 					}}
 					onEdit={onEditSpace ? () => onEditSpace(spaceCtxMenu.space.id) : undefined}
+					onManageCategories={onManageCategories ? () => onManageCategories(spaceCtxMenu.space.id) : undefined}
 					onAddRoom={onAddRoomToSpace ? () => onAddRoomToSpace(spaceCtxMenu.space.id) : undefined}
 					onAddExistingRoom={onAddExistingRoomToSpace ? () => onAddExistingRoomToSpace(spaceCtxMenu.space.id) : undefined}
 					onLeave={() => {

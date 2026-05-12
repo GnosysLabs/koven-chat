@@ -13,7 +13,7 @@
 import type { Room, RoomId, Space } from "@koven/shared";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { cn } from "@/lib/utils";
-import { Hash, Lock, Plus, Settings, User, UserPlus } from "lucide-react";
+import { Folder, Hash, Lock, Plus, Settings, User, UserPlus } from "lucide-react";
 
 // Which kind of "space" this landing is rendering for.  DMs and Rooms
 // are virtual (no real Matrix space behind them) and want different
@@ -32,12 +32,16 @@ export interface SpaceLandingProps {
 	onAddExistingRoom?(): void;
 	onInvite(): void;
 	onOpenSettings(): void;
+	// Admin entry into the category manager.  Optional — when omitted
+	// (or for non-real-space variants) the "Categories" button is
+	// hidden.
+	onManageCategories?(): void;
 	onSelectRoom(roomId: RoomId): void;
 	onStartDm?(): void;                // only used in the dms variant
 }
 
 export function SpaceLanding({
-	space, rooms, variant = "real", onAddRoom, onAddExistingRoom, onInvite, onOpenSettings, onSelectRoom, onStartDm,
+	space, rooms, variant = "real", onAddRoom, onAddExistingRoom, onInvite, onOpenSettings, onManageCategories, onSelectRoom, onStartDm,
 }: SpaceLandingProps) {
 	const heading = variant === "real" ? `Welcome to ${space.name}` : space.name;
 	// Founder / mod actions — gated on Matrix power level.  PL ≥ 50 is
@@ -103,6 +107,9 @@ export function SpaceLanding({
 									)}
 									{showInvite && (
 										<HeaderAction icon={<UserPlus className="h-4 w-4" />} label="Invite" onClick={onInvite} />
+									)}
+									{showSettings && onManageCategories && (
+										<HeaderAction icon={<Folder className="h-4 w-4" />} label="Categories" onClick={onManageCategories} />
 									)}
 									{showSettings && (
 										<HeaderAction icon={<Settings className="h-4 w-4" />} label="Settings" onClick={onOpenSettings} />
