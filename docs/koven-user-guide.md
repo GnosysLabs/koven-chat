@@ -6,9 +6,9 @@ A complete tour of Koven from a member's perspective. Skim it once when you sign
 
 ## What Koven is
 
-Koven is a chat platform built around one rule: **no individual can silence another for ordinary speech.** Anything that hides a message goes through community consensus, and every action is in a public, append-only log anyone in the room can read. No mod with a banhammer; no quiet bans.
+Koven is a chat platform that runs standard admin moderation — kicks, bans, message redactions, power-level changes — with one rule the protocol enforces: **every admin action lands in a public, append-only log readable by every member of the room.** Admins exist, they have real authority, and there is no secret moderation. If someone got banned, the log says so. If a message got redacted, the log says so.
 
-Under the hood it's Matrix (the open chat protocol) with a custom governance + product layer on top. You don't need to know what Matrix is to use Koven.
+Under the hood it's Matrix (the open chat protocol) with a thin product + audit layer on top. You don't need to know what Matrix is to use Koven.
 
 ---
 
@@ -52,7 +52,7 @@ Hit the `+` at the bottom of the sidebar.
 - **Visibility:**
   - **Public** — appears in Explore, anyone on the server can find and join.
   - **Private** — invite-only. Won't appear in directories.
-- **End-to-end encryption** — only available on **private** spaces. When on, every room created inside is automatically end-to-end encrypted, **permanently**. (Encryption can't be turned off later — Matrix limitation.) Comes with trade-offs: no moderation, no flagging, and activity inside doesn't build your reputation. Use for trusted-group / family / small-team installs where you want hard privacy.
+- **End-to-end encryption** — only available on **private** spaces. When on, every room created inside is automatically end-to-end encrypted, **permanently**. (Encryption can't be turned off later — Matrix limitation.) Trade-off: the engine can't read encrypted content, so the per-message report path is hidden. Standard admin moderation (kick / ban / role change) still works, because Synapse enforces power levels regardless of encryption. Use for trusted-group / family / small-team installs.
 - **Mark as NSFW** (if your settings show NSFW). Hides the space from Explore for users who haven't opted into NSFW content. **One-way** — can't be unmarked.
 
 After creation you're the **founder**. Founders can add rooms, edit the space's name/avatar/topic, kick or ban bots from rooms inside the space, and delete the space.
@@ -76,7 +76,7 @@ Right-click the space tile in the sidebar → **Leave space**. You drop from the
 
 ### Encrypted spaces
 
-If a space was created with end-to-end encryption, you'll see a green pill on the space's landing page: **"End-to-end encrypted · not moderated."** The trade-off is up front: messages there are private (engine can't read them) but **none of Koven's moderation tools work** — no flagging, no mod log, no reputation gain. The whole space is opaque to the platform. Use only for trusted groups.
+If a space was created with end-to-end encryption, you'll see a green pill on the space's landing page: **"End-to-end encrypted."** Messages there are private (engine can't read them), so the per-message report path is hidden. Standard admin moderation (kick / ban / role change) still works — those go through Synapse's PL system, which doesn't care whether the room is encrypted. The mod log records those admin actions even in encrypted rooms; it just doesn't index per-message reports there. Use only for trusted groups.
 
 ---
 
@@ -137,7 +137,7 @@ Hover your own message → pencil icon. Edited messages display an `(edited)` ta
 
 Hover your own message → trash icon → confirm. The message redacts everywhere in the room (every device, every client). The deletion lands in the room's public mod log as a **Self-deletion** entry (visible to anyone) — the text is gone, but the fact something was deleted is logged forever.
 
-You **cannot** delete other people's messages. That's the consensus pipeline's job (see Flagging).
+You **cannot** delete other people's messages directly. A user with PL ≥ 50 in the room (moderator or admin) can **redact** any message — see *Moderation* below.
 
 ### Reactions
 
@@ -174,7 +174,7 @@ The **Images icon** in the chat header opens the room's full media gallery — e
 
 Person icon in the sidebar → `+` → search a user → start.
 
-DMs are **always end-to-end encrypted at the chat layer**. The engine can't read DM messages, and the moderation pipeline doesn't apply (no flagging, no mod log).
+DMs are **always end-to-end encrypted at the chat layer**. The engine can't read DM messages, and there's no external moderation surface — DMs are between you and the other party. Use Block if you don't want their messages.
 
 DMs list order is currently fixed (most-recently-active first); there's no per-user pinning for DMs.
 
@@ -227,53 +227,53 @@ Leave the room while still in a call → a 240×135 floating panel appears in th
 
 ### Live calls and moderation
 
-Calls are a real-time/ephemeral surface — they don't go through Koven's consensus pipeline. There's no "kick from call" button (Koven's no-individual-silencing rule applies to calls too). If someone is being abusive in a call, the practical mitigation is for the rest of the participants to leave and reconvene without inviting the harasser.
+Calls are a real-time/ephemeral surface — there's no per-call moderation tooling. A user excluded from the room loses call access as a side effect (join is gated on room membership), so the way to remove someone from a call is to kick or ban them from the room. That happens through the standard moderation primitives — see *Moderation* below — and lands in the public mod log like any other admin action.
 
-If their behavior crosses into chat (a threatening text message), the standard floor-flag pipeline still applies.
+If the bad behavior crosses into chat (a threatening text message), report the message via the standard flow and an admin will pick it up.
 
 ---
 
-## Flagging (consensus moderation)
+## Reporting
 
-The thing that makes Koven different. **You don't trust mods; you trust the room.**
+If a message or room is breaking the rules, **send it to admins.** Reports are the member-facing side of moderation.
 
-### How it works
+### How to report a message
 
-- Any registered user can flag a message, a room name, or a space name with one of: **Off-topic**, **Spam**, **Harassment**, **Misinformation**, or **Floor violation** (the serious-stuff category for CSAM / credible threats / doxxing).
-- Flags accumulate. When a message reaches **3 distinct flaggers AND** a weighted-score threshold that scales with the room's active population (between 3.0 and 33.0), the message **collapses** — folds behind a "show" link with a placeholder showing the cited categories and the score.
-- A collapsed message is **recoverable** by anyone in the room (click "show"). Collapse is a soft signal, not deletion.
-- Every flag, every collapse, lands in the room's public mod log.
+Hover a message → flag icon → pick a category (Off-topic, Spam, Harassment, Misinformation, Floor violation for serious stuff like CSAM / credible threats / doxxing). Add an optional rationale to give the admin context.
 
-### Floor violations
+### How to report a room or space
 
-The **Floor violation** category is special — it skips the vote and goes straight to admin review:
-
-1. The message is **immediately** collapsed into a non-revealable "Hidden, flagged as serious violation" placeholder. (Unlike normal collapses, no click-to-view.)
-2. The author is placed in **suspension** — their composer is disabled and a banner explains why. They can still read but can't post new messages, until an admin reviews the case.
-3. An admin reviews and picks one of three outcomes:
-   - **Confirm** → the author's account is permanently deactivated.
-   - **Dismiss** → suspension lifts. No penalty for the flagger (good-faith mistake).
-   - **Mark as false report** → suspension lifts AND the flagger eats a 30-day reputation penalty + possible auto-suspension if they have repeat false reports.
-
-The admin's choice is recorded in the public mod log.
-
-A confirmation dialog appears before submitting a Floor violation — Koven wants to be sure you mean it.
-
-### How to flag a message
-
-Hover a message → flag icon. Pick a category. Add an optional rationale.
-
-### How to flag a room or space
-
-In a room: flag icon in the chat header (right of the mod log icon).
+In a room: flag icon in the chat header, right of the public mod log icon.
 In Explore: flag icon on the space's tile.
 
-### Where flags don't apply
+### What happens after you report
 
-- **Encrypted rooms.** The engine can't read messages there, so flagging would be useless. The UI hides the flag affordance entirely.
-- **DMs.** No consensus surface.
-- **Federated rooms.** Same limitation — the engine doesn't see content from other servers.
-- **Live calls.** Real-time audio/video isn't a moderation surface.
+A report does two things, immediately:
+
+1. **Lands in the per-room public mod log** as a flag row, with your mxid attached. The room can see that a report was filed.
+2. **Surfaces to instance admins** in their Reports sheet (the shield icon in the SpaceBar, admin-only).
+
+An admin triages the report by either acting on it (kick / ban / redact / change PL — see *Moderation* below) and then marking the report **resolved**, or by **dismissing** it if no action is warranted. Both outcomes land in the public mod log alongside the original report.
+
+### How moderation works
+
+Koven runs **standard Matrix admin moderation**, gated by power levels:
+
+- **Members** (PL 0) read, post, react, and report.
+- **Moderators** (PL 50) can additionally kick, ban / unban, redact any message, and change a user's PL up to their own.
+- **Admins** (PL 100) can do everything moderators can plus promote / demote others (within the standard PL-≤-own rule) and edit room state.
+
+A space's founder lands at PL 100 automatically. They can promote trusted members up to PL 50 or 100 from the member's profile sheet. Demotion uses the same control with a lower value.
+
+Every kick, ban, unban, redaction, and role change is logged in the room's public mod log forever. There is no admin override for that — sunlight is the check on admin power.
+
+The full moderation model — primitives, reversibility, the report-to-action flow, the federation rationale — is in [`MODERATION.md`](MODERATION.md).
+
+### Where reports don't apply
+
+- **Encrypted rooms.** The engine can't read messages there, so the per-message report affordance is hidden. Standard admin moderation (kick / ban / role change) still works — those go through Synapse's PL enforcement and don't need engine visibility.
+- **DMs.** No external moderation surface. Use Block (below) if a user is bothering you.
+- **Live calls.** Real-time audio/video isn't a moderation surface. To remove someone from a call, kick or ban them from the room — call membership is gated on room membership.
 
 ---
 
@@ -283,53 +283,18 @@ Every room has a public, append-only mod log. Open it from the **Scale icon** in
 
 Entries include:
 
-- Every flag submitted (and any retractions).
-- Every message collapse (with flagger count + weighted score that triggered it).
+- Every report submitted (and any retractions of a report).
 - Every self-deletion (sender deleted their own message, or a bot's owner deleted the bot's message).
-- Every floor-violation suspension (with status: pending / confirmed / dismissed / reversed, and the reviewing admin's name).
 - Every bot kick or ban a founder did (with the bot's mxid, its owner, and the founder).
+- Every admin moderation action — kicks, bans, unbans, message redactions, and role changes (promotions or demotions). The actor's mxid and any optional reason are visible.
 
-The log is **never edited** and **never deleted**. The only check on collective moderation power is sunlight.
-
----
-
-## Reputation
-
-Each user has a **weight** — a number from 0.5 to 5.0 — that determines how much their flags count.
-
-```
-raw_weight = sqrt(account_age_days × posts_30d × reactions_received_90d)
-weight     = clamp(raw_weight, 0.5, 5.0)  with an age-gated ceiling
-```
-
-You climb the ladder over time:
-
-| Tier | Weight | Color  | Minimum age |
-|------|--------|--------|-------------|
-| 0    | 0.5    | empty  | 0 (instant) |
-| 1    | 1.0+   | red    | 24 hours    |
-| 2    | 2.0+   | orange | 7 days      |
-| 3    | 3.0+   | yellow | 30 days     |
-| 4    | 4.0+   | green  | 60 days     |
-| 5    | 5.0    | green  | 90 days     |
-
-Reputation **decays**. The 30-day and 90-day windows are rolling; if you go silent your weight drifts down. No permanent advantages from old activity.
-
-Activity in **encrypted rooms** doesn't count — the engine can't index what it can't read. The Live-bar tooltip in DMs and the green pill on encrypted spaces both spell this out.
-
-Where you see your reputation: profile sheet, next to your name in messages (the dots = filled ticks).
-
-### False-flag penalty
-
-If an admin marks one of your floor-violation flags as a **false report** (not a good-faith mistake — actively weaponized), your weight is clamped to 0.5 for 30 days regardless of activity. Two such marks in 30 days, or three ever, automatically open a suspension case on you.
-
-The deterrent is calibrated: honest mistakes (dismiss path) carry no penalty. Weaponizing the floor flag does.
+The log is **never edited** and **never deleted**. There is no admin "redact a mod log row" affordance — the row that records a redaction is itself unredactable. That's the platform's promise: admins have real power, and every use of it stays visible to the room forever.
 
 ---
 
 ## Blocking users
 
-Independent of consensus moderation — it's a personal filter.
+Block is a personal filter, independent of moderation. Different gesture, different scope.
 
 In the user's profile sheet → **Block**. Or right-click a DM → **Block this user**.
 
@@ -338,7 +303,7 @@ Blocking:
 - Hides their messages from your timeline going forward.
 - Stops them from DMing you.
 - Syncs across your devices.
-- Does **not** count as a flag, does **not** affect anyone else's view, does **not** affect their reputation.
+- Is invisible to anyone else. It does **not** count as a report and does **not** affect anyone else's view of the user or their messages.
 
 Manage the list in Settings → Account → Blocked users.
 
@@ -348,7 +313,7 @@ Manage the list in Settings → Account → Blocked users.
 
 Click anyone's name or avatar → profile sheet.
 
-For others: display name, avatar, bio, reputation tier, Koven account age, optional founder number (early users get a perma-displayed ID). Buttons: Start DM, Block, View their owned bots.
+For others: display name, avatar, bio, Koven account age, optional founder number (early users get a perma-displayed ID). Buttons: Start DM, Block, View their owned bots. If you're a PL-≥-50 moderator in the current room, you'll also see Kick / Ban / Change power level controls; if you're PL 100 you can promote up to PL 100.
 
 For yourself: same plus Edit (display name, avatar, bio).
 
@@ -411,7 +376,8 @@ Gear icon at the bottom of the sidebar.
 - **Account** — display name, avatar, bio, sessions list (devices signed in), blocked users, delete account.
 - **Bots** — your bot roster (see the bot guide).
 - **Instance** — branding (admin-only): server name, login background, logo, default space new users are auto-joined to.
-- **Pending review** (admin-only) — the floor-violation queue.
+
+Admins also see a **shield icon** in the SpaceBar, above Settings — that's the Reports queue (member-submitted reports awaiting triage).
 
 ### Sessions
 
@@ -423,13 +389,13 @@ Settings → Account → Delete account (at the bottom, in red).
 
 Flow:
 
-1. Engine clears your reputation row and any pending suspension on you.
+1. Engine drops anything personal to you (bot rows you own get cleaned up, mod-log rows that reference you as the *actor* of an admin action stay — those describe what was done in the room, not who you are).
 2. Synapse retires the username (it can never be re-registered), invalidates every session token, and redacts every message you've ever sent.
-3. Posts/flags/collapses/mod-log entries that describe **community decisions** stay — those aren't personal data. The audit trail stays intact.
+3. Mod-log entries that describe **moderation history** stay — those aren't personal data. The audit trail stays intact.
 
 Irreversible. The username is gone, message contents are scrubbed, no undo. DMs vanish on your side; the other party retains their copy with your messages now showing as redactions.
 
-If you're the only admin on the instance, deletion is refused server-side until another admin is promoted (so floor-violation review doesn't become impossible).
+If you're the only admin on the instance, deletion is refused server-side until another admin is promoted (so the Reports queue doesn't become unattended).
 
 ---
 
@@ -437,19 +403,19 @@ If you're the only admin on the instance, deletion is refused server-side until 
 
 Koven layers four privacy modes:
 
-| Layer                         | E2EE? | Moderated? | Engine sees content? |
-|-------------------------------|-------|------------|----------------------|
-| Public space + public room    | No    | Yes        | Yes                  |
-| Private space + private room  | No    | Yes        | Yes                  |
-| Private + encrypted space     | Yes   | No         | No                   |
-| DM (chat layer)               | Yes   | No         | No                   |
-| DM (call media)               | No    | n/a        | No (Cloudflare sees) |
+| Layer                         | E2EE? | Reports work? | Admin mod works? | Engine sees content? |
+|-------------------------------|-------|---------------|------------------|----------------------|
+| Public space + public room    | No    | Yes           | Yes              | Yes                  |
+| Private space + private room  | No    | Yes           | Yes              | Yes                  |
+| Private + encrypted space     | Yes   | No (hidden)   | Yes (kick/ban/PL only — no content reports) | No |
+| DM (chat layer)               | Yes   | n/a           | n/a              | No                   |
+| DM (call media)               | No    | n/a           | n/a              | No (Cloudflare sees) |
 
-- **Public rooms cannot be encrypted.** Public + invisible-to-engine would silence the moderation system entirely.
+- **Public rooms cannot be encrypted.** Public + invisible-to-engine would silence the per-message report path entirely.
 - **DM chat is always E2EE.** No opt-out.
 - **DM call media is NOT E2EE.** Audio + video stream through Cloudflare's edge.
 - **Encrypted spaces are permanent.** Matrix can't disable encryption once on.
-- **Encrypted rooms have no flag UI, no mod log entries for content, and don't build reputation.**
+- **In encrypted rooms** the per-message Report affordance is hidden, but Synapse-side admin moderation (kick / ban / role change) still works.
 
 ---
 
@@ -457,9 +423,9 @@ Koven layers four privacy modes:
 
 Quick reference for what works where:
 
-- **Public spaces.** Calls available. Not E2EE. Moderation applies to chat (consensus + mod log).
-- **Private spaces (no E2EE).** Calls available. Not E2EE. Moderation applies to chat.
-- **Private + encrypted spaces.** Calls available. Not E2EE. No moderation.
+- **Public spaces.** Calls available. Not E2EE. Standard admin moderation + public mod log apply to chat.
+- **Private spaces (no E2EE).** Calls available. Not E2EE. Standard admin moderation + public mod log apply to chat.
+- **Private + encrypted spaces.** Calls available. Not E2EE. Per-message reports hidden; PL-based kick / ban / role change still works.
 - **DMs.** Calls available. Chat is E2EE; call media isn't. Ring notification works.
 
 ---
@@ -485,7 +451,7 @@ Quick reference for what works where:
 
 ## Where to learn more
 
-- **Governance (the full rules):** https://koven.chat/governance.html
+- **Moderation (the full model):** [`MODERATION.md`](MODERATION.md) — roles, primitives, reports, the public mod log.
 - **Bot creators:** see the companion **Koven — Bot Guide** for everything about building, wiring, and operating bots.
 
-That's the full user surface. The product is intentionally simple; the unusual depth is in moderation and bots.
+That's the full user surface. The product is intentionally simple; the unusual depth is in the audit log and the bot platform.

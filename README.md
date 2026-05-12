@@ -11,14 +11,14 @@
 </p>
 
 <p align="center">
-  <strong>The first public-square chat platform where censorship requires consensus, not authority.</strong>
+  <strong>Group chat where admins exist and every moderation action they take is in a public log forever.</strong>
 </p>
 
 ---
 
 ## What Koven is
 
-Group chat — spaces, rooms, DMs, voice + video calls, screen share, bots — built on Matrix + a governance layer that makes "kick this person" or "delete that message" a community decision, not a moderator's whim. Discord shape, with one rule that's actually enforced by the protocol: no individual silences another for ordinary speech.
+Group chat — spaces, rooms, DMs, voice + video calls, screen share, bots — built on Matrix + a thin governance layer. Standard admin moderation (kick / ban / redact / set power levels, PL-gated by Synapse) with one preserved differentiator: every admin action lands in the per-room **public mod log**, append-only, readable by every member of the room. Discord shape with one rule the protocol actually enforces: there is no secret moderation.
 
 ### Features
 
@@ -27,19 +27,19 @@ Group chat — spaces, rooms, DMs, voice + video calls, screen share, bots — b
 - **Live channels (voice + video + screen-share)** — every room can host group calls. DM calls ring once and connect. Powered by Cloudflare RealtimeKit (the SFU); see the setup notes below.
 - **Encrypted spaces** — private spaces can opt into "every room E2EE forever" at creation. Permanent, trades moderation for privacy. Use for trusted-group / family / small-team installs.
 - **Multi-user bot platform** — anyone with an account can create LLM bots. OpenRouter or any OpenAI-compatible endpoint. MCP servers (stdio sandboxed via bwrap, or HTTP). Inbound + outbound webhooks. You pay for tokens; the platform runs the orchestration.
-- **Consensus moderation** — flagging requires multiple distinct people AND a weighted-score gate that scales with the room's activity. Reputation accumulates with participation and decays with silence. Floor violations (CSAM / credible threats / doxxing) bypass the vote and go to admin review.
-- **Public mod log** — every flag, collapse, suspension is logged forever, append-only, readable by anyone in the room. The only check on collective moderation power is sunlight.
+- **Standard moderation** — admins kick / ban / redact / set roles. PL-based, like Matrix. PL 50 for moderators, PL 100 for space owners; promotions and demotions follow Synapse's PL-≤-own rule.
+- **Public mod log** — every moderation action lands in an append-only log readable by every room member. There is no secret moderation. Kicks, bans, redactions, role changes, member-submitted reports, self-deletions, and bot kicks/bans all show up forever, with the actor's mxid and the reason attached.
 - **Universal deep links** — `koven://` scheme + `https://client.koven.chat/invite/…` Universal Links open the desktop app directly on macOS, Linux, and Windows. Confirmation card with preview metadata before the user joins.
 - **Inline room mentions** — paste a room id, alias, invite URL, or matrix.to link in any message and it renders as a Discord-style pill. Click jumps in.
-- **Per-instance, no federation** — Koven instances don't federate with each other or with vanilla Matrix homeservers. Each Koven instance is its own community with its own moderation outcomes, its own reputation registry, its own mod log. See [`docs/GOVERNANCE.md`](docs/GOVERNANCE.md#why-koven-doesnt-federate) for the reasoning.
+- **Per-instance, no federation** — Koven instances don't federate with each other or with vanilla Matrix homeservers. Each Koven instance is its own community with its own admin pool and its own mod log. See [No federation](#no-federation) below for the reasoning.
 
-See [docs/GOVERNANCE.md](docs/GOVERNANCE.md) for the moderation primitives in detail. Two end-user-facing guides also live in `docs/`: [koven-user-guide.md](docs/koven-user-guide.md) (everything members see in the product) and [koven-bot-guide.md](docs/koven-bot-guide.md) (the bot platform end-to-end, including MCP + webhooks).
+See [docs/MODERATION.md](docs/MODERATION.md) for the moderation model — roles, primitives, reports, the public mod log — spelled out. Two end-user-facing guides also live in `docs/`: [koven-user-guide.md](docs/koven-user-guide.md) (everything members see in the product) and [koven-bot-guide.md](docs/koven-bot-guide.md) (the bot platform end-to-end, including MCP + webhooks).
 
 ---
 
 ## What's in this repo
 
-The web client, the desktop app (Tauri), the server-side governance engine, and a complete self-hosting bundle (Synapse — client-server API only, no federation — Postgres, coturn, plus a choice of Caddy with auto-TLS or host nginx + certbot).
+The web client, the desktop app (Tauri), the server-side engine (admin moderation audit, profiles, bots, calls, instance config), and a complete self-hosting bundle (Synapse — client-server API only, no federation — Postgres, coturn, plus a choice of Caddy with auto-TLS or host nginx + certbot).
 
 ```
                     ┌────────────────────┐
@@ -68,7 +68,7 @@ The web client, the desktop app (Tauri), the server-side governance engine, and 
 |------------------------|-------------------------------------------------------------------------------------------------------|
 | `client/`              | Vite + React + Tailwind web client (the SPA)                                                          |
 | `apps/desktop/`        | Tauri 2 desktop bundle (macOS / Linux / Windows)                                                      |
-| `engine/`              | Bun service: governance, admin, profiles, bots, calls, instance config                                |
+| `engine/`              | Bun service: mod-log audit + reports queue, admin promotion, profiles, bots, calls, instance config   |
 | `shared/`              | TypeScript types shared between client and engine                                                     |
 | `docker/synapse/`      | Synapse Dockerfile + config templates + `koven-room-gate` Synapse module                              |
 | `docker/coturn/`       | coturn config template                                                                                |
@@ -229,9 +229,9 @@ docker compose up -d
 
 ## No federation
 
-Koven instances **do not federate** — with each other or with any other Matrix server. Each instance is its own bounded community: its own membership, its own reputation registry, its own consensus moderation outcomes, its own mod log. Cross-instance DMs, cross-instance rooms, cross-instance reputation — none of it exists. A user on one Koven instance can't reach a user on another except by joining that other instance directly.
+Koven instances **do not federate** — with each other or with any other Matrix server. Each instance is its own bounded community: its own membership, its own admin pool, its own mod log. Cross-instance DMs, cross-instance rooms — none of it exists. A user on one Koven instance can't reach a user on another except by joining that other instance directly.
 
-The reasoning is laid out in full in [`docs/GOVERNANCE.md`](docs/GOVERNANCE.md#why-koven-doesnt-federate). The short version: Koven's value proposition is consensus-driven moderation backed by a shared reputation registry. Federation makes the community boundary fuzzy, makes remote reputation un-trustable, and makes moderation outcomes diverge per-server — all three are load-bearing, and federation actively undermines them.
+The reasoning is laid out in [`docs/MODERATION.md`](docs/MODERATION.md#federation-note) under "Federation note." Short version: the "public mod log is the authoritative audit trail for this room" promise depends on the instance being the canonical ledger. Federated rooms would have N ledgers across N instances and no single authority — the audit-trail promise becomes ambiguous on every dimension. Per-instance is a hard requirement of the moderation model, not a default.
 
 Concretely: Synapse runs with `federation_domain_whitelist: []` and no `federation` listener, the reverse proxy serves no `/.well-known/matrix/server` route, and nothing in the codebase branches on "is this a remote room."
 
@@ -286,7 +286,7 @@ A bot is a Matrix user the engine drives on your behalf using an LLM API key you
 - **Webhooks** — LLM-callable outbound HTTP tools (with `{placeholder}` URL templates) + inbound webhook endpoints (auto-detected GitHub / Twilio / generic JSON, optional HMAC signing).
 - **Limits** — per-reply token cap, daily token cap, daily call cap.
 
-Bot governance: the no-individual-silencing rule applies to humans, not bots. Owners can delete their bot's messages; a room's founder can kick or ban a bot from their room without consensus. Logged in the public mod log.
+Bot moderation carve-out: an owner can delete their bot's messages directly, and a room's founder can kick or ban a bot from their room with one click (mirrors the PL-100 authority a founder already has, applied to a bot without going through the standard `mod_actions` audit row — bots aren't people). Both gestures are logged in the public mod log.
 
 Detailed guide: see `apps/desktop/koven-bot-guide.md` (the version on the developer's desktop) or read `engine/src/bot_pipeline.ts`.
 
@@ -324,18 +324,17 @@ Idempotent — re-run anytime to top up. Drop the DB to start clean.
 
 ## Architecture
 
-- **Wire protocol**: [Matrix](https://matrix.org/). Federation, file sharing, profiles, E2EE all come from the spec. Koven doesn't reinvent the transport.
-- **Governance layer**: Koven-native. Consensus moderation primitive, public audit log, weighted reputation engine, automatic decay, floor-violation review. Built on top of Matrix events as custom event types (`chat.koven.flag.v1`, `chat.koven.collapse.v1`, `chat.koven.space.config`, …).
+- **Wire protocol**: [Matrix](https://matrix.org/). Membership, file sharing, profiles, E2EE, power levels — all come from the spec. Koven doesn't reinvent the transport, and the standard moderation primitives (kick / ban / redact / PL) are Synapse's, not Koven's.
+- **Audit layer**: Koven-native. The engine watches the appservice stream, indexes every `chat.koven.flag.v1` (report), every self-deletion, every bot-membership action, and every kick/ban/redact/role_change recorded via `POST /api/rooms/:id/mod-actions`. The per-room mod log feed merges them all into one chronological view that the SPA renders into the public mod log sheet.
 - **Calls**: Cloudflare RealtimeKit as the SFU. The engine mints per-call participant tokens via Cloudflare's API; the client SDK connects directly to Cloudflare's edge. Synapse + coturn handle Matrix-spec 1:1 VoIP for legacy clients only — Koven Desktop / the SPA use RealtimeKit exclusively.
 - **Bots**: matrix-rust-sdk WASM running inside the engine's bun process, one client per bot. OpenAI-shape tool definitions cover both outbound webhooks and MCP attachments; the engine bridges between the two.
-- **Encryption**: DMs are end-to-end encrypted (Megolm) by default. Spaces can be created with the `e2ee_required` policy — every child room inherits encryption automatically, permanently. Encrypted rooms bypass the consensus layer because the engine bot can't observe their content; the SPA hides flag affordances in encrypted rooms and labels them with a `Lock` badge in the chat header.
-- **Federation gate**: a custom Synapse spam-checker module rejects events from non-Koven peers. Symmetric: every Koven instance auto-serves `/.well-known/koven` so discovery is two-way.
+- **Encryption**: DMs are end-to-end encrypted (Megolm) by default. Spaces can be created with the `e2ee_required` policy — every child room inherits encryption automatically, permanently. The engine can't index events it can't read; the SPA hides report affordances in encrypted rooms and labels them with a `Lock` badge in the chat header. Standard admin primitives still work in encrypted rooms (Synapse enforces PL regardless of encryption); the audit-row write succeeds, only the per-message report path is hidden.
+- **No federation**: Synapse runs without a `federation` listener and with an empty federation whitelist. There is no `koven-federation-gate` module; the decision is "no federation," not "selective federation."
 
-See `engine/src/` for the governance primitives in detail. The interesting files:
+See `engine/src/` for the audit primitives in detail. The interesting files:
 
-- `engine/src/weight.ts` — reputation math.
-- `engine/src/aggregate.ts` — event-stream → DB state machine.
-- `engine/src/server.ts` — the engine's HTTP API + appservice transaction handler.
+- `engine/src/aggregate.ts` — appservice event stream → DB state machine (flags, redactions, role changes).
+- `engine/src/server.ts` — the engine's HTTP API, including `/api/rooms/:id/mod-actions`, `/api/rooms/:id/mod-log`, and `/api/admin/reports`.
 - `engine/src/bot_pipeline.ts` — bot trigger detection, context gathering, tool-call loop.
 - `engine/src/calls.ts` — Cloudflare RealtimeKit token minting.
 

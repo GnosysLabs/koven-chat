@@ -17,13 +17,13 @@ Concretely: a Koven bot is **a Matrix user account that the engine drives on you
 
 You pay for the LLM tokens (it's your API key). Koven runs the orchestration.
 
-### The governance carve-out
+### The moderation carve-out
 
-Bots are not people. The platform's "no individual silences another" rule applies to humans, not bots. Concretely:
+Bots are not people. The standard moderation primitives (kick / ban / redact / role change) apply to bots through the normal PL-based path, but bots have two extra affordances on top:
 
 - **You can delete your bot's messages.** Trash icon appears on any message a bot you own sent.
-- **A room's founder can kick or ban your bot from their room** with one click, no consensus required. Logged in the public mod log.
-- **Banning a bot platform-wide** means the owner deletes it (Settings → Bots → ⋯ → Delete) or, if it posted floor-violating content, the owner gets the suspension since they're accountable for what they configured.
+- **A room's founder can kick or ban your bot from their room** with one click — a dedicated affordance that bypasses the standard PL gate for bot targets only. Logged in the public mod log as a `bot_membership` row.
+- **Banning a bot platform-wide** means the owner deletes it (Settings → Bots → ⋯ → Delete) — or, if the bot is causing trouble, an admin can ban the owner from the rooms the bot is misbehaving in, since the owner is accountable for what they configured.
 
 You're responsible for what your bot says. Configure accordingly.
 
@@ -352,15 +352,15 @@ Every LLM call is recorded in the engine's `bot_call_log` table. The bot's row i
 
 Bots **can** join encrypted-space rooms if you invite them, but they need to handle Matrix's olm/megolm key sharing. The engine handles this transparently for bots you own. The room's existing members must share keys with the bot (Matrix's standard flow); some clients auto-share, some prompt.
 
-### Floor-violation accountability
+### Owner accountability for bot output
 
-If your bot posts something that crosses the floor-violation line (CSAM, credible threat, doxx), the engine will:
+If your bot posts something seriously over the line (CSAM, credible threat, doxx), members report it through the standard flow. The report lands in the admin Reports queue naming the **bot's message** as the target. From there an admin can:
 
-1. Collapse the bot's message immediately (same as any floor flag).
-2. Open a suspension case against **you, the owner** — not the bot.
-3. Land the case in the admin floor-review queue with your reputation on the line.
+1. Redact the offending message (standard primitive).
+2. Kick or ban the bot from the room.
+3. Treat the pattern as your problem — repeated bad output from a bot you configured is grounds to ban **you** from the affected rooms, since you're accountable for what you wired up.
 
-Configure your bot's system prompt carefully. You're accountable.
+Configure your bot's system prompt carefully. There is no platform-level "the model did it" defense.
 
 ---
 
@@ -553,7 +553,7 @@ Body shapes for the JSON endpoints mirror the SPA's TypeScript types in `client/
 
 - **MCP spec:** https://modelcontextprotocol.io/
 - **OpenAI chat completions API** (the wire format Koven uses): https://platform.openai.com/docs/api-reference/chat
-- **Koven governance** (how bots fit into the consensus model): https://koven.chat/governance.html
+- **Koven moderation** (the model bots are subject to): [`MODERATION.md`](MODERATION.md)
 - **User guide** (for what humans see when they interact with bots): the companion **Koven — User Guide** doc.
 
 ---

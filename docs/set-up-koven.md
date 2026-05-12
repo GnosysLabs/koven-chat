@@ -415,7 +415,7 @@ Synapse and the engine start bound to `127.0.0.1:8008` and `127.0.0.1:9000` resp
 
 ## Scenario E: text only, no calls
 
-Leave the `CF_REALTIME_*` variables blank in `.env`.  Setup detects this and the engine's `/api/calls/*` endpoints return 503; the SPA hides the Join Live button.  Everything else (text, DMs, bots, governance) works.
+Leave the `CF_REALTIME_*` variables blank in `.env`.  Setup detects this and the engine's `/api/calls/*` endpoints return 503; the SPA hides the Join Live button.  Everything else (text, DMs, bots, moderation) works.
 
 If you change your mind later, fill in the Cloudflare variables and restart the engine container:
 
@@ -467,11 +467,11 @@ Walk-through:
 3. Check inbox (or the engine logs if you're running without an email provider) for the 6-digit code.
 4. Paste the code, set a display name.
 
-You're now `@<localpart>:<SERVER_NAME>` and the engine has flagged you as admin.  Reload the SPA and you'll see an extra **Pending review** entry in Settings (the floor-violation review queue, admin-only).
+You're now `@<localpart>:<SERVER_NAME>` and the engine has flagged you as admin.  Reload the SPA and you'll see an extra **shield icon** in the SpaceBar above Settings — that's the admin Reports queue (member-submitted reports awaiting triage).
 
 Add a second account by signing out and signing in with a different email.  Use the second account to test DMs, rooms, invites, etc.
 
-To later promote additional admins, the admin UI exposes a toggle.  Under the hood the engine writes an `is_admin=1` row in its SQLite database.
+To later promote additional admins, the admin UI exposes a toggle.  Under the hood the engine writes an `is_admin=1` row in its SQLite database.  That bit gates the Reports sheet and the instance-branding controls; per-room moderation authority (kick / ban / redact / role change) is independent and gated by power levels, not by this bit.
 
 ---
 
@@ -533,7 +533,7 @@ Schema migrations run automatically at engine boot via the `ensureColumns` helpe
 Three things to back up:
 
 1. **Postgres data** (all chat history, all user accounts).  Lives in the named volume `postgres_data`.
-2. **Engine SQLite** (governance state, bot configs, notifications).  Lives in `./data/engine/engine.sqlite` (bind-mounted, so it's right there on the filesystem).
+2. **Engine SQLite** (mod-log + reports state, bot configs, notifications).  Lives in `./data/engine/engine.sqlite` (bind-mounted, so it's right there on the filesystem).
 3. **Synapse signing key**.  Lives at `./synapse-data/signing.key`.  **Don't lose this.**  Synapse signs its own outbound events with this key; rotating it without a clean restart leaves an instance unable to read its own history.
 
 Minimal backup script (run from `/opt/koven-chat`):
@@ -650,11 +650,11 @@ git restore .env.example
 cp .env.example .env
 ```
 
-This destroys all chat history, all users, and all governance state.  Use with intent.
+This destroys all chat history, all users, and all mod-log state.  Use with intent.
 
 ### "I can't message someone on another Koven instance"
 
-That's intentional.  Koven instances don't federate — with each other or with any other Matrix server.  Each instance is its own community.  See [`docs/GOVERNANCE.md#why-koven-doesnt-federate`](GOVERNANCE.md#why-koven-doesnt-federate) for the reasoning, and tell the other user to make an account on your instance (or vice versa) if you want to talk.
+That's intentional.  Koven instances don't federate — with each other or with any other Matrix server.  Each instance is its own community.  See [`MODERATION.md#federation-note`](MODERATION.md#federation-note) for the reasoning, and tell the other user to make an account on your instance (or vice versa) if you want to talk.
 
 ---
 
@@ -712,7 +712,7 @@ If you're migrating to new hardware, follow the [Backups](#backups) section to c
 ## What's next
 
 - End-user docs (using the chat, reacting, creating spaces, calls, bots) are in [`koven-user-guide.md`](koven-user-guide.md) and [`koven-bot-guide.md`](koven-bot-guide.md).
-- The governance model (how flagging, collapse, reputation, suspensions work) is in [`GOVERNANCE.md`](GOVERNANCE.md).
+- The moderation model (roles, kick / ban / redact / role change, reports, the public mod log) is in [`MODERATION.md`](MODERATION.md).
 - The codebase entry points are in the repo's `README.md` under **Architecture**.
 
 If something here is wrong, missing, or out of date, please send a PR.  This file lives in `docs/` and is the canonical setup guide.
