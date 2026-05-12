@@ -2,7 +2,7 @@
 
 How moderation works on Koven as built. This document describes what the protocol enforces today. Design ideas that aren't wired up yet aren't claimed here.
 
-Koven is a standard chat platform with standard Matrix admin moderation, with one preserved differentiator: **the mod log is public and append-only**. Spaces have owners (the `room.creator` at power level 100). Owners can promote others to admin (PL 100) or moderator (PL 50). PL ≥ 50 enables: kick a member from a room, ban a member from a room, redact (remove) any message, and change a user's power level. PL transitions are gated by Synapse — Koven doesn't reinvent any of this. Members can still flag messages or rooms; flags surface to admins in an admin-only "Reports" sheet reached from a shield icon in the SpaceBar. Admins act on reports with the standard moderation primitives, then mark the report resolved or dismiss it. Every admin action lands in the per-room public mod log forever. That's the consensus-era idea Koven keeps: admins have power, and what they do with it is visible to everyone in the room.
+Koven is a standard chat platform with standard Matrix admin moderation, with one preserved differentiator: **the mod log is public and append-only**. Spaces have owners (the `room.creator` at power level 100). Owners can promote others to admin (PL 100) or moderator (PL 50). PL ≥ 50 enables: kick a member from the space, ban a member from the space, redact (remove) any message, and change a user's power level. Kick and ban are space-wide by design (Discord-style) — the action fans out across every room in the space plus the space itself, so a banned user is removed everywhere at once and the per-room mod log of every affected room reflects it. PL transitions are gated by Synapse — Koven doesn't reinvent any of this. Members can still flag messages or rooms; flags surface to admins in an admin-only "Reports" sheet reached from a shield icon in the SpaceBar. Admins act on reports with the standard moderation primitives, then mark the report resolved or dismiss it. Every admin action lands in the per-room public mod log forever. That's the consensus-era idea Koven keeps: admins have power, and what they do with it is visible to everyone in the room.
 
 ---
 
@@ -13,7 +13,7 @@ A room (or space) has three roles, gated by Matrix power levels. The model is th
 | Role       | PL   | Can do                                                                       |
 |------------|------|------------------------------------------------------------------------------|
 | Member     | 0    | Read, post, react, flag (= submit a report). That's it.                      |
-| Moderator  | 50   | Everything a member can. Plus kick, ban / unban, redact any message, change a user's PL up to their own.  |
+| Moderator  | 50   | Everything a member can. Plus kick from space, ban / unban from space, redact any message, change a user's PL up to their own.  |
 | Admin      | 100  | Everything a moderator can. Plus promote / demote other users (within the PL-≤-own rule) and edit room state (name, topic, avatar). |
 
 The user who creates a space lands at PL 100 — they are the **founder**. There is no separate "owner" concept above admin; founder is just "first PL-100 user, and the only one until they promote someone else." Founders can demote themselves, including all the way down to member, if they want to hand a space off.
@@ -34,15 +34,17 @@ Power-level changes against humans go through the standard moderation primitive 
 
 Five actions, all PL ≥ 50, all backed by standard Matrix mechanisms. Koven doesn't add new transports; it adds an audit trail.
 
-| Primitive       | What it does at the Matrix layer                                                   | Reversible?                                          |
-|-----------------|-------------------------------------------------------------------------------------|------------------------------------------------------|
-| **kick**        | `PUT /rooms/{id}/state/m.room.member/{user}` setting membership=`leave`.            | Yes — the kicked user can rejoin if the room admits them. |
-| **ban**         | Same path, membership=`ban`. Target can't rejoin until unbanned.                   | Only via `unban`.                                    |
-| **unban**       | Membership flips `ban` → `leave`.                                                  | n/a — undoes a previous ban.                         |
-| **redact**      | `PUT /rooms/{id}/redact/{event}` strips the event's content.                       | No — the content is gone for everyone. The audit row stays.|
-| **role_change** | `PUT /rooms/{id}/state/m.room.power_levels` with a new entry in `users`.            | Yes — issue another `role_change` in the other direction. |
+| Primitive       | Scope       | What it does at the Matrix layer                                                   | Reversible?                                          |
+|-----------------|-------------|-------------------------------------------------------------------------------------|------------------------------------------------------|
+| **kick**        | Space-wide  | `PUT /rooms/{id}/state/m.room.member/{user}` setting membership=`leave`, fanned out across every child room of the space plus the space itself. | Yes — the kicked user can rejoin any room that admits them. |
+| **ban**         | Space-wide  | Same path, membership=`ban`, fanned out across the whole space. Target can't rejoin any room in the space until unbanned. | Only via `unban`.                                    |
+| **unban**       | Space-wide  | Membership flips `ban` → `leave` across every room in the space.                   | n/a — undoes a previous ban.                         |
+| **redact**      | Per-message | `PUT /rooms/{id}/redact/{event}` strips the event's content.                       | No — the content is gone for everyone. The audit row stays.|
+| **role_change** | Per-room    | `PUT /rooms/{id}/state/m.room.power_levels` with a new entry in `users`.            | Yes — issue another `role_change` in the other direction. |
 
 All five route through the SPA's room-member sheet or the ChatPane message toolbar; under the hood the caller's bearer token hits Synapse directly, then the SPA calls `POST /api/rooms/:id/mod-actions` against the engine to record the audit row. The engine re-checks PL ≥ 50 server-side, so a tampered client can't forge an audit row for an action it couldn't actually perform.
+
+For kick / ban / unban the SPA enumerates `m.space.child` on the parent space, applies the membership change to each joined child plus the space room, and fires one `mod-actions` POST per room where the call succeeded. Each room's public mod log therefore gets its own row carrying a "Space-wide" reason marker — the trail reads honestly per-room rather than implying a phantom action on a room the caller lacked PL in. Partial failures (rare in practice; Koven admins hold PL ≥ 50 across their space's children) surface as an inline error toast naming the affected count.
 
 ### Why PL 50 instead of admin-only
 
@@ -50,8 +52,8 @@ The PL-50 cutoff matches the Matrix default for kick/ban/redact. Splitting "trus
 
 ### Reversibility, in detail
 
-- **Kick** is the lightest. The target leaves the room; they can be re-invited or, in a public room, simply rejoin. Use kick when someone needs to step out — say, to cool down — and you're fine seeing them back tomorrow.
-- **Ban** is heavier. Synapse refuses any rejoin attempt until an admin issues `unban`. Use ban for users who shouldn't come back without explicit re-admission.
+- **Kick** is the lightest. The target leaves every room in the space; they can be re-invited or, for public rooms, simply rejoin. Use kick when someone needs to step out — say, to cool down — and you're fine seeing them back tomorrow.
+- **Ban** is heavier. Synapse refuses any rejoin attempt in every room of the space until an admin issues `unban`. Use ban for users who shouldn't come back without explicit re-admission.
 - **Redact** is permanent for content. The event's body is stripped server-side and there's no undo — Matrix doesn't keep the pre-redaction content anywhere recoverable. The audit row in the mod log, though, stays forever and names both the actor and the original sender. "What was redacted" is gone; "that something was redacted, by whom, when" stays visible.
 - **Role change** is fully reversible. Demoting someone is a state event like any other; promoting them back is the same call with a different value. The mod log retains both.
 

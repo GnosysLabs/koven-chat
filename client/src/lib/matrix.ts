@@ -92,6 +92,21 @@ export interface FlagEventLite {
 	rationale?: string;
 }
 
+// Result of a fan-out membership action (kick / ban / unban) across
+// every room in a space.  `ok` is the list of rooms where the call
+// succeeded — callers fan the audit-trail POST out across this set.
+// `failed` carries the per-room error so the UI can surface a
+// "succeeded in 7 of 8 rooms" toast on partial failure without
+// hiding the issue.
+export interface SpaceModFailure {
+	roomId: RoomId;
+	error: string;
+}
+export interface SpaceModResult {
+	ok: RoomId[];
+	failed: SpaceModFailure[];
+}
+
 // ─── Stored credentials ──────────────────────────────────────────────
 
 const CREDENTIALS_KEY = "koven:matrix-credentials";
@@ -2324,6 +2339,90 @@ export class MatrixTransport {
 	async unbanFromRoom(roomId: RoomId, userId: UserId): Promise<void> {
 		const c = this.requireClient();
 		await c.unban(roomId, userId);
+	}
+
+	/** Enumerate every joined child room of a space via m.space.child
+	 * state events.  An entry with empty / missing `via` is the spec-
+	 * standard tombstone for a removed child and is skipped — same
+	 * filter readSpaceChildrenMeta uses.  The space room itself is
+	 * NOT included; callers that want to apply an action across the
+	 * whole tree should append the space id explicitly.
+	 *
+	 * Returns RoomId[] sorted by ascending state-event timestamp
+	 * (oldest first) — stable iteration order so the resulting mod-
+	 * action audit rows land in a predictable sequence across rooms.
+	 */
+	getSpaceChildRoomIds(spaceId: SpaceId): RoomId[] {
+		const space = this.client?.getRoom(spaceId);
+		if (!space) return [];
+		const out: Array<{ id: RoomId; ts: number }> = [];
+		for (const ev of space.currentState.getStateEvents("m.space.child")) {
+			const childId = ev.getStateKey();
+			if (!childId) continue;
+			const via = (ev.getContent() as { via?: unknown }).via;
+			if (!Array.isArray(via) || via.length === 0) continue;
+			out.push({ id: childId as RoomId, ts: ev.getTs() });
+		}
+		out.sort((a, b) => a.ts - b.ts);
+		return out.map(x => x.id);
+	}
+
+	// ─── Space-wide moderation (Discord-style) ──────────────────────
+	// Each helper fans out the corresponding membership mutation
+	// across every joined child room of the space PLUS the space
+	// room itself, collecting per-room results.  Errors are non-
+	// fatal: a 403 on one child (rare in practice — Koven admins
+	// hold PL ≥ 50 in every child of their space) doesn't abort the
+	// whole sweep.  Caller uses the returned `failed` array to surface
+	// partial-failure UX and to skip the audit-trail POST for rooms
+	// that didn't actually take the action.
+
+	async kickFromSpace(spaceId: SpaceId, userId: UserId, reason?: string): Promise<SpaceModResult> {
+		const c = this.requireClient();
+		const targets: RoomId[] = [...this.getSpaceChildRoomIds(spaceId), spaceId as unknown as RoomId];
+		const ok: RoomId[] = [];
+		const failed: SpaceModFailure[] = [];
+		for (const rid of targets) {
+			try {
+				await c.kick(rid, userId, reason);
+				ok.push(rid);
+			} catch (e) {
+				failed.push({ roomId: rid, error: e instanceof Error ? e.message : String(e) });
+			}
+		}
+		return { ok, failed };
+	}
+
+	async banFromSpace(spaceId: SpaceId, userId: UserId, reason?: string): Promise<SpaceModResult> {
+		const c = this.requireClient();
+		const targets: RoomId[] = [...this.getSpaceChildRoomIds(spaceId), spaceId as unknown as RoomId];
+		const ok: RoomId[] = [];
+		const failed: SpaceModFailure[] = [];
+		for (const rid of targets) {
+			try {
+				await c.ban(rid, userId, reason);
+				ok.push(rid);
+			} catch (e) {
+				failed.push({ roomId: rid, error: e instanceof Error ? e.message : String(e) });
+			}
+		}
+		return { ok, failed };
+	}
+
+	async unbanFromSpace(spaceId: SpaceId, userId: UserId): Promise<SpaceModResult> {
+		const c = this.requireClient();
+		const targets: RoomId[] = [...this.getSpaceChildRoomIds(spaceId), spaceId as unknown as RoomId];
+		const ok: RoomId[] = [];
+		const failed: SpaceModFailure[] = [];
+		for (const rid of targets) {
+			try {
+				await c.unban(rid, userId);
+				ok.push(rid);
+			} catch (e) {
+				failed.push({ roomId: rid, error: e instanceof Error ? e.message : String(e) });
+			}
+		}
+		return { ok, failed };
 	}
 
 	/** Redact someone else's message as an admin.  Self-deletes go

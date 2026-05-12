@@ -165,8 +165,8 @@ export function MemberList({
 		// branches.  Each variant gets its own copy so admins know
 		// exactly what they're about to do.
 		const confirmCopy: Partial<Record<MemberAction, string>> = {
-			kick_member:    `Kick ${target} from this room?`,
-			ban_member:     `Ban ${target} from this room? They will not be able to rejoin until unbanned.`,
+			kick_member:    `Kick ${target} from the entire space? They'll be removed from every room in this space.`,
+			ban_member:     `Ban ${target} from the entire space? They'll be removed from every room and won't be able to rejoin until unbanned.`,
 			promote_mod:    `Promote ${target} to Moderator (PL 50)?`,
 			promote_admin:  `Promote ${target} to Admin (PL 100)? They will be able to moderate you back.`,
 			reset_role:     `Reset ${target} to a regular member (PL 0)?`,
@@ -625,7 +625,7 @@ function MemberContextMenu({
 					{canKickMember && (
 						<MenuItem
 							icon={<UserX className="h-4 w-4" />}
-							label={busyAction === "kick_member" ? "Kicking…" : "Kick from room"}
+							label={busyAction === "kick_member" ? "Kicking…" : "Kick from space"}
 							onClick={() => onAction("kick_member")}
 							disabled={!!busyAction}
 							tone="warn"
@@ -634,7 +634,7 @@ function MemberContextMenu({
 					{canBanMember && (
 						<MenuItem
 							icon={<Ban className="h-4 w-4" />}
-							label={busyAction === "ban_member" ? "Banning…" : "Ban from room"}
+							label={busyAction === "ban_member" ? "Banning…" : "Ban from space"}
 							onClick={() => onAction("ban_member")}
 							disabled={!!busyAction}
 							tone="danger"

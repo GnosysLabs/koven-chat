@@ -2845,18 +2845,60 @@ export default function App() {
 							// error but DON'T undo the Matrix-side change
 							// (the kick / ban / PL bump already happened
 							// and rolling it back would be its own race).
+							//
+							// kick / ban are SPACE-WIDE (Discord-style):
+							// the action fans out across every joined
+							// child room of the active room's parent
+							// space PLUS the space itself, with one
+							// mod-action audit row per affected room so
+							// each room's public mod log reflects the
+							// action independently.  Promote / reset are
+							// still per-room (PLs are room-scoped state).
 							canModerateRoom={canModerateActiveRoom}
 							onKickMember={async (userId) => {
 								if (!transport || !creds?.access_token || !activeRoom) return;
+								const parentSpaceId = activeRoom.parentSpaceIds[0];
 								try {
-									await transport.kickFromRoom(activeRoom.id, userId as UserId);
-									await recordModAction(creds.access_token, {
-										roomId: activeRoom.id,
-										action: "kick",
-										targetUser: userId,
-									}).catch(err => {
-										console.warn("recordModAction kick failed", err);
-									});
+									if (!parentSpaceId) {
+										// Orphan room (rare; createRoom enforces a
+										// parent space).  Fall back to room-scoped
+										// so admins aren't blocked entirely.
+										await transport.kickFromRoom(activeRoom.id, userId as UserId);
+										await recordModAction(creds.access_token, {
+											roomId: activeRoom.id,
+											action: "kick",
+											targetUser: userId,
+										}).catch(err => {
+											console.warn("recordModAction kick failed", err);
+										});
+										return;
+									}
+									const reason = "Space-wide kick";
+									const result = await transport.kickFromSpace(
+										parentSpaceId,
+										userId as UserId,
+										reason,
+									);
+									// Fan one audit row per room that actually took
+									// the action.  Each room's public mod log gets
+									// its own row so the trail reads honestly per-
+									// room ("X was kicked on date") rather than
+									// implying a phantom kick on rooms where the
+									// caller lacked PL.
+									await Promise.allSettled(result.ok.map(rid =>
+										recordModAction(creds.access_token!, {
+											roomId: rid,
+											action: "kick",
+											targetUser: userId,
+											reason,
+										}),
+									));
+									if (result.failed.length > 0) {
+										dispatch({
+											type: "error",
+											message: `Kicked ${userId} from ${result.ok.length} of ${result.ok.length + result.failed.length} rooms — ${result.failed.length} failed (likely missing PL there)`,
+										});
+									}
 								} catch (e) {
 									dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
 									throw e;
@@ -2864,15 +2906,39 @@ export default function App() {
 							}}
 							onBanMember={async (userId) => {
 								if (!transport || !creds?.access_token || !activeRoom) return;
+								const parentSpaceId = activeRoom.parentSpaceIds[0];
 								try {
-									await transport.banFromRoom(activeRoom.id, userId as UserId);
-									await recordModAction(creds.access_token, {
-										roomId: activeRoom.id,
-										action: "ban",
-										targetUser: userId,
-									}).catch(err => {
-										console.warn("recordModAction ban failed", err);
-									});
+									if (!parentSpaceId) {
+										await transport.banFromRoom(activeRoom.id, userId as UserId);
+										await recordModAction(creds.access_token, {
+											roomId: activeRoom.id,
+											action: "ban",
+											targetUser: userId,
+										}).catch(err => {
+											console.warn("recordModAction ban failed", err);
+										});
+										return;
+									}
+									const reason = "Space-wide ban";
+									const result = await transport.banFromSpace(
+										parentSpaceId,
+										userId as UserId,
+										reason,
+									);
+									await Promise.allSettled(result.ok.map(rid =>
+										recordModAction(creds.access_token!, {
+											roomId: rid,
+											action: "ban",
+											targetUser: userId,
+											reason,
+										}),
+									));
+									if (result.failed.length > 0) {
+										dispatch({
+											type: "error",
+											message: `Banned ${userId} from ${result.ok.length} of ${result.ok.length + result.failed.length} rooms — ${result.failed.length} failed (likely missing PL there)`,
+										});
+									}
 								} catch (e) {
 									dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
 									throw e;
