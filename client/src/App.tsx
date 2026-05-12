@@ -607,6 +607,7 @@ export default function App() {
 			onRoomsUpdated: rooms => dispatch({ type: "rooms_updated", rooms }),
 			onSpacesUpdated: spaces => dispatch({ type: "spaces_updated", spaces }),
 			onSpaceInvitesUpdated: invites => dispatch({ type: "space_invites_updated", invites }),
+			onTypingUpdated: (roomId, userIds) => dispatch({ type: "typing_updated", roomId, userIds }),
 			onMessage: (message, { live }) => {
 				dispatch({ type: "message_arrived", message, live });
 				// Mark-as-read for messages arriving in the room
@@ -2452,6 +2453,11 @@ export default function App() {
 					room={activeRoom}
 					messages={messages}
 					memberAvatars={memberAvatars}
+					typingUserIds={state.activeRoomId ? state.typingByRoom.get(state.activeRoomId) : undefined}
+					onTypingChange={(isTyping) => {
+						if (!transport || !state.activeRoomId) return;
+						void transport.setMyTyping(state.activeRoomId, isTyping);
+					}}
 					reactionsByMessage={state.reactionsByMessage}
 					flagsByMessage={state.flagsByMessage}
 					collapsesByMessage={state.collapsesByMessage}

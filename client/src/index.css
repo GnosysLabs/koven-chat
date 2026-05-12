@@ -912,3 +912,22 @@
 		animation: none;
 	}
 }
+
+/* Typing-indicator dots.  Three of these run with staggered
+   delays (0ms / 150ms / 300ms) to produce a wave that loops
+   while the indicator is mounted.  Opacity 0.3 → 1 → 0.3 keeps
+   the dots from disappearing entirely (a fully-off frame reads
+   as flicker on slow displays). */
+.animate-typing-dot {
+	animation: typing-dot 1.05s ease-in-out infinite;
+}
+@keyframes typing-dot {
+	0%, 80%, 100% { opacity: 0.3; transform: translateY(0); }
+	40%           { opacity: 1;   transform: translateY(-1px); }
+}
+@media (prefers-reduced-motion: reduce) {
+	.animate-typing-dot {
+		animation: none;
+		opacity: 0.7;
+	}
+}

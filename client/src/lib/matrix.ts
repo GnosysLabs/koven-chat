@@ -296,6 +296,14 @@ export interface MatrixHandlers {
 	// SpaceBar can't host inline Accept/Decline UI; the consumer
 	// renders a dedicated banner + sheet instead.
 	onSpaceInvitesUpdated(invites: SpaceInvite[]): void;
+	// Fires whenever the set of "currently typing" users changes in
+	// any room.  Matrix typing events are ephemeral (`m.typing`),
+	// arrive via /sync, and time out server-side after their
+	// embedded timeout elapses.  Self is excluded so the indicator
+	// never shows "you are typing…" to yourself.  Empty array means
+	// "nobody typing in this room right now" and the consumer
+	// should hide its indicator.
+	onTypingUpdated(roomId: RoomId, typingUserIds: UserId[]): void;
 	onMessage(msg: Message, options: { live: boolean }): void;
 	// Fires when a redaction event arrives that targets a real
 	// message bubble (self-delete, bot-owner-delete, mod kick of a
@@ -954,6 +962,18 @@ export class MatrixTransport {
 
 		this.client.on(RoomMemberEvent.Membership, (_event, member) => {
 			this.handlers.onMembersUpdated(member.roomId as RoomId);
+		});
+
+		// Typing indicators.  matrix-js-sdk fires RoomMemberEvent.Typing
+		// for every flip of a member's `typing` boolean, sourced from
+		// `m.typing` ephemeral events on /sync.  Re-emit the room's
+		// current typing set (excluding self) so the SPA can render
+		// "Alice is typing…" indicators.  Self is excluded server-side
+		// in the spec but we belt-and-brace filter it here too in case
+		// the homeserver echoes our own typing back.
+		this.client.on(RoomMemberEvent.Typing, (_event, member) => {
+			const roomId = member.roomId as RoomId;
+			this.emitTyping(roomId);
 		});
 
 		// m.read receipts — drives the "seen by" indicators in chat.
@@ -2070,6 +2090,63 @@ export class MatrixTransport {
 	}
 
 	/** Send a text message that replies to an existing one. */
+	/**
+	 * Tell the homeserver this user is typing (or stopped typing) in
+	 * `roomId`.  Matrix uses ephemeral `m.typing` events with an
+	 * embedded timeout: while a user is actively typing the client
+	 * re-sends `isTyping=true` every few seconds to keep the
+	 * indicator alive; when the user goes idle / sends / blurs the
+	 * composer the client sends `isTyping=false` to clear it
+	 * immediately.  The homeserver also expires stale `true` states
+	 * server-side once the timeout elapses, so a crashed client
+	 * never strands a "typing…" indicator on other clients.
+	 *
+	 * Timeout: 10 seconds.  Long enough that a normal pause between
+	 * keystrokes doesn't drop the indicator, short enough that a
+	 * dropped network + crash clears in a reasonable window.  The
+	 * composer-side throttle re-sends every ~5s so the indicator
+	 * stays alive while the user keeps typing.
+	 *
+	 * Best-effort: failures are swallowed because typing indicators
+	 * are decorative, blocking the composer flow on a network blip
+	 * would be worse than a missing dot.
+	 */
+	async setMyTyping(roomId: RoomId, isTyping: boolean): Promise<void> {
+		const c = this.client;
+		if (!c) return;
+		try {
+			await c.sendTyping(roomId, isTyping, 10000);
+		} catch (err) {
+			console.warn(`setMyTyping(${roomId}, ${isTyping}) failed`, err);
+		}
+	}
+
+	/**
+	 * Current set of OTHER users typing in `roomId` (self always
+	 * excluded).  Walks the room's joined members for the typing
+	 * flag matrix-js-sdk maintains in-memory from RoomMemberEvent.Typing.
+	 * Returns an empty array when the room isn't in the local store
+	 * (rare; only briefly during initial sync).
+	 */
+	getTypingUsers(roomId: RoomId): UserId[] {
+		const c = this.client;
+		if (!c) return [];
+		const room = c.getRoom(roomId);
+		if (!room) return [];
+		const myUserId = this.creds?.user_id;
+		const out: UserId[] = [];
+		for (const member of room.getJoinedMembers()) {
+			if (!member.typing) continue;
+			if (member.userId === myUserId) continue;
+			out.push(member.userId as UserId);
+		}
+		return out;
+	}
+
+	private emitTyping(roomId: RoomId): void {
+		this.handlers.onTypingUpdated(roomId, this.getTypingUsers(roomId));
+	}
+
 	async replyTo(roomId: RoomId, targetEventId: EventId, body: string): Promise<EventId> {
 		const c = this.requireClient();
 		// Matrix replies need a "fallback" body that quotes the original

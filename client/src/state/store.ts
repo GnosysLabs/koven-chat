@@ -73,6 +73,11 @@ export interface AppState {
 	// fall into `spaces` would re-create the bug where an NSFW space
 	// name + avatar surface in SpaceBar before the user has accepted.
 	spaceInvites: SpaceInvite[];
+	// Map of roomId → user ids currently typing.  Self is excluded
+	// at the transport layer.  An empty array (or missing key)
+	// means "nobody typing right now", drives whether the chat
+	// pane renders its typing indicator row.
+	typingByRoom: Map<RoomId, UserId[]>;
 	messagesByRoom: Map<RoomId, Message[]>;
 	// Set of room ids whose initial timeline page has finished
 	// loading.  Distinct from `messagesByRoom.has(roomId)` because
@@ -117,6 +122,7 @@ export const initialState: AppState = {
 	rooms: [],
 	spaces: [],
 	spaceInvites: [],
+	typingByRoom: new Map(),
 	messagesByRoom: new Map(),
 	loadedTimelines: new Set(),
 	membersByRoom: new Map(),
@@ -143,6 +149,7 @@ export type Action =
 	| { type: "rooms_updated"; rooms: Room[] }
 	| { type: "spaces_updated"; spaces: Space[] }
 	| { type: "space_invites_updated"; invites: SpaceInvite[] }
+	| { type: "typing_updated"; roomId: RoomId; userIds: UserId[] }
 	| { type: "messages_loaded"; roomId: RoomId; messages: Message[] }
 	| { type: "message_arrived"; message: Message; live: boolean }
 	| { type: "message_redacted"; roomId: RoomId; eventId: EventId }
@@ -175,6 +182,21 @@ export function reduce(state: AppState, action: Action): AppState {
 
 		case "space_invites_updated":
 			return { ...state, spaceInvites: action.invites };
+
+		case "typing_updated": {
+			// Drop the entry entirely when nobody's typing so a Map
+			// lookup of `typingByRoom.get(roomId)` returns undefined
+			// instead of an empty array, the chat-pane treats both
+			// equivalently but the Map stays bounded by active
+			// conversations.
+			const next = new Map(state.typingByRoom);
+			if (action.userIds.length === 0) {
+				next.delete(action.roomId);
+			} else {
+				next.set(action.roomId, action.userIds);
+			}
+			return { ...state, typingByRoom: next };
+		}
 
 		case "messages_loaded": {
 			const next = new Map(state.messagesByRoom);

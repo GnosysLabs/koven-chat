@@ -4,7 +4,7 @@
 // renders in its own rounded bubble.  Self messages use the primary
 // bubble color; everyone else uses the muted card color.
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CollapseAggregate, EventId, FlagAggregate, FlagCategory, Member, Message, PollAggregate, ReactionAggregate, Room, RoomId, UserId } from "@koven/shared";
 import { cn } from "@/lib/utils";
 import { COLLAPSED_NAME } from "@/lib/collapsedRooms";
@@ -238,6 +238,18 @@ export interface ChatPaneProps {
 	// End a poll.  Creator-only by spec; the receiving end ignores
 	// end-events from anyone except the start sender.
 	onEndPoll?(pollId: EventId): Promise<void> | void;
+	// Mxids currently typing in this room (self always excluded
+	// at the transport layer).  Empty / undefined hides the
+	// indicator.  Updates live via state.typingByRoom which the
+	// transport maintains from m.typing ephemeral events.
+	typingUserIds?: UserId[];
+	// Called when the local user starts or stops typing.  Fires
+	// once on the first keystroke (debounced; doesn't re-fire on
+	// every char), again every ~5s while still typing to keep the
+	// indicator alive server-side, and with false on send / idle /
+	// blur / room change.  Best-effort, the parent forwards to
+	// transport.setMyTyping which itself is best-effort.
+	onTypingChange?(isTyping: boolean): void;
 }
 
 // Threshold for "this message is part of the same group as the
@@ -273,6 +285,8 @@ export function ChatPane({
 	onCreatePoll,
 	onVoteOnPoll,
 	onEndPoll,
+	typingUserIds,
+	onTypingChange,
 }: ChatPaneProps) {
 	// Consensus flagging only works where the local engine can act:
 	//   - DMs are 1-on-1 — no quorum to gather, no consensus to reach.
@@ -294,6 +308,55 @@ export function ChatPane({
 	const [galleryOpen, setGalleryOpen] = useState(false);
 	const [draft, setDraft] = useState("");
 	const [replyTarget, setReplyTarget] = useState<Message | null>(null);
+
+	// Typing-indicator throttle.  Matrix's `m.typing` events carry an
+	// embedded timeout (10s, see transport.setMyTyping); we fire
+	// isTyping=true on the first keystroke after an idle period and
+	// re-up every 5s while the user keeps typing, then fire false on
+	// send / clear / idle 3s / room change / unmount.  Two refs:
+	// `lastTypingSentAt` for the 5s throttle, `typingIdleTimer` for
+	// the 3s post-keystroke "they stopped" deadline.  Bare refs
+	// rather than state because changing them shouldn't re-render.
+	const lastTypingSentAtRef = useRef(0);
+	const typingIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const onTypingChangeRef = useRef(onTypingChange);
+	useEffect(() => { onTypingChangeRef.current = onTypingChange; }, [onTypingChange]);
+	const stopTypingNow = useCallback(() => {
+		if (typingIdleTimerRef.current) {
+			clearTimeout(typingIdleTimerRef.current);
+			typingIdleTimerRef.current = null;
+		}
+		if (lastTypingSentAtRef.current > 0) {
+			lastTypingSentAtRef.current = 0;
+			onTypingChangeRef.current?.(false);
+		}
+	}, []);
+	const noteTypingActivity = useCallback(() => {
+		const now = Date.now();
+		// Re-up the upstream "is typing" every 5s.  First keystroke
+		// (lastTypingSentAt === 0) always fires; subsequent ones
+		// only refresh if 5s have passed since the last send.
+		if (now - lastTypingSentAtRef.current > 5000) {
+			lastTypingSentAtRef.current = now;
+			onTypingChangeRef.current?.(true);
+		}
+		// Reset the idle countdown.  3s with no further keystrokes
+		// flips us to isTyping=false; if the user resumes typing
+		// before then the noteTypingActivity call above kicks the
+		// throttle back into life on the next 5s boundary.
+		if (typingIdleTimerRef.current) clearTimeout(typingIdleTimerRef.current);
+		typingIdleTimerRef.current = setTimeout(() => {
+			lastTypingSentAtRef.current = 0;
+			onTypingChangeRef.current?.(false);
+		}, 3000);
+	}, []);
+	// Stop typing immediately when the active room changes or the
+	// pane unmounts.  Without this, switching rooms with the
+	// composer focused would strand an isTyping=true on the
+	// previous room until its 10s server-side timeout expired.
+	useEffect(() => {
+		return () => stopTypingNow();
+	}, [room?.id, stopTypingNow]);
 	// Pending attachments: the user picked one or more files but hasn't
 	// hit send yet.  Up to MAX_PENDING_ATTACHMENTS at once; each file
 	// posts as its OWN m.room.message event in pick order — no album
@@ -778,6 +841,10 @@ export function ChatPane({
 	};
 
 	function send() {
+		// Sending always clears the typing indicator immediately, no
+		// reason to wait for the idle timer when the conversation
+		// already has fresh content from this user.
+		stopTypingNow();
 		// Attachment send: each pending file posts as its OWN
 		// m.room.message event in pick order.  No album grouping —
 		// the user said "post them to the chat normally," so each
@@ -1281,6 +1348,10 @@ export function ChatPane({
 				</div>
 			) : (
 			<div className="border-t border-border p-3">
+				<TypingIndicator
+					userIds={typingUserIds ?? []}
+					members={members ?? null}
+				/>
 				{replyTarget && (
 					<div className="mb-2 flex items-start gap-2 px-3 py-1.5 rounded-md bg-muted/60 border border-border text-xs">
 						<CornerDownRight className="h-3.5 w-3.5 mt-0.5 text-muted-foreground shrink-0" />
@@ -1404,8 +1475,20 @@ export function ChatPane({
 							value={draft}
 							rows={1}
 							onChange={e => {
-								setDraft(e.target.value);
-								setCursor(e.target.selectionStart ?? e.target.value.length);
+								const next = e.target.value;
+								setDraft(next);
+								setCursor(e.target.selectionStart ?? next.length);
+								// Typing-indicator throttle.  An empty
+								// draft means the user cleared the
+								// composer (backspaced everything out
+								// or pasted then deleted), which is a
+								// "stopped typing" signal even if the
+								// idle timer hasn't fired yet.
+								if (next.length === 0) {
+									stopTypingNow();
+								} else {
+									noteTypingActivity();
+								}
 							}}
 							onSelect={e => {
 								// Track caret moves driven by mouse / arrow keys
@@ -3174,5 +3257,49 @@ function SeenAvatarChip({
 			}}
 			className="rounded-full ring-1 ring-background shrink-0"
 		/>
+	);
+}
+
+// Small "Alice is typing…" row that sits just above the composer.
+// Renders nothing when nobody's typing so the composer doesn't shift
+// up and down on every empty/non-empty flip.  Display-name resolution
+// goes through the room's member list with a localpart fallback for
+// users we haven't synced membership data for yet (rare; only briefly
+// during initial sync after a fresh sign-in).
+function TypingIndicator({
+	userIds,
+	members,
+}: {
+	userIds: UserId[];
+	members: Member[] | null;
+}) {
+	if (!userIds || userIds.length === 0) return null;
+	const nameFor = (uid: UserId): string => {
+		const m = members?.find(mm => mm.userId === uid);
+		if (m?.displayName) return m.displayName;
+		return localpartOf(uid);
+	};
+	const names = userIds.slice(0, 3).map(nameFor);
+	let label: string;
+	if (userIds.length === 1) {
+		label = `${names[0]} is typing`;
+	} else if (userIds.length === 2) {
+		label = `${names[0]} and ${names[1]} are typing`;
+	} else if (userIds.length === 3) {
+		label = `${names[0]}, ${names[1]}, and ${names[2]} are typing`;
+	} else {
+		label = `${names[0]}, ${names[1]}, and ${userIds.length - 2} others are typing`;
+	}
+	return (
+		<div className="mb-2 px-1 flex items-center gap-2 text-[11px] text-muted-foreground leading-none">
+			<span className="inline-flex gap-0.5" aria-hidden>
+				<span className="block h-1 w-1 rounded-full bg-current animate-typing-dot" style={{ animationDelay: "0ms" }} />
+				<span className="block h-1 w-1 rounded-full bg-current animate-typing-dot" style={{ animationDelay: "150ms" }} />
+				<span className="block h-1 w-1 rounded-full bg-current animate-typing-dot" style={{ animationDelay: "300ms" }} />
+			</span>
+			<span className="truncate">
+				{label}<span aria-hidden>…</span>
+			</span>
+		</div>
 	);
 }
