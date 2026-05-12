@@ -179,6 +179,12 @@ function LandingAvatar({ space, variant }: { space: Space; variant: SpaceLanding
 	return (
 		<MatrixAvatar
 			mxc={space.avatarUrl}
+			// Custom emoji icon takes precedence over the uploaded
+			// avatar in MatrixAvatar's resolver — matches the
+			// SpaceBar treatment, so a space the user picked an
+			// emoji for renders the same glyph everywhere it's
+			// represented in chrome.
+			emoji={space.iconEmoji}
 			seed={space.id}
 			kind="space"
 			className="h-20 w-20 rounded-2xl mb-4"
