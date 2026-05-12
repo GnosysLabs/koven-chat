@@ -2507,12 +2507,26 @@ function AttachmentImage({ message }: { message: Message }) {
 
 function AttachmentVideo({ message }: { message: Message }) {
 	const url = useMatrixAttachment(message);
-	// Sender-supplied poster (info.thumbnail_*) — instant paint while
-	// the actual video bytes stream in.  Older messages without an
-	// embedded poster get the legacy black-square-then-first-frame
-	// behaviour, which is what shipped before this fix landed.
+	// Sender-supplied poster (info.thumbnail_*).  Instant paint
+	// while the actual video bytes stream in.  Older messages
+	// without an embedded poster get the legacy
+	// black-square-then-first-frame behaviour, which is what
+	// shipped before this fix landed.
 	const poster = useMatrixVideoPoster(message);
 	const { onContextMenu, menu } = useMediaContextMenu(url, message.mediaName ?? "video");
+	const videoRef = useRef<HTMLVideoElement | null>(null);
+	const [playing, setPlaying] = useState(false);
+
+	function togglePlay() {
+		const v = videoRef.current;
+		if (!v) return;
+		if (v.paused) {
+			v.play().catch(() => { /* play() can reject under autoplay policy, harmless */ });
+		} else {
+			v.pause();
+		}
+	}
+
 	if (!url) {
 		// While the main video URL is loading: if we already have the
 		// poster, show it instead of the dead grey skeleton.  The
@@ -2532,17 +2546,56 @@ function AttachmentVideo({ message }: { message: Message }) {
 		);
 	}
 	return (
-		<>
+		<div className="relative inline-block group/video" onContextMenu={onContextMenu}>
 			<video
+				ref={videoRef}
 				src={url}
-				controls
 				poster={poster}
 				preload="metadata"
-				className="max-w-md max-h-80 rounded-lg block"
-				onContextMenu={onContextMenu}
+				// Drop native controls entirely.  The glass play
+				// overlay below + click-to-toggle on the element
+				// itself is the whole UI; users who want scrubbing
+				// / time / volume can right-click → Open in new
+				// tab (or use the context menu's Save action).
+				className="max-w-md max-h-80 rounded-lg block cursor-pointer"
+				onClick={togglePlay}
+				onPlay={() => setPlaying(true)}
+				onPause={() => setPlaying(false)}
+				onEnded={() => setPlaying(false)}
+				playsInline
 			/>
+			{!playing && (
+				<button
+					type="button"
+					onClick={togglePlay}
+					aria-label="Play video"
+					// Glassmorphic centred play button.  Sits over
+					// the video's natural footprint without
+					// changing layout (absolute, full inset).
+					// `pointer-events-none` on the outer span + an
+					// explicit pointer-events-auto on the inner
+					// circle so only the circle is clickable.
+					// Otherwise the button intercepts clicks on the
+					// rest of the video and prevents the video
+					// itself from being interactive (e.g. tap on
+					// the side to toggle).
+					className="absolute inset-0 flex items-center justify-center pointer-events-none"
+				>
+					<span
+						className={cn(
+							"pointer-events-auto h-14 w-14 rounded-full flex items-center justify-center",
+							"bg-background/30 backdrop-blur-md ring-1 ring-white/20",
+							"shadow-[0_2px_12px_rgba(0,0,0,0.35)]",
+							"transition-all duration-150",
+							"group-hover/video:bg-background/45 group-hover/video:scale-105",
+						)}
+					>
+						<Play className="h-6 w-6 text-white fill-white translate-x-0.5" />
+					</span>
+				</button>
+			)}
 			{menu}
-		</>
+		</div>
 	);
 }
 

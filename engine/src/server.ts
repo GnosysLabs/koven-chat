@@ -131,6 +131,7 @@ import {
 	deactivateUser,
 	getEventSender,
 	getJoinedMembers,
+	getAllJoinedMembers,
 	getRoomIconEmoji,
 	getRoomJoinRule,
 	getRoomKovenMeta,
@@ -4346,7 +4347,16 @@ export function startServer(): void {
 								// space under a parent space without
 								// dragging every member into the sub-space.
 								if (await isSpaceRoom(childId)) continue;
-								const members = await getJoinedMembers(spaceId);
+								// getAllJoinedMembers (not getJoinedMembers)
+								// because the cascade needs to include
+								// bots: a space's bots should land in
+								// every new child room the same way human
+								// members do, otherwise creating a room
+								// in a space silently leaves the bots
+								// out and users have to re-invite them
+								// per-room.  The engine appservice user
+								// is still excluded inside the helper.
+								const members = await getAllJoinedMembers(spaceId);
 								const localSuffix = `:${config.homeserverName}`;
 								for (const userId of members) {
 									// Only act on local users — admin/v1/join

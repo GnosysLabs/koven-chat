@@ -704,6 +704,35 @@ export async function getJoinedMembers(roomId: string): Promise<string[]> {
 }
 
 /**
+ * Like `getJoinedMembers` but INCLUDES bots.  Use for cascades that
+ * need to mirror a space's full participant set into child rooms:
+ * the human-only filter on the regular helper is correct for
+ * member-count UI / call participant lists / suspension targets,
+ * but it silently dropped bots out of the "new child → existing
+ * members" cascade so new rooms in a space were created without
+ * the space's bots in them.  This variant still excludes the
+ * engine appservice user because it isn't a participant (it
+ * joins rooms on its own via joinRoomIfNeeded when it needs to
+ * write moderation events).
+ */
+export async function getAllJoinedMembers(roomId: string): Promise<string[]> {
+	const path = `/_synapse/admin/v1/rooms/${encodeURIComponent(roomId)}/members`;
+	const r = await adminFetch(path);
+	if (!r.ok) return [];
+	const body = (await r.json().catch(() => null)) as
+		| { members?: unknown }
+		| null;
+	if (!body || !Array.isArray(body.members)) return [];
+	const ids: string[] = [];
+	for (const m of body.members) {
+		if (typeof m !== "string") continue;
+		if (/^@koven-engine[:_]/.test(m)) continue;
+		ids.push(m);
+	}
+	return ids;
+}
+
+/**
  * Read a room's current m.room.name + m.room.create from a single
  * /state pull.  Used by the room-flag pipeline:
  *   - `name` becomes `original_name` on the collapse row so an admin
