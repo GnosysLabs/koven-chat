@@ -3,12 +3,19 @@
 # possible shapes:
 #
 #   1. SERVER_NAME == KOVEN_HOSTNAME (single-domain install):
-#      Only the main site block runs.  Well-known handlers live
-#      inside it so federation discovery still works.
+#      Only the main site block runs.
 #
 #   2. SERVER_NAME != KOVEN_HOSTNAME (apex + subdomain):
-#      Both blocks run.  Apex serves only /.well-known/* + redirects
-#      everything else to the main site; main site serves the app.
+#      Both blocks run.  Apex serves /.well-known/matrix/client only
+#      so local Matrix-shaped clients can resolve `@user:apex` to the
+#      subdomain homeserver; everything else redirects to the main
+#      site.
+#
+# Koven instances don't federate (see docs/GOVERNANCE.md), so the
+# /.well-known/matrix/server and /.well-known/koven routes that used
+# to live here are gone.  The remaining `matrix/client` route is
+# local-client discovery only — it lets a Matrix client typing
+# "@user:apex" find the homeserver URL.
 #
 # Caddy fetches Let's Encrypt certs automatically for whichever
 # domains are listed, given a reachable HTTP/HTTPS port and DNS A
@@ -20,20 +27,10 @@
 
 # ─── Main site: web client + matrix + engine ──────────────────────────
 {$KOVEN_HOSTNAME} {
-	# Well-known files (also served on the apex block below if
-	# SERVER_NAME differs).  Cheap to serve from both — federating
-	# peers and clients can hit either and the answer is the same.
-	handle /.well-known/matrix/server {
-		respond `{"m.server": "{$KOVEN_HOSTNAME}:443"}` 200
-		header Content-Type application/json
-	}
+	# Client well-known — local Matrix clients use this after the user
+	# types "@someone:{$KOVEN_HOSTNAME}".  Not a federation handshake.
 	handle /.well-known/matrix/client {
 		respond `{"m.homeserver": {"base_url": "https://{$KOVEN_HOSTNAME}"}}` 200
-		header Content-Type application/json
-		header Access-Control-Allow-Origin "*"
-	}
-	handle /.well-known/koven {
-		respond `{"version": "0.1.0", "homeserver": "{$KOVEN_HOSTNAME}", "name": "{$SERVER_NAME}"}` 200
 		header Content-Type application/json
 		header Access-Control-Allow-Origin "*"
 	}
@@ -63,9 +60,10 @@
 		reverse_proxy engine:9000
 	}
 
-	# Synapse — client-server API + federation traffic.  Federation
-	# port (8448 by spec) is exposed via this same 443 route per the
-	# .well-known/matrix/server hint above.
+	# Synapse — client-server API only.  No federation traffic
+	# (homeserver.yaml drops the federation listener name and no
+	# /.well-known/matrix/server route exists, so remote Matrix
+	# servers can't discover us in the first place).
 	handle /_matrix/* {
 		reverse_proxy synapse:8008
 	}

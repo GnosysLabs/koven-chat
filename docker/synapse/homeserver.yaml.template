@@ -6,20 +6,25 @@
 
 server_name: "${SERVER_NAME}"
 public_baseurl: "https://${KOVEN_HOSTNAME}/"
-serve_server_wellknown: false  # Caddy serves /.well-known/matrix/server
-                                # at the apex itself (cleaner; lets us
-                                # also serve /.well-known/koven from
-                                # the same handler).
+# Federation is off (see the Federation section below), so we also
+# don't serve /.well-known/matrix/server — nothing for remotes to
+# discover.  The nginx config drops that route as well.
+serve_server_wellknown: false
 pid_file: /data/homeserver.pid
 
 listeners:
   - port: 8008
     tls: false
     type: http
-    x_forwarded: true            # Caddy is the TLS terminator.
+    x_forwarded: true            # nginx is the TLS terminator.
     bind_addresses: ['::', '0.0.0.0']
     resources:
-      - names: [client, federation]
+      # `client` only — no `federation`.  Even with the empty
+      # whitelist below, dropping the listener name means Synapse
+      # won't accept federation requests on this port at all (the
+      # 8448 listener doesn't exist either).  Belt-and-braces with
+      # the whitelist.
+      - names: [client]
         compress: false
 
 # --- Database -------------------------------------------------------
@@ -77,18 +82,27 @@ user_directory:
   prefer_local_users: true
 
 # --- Federation ------------------------------------------------------
-# `federation_domain_whitelist` is intentionally NOT set.  Static
-# whitelists don't hot-reload, which makes per-peer onboarding either
-# admin-mediated or tied to Synapse restarts.  Instead, federation
-# allow/deny decisions are made at runtime by the koven_federation_gate
-# module (see modules: below).  The gate fetches /.well-known/koven on
-# each remote and caches the answer; net effect is "open federation,
-# but only to Koven peers."
+# Koven instances do NOT federate with each other or with any other
+# Matrix server.  The product premise — consensus-driven, reputation-
+# weighted moderation with a visible mod log — relies on a bounded
+# community, a single shared reputation registry, and a consistent
+# moderation outcome.  Federation breaks all three: community
+# boundaries become fuzzy, remote reputation can't be trusted, and
+# moderation decisions diverge per-server.  See docs/GOVERNANCE.md
+# for the full reasoning.
+#
+# Defense in depth:
+#   1. The `federation` listener name above is removed, so Synapse
+#      won't even accept federation traffic on the HTTP listener.
+#   2. `federation_domain_whitelist: []` (empty list) makes Synapse
+#      explicitly refuse outbound federation to any domain.
+#   3. nginx drops the /.well-known/matrix/server route, so other
+#      Matrix servers can't discover us.
+#   4. docker-compose doesn't expose port 8448 (the dedicated
+#      federation port).
+federation_domain_whitelist: []
+
 modules:
-  - module: koven_federation_gate.KovenFederationGate
-    config:
-      always_allow: []
-      always_deny: []
   # Rate-limit + reputation-gate the publish-room-to-directory action
   # by delegating to the engine over HTTP.  The engine consults the
   # user's reputation weight + how many rooms they've already

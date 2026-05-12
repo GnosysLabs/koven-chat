@@ -2,7 +2,7 @@
 #
 # What's here:
 #   caddy      — TLS terminator + reverse proxy + static SPA host
-#   synapse    — Matrix homeserver, custom-built with federation gate
+#   synapse    — Matrix homeserver (client API only — no federation)
 #   postgres   — Synapse's database
 #   engine     — Koven's governance / admin / profile service
 #   coturn     — TURN server for WebRTC NAT traversal in calls
@@ -64,8 +64,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    # Federation port 8448 is reachable via 443 + .well-known.  No
-    # ports: declared here — Caddy is the public face.
+    # No ports: declared — Caddy is the public face and only proxies
+    # the /_matrix/client/* + /_synapse/admin/* paths.  Federation
+    # is off entirely (homeserver.yaml drops the federation listener
+    # name + sets federation_domain_whitelist: []), so there's no
+    # 8448 to expose either.
 
   engine:
     build:

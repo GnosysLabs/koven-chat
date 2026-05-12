@@ -59,9 +59,12 @@ server {
         proxy_set_header Host $host;
     }
 
-    # Matrix client API + federation share Synapse's :8008 listener.
-    # /sync long-polls for ~30s; bump read timeout + disable buffering
-    # so SSE/long-poll behaves.
+    # Matrix client API.  /sync long-polls for ~30s; bump read timeout
+    # + disable buffering so SSE/long-poll behaves.  Koven instances
+    # don't federate (see docs/GOVERNANCE.md), so this listener only
+    # serves the local client API — the federation listener name was
+    # dropped from Synapse and no proxy route lives at /.well-known/
+    # matrix/server.
     location /_matrix/ {
         proxy_pass http://127.0.0.1:8008;
         proxy_http_version 1.1;
@@ -93,18 +96,18 @@ server {
     listen [::]:80;
 }
 
-# ─── ${SERVER_NAME} apex — Matrix .well-known + redirect to client ──
+# ─── ${SERVER_NAME} apex — client .well-known + redirect to client ──
+#
+# Federation discovery routes (/.well-known/matrix/server,
+# /.well-known/koven) used to live here.  Both are gone:
+# Koven instances don't federate, so there's nothing for remote
+# Matrix servers to discover and no probe path for would-be Koven
+# peers.  Only the *client* .well-known stays, so a Matrix client
+# typing "@user:${SERVER_NAME}" still resolves to the right
+# homeserver URL locally — that's a local-client lookup, not a
+# federation handshake.
 server {
     server_name ${SERVER_NAME};
-
-    # Federation server discovery: tells peers where the Matrix
-    # homeserver actually lives.  This is how a server_name on the
-    # apex resolves to a homeserver running on the subdomain.
-    location = /.well-known/matrix/server {
-        default_type application/json;
-        add_header Access-Control-Allow-Origin *;
-        return 200 '{"m.server":"${KOVEN_HOSTNAME}:443"}';
-    }
 
     # Client well-known: tells Matrix clients which homeserver URL
     # to use after they enter "@user:${SERVER_NAME}".
@@ -112,14 +115,6 @@ server {
         default_type application/json;
         add_header Access-Control-Allow-Origin *;
         return 200 '{"m.homeserver":{"base_url":"https://${KOVEN_HOSTNAME}"}}';
-    }
-
-    # Koven federation gate: peers probe this to confirm the remote
-    # is a Koven instance before accepting events.
-    location = /.well-known/koven {
-        default_type application/json;
-        add_header Access-Control-Allow-Origin *;
-        return 200 '{"version":"1"}';
     }
 
     # Anything else on the apex → bounce to the client app.
