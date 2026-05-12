@@ -73,10 +73,8 @@ The web client, the desktop app (Tauri), the server-side governance engine, and 
 | `docker/synapse/`      | Synapse Dockerfile + config templates + `koven-room-gate` Synapse module                              |
 | `docker/coturn/`       | coturn config template                                                                                |
 | `docker/nginx/`        | Optional nginx config template if you're not using the bundled Caddy                                  |
-| `marketing/`           | Static landing site at <https://koven.chat>                                                           |
 | `tools/seed.ts`        | Idempotent seed script. Populates a fresh install with users, spaces, rooms, and chat for development |
 | `bin/koven`            | Install / setup script                                                                                |
-| `bin/deploy-marketing` | rsync the marketing site to the koven.chat VPS                                                        |
 
 ---
 
