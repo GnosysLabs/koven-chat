@@ -5276,14 +5276,13 @@ export class MatrixTransport {
 			}
 		}
 
-		// Federation: room id format is `!localpart:server`.  The host
-		// after the colon tells us which homeserver hosts the room.
-		// Matching against our own user id's host tells us whether the
-		// engine's moderation has any reach here.
+		// Homeserver the room is anchored to (everything after the
+		// colon in the room id).  Always equal to the local instance's
+		// server now that Koven doesn't federate, but we keep the
+		// field on Room for any admin tool that wants to assert that
+		// invariant.
 		const colon = r.roomId.indexOf(":");
 		const homeserver = colon === -1 ? "" : r.roomId.slice(colon + 1);
-		const localServer = this.serverName();
-		const isFederated = !!homeserver && !!localServer && homeserver !== localServer;
 
 		// My power level in the room — undefined for invites since we
 		// don't have member state for ourselves until we join.
@@ -5344,7 +5343,6 @@ export class MatrixTransport {
 			inviter,
 			inviterDisplayName,
 			homeserver,
-			isFederated,
 			myPowerLevel,
 			creatorId,
 			nsfw: readKovenNsfw(r),

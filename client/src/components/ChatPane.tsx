@@ -103,7 +103,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import { AlertTriangle, ArrowDown, BarChart3, Check, CheckCheck, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Images, Lock, Network, Paperclip, Play, Scale, Settings, X } from "lucide-react";
+import { AlertTriangle, ArrowDown, BarChart3, Check, CheckCheck, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Images, Lock, Paperclip, Play, Scale, Settings, X } from "lucide-react";
 
 export interface ChatPaneProps {
 	room: Room | null;
@@ -311,18 +311,15 @@ export function ChatPane({
 }: ChatPaneProps) {
 	// Consensus flagging only works where the local engine can act:
 	//   - DMs are 1-on-1 — no quorum to gather, no consensus to reach.
-	//   - Federated rooms live on a different homeserver; our engine
-	//     bot can't join them, so flags pile up visually but no
-	//     collapse ever fires.
 	//   - Encrypted rooms hide message content from the engine (and
 	//     from any admin reviewing a floor case), so the moderation
 	//     pipeline is hollow there — the admin queue would surface
 	//     reports they can't read.  Better to not offer the affordance
 	//     than to let users believe they took action that won't
 	//     produce a real review.
-	// Hiding the affordance everywhere it can't bite avoids misleading
-	// users into thinking they took action.
-	const flaggable = !!room && room.kind !== "dm" && !room.isFederated && !room.encrypted;
+	// (Federation is no longer a consideration: Koven instances don't
+	// federate, so every joined room is local.  See docs/GOVERNANCE.md.)
+	const flaggable = !!room && room.kind !== "dm" && !room.encrypted;
 	const [roomFlagOpen, setRoomFlagOpen] = useState(false);
 	// Gallery sheet — opens from the header's Images icon, shows every
 	// image/video shared in the room as a grid + lightbox.
@@ -1137,14 +1134,10 @@ export function ChatPane({
 							title="Marked as adult content. Hidden from Explore for users who haven't opted into NSFW discovery."
 						/>
 					)}
-					{room.isFederated && (
-						<RoomBadge
-							icon={<Network className="h-3 w-3" />}
-							label={`On ${room.homeserver}`}
-							tone="warn"
-							title={`This room is hosted on ${room.homeserver}, not your home server. The local moderation engine does not apply here — flags and reputation are local-only.`}
-						/>
-					)}
+					{/* The "On <homeserver>" federated-room badge is gone.
+					    Koven instances no longer federate, so every
+					    room is local by construction — see
+					    docs/GOVERNANCE.md. */}
 					{/* Old MatrixCall Phone + Video buttons removed.
 					    DMs now use the same Live channel system as
 					    rooms — see RoomVoiceBar below.  Calling a DM

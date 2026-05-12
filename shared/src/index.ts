@@ -54,13 +54,12 @@ export interface Room {
 	 * member state.  Populated only for invites; the request UI shows
 	 * this instead of the raw mxid. */
 	inviterDisplayName?: string;
-	// Federation: every Matrix room id is `!localpart:homeserver`, so
-	// we can tell from the id alone what server hosts it.  The local
-	// engine's moderation only applies to rooms hosted by the user's
-	// own homeserver — surfacing this in the UI is how we honour the
-	// "open federation, but be honest about scope" stance.
+	// Homeserver the room id is anchored to (`!localpart:homeserver`).
+	// Always equal to the local instance's server now that Koven
+	// doesn't federate — kept here so the value is greppable for any
+	// admin tool that wants it, but the SPA no longer branches on
+	// "is this a remote room" anywhere.
 	homeserver: string;
-	isFederated: boolean;
 	// Current user's power level in this room.  Populated for joined
 	// rooms; undefined for invites (we don't have full state yet) and
 	// for DMs where it's irrelevant.  Used to gate room-settings UI:
