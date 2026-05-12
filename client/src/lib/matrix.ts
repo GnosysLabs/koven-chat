@@ -864,7 +864,15 @@ export class MatrixTransport {
 			this.routeDecryptedEvent(event, room, live);
 		});
 
-		this.client.on(RoomEvent.MyMembership, () => {
+		this.client.on(RoomEvent.MyMembership, (room: SdkRoom) => {
+			// When /sync delivers the leave we issued locally, clear
+			// the recently-deleted guard for that id eagerly — no
+			// reason to keep it in the set for the full 30-second
+			// backstop window when the SDK now agrees with us.
+			const m = room.getMyMembership();
+			if (m === "leave" || m === "ban") {
+				this.recentlyDeletedRoomIds.delete(room.roomId);
+			}
 			this.emitRoomList();
 			this.emitSpaceList();
 		});
@@ -4273,11 +4281,73 @@ export class MatrixTransport {
 		}
 
 		// Leave self last so the kicks happen while we still have
-		// power-level to issue them.
-		await c.leave(roomId);
-		await c.forget(roomId).catch(() => {/* ok if not supported */});
+		// power-level to issue them.  Wrap leave + forget so a
+		// partial failure (e.g. Synapse rate-limit, already-not-a-
+		// member after a sync race) doesn't reject the whole
+		// deleteRoom and leave the UI stuck on the modal with the
+		// room half-deleted.
+		//
+		// The leave is the critical step: once Synapse acknowledges
+		// it (or reports we're already not joined), we mark the room
+		// as locally-deleted so the SPA stops rendering it without
+		// waiting for /sync to echo the membership transition back.
+		// We don't mark on leave failure — if Synapse refused (rare
+		// outside of network errors), the room is still really
+		// joined and the next /sync would re-surface it anyway.
+		let leftOk = false;
+		try {
+			await c.leave(roomId);
+			leftOk = true;
+		} catch (err) {
+			console.warn(`deleteRoom: leave ${roomId} failed`, err);
+		}
+		await c.forget(roomId).catch(err => {
+			console.warn(`deleteRoom: forget ${roomId} failed`, err);
+		});
+		if (leftOk) this.markRoomDeletedLocally(roomId);
 		this.emitRoomList();
 		this.emitSpaceList();
+	}
+
+	/** Mark a room id as deleted locally so it stops rendering in the
+	 * SPA's `getRooms()` / `getSpaces()` immediately, without waiting
+	 * for matrix-js-sdk's local membership to flip on the next /sync.
+	 *
+	 * matrix-js-sdk's leave/forget round-trip completes against the
+	 * homeserver, but the local Room's `getMyMembership()` only flips
+	 * to "leave" when /sync echoes the m.room.member transition back —
+	 * a tens-to-hundreds-of-ms gap during which our `getRooms()`
+	 * filter would still let the room through.  The set is cleared
+	 * eagerly when the membership listener observes the leave, and on
+	 * a 30-second timeout as a backstop. */
+	private markRoomDeletedLocally(roomId: string): void {
+		this.recentlyDeletedRoomIds.add(roomId);
+		// Backstop: clear after 30 seconds even if /sync never echoes
+		// the leave (offline tab, network hiccup).  Keeps the set
+		// bounded.
+		setTimeout(() => {
+			this.recentlyDeletedRoomIds.delete(roomId);
+		}, 30_000);
+		// Eager local membership flip on the SdkRoom (if still present
+		// in the store) so any code path that reads getMyMembership()
+		// before the next /sync sees the leave.
+		const r = this.client?.getRoom(roomId);
+		if (r) {
+			try {
+				const me = this.creds?.user_id;
+				if (me) {
+					// matrix-js-sdk exposes this as a public API for
+					// exactly this purpose — synthesising the
+					// membership transition before /sync delivers it.
+					(r as unknown as { updateMyMembership: (m: string) => void })
+						.updateMyMembership("leave");
+				}
+			} catch {
+				// Best-effort — newer matrix-js-sdk versions may
+				// rename or remove this; the guard set above is the
+				// real fix.
+			}
+		}
 	}
 
 	/**
@@ -4382,8 +4452,13 @@ export class MatrixTransport {
 			// `client.forget()` completes (and even then, sometimes
 			// briefly).  Without this filter, a deleted/left room
 			// lingers in the user's list as a member-less ghost
-			// until the next page reload.
+			// until the next page reload.  The `recentlyDeletedRoomIds`
+			// guard covers the additional window where the leave/forget
+			// promise has resolved but matrix-js-sdk hasn't yet flipped
+			// the local membership (waiting on /sync to echo back the
+			// transition).
 			.filter(r => isLiveMembership(r.getMyMembership()))
+			.filter(r => !this.recentlyDeletedRoomIds.has(r.roomId))
 			.map(r => this.sdkRoomToRoom(r))
 			// Stable alphabetical baseline.  The previous recency-based
 			// sort drove the "click a room, it sinks" complaint — every
@@ -4415,6 +4490,7 @@ export class MatrixTransport {
 		const all = this.client.getRooms()
 			.filter(r => this.isSpace(r))
 			.filter(r => r.getMyMembership() === "join")
+			.filter(r => !this.recentlyDeletedRoomIds.has(r.roomId))
 			.map(r => this.sdkRoomToSpace(r));
 
 		// User-set order from account_data — drag-and-drop in the
@@ -5264,6 +5340,16 @@ export class MatrixTransport {
 	// solves the burst-thrash case.
 	private roomListEmitPending: number | null = null;
 	private spaceListEmitPending: number | null = null;
+	// Rooms the SPA just deleted/left locally.  `c.leave()` / `c.forget()`
+	// only flip matrix-js-sdk's local membership when the homeserver
+	// echoes the m.room.member transition back through /sync, which is
+	// async — a tens-to-hundreds-of-ms gap during which `getRooms()`
+	// would still surface the room as joined.  We mark the id here at
+	// the moment we issue the leave, filter it out of `getRooms()` and
+	// `getSpaces()`, and clear it after a 30-second grace window (plenty
+	// for /sync to catch up; the membership-event listener also clears
+	// it eagerly when /sync actually delivers the leave).
+	private recentlyDeletedRoomIds: Set<string> = new Set();
 	private emitRoomList(): void {
 		if (this.roomListEmitPending !== null) return;
 		this.roomListEmitPending = requestAnimationFrame(() => {
