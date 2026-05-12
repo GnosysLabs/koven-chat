@@ -2425,6 +2425,55 @@ export class MatrixTransport {
 		return { ok, failed };
 	}
 
+	/** Set a user's power level across an ENTIRE space — fanned out
+	 * across every joined child room plus the space room itself
+	 * (Discord-style: "roles" are server-wide, not per-channel).
+	 *
+	 * Each room is patched independently: we read its current
+	 * `m.room.power_levels`, splice `users[userId] = level`, and write
+	 * the whole content back.  That preserves all the other room-
+	 * specific PL config (events_default, redact, invite, etc.) — we
+	 * only touch the users dict.  Errors are non-fatal so a 403 in
+	 * one child (a moderator who hadn't been bumped above the
+	 * target's current PL when the founder changed it manually
+	 * before) doesn't abort the sweep; the caller surfaces the
+	 * partial-failure count.
+	 *
+	 * Setting `level = 0` is the demotion path: it leaves an explicit
+	 * `users[userId] = 0` entry rather than deleting the key.  That
+	 * costs a few bytes per room but keeps the role_change audit row
+	 * meaningful (the diff "PL 50 → PL 0" is visible in the per-room
+	 * mod log even if 0 is the users_default).
+	 */
+	async setUserPowerLevelInSpace(spaceId: SpaceId, userId: UserId, level: number): Promise<SpaceModResult> {
+		const c = this.requireClient();
+		const targets: RoomId[] = [...this.getSpaceChildRoomIds(spaceId), spaceId as unknown as RoomId];
+		const ok: RoomId[] = [];
+		const failed: SpaceModFailure[] = [];
+		for (const rid of targets) {
+			try {
+				const room = c.getRoom(rid);
+				if (!room) {
+					failed.push({ roomId: rid, error: "room not loaded" });
+					continue;
+				}
+				const currentEvent = room.currentState.getStateEvents("m.room.power_levels", "");
+				const current = (currentEvent?.getContent() as { users?: Record<string, number> } | undefined) ?? {};
+				const users = { ...(current.users ?? {}), [userId]: level };
+				await c.sendStateEvent(
+					rid,
+					"m.room.power_levels" as Parameters<typeof c.sendStateEvent>[1],
+					{ ...current, users } as Parameters<typeof c.sendStateEvent>[2],
+					"",
+				);
+				ok.push(rid);
+			} catch (e) {
+				failed.push({ roomId: rid, error: e instanceof Error ? e.message : String(e) });
+			}
+		}
+		return { ok, failed };
+	}
+
 	/** Redact someone else's message as an admin.  Self-deletes go
 	 * through the engine's /messages/:id/delete endpoint instead so
 	 * the self_deletion mod-log row gets written. */

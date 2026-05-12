@@ -2,9 +2,11 @@
 // "Online" (humans active or recently active), "Bots" (always-on
 // services, called out as their own bucket so it's clear what's a
 // person vs. a service), and "Offline" (humans we haven't seen
-// recently).  No power-level grouping — Koven doesn't have a
-// moderator tier (community moderation lives in the engine), so PL
-// distinctions other than "creator" don't carry meaning in the UI.
+// recently).  Sections are still presence-based, not role-based —
+// rooms are small enough that a separate "Admins" bucket would
+// fragment the roster more than it would help.  Role badges
+// (admin star, moderator shield) render inline on the row instead,
+// driven by Member.powerLevel.
 // Bots don't emit Matrix presence reliably; the engine keeps them
 // connected so we treat them as a peer category to online humans.
 
@@ -167,9 +169,9 @@ export function MemberList({
 		const confirmCopy: Partial<Record<MemberAction, string>> = {
 			kick_member:    `Kick ${target} from the entire space? They'll be removed from every room in this space.`,
 			ban_member:     `Ban ${target} from the entire space? They'll be removed from every room and won't be able to rejoin until unbanned.`,
-			promote_mod:    `Promote ${target} to Moderator (PL 50)?`,
-			promote_admin:  `Promote ${target} to Admin (PL 100)? They will be able to moderate you back.`,
-			reset_role:     `Reset ${target} to a regular member (PL 0)?`,
+			promote_mod:    `Promote ${target} to Moderator across the entire space (PL 50)? They'll be able to kick/ban/redact in every room.`,
+			promote_admin:  `Promote ${target} to Admin across the entire space (PL 100)? They'll be able to moderate you back and edit space settings.`,
+			reset_role:     `Reset ${target} to a regular member across the entire space (PL 0)?`,
 		};
 		const copy = confirmCopy[action];
 		if (copy && typeof window !== "undefined" && !window.confirm(copy)) {
@@ -712,6 +714,20 @@ function MemberRow({
 	// context menu wins on those rows.
 	onContextMenu?(e: React.MouseEvent): void;
 }) {
+	// Role badge — small icon next to the name reflecting the
+	// member's effective power level in this room.  Roles are space-
+	// wide in Koven (promotions fan out across every child + the
+	// space itself), so the room-level PL we observe here is the
+	// same value across the whole space in normal operation.  An
+	// admin (founder or anyone they promoted to PL 100) gets a gold
+	// star; a moderator (50 ≤ PL < 100) gets an amber shield.
+	// Members and bots without an explicit PL bump (PL < 50, which
+	// is the users_default of 0 for the vast majority) get nothing
+	// so the roster doesn't look like a parade of icons.
+	const role: "admin" | "mod" | null =
+		member.powerLevel >= 100 ? "admin"
+		: member.powerLevel >= 50 ? "mod"
+		: null;
 	return (
 		<li>
 			<button
@@ -728,6 +744,20 @@ function MemberRow({
 				<Avatar member={member} isBot={isBot} presence={presence} />
 				<span className="flex-1 truncate flex items-center gap-1.5">
 					<span className="truncate">{member.displayName}</span>
+					{role === "admin" && (
+						// Wrapping span carries the tooltip — lucide SVGs
+						// don't reliably pass a child <title> across
+						// versions, so a `title` attribute on a wrapper is
+						// the portable hover-text surface.
+						<span title={`Admin · PL ${member.powerLevel}`} aria-label="Admin" className="inline-flex shrink-0">
+							<Star className="h-3.5 w-3.5 text-amber-400 fill-amber-400/80" />
+						</span>
+					)}
+					{role === "mod" && (
+						<span title={`Moderator · PL ${member.powerLevel}`} aria-label="Moderator" className="inline-flex shrink-0">
+							<Shield className="h-3.5 w-3.5 text-amber-500 fill-amber-500/20" />
+						</span>
+					)}
 					{isBot && <BotBadge />}
 				</span>
 			</button>

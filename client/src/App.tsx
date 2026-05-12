@@ -2944,18 +2944,52 @@ export default function App() {
 									throw e;
 								}
 							}}
+							// Role changes (promote / demote) are SPACE-WIDE
+							// for the same Discord-style reason kick/ban
+							// are: a "Moderator" or "Admin" role is a
+							// community-level grant, not a per-channel
+							// permission.  Each handler fans the PL state
+							// event across every joined child room of the
+							// parent space + the space itself, then
+							// records one role_change audit row per room
+							// where the patch actually landed.  Orphan
+							// rooms fall back to the room-scoped path.
 							onPromoteToMod={async (userId) => {
 								if (!transport || !creds?.access_token || !activeRoom) return;
+								const parentSpaceId = activeRoom.parentSpaceIds[0];
 								try {
-									await transport.setUserPowerLevel(activeRoom.id, userId as UserId, 50);
-									await recordModAction(creds.access_token, {
-										roomId: activeRoom.id,
-										action: "role_change",
-										targetUser: userId,
-										newPowerLevel: 50,
-									}).catch(err => {
-										console.warn("recordModAction role_change failed", err);
-									});
+									if (!parentSpaceId) {
+										await transport.setUserPowerLevel(activeRoom.id, userId as UserId, 50);
+										await recordModAction(creds.access_token, {
+											roomId: activeRoom.id,
+											action: "role_change",
+											targetUser: userId,
+											newPowerLevel: 50,
+										}).catch(err => {
+											console.warn("recordModAction role_change failed", err);
+										});
+										return;
+									}
+									const result = await transport.setUserPowerLevelInSpace(
+										parentSpaceId,
+										userId as UserId,
+										50,
+									);
+									await Promise.allSettled(result.ok.map(rid =>
+										recordModAction(creds.access_token!, {
+											roomId: rid,
+											action: "role_change",
+											targetUser: userId,
+											newPowerLevel: 50,
+											reason: "Space-wide promote to moderator",
+										}),
+									));
+									if (result.failed.length > 0) {
+										dispatch({
+											type: "error",
+											message: `Promoted ${userId} in ${result.ok.length} of ${result.ok.length + result.failed.length} rooms — ${result.failed.length} failed`,
+										});
+									}
 								} catch (e) {
 									dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
 									throw e;
@@ -2963,16 +2997,40 @@ export default function App() {
 							}}
 							onPromoteToAdmin={async (userId) => {
 								if (!transport || !creds?.access_token || !activeRoom) return;
+								const parentSpaceId = activeRoom.parentSpaceIds[0];
 								try {
-									await transport.setUserPowerLevel(activeRoom.id, userId as UserId, 100);
-									await recordModAction(creds.access_token, {
-										roomId: activeRoom.id,
-										action: "role_change",
-										targetUser: userId,
-										newPowerLevel: 100,
-									}).catch(err => {
-										console.warn("recordModAction role_change failed", err);
-									});
+									if (!parentSpaceId) {
+										await transport.setUserPowerLevel(activeRoom.id, userId as UserId, 100);
+										await recordModAction(creds.access_token, {
+											roomId: activeRoom.id,
+											action: "role_change",
+											targetUser: userId,
+											newPowerLevel: 100,
+										}).catch(err => {
+											console.warn("recordModAction role_change failed", err);
+										});
+										return;
+									}
+									const result = await transport.setUserPowerLevelInSpace(
+										parentSpaceId,
+										userId as UserId,
+										100,
+									);
+									await Promise.allSettled(result.ok.map(rid =>
+										recordModAction(creds.access_token!, {
+											roomId: rid,
+											action: "role_change",
+											targetUser: userId,
+											newPowerLevel: 100,
+											reason: "Space-wide promote to admin",
+										}),
+									));
+									if (result.failed.length > 0) {
+										dispatch({
+											type: "error",
+											message: `Promoted ${userId} in ${result.ok.length} of ${result.ok.length + result.failed.length} rooms — ${result.failed.length} failed`,
+										});
+									}
 								} catch (e) {
 									dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
 									throw e;
@@ -2980,16 +3038,40 @@ export default function App() {
 							}}
 							onResetRole={async (userId) => {
 								if (!transport || !creds?.access_token || !activeRoom) return;
+								const parentSpaceId = activeRoom.parentSpaceIds[0];
 								try {
-									await transport.setUserPowerLevel(activeRoom.id, userId as UserId, 0);
-									await recordModAction(creds.access_token, {
-										roomId: activeRoom.id,
-										action: "role_change",
-										targetUser: userId,
-										newPowerLevel: 0,
-									}).catch(err => {
-										console.warn("recordModAction role_change failed", err);
-									});
+									if (!parentSpaceId) {
+										await transport.setUserPowerLevel(activeRoom.id, userId as UserId, 0);
+										await recordModAction(creds.access_token, {
+											roomId: activeRoom.id,
+											action: "role_change",
+											targetUser: userId,
+											newPowerLevel: 0,
+										}).catch(err => {
+											console.warn("recordModAction role_change failed", err);
+										});
+										return;
+									}
+									const result = await transport.setUserPowerLevelInSpace(
+										parentSpaceId,
+										userId as UserId,
+										0,
+									);
+									await Promise.allSettled(result.ok.map(rid =>
+										recordModAction(creds.access_token!, {
+											roomId: rid,
+											action: "role_change",
+											targetUser: userId,
+											newPowerLevel: 0,
+											reason: "Space-wide reset to member",
+										}),
+									));
+									if (result.failed.length > 0) {
+										dispatch({
+											type: "error",
+											message: `Reset ${userId} in ${result.ok.length} of ${result.ok.length + result.failed.length} rooms — ${result.failed.length} failed`,
+										});
+									}
 								} catch (e) {
 									dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
 									throw e;
