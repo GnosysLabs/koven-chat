@@ -18,7 +18,7 @@ import {
 import { Camera, Check, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { MatrixTransport } from "@/lib/matrix";
-import { fetchIntegrationsStatus, type IntegrationsStatus } from "@/lib/giphy";
+import { fetchIntegrationsStatus, type IntegrationsStatus } from "@/lib/klipy";
 
 export interface InstanceAdminSectionProps {
 	accessToken: string;
@@ -44,12 +44,12 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
 	const logoInputRef = useRef<HTMLInputElement | null>(null);
 
-	// Integrations — Giphy etc.  The API key itself is never returned
+	// Integrations: Klipy etc.  The API key itself is never returned
 	// from the engine (write-only); we only learn whether one is set
-	// via /api/instance/integrations.  `giphyKeyDraft` holds the
+	// via /api/instance/integrations.  `klipyKeyDraft` holds the
 	// admin's pending input until they hit Save.
 	const [integrations, setIntegrations] = useState<IntegrationsStatus | null>(null);
-	const [giphyKeyDraft, setGiphyKeyDraft] = useState("");
+	const [klipyKeyDraft, setKlipyKeyDraft] = useState("");
 	// Turnstile uses two keys: site (public, embedded in login HTML)
 	// and secret (private, used for siteverify).  Both required for
 	// the integration to function — engine reports `configured` true
@@ -68,7 +68,7 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 				? transport.discoverPublicRooms({ limit: 100 }).catch(() => [])
 				: Promise.resolve([]),
 			fetchIntegrationsStatus(accessToken).catch(
-				() => ({ giphy: { configured: false } } as IntegrationsStatus),
+				() => ({ klipy: { configured: false } } as IntegrationsStatus),
 			),
 		]).then(([cfg, dirEntries, integ]) => {
 			if (cancelled) return;
@@ -104,10 +104,10 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 				login_tagline: tagline.trim() || null,
 				default_space_id: defaultSpaceId || null,
 			};
-			// Only write the Giphy key when the admin has typed
-			// something — never overwrite an existing key with empty
+			// Only write the Klipy key when the admin has typed
+			// something, never overwrite an existing key with empty
 			// (Clear is the explicit way to remove it).
-			if (giphyKeyDraft.trim()) patch.giphy_api_key = giphyKeyDraft.trim();
+			if (klipyKeyDraft.trim()) patch.klipy_api_key = klipyKeyDraft.trim();
 			// Turnstile site key is editable in-place (it's public),
 			// so write it whenever it differs from the saved value.
 			// Empty input clears the saved key (passes null).
@@ -116,7 +116,7 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 			if (trimmedSite !== currentSite) {
 				patch.turnstile_site_key = trimmedSite || null;
 			}
-			// Secret key is write-only.  Same rule as Giphy: only
+			// Secret key is write-only.  Same rule as Klipy: only
 			// write on non-empty draft.
 			if (turnstileSecretDraft.trim()) {
 				patch.turnstile_secret_key = turnstileSecretDraft.trim();
@@ -124,14 +124,14 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 			const next = await updateInstanceConfig(accessToken, patch);
 			setConfig(next);
 			const wroteIntegration = !!(
-				giphyKeyDraft.trim() || turnstileSecretDraft.trim() || trimmedSite !== currentSite
+				klipyKeyDraft.trim() || turnstileSecretDraft.trim() || trimmedSite !== currentSite
 			);
 			if (wroteIntegration) {
 				// Re-fetch integrations to flip the badge to "configured"
 				// and clear write-only drafts back to placeholder.
 				const integ = await fetchIntegrationsStatus(accessToken);
 				setIntegrations(integ);
-				setGiphyKeyDraft("");
+				setKlipyKeyDraft("");
 				setTurnstileSecretDraft("");
 				// Site key is left in-place — pre-fills from the freshly-
 				// loaded config below.
@@ -192,16 +192,16 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 		}
 	}
 
-	async function clearGiphyKey() {
+	async function clearKlipyKey() {
 		setPending(true);
 		setError(null);
 		setInfo(null);
 		try {
-			await updateInstanceConfig(accessToken, { giphy_api_key: null });
+			await updateInstanceConfig(accessToken, { klipy_api_key: null });
 			const next = await fetchIntegrationsStatus(accessToken);
 			setIntegrations(next);
-			setGiphyKeyDraft("");
-			setInfo("Giphy disabled.");
+			setKlipyKeyDraft("");
+			setInfo("Klipy disabled.");
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
 		} finally {
@@ -258,7 +258,7 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 		name.trim() !== (config.name ?? "") ||
 		tagline.trim() !== (config.login_tagline ?? "") ||
 		defaultSpaceId !== (config.default_space_id ?? "") ||
-		giphyKeyDraft.trim() !== "" ||
+		klipyKeyDraft.trim() !== "" ||
 		turnstileSiteDraft.trim() !== currentTurnstileSite ||
 		turnstileSecretDraft.trim() !== "";
 
@@ -439,8 +439,8 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 
 					<div className="space-y-1.5">
 						<div className="flex items-center justify-between">
-							<Label htmlFor="giphy-api-key">Giphy API key</Label>
-							{integrations?.giphy.configured ? (
+							<Label htmlFor="klipy-api-key">Klipy API key</Label>
+							{integrations?.klipy.configured ? (
 								<span className="inline-flex items-center gap-1 text-[10px] text-emerald-500/90">
 									<Check className="h-3 w-3" />
 									Configured
@@ -451,20 +451,20 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 						</div>
 						<div className="flex gap-2">
 							<Input
-								id="giphy-api-key"
+								id="klipy-api-key"
 								type="password"
 								autoComplete="off"
-								value={giphyKeyDraft}
-								onChange={(e) => setGiphyKeyDraft(e.target.value)}
-								placeholder={integrations?.giphy.configured ? "•••••••• (paste a new key to replace)" : "Paste your Giphy API key"}
+								value={klipyKeyDraft}
+								onChange={(e) => setKlipyKeyDraft(e.target.value)}
+								placeholder={integrations?.klipy.configured ? "•••••••• (paste a new key to replace)" : "Paste your Klipy API key"}
 								disabled={pending}
 							/>
-							{integrations?.giphy.configured && (
+							{integrations?.klipy.configured && (
 								<Button
 									type="button"
 									variant="ghost"
 									size="sm"
-									onClick={clearGiphyKey}
+									onClick={clearKlipyKey}
 									disabled={pending}
 									className="text-muted-foreground hover:text-destructive"
 								>
@@ -473,7 +473,7 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 							)}
 						</div>
 						<p className="text-[10px] text-muted-foreground leading-snug">
-							Get a key at <a href="https://developers.giphy.com/dashboard/" target="_blank" rel="noreferrer" className="underline">developers.giphy.com</a> — pick the <strong>API</strong> option (not SDK). When set, members get a GIF picker in the message composer.
+							Sign up at <a href="https://klipy.com/developers" target="_blank" rel="noreferrer" className="underline">klipy.com/developers</a> and request a key.  When set, members get a media picker (GIFs, clips, and stickers) in the message composer.
 						</p>
 					</div>
 

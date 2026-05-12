@@ -56,7 +56,7 @@ import { SuspendedBanner } from "@/components/SuspendedBanner";
 import { ModLogSheet } from "@/components/ModLogSheet";
 import { FloorReviewSheet } from "@/components/FloorReviewSheet";
 import { botKickBan, deleteOwnMessage, fetchAdminStatus, fetchFloorQueue, fetchMyStatus, fetchRoomParents, flagRoom, type SuspensionSummary } from "@/lib/instance";
-import { fetchIntegrationsStatus } from "@/lib/giphy";
+import { fetchIntegrationsStatus } from "@/lib/klipy";
 import { ENGINE_URL } from "@/lib/urls";
 import { setAppBadge } from "@/lib/appBadge";
 import { NsfwAcceptDialog } from "@/components/NsfwAcceptDialog";
@@ -394,7 +394,7 @@ export default function App() {
 	// Instance-wide third-party integrations.  Polled once on sign-in
 	// (admin re-saves invalidate it via a refresh — see InstanceAdmin
 	// section).  Drives the GIF picker visibility in the composer.
-	const [giphyEnabled, setGiphyEnabled] = useState(false);
+	const [klipyEnabled, setKlipyEnabled] = useState(false);
 	// (Old MatrixCall-based 1:1 call state removed — DM calls now
 	// use the same RealtimeKit-backed flow as group rooms via
 	// CallProvider.  The ringing UI is IncomingRingListener +
@@ -516,17 +516,17 @@ export default function App() {
 	// pick up on next sign-in, which is good enough for v1.
 	useEffect(() => {
 		if (!creds) {
-			setGiphyEnabled(false);
+			setKlipyEnabled(false);
 			return;
 		}
 		let cancelled = false;
 		fetchIntegrationsStatus(creds.access_token)
 			.then(integ => {
-				if (!cancelled) setGiphyEnabled(integ.giphy.configured);
+				if (!cancelled) setKlipyEnabled(integ.klipy.configured);
 			})
 			.catch(() => {
 				/* engine may be older than the integrations endpoint;
-				   leave giphy disabled.  Not worth surfacing. */
+				   leave klipy disabled.  Not worth surfacing. */
 			});
 		return () => { cancelled = true; };
 	}, [creds]);
@@ -2613,7 +2613,7 @@ export default function App() {
 						}
 					}}
 					accessToken={creds.access_token}
-					giphyEnabled={giphyEnabled}
+					klipyEnabled={klipyEnabled}
 					pollsByMessage={state.pollsByMessage}
 					onCreatePoll={async (opts) => {
 						if (!transport || !state.activeRoomId) return;

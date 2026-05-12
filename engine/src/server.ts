@@ -236,7 +236,7 @@ const ALLOWED_CONFIG_KEYS = new Set([
 	// the public GET /api/instance (filtered by SENSITIVE_CONFIG_KEYS
 	// below).  Adding a new integration here means adding it to the
 	// sensitive set too if it's a credential.
-	"giphy_api_key",
+	"klipy_api_key",
 	// Cloudflare Turnstile — site key is public (the login page must
 	// embed it to render the widget); secret key is the
 	// server-side credential used for siteverify.  Only the secret
@@ -252,7 +252,7 @@ const ALLOWED_CONFIG_KEYS = new Set([
 // integration keys too; this set is purely about what's safe to
 // return unauthenticated.
 const SENSITIVE_CONFIG_KEYS = new Set([
-	"giphy_api_key",
+	"klipy_api_key",
 	"turnstile_secret_key",
 ]);
 
@@ -836,7 +836,7 @@ export function startServer(): void {
 			// Public read — login screen needs this before the user is
 			// authenticated, so no token check.
 			if (req.method === "GET" && path === "/api/instance") {
-				// Strips sensitive keys (e.g. giphy_api_key) — this
+				// Strips sensitive keys (e.g. klipy_api_key): this
 				// endpoint is unauthenticated so the login screen can
 				// load branding without a session.
 				return json({ config: publicInstanceConfig() });
@@ -3867,20 +3867,20 @@ export function startServer(): void {
 				return handleAdminImageUpload(req, "logo_url");
 			}
 
-			// Admin-only debug: test the stored Giphy key by hitting
+			// Admin-only debug: test the stored Klipy key by hitting
 			// trending and returning the upstream status + body + the
 			// URL it sent (with the api_key masked).  Lets the admin
-			// see exactly what Giphy says without grepping engine logs.
-			if (req.method === "GET" && path === "/api/instance/giphy-test") {
+			// see exactly what Klipy says without grepping engine logs.
+			if (req.method === "GET" && path === "/api/instance/klipy-test") {
 				const auth = await requireAdmin(req);
 				if (auth instanceof Response) return auth;
-				const apiKey = readInstanceConfig()["giphy_api_key"]?.trim();
+				const apiKey = readInstanceConfig()["klipy_api_key"]?.trim();
 				if (!apiKey) {
 					return json({ ok: false, error: "no_key_configured" });
 				}
-				const upstream = new URL("https://api.giphy.com/v1/gifs/trending");
-				upstream.searchParams.set("api_key", apiKey);
-				upstream.searchParams.set("limit", "1");
+				// Klipy embeds the API key in the URL path: /api/v1/{KEY}/gifs/trending
+				const upstream = new URL(`https://api.klipy.com/api/v1/${encodeURIComponent(apiKey)}/gifs/trending`);
+				upstream.searchParams.set("per_page", "1");
 				const masked = `${apiKey.slice(0, 4)}…${apiKey.slice(-4)} (length=${apiKey.length})`;
 				try {
 					const r = await fetch(upstream);
@@ -3889,7 +3889,7 @@ export function startServer(): void {
 						ok: r.ok,
 						status: r.status,
 						key_preview: masked,
-						url: upstream.toString().replace(apiKey, "***"),
+						url: upstream.toString().replace(encodeURIComponent(apiKey), "***"),
 						upstream_body: body.slice(0, 1000),
 					});
 				} catch (err) {
@@ -3917,7 +3917,7 @@ export function startServer(): void {
 				const cfg = readInstanceConfig();
 				return json({
 					integrations: {
-						giphy: { configured: !!cfg["giphy_api_key"] },
+						klipy: { configured: !!cfg["klipy_api_key"] },
 						// Turnstile counts as configured only when BOTH
 						// keys are set — neither half on its own is
 						// usable, so the admin form should report it
@@ -3929,38 +3929,57 @@ export function startServer(): void {
 				});
 			}
 
-			// ─── Giphy proxy ─────────────────────────────────────────
-			// Forwards search / trending requests to Giphy's API using
+			// ─── Klipy proxy (GIFs / clips / stickers) ───────────────
+			// Forwards search / trending requests to Klipy's API using
 			// the instance-wide API key from instance_config.  Keeps
 			// the key server-side (never sent to clients).  Returns
 			// 503 when the key isn't configured so the SPA can hide
-			// the GIF picker.  Auth: any logged-in user — Giphy
-			// requests aren't free, so we gate on a valid Matrix
+			// the media picker.  Auth: any logged-in user, Klipy
+			// requests aren't free so we gate on a valid Matrix
 			// access token to avoid unauthenticated clients burning
 			// the quota.
-			if (req.method === "GET" && (path === "/api/giphy/search" || path === "/api/giphy/trending")) {
+			//
+			// Endpoints:
+			//   GET /api/klipy/trending?kind=gif|sticker|clip
+			//   GET /api/klipy/search?kind=gif|sticker|clip&q=...
+			//
+			// Klipy embeds the API key in the URL PATH instead of as a
+			// query param (the Giphy/Tenor convention).  Their
+			// endpoints are also per-kind: /gifs/trending,
+			// /stickers/trending, /clips/trending.  Engine bridges
+			// both differences so the SPA gets one uniform shape:
+			// { results: [{ id, kind, title, preview_url,
+			// preview_blur, full_url, full_mp4_url, full_webp_url,
+			// width, height, mime_type }] }
+			if (req.method === "GET" && (path === "/api/klipy/search" || path === "/api/klipy/trending")) {
 				const userId = await whoami(extractToken(req));
 				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
-				const apiKey = readInstanceConfig()["giphy_api_key"]?.trim();
-				if (!apiKey) return json({ errcode: "M_NOT_FOUND", error: "giphy_not_configured" }, { status: 503 });
+				const apiKey = readInstanceConfig()["klipy_api_key"]?.trim();
+				if (!apiKey) return json({ errcode: "M_NOT_FOUND", error: "klipy_not_configured" }, { status: 503 });
 				const params = new URL(req.url).searchParams;
-				// Clamp limit to Giphy's accepted range to keep
-				// response sizes predictable.
-				const limit = Math.max(1, Math.min(50, parseInt(params.get("limit") ?? "24", 10) || 24));
-				// pg-13 by default — the brand-side Giphy default;
-				// keeps the picker chat-appropriate without forcing
-				// G-rated only.  Hardcoded for v1; could become an
-				// instance setting later if anyone asks.
+				const kindRaw = (params.get("kind") ?? "gif").toLowerCase();
+				const kindToPath: Record<string, "gifs" | "stickers" | "clips"> = {
+					gif: "gifs",
+					sticker: "stickers",
+					clip: "clips",
+				};
+				const kindPath = kindToPath[kindRaw];
+				if (!kindPath) {
+					return json({ errcode: "M_INVALID_PARAM", error: "kind must be gif, sticker, or clip" }, { status: 400 });
+				}
+				// Clamp per_page to Klipy's accepted range (min 8, max 50,
+				// default 24).  Same as Giphy's `limit` cap.
+				const perPage = Math.max(8, Math.min(50, parseInt(params.get("limit") ?? "24", 10) || 24));
+				// pg-13 by default to keep the picker chat-appropriate;
+				// admin could lift this to a tunable later.
 				const rating = "pg-13";
+				const action = path === "/api/klipy/search" ? "search" : "trending";
 				const upstream = new URL(
-					path === "/api/giphy/search"
-						? "https://api.giphy.com/v1/gifs/search"
-						: "https://api.giphy.com/v1/gifs/trending",
+					`https://api.klipy.com/api/v1/${encodeURIComponent(apiKey)}/${kindPath}/${action}`,
 				);
-				upstream.searchParams.set("api_key", apiKey);
-				upstream.searchParams.set("limit", String(limit));
+				upstream.searchParams.set("per_page", String(perPage));
 				upstream.searchParams.set("rating", rating);
-				if (path === "/api/giphy/search") {
+				if (action === "search") {
 					const q = (params.get("q") ?? "").trim();
 					if (!q) return json({ errcode: "M_INVALID_PARAM", error: "q required" }, { status: 400 });
 					upstream.searchParams.set("q", q);
@@ -3968,48 +3987,79 @@ export function startServer(): void {
 				try {
 					const r = await fetch(upstream);
 					if (!r.ok) {
-						// Forward Giphy's own message verbatim — when the
-						// admin's seeing 401 it's almost always "wrong
-						// key" or "SDK key in API slot," and Giphy's
-						// reply spells that out.  Rendered in the
-						// picker's error toast so the admin can act
-						// without checking server logs.
 						const detail = await r.text().catch(() => "");
 						return json(
 							{
 								errcode: "M_UNKNOWN",
-								error: `giphy_upstream_${r.status}`,
+								error: `klipy_upstream_${r.status}`,
 								detail: detail.slice(0, 500),
 							},
 							{ status: 502 },
 						);
 					}
-					// Reshape Giphy's response down to the fields the
-					// client actually uses.  Avoids leaking irrelevant
-					// metadata and keeps the wire format stable if
-					// Giphy reorganises their schema.
+					// Klipy response shape (gif item, sticker + clip
+					// look the same with the kind reflected in `type`):
+					//   { result: true, data: { data: [Item], current_page, per_page, has_next, meta } }
+					// Each Item:
+					//   { id, slug, title, type ("gif"|"sticker"|"clip"),
+					//     file: { hd|md|sm|xs: { gif|webp|jpg|mp4|webm: { url, width, height, size } } },
+					//     blur_preview: "data:image/jpeg;base64,..." }
+					//
+					// Mapping rules:
+					//   preview_url: sm.webp.url, fallback sm.gif.url, fallback sm.jpg.url
+					//   preview_blur: blur_preview verbatim
+					//   full_url: md.gif.url for kind=gif/sticker (animated),
+					//             md.mp4.url for kind=clip
+					//   full_webp_url: md.webp.url when present (modern fallback for the bubble)
+					//   full_mp4_url: md.mp4.url when present (for clip bubbles)
+					//   width, height: from the chosen full format's dims
+					//   mime_type: image/gif | image/webp | video/mp4
+					interface KlipyFormat { url?: string; width?: number; height?: number; size?: number }
+					interface KlipyTier { gif?: KlipyFormat; webp?: KlipyFormat; jpg?: KlipyFormat; mp4?: KlipyFormat; webm?: KlipyFormat }
+					interface KlipyItem {
+						id?: number | string;
+						slug?: string;
+						title?: string;
+						type?: string;
+						blur_preview?: string;
+						file?: { hd?: KlipyTier; md?: KlipyTier; sm?: KlipyTier; xs?: KlipyTier };
+					}
 					const raw = await r.json() as {
-						data?: Array<{
-							id?: string;
-							title?: string;
-							images?: {
-								fixed_width?: { url?: string; width?: string; height?: string };
-								original?: { url?: string; mp4?: string; width?: string; height?: string };
-								preview_gif?: { url?: string };
-							};
-						}>;
+						result?: boolean;
+						data?: { data?: KlipyItem[] };
 					};
-					const results = (raw.data ?? []).flatMap(item => {
-						const preview = item.images?.fixed_width?.url ?? item.images?.preview_gif?.url;
-						const original = item.images?.original?.url;
-						if (!item.id || !preview || !original) return [];
+					const items = raw.data?.data ?? [];
+					const results = items.flatMap(item => {
+						if (!item.id || !item.file) return [];
+						const sm = item.file.sm ?? {};
+						const md = item.file.md ?? {};
+						const previewUrl = sm.webp?.url ?? sm.gif?.url ?? sm.jpg?.url;
+						if (!previewUrl) return [];
+						const isClip = kindRaw === "clip";
+						const fullObj = isClip ? md.mp4 : md.gif;
+						const fullUrl = fullObj?.url;
+						if (!fullUrl) return [];
+						const mimeType = isClip
+							? "video/mp4"
+							: kindRaw === "sticker"
+								? "image/webp"  // stickers render best from the transparent webp
+								: "image/gif";
+						// For stickers we prefer the webp at md tier as the
+						// "full" image so transparency is preserved; the
+						// gif fallback is fine if md.webp is missing.
+						const fullForSticker = md.webp?.url ?? md.gif?.url;
 						return [{
-							id: item.id,
+							id: String(item.id),
+							kind: kindRaw,
 							title: item.title ?? "",
-							preview_url: preview,
-							original_url: original,
-							width: parseInt(item.images?.original?.width ?? "0", 10) || 0,
-							height: parseInt(item.images?.original?.height ?? "0", 10) || 0,
+							preview_url: previewUrl,
+							preview_blur: item.blur_preview ?? null,
+							full_url: kindRaw === "sticker" ? (fullForSticker ?? fullUrl) : fullUrl,
+							full_mp4_url: md.mp4?.url ?? null,
+							full_webp_url: md.webp?.url ?? null,
+							width: fullObj?.width ?? 0,
+							height: fullObj?.height ?? 0,
+							mime_type: mimeType,
 						}];
 					});
 					return json({ results });

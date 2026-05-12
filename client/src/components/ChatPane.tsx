@@ -35,7 +35,7 @@ import { renderWithMentions } from "@/lib/mentionRender";
 import { buildMessageUrl, parseShareLinkUrl } from "@/lib/inviteLink";
 import { findYouTubeMatches, isYouTubeUrl, stripYouTubeUrls } from "@/lib/youtube";
 import { YouTubeEmbed } from "@/components/YouTubeEmbed";
-import { GifPicker } from "@/components/GifPicker";
+import { MediaPicker } from "@/components/MediaPicker";
 import { PollCard } from "@/components/PollCard";
 import { CreatePollDialog } from "@/components/CreatePollDialog";
 import { GallerySheet } from "@/components/GallerySheet";
@@ -205,16 +205,16 @@ export interface ChatPaneProps {
 	// items that need them are filtered out when missing.
 	onSendDm?(userId: UserId): void | Promise<void>;
 	onBlockSender?(userId: UserId): void | Promise<void>;
-	// Bearer token used for the engine's Giphy proxy (search /
-	// trending).  Required for the GIF picker to work; absent or
+	// Bearer token used for the engine's Klipy proxy (search /
+	// trending).  Required for the media picker to work; absent or
 	// empty keeps the picker hidden even if the integration is
 	// configured.
 	accessToken?: string;
-	// True when the instance admin has set a Giphy API key — drives
-	// the GIF picker affordance next to the paperclip.  Optional;
-	// defaults to "off" so instances without Giphy don't see the
-	// button at all.
-	giphyEnabled?: boolean;
+	// True when the instance admin has set a Klipy API key, drives
+	// the GIF / clip / sticker picker affordance next to the
+	// paperclip.  Optional; defaults to "off" so instances without
+	// Klipy don't see the button at all.
+	klipyEnabled?: boolean;
 	// Per-message poll aggregates, keyed by the poll's start event id.
 	// Drives the live vote counts + viewer-selected-answers state on
 	// PollCard.  Mirror of the App reducer's `pollsByMessage` map.
@@ -268,7 +268,7 @@ export function ChatPane({
 	onSendDm,
 	onBlockSender,
 	accessToken,
-	giphyEnabled,
+	klipyEnabled,
 	pollsByMessage,
 	onCreatePoll,
 	onVoteOnPoll,
@@ -837,12 +837,15 @@ export function ChatPane({
 		});
 	}
 
-	// GIFs from the Giphy picker bypass the preview/caption flow:
-	// users expect a one-click "send" the way Discord does it,
-	// and a second confirm step would feel like friction.  Caption
-	// support could come back if anyone asks; reply-to is preserved
-	// since it was already targeted before the picker opened.
-	async function sendGif(file: File) {
+	// Media picks from the Klipy picker (GIFs / clips / stickers)
+	// bypass the preview/caption flow: users expect a one-click
+	// "send" the way Discord does it, and a second confirm step
+	// would feel like friction.  Caption support could come back if
+	// anyone asks; reply-to is preserved since it was already
+	// targeted before the picker opened.  MIME type on the File
+	// drives the resulting Matrix msgtype (m.image for gif/webp,
+	// m.video for mp4).
+	async function sendMedia(file: File) {
 		if (!onSendAttachment) return;
 		const replyToId = replyTarget?.id ?? null;
 		setUploading(true);
@@ -1358,16 +1361,16 @@ export function ChatPane({
 							<BarChart3 className="h-4 w-4" />
 						</button>
 					)}
-					{onSendAttachment && giphyEnabled && accessToken && (
+					{onSendAttachment && klipyEnabled && accessToken && (
 						// GIF picker — Discord-style "GIF" text pill.  Sized
 						// to h-8 so it shares a baseline with the paperclip
 						// button (which is h-4 icon + p-2 = 32px); items-end
 						// on the surrounding form keeps both anchored to
 						// the bottom of the multi-line composer.
-						<GifPicker
+						<MediaPicker
 							accessToken={accessToken}
 							disabled={isSuspended || uploading || pendingAttachments.length > 0}
-							onPick={sendGif}
+							onPick={sendMedia}
 						>
 							<button
 								type="button"
@@ -1384,7 +1387,7 @@ export function ChatPane({
 							>
 								GIF
 							</button>
-						</GifPicker>
+						</MediaPicker>
 					)}
 					<div className="relative flex-1">
 						{mentionToken && matches.length > 0 && (
