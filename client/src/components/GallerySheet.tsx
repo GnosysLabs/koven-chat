@@ -393,7 +393,7 @@ function MediaLightboxBody({
 				</button>
 			)}
 			<div
-				className="relative max-w-[92vw] max-h-[85vh] flex flex-col gap-2 items-center"
+				className="relative max-w-[92vw] max-h-[85vh] flex items-center justify-center"
 				onClick={(e) => e.stopPropagation()}
 			>
 				{url ? (
@@ -409,23 +409,18 @@ function MediaLightboxBody({
 							// the first keyframe decodes (which can
 							// be 1-2s on a 4K source).
 							poster={poster}
-							className="max-w-[92vw] max-h-[80vh] rounded-md"
+							className="max-w-[92vw] max-h-[85vh] rounded-md"
 						/>
 					) : (
 						<img
 							src={url}
 							alt={message.mediaName ?? "image"}
-							className="max-w-[92vw] max-h-[80vh] rounded-md object-contain"
+							className="max-w-[92vw] max-h-[85vh] rounded-md object-contain"
 						/>
 					)
 				) : (
 					<div className="w-64 h-64 rounded-md bg-muted-foreground/10 animate-pulse" />
 				)}
-				<div className="text-[11px] text-white/70 flex items-center gap-2">
-					<span className="truncate max-w-[60ch]">{message.senderDisplayName}</span>
-					<span>·</span>
-					<span>{new Date(message.timestamp).toLocaleString()}</span>
-				</div>
 			</div>
 		</>
 	);
