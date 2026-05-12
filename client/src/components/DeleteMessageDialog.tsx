@@ -62,7 +62,7 @@ export function DeleteMessageDialog({ open, onOpenChange, onConfirm }: DeleteMes
 				<DialogHeader>
 					<DialogTitle>Delete this message?</DialogTitle>
 					<DialogDescription>
-						This can't be undone. The message content is replaced with a redaction marker on the server.
+						This can't be undone.
 					</DialogDescription>
 				</DialogHeader>
 				{error && (
