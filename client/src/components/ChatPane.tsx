@@ -1364,9 +1364,22 @@ export function ChatPane({
 								// trash button but is visually + semantically
 								// distinct — moderating someone else's content
 								// vs. removing your own.
+								//
+								// Suppressed in DMs.  Matrix creates DMs with
+								// both parties at PL 100 so `canModerateRoom`
+								// reads true, but there is no admin / member
+								// asymmetry in a two-party DM and no public
+								// mod log to audit against — the shield would
+								// be redactingly someone else's message under
+								// the pretense of moderation, which is just
+								// "deleting their message", and that's a
+								// boundary we don't want a one-click button
+								// for.  Each party can still self-delete
+								// their own messages via the trash icon.
 								onAdminRedact={
 									onAdminRedactMessage
 									&& canModerateRoom
+									&& room.kind !== "dm"
 									&& !m.isSelf
 									&& !myOwnedBotMxids?.has(m.sender)
 									&& !m.pending
