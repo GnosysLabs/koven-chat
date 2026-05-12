@@ -6070,16 +6070,28 @@ const MESSAGE_LIKE_TYPES = new Set([
 ]);
 
 /** Walk the live timeline from the tail and return the timestamp of
- * the most recent message-shaped event, or 0 when none exist (room
- * has only state activity, never a real message).
+ * the most recent message-shaped event.  Falls back to the SDK's
+ * `getLastActiveTimestamp()` (the latest event of ANY kind) when no
+ * message-shaped event lives in the loaded slice — without this
+ * fallback, quiet rooms whose initial-sync window contained only
+ * state events (member joins, m.space.child writes, name/icon edits)
+ * collapsed to ts=0 and piled up at the bottom of the sidebar until
+ * the user clicked to backfill enough history to surface a real
+ * message.
  *
- * Cheap in the steady state: the last event in an active conversation
- * IS a message, so the loop exits on the first iteration.  Worst case
- * is a chatty room whose tail has a long burst of state churn (e.g.
- * an admin renaming + re-iconing in a row); we walk back through the
- * burst and stop at the first real message.  Bounded above by the
- * live timeline's natural length (matrix-js-sdk caps it; older
- * messages live in paginated chunks not in scope here). */
+ * Trade-off: state-event-only rooms now sort by their last state
+ * event rather than 0, which means an admin renaming a quiet room
+ * will bubble it up alongside chattier rooms.  That's correct in
+ * spirit (the room IS recently active in the user's mental model);
+ * the concern with the original lastActiveTimestamp approach was
+ * engine-driven member churn (@engine joining rooms automatically)
+ * bumping silent rooms — but in practice that happens once at room
+ * creation, not continuously, so the bumping problem doesn't
+ * recur.
+ *
+ * Cheap in the steady state: the last event in an active
+ * conversation IS a message, so the loop exits on the first
+ * iteration. */
 function lastMessageTs(r: SdkRoom | null | undefined): number {
 	if (!r) return 0;
 	const events = r.getLiveTimeline().getEvents();
@@ -6088,7 +6100,15 @@ function lastMessageTs(r: SdkRoom | null | undefined): number {
 		if (!ev) continue;
 		if (MESSAGE_LIKE_TYPES.has(ev.getType())) return ev.getTs();
 	}
-	return 0;
+	// Fallback: getLastActiveTimestamp() returns the ts of the tail
+	// event regardless of type.  matrix-js-sdk maintains this even
+	// for rooms whose live timeline page hasn't surfaced a message-
+	// shaped event yet, so the sidebar lands on a stable order from
+	// first paint instead of requiring a per-room click to backfill.
+	// Clamp to non-negative — SDK returns Number.MIN_SAFE_INTEGER + 1
+	// for genuinely empty rooms.
+	const fallback = r.getLastActiveTimestamp();
+	return fallback > 0 ? fallback : 0;
 }
 
 function readKovenIconEmoji(r: SdkRoom): string | undefined {
