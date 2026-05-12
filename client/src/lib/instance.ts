@@ -410,6 +410,113 @@ export async function unflagRoom(
 	return { ok: true };
 }
 
+// ─── Admin reports queue ────────────────────────────────────────────
+//
+// Member-submitted flags surface here for instance admins to triage.
+// The engine endpoint pulls from the existing flags table (with a
+// review_status column added in the migration).  Closing a report is
+// a triage action only — the actual moderation (kick / ban / redact)
+// is performed via the separate transport + recordModAction calls.
+
+export interface AdminReport {
+	id: number;
+	room_id: string;
+	flagger: string;
+	target_kind: "message" | "room";
+	target_event_id: string | null;
+	target_room_id: string | null;
+	category: string;
+	rationale: string | null;
+	created_at: number;
+	status: "open" | "dismissed" | "actioned";
+}
+
+export async function fetchAdminReports(accessToken: string): Promise<AdminReport[]> {
+	const r = await fetch(`${ENGINE_URL}/api/admin/reports`, {
+		headers: { Authorization: `Bearer ${accessToken}` },
+	});
+	if (!r.ok) return [];
+	const body = (await r.json()) as { reports?: AdminReport[] };
+	return body.reports ?? [];
+}
+
+export async function fetchAdminReportsCount(accessToken: string): Promise<number> {
+	const r = await fetch(`${ENGINE_URL}/api/admin/reports/count`, {
+		headers: { Authorization: `Bearer ${accessToken}` },
+	});
+	if (!r.ok) return 0;
+	const body = (await r.json()) as { open?: number };
+	return body.open ?? 0;
+}
+
+export async function dismissReport(accessToken: string, flagId: number): Promise<void> {
+	const r = await fetch(
+		`${ENGINE_URL}/api/admin/reports/${flagId}/dismiss`,
+		{
+			method: "POST",
+			headers: { Authorization: `Bearer ${accessToken}` },
+		},
+	);
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		throw new Error(`dismiss failed: ${r.status} ${txt.slice(0, 200)}`);
+	}
+}
+
+export async function markReportActioned(accessToken: string, flagId: number): Promise<void> {
+	const r = await fetch(
+		`${ENGINE_URL}/api/admin/reports/${flagId}/action`,
+		{
+			method: "POST",
+			headers: { Authorization: `Bearer ${accessToken}` },
+		},
+	);
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		throw new Error(`action failed: ${r.status} ${txt.slice(0, 200)}`);
+	}
+}
+
+// Records a moderator action to the audit trail.  Caller is expected
+// to perform the underlying Matrix mutation separately (via transport
+// .kickFromRoom etc.) — the engine endpoint only writes the audit
+// row.  Both sides happen in parallel from the SPA's perspective.
+export interface RecordModActionOpts {
+	roomId: string;
+	action: "kick" | "ban" | "unban" | "redact" | "role_change";
+	targetUser?: string;
+	targetEventId?: string;
+	newPowerLevel?: number;
+	reason?: string;
+}
+
+export async function recordModAction(
+	accessToken: string,
+	opts: RecordModActionOpts,
+): Promise<void> {
+	const r = await fetch(
+		`${ENGINE_URL}/api/rooms/${encodeURIComponent(opts.roomId)}/mod-actions`,
+		{
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${accessToken}`,
+			},
+			body: JSON.stringify({
+				action: opts.action,
+				target_user: opts.targetUser,
+				target_event_id: opts.targetEventId,
+				new_power_level: opts.newPowerLevel,
+				reason: opts.reason,
+			}),
+		},
+	);
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		throw new Error(`recordModAction failed: ${r.status} ${txt.slice(0, 200)}`);
+	}
+}
+
 export async function updateInstanceConfig(
 	accessToken: string,
 	patch: Partial<Record<keyof InstanceConfig, string | null>>,

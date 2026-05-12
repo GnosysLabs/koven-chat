@@ -54,7 +54,16 @@ import { AppSettingsSheet } from "@/components/AppSettingsSheet";
 import { EncryptionSetupSheet } from "@/components/EncryptionSetupSheet";
 import { EncryptionUnlockSheet } from "@/components/EncryptionUnlockSheet";
 import { ModLogSheet } from "@/components/ModLogSheet";
-import { botKickBanFromSpace, deleteOwnMessage, fetchAdminStatus, fetchRoomParents, flagRoom } from "@/lib/instance";
+import {
+	botKickBanFromSpace,
+	deleteOwnMessage,
+	fetchAdminReportsCount,
+	fetchAdminStatus,
+	fetchRoomParents,
+	flagRoom,
+	recordModAction,
+} from "@/lib/instance";
+import { AdminReportsSheet } from "@/components/AdminReportsSheet";
 import { fetchIntegrationsStatus } from "@/lib/klipy";
 import { ENGINE_URL } from "@/lib/urls";
 import { setAppBadge } from "@/lib/appBadge";
@@ -383,6 +392,10 @@ export default function App() {
 	// in the SpaceBar.  Polled every 60s so newly-granted admin rights
 	// surface without a refresh.
 	const [isAdmin, setIsAdmin] = useState(false);
+	// Admin reports queue (replaces the retired floor-review queue).
+	// Sheet open + open-count badge on the SpaceBar shield button.
+	const [adminReportsOpen, setAdminReportsOpen] = useState(false);
+	const [pendingReviewCount, setPendingReviewCount] = useState(0);
 	// Instance-wide third-party integrations.  Polled once on sign-in
 	// (admin re-saves invalidate it via a refresh — see InstanceAdmin
 	// section).  Drives the GIF picker visibility in the composer.
@@ -541,9 +554,33 @@ export default function App() {
 		return () => { cancelled = true; };
 	}, [creds]);
 
-	// (Suspension-state and floor-queue polls deleted — admins act on
-	// reports via the upcoming /api/admin/reports queue, not via the
-	// retired consensus-suspension pipeline.)
+	// Admin reports queue poll.  Drives the open-count badge on the
+	// SpaceBar shield icon — pulled once on admin sign-in and every
+	// 60s thereafter.  Same cadence as the admin-status probe above:
+	// admin moderation isn't a sub-second affordance, and polling
+	// faster would burn engine cycles without changing the UX.
+	useEffect(() => {
+		if (!creds || !isAdmin) {
+			setPendingReviewCount(0);
+			return;
+		}
+		let cancelled = false;
+		const poll = async () => {
+			try {
+				const n = await fetchAdminReportsCount(creds.access_token);
+				if (cancelled) return;
+				setPendingReviewCount(n);
+			} catch {
+				/* keep last-known value */
+			}
+		};
+		poll();
+		const id = window.setInterval(poll, 60_000);
+		return () => {
+			cancelled = true;
+			window.clearInterval(id);
+		};
+	}, [creds, isAdmin]);
 
 	// Listen for `open-room` messages posted by the service worker
 	// when the user taps a notification.  The SW can't navigate the
@@ -1851,6 +1888,14 @@ export default function App() {
 		() => state.rooms.find(r => r.id === state.activeRoomId) ?? null,
 		[state.rooms, state.activeRoomId],
 	);
+	// Standard admin moderation gate.  True when the viewer has PL ≥
+	// 50 in the active room — drives the MemberList admin moderation
+	// menu items + the ChatPane admin-redact shield button.  Read off
+	// the cached Room.myPowerLevel value the transport populates on
+	// every Room.MyMembership / state-event update; falls back to 0
+	// when the room hasn't been fully resolved yet.  Synapse re-checks
+	// server-side, so a tampered SPA can't actually exceed its PL.
+	const canModerateActiveRoom = (activeRoom?.myPowerLevel ?? 0) >= 50;
 	// Set form of the viewer's owned-bot mxids, recomputed only when
 	// the bot roster changes.  ChatPane consults this to decide whether
 	// to show the trash icon on a bot's message: if the sender is in
@@ -2201,6 +2246,9 @@ export default function App() {
 					}}
 					onOpenProfile={() => setViewedUserId(creds.user_id as UserId)}
 					onOpenSettings={() => setSettingsOpen(true)}
+					isAdmin={isAdmin}
+					adminReportsBadge={pendingReviewCount}
+					onOpenAdminReports={() => setAdminReportsOpen(true)}
 					accounts={accounts}
 					onSwitchAccount={switchAccount}
 					onAddAccount={() => setAddAccountMode(true)}
@@ -2498,6 +2546,25 @@ export default function App() {
 							eventId,
 						);
 					}}
+					canModerateRoom={canModerateActiveRoom}
+					onAdminRedactMessage={async (eventId) => {
+						if (!transport || !creds?.access_token || !state.activeRoomId) {
+							throw new Error("Not connected");
+						}
+						try {
+							await transport.redactEventAsAdmin(state.activeRoomId, eventId);
+							await recordModAction(creds.access_token, {
+								roomId: state.activeRoomId,
+								action: "redact",
+								targetEventId: eventId,
+							}).catch(err => {
+								console.warn("recordModAction redact failed", err);
+							});
+						} catch (e) {
+							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+							throw e;
+						}
+					}}
 					members={state.activeRoomId ? state.membersByRoom.get(state.activeRoomId) ?? [] : []}
 					// True once the active room's initial timeline has
 					// landed.  Suppresses ChatPane's "No messages yet."
@@ -2765,6 +2832,99 @@ export default function App() {
 									dispatch({ type: "set_active_room", roomId });
 								} catch (e) {
 									dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+								}
+							}}
+							// ─── Standard admin moderation (PL ≥ 50) ──
+							// Each handler runs the Synapse mutation under
+							// the viewer's own bearer (Matrix-side PL check
+							// re-enforces) AND records the audit row via
+							// the engine.  The audit-trail row is logged
+							// best-effort: if it 4xx/5xxs we surface the
+							// error but DON'T undo the Matrix-side change
+							// (the kick / ban / PL bump already happened
+							// and rolling it back would be its own race).
+							canModerateRoom={canModerateActiveRoom}
+							onKickMember={async (userId) => {
+								if (!transport || !creds?.access_token || !activeRoom) return;
+								try {
+									await transport.kickFromRoom(activeRoom.id, userId as UserId);
+									await recordModAction(creds.access_token, {
+										roomId: activeRoom.id,
+										action: "kick",
+										targetUser: userId,
+									}).catch(err => {
+										console.warn("recordModAction kick failed", err);
+									});
+								} catch (e) {
+									dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+									throw e;
+								}
+							}}
+							onBanMember={async (userId) => {
+								if (!transport || !creds?.access_token || !activeRoom) return;
+								try {
+									await transport.banFromRoom(activeRoom.id, userId as UserId);
+									await recordModAction(creds.access_token, {
+										roomId: activeRoom.id,
+										action: "ban",
+										targetUser: userId,
+									}).catch(err => {
+										console.warn("recordModAction ban failed", err);
+									});
+								} catch (e) {
+									dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+									throw e;
+								}
+							}}
+							onPromoteToMod={async (userId) => {
+								if (!transport || !creds?.access_token || !activeRoom) return;
+								try {
+									await transport.setUserPowerLevel(activeRoom.id, userId as UserId, 50);
+									await recordModAction(creds.access_token, {
+										roomId: activeRoom.id,
+										action: "role_change",
+										targetUser: userId,
+										newPowerLevel: 50,
+									}).catch(err => {
+										console.warn("recordModAction role_change failed", err);
+									});
+								} catch (e) {
+									dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+									throw e;
+								}
+							}}
+							onPromoteToAdmin={async (userId) => {
+								if (!transport || !creds?.access_token || !activeRoom) return;
+								try {
+									await transport.setUserPowerLevel(activeRoom.id, userId as UserId, 100);
+									await recordModAction(creds.access_token, {
+										roomId: activeRoom.id,
+										action: "role_change",
+										targetUser: userId,
+										newPowerLevel: 100,
+									}).catch(err => {
+										console.warn("recordModAction role_change failed", err);
+									});
+								} catch (e) {
+									dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+									throw e;
+								}
+							}}
+							onResetRole={async (userId) => {
+								if (!transport || !creds?.access_token || !activeRoom) return;
+								try {
+									await transport.setUserPowerLevel(activeRoom.id, userId as UserId, 0);
+									await recordModAction(creds.access_token, {
+										roomId: activeRoom.id,
+										action: "role_change",
+										targetUser: userId,
+										newPowerLevel: 0,
+									}).catch(err => {
+										console.warn("recordModAction role_change failed", err);
+									});
+								} catch (e) {
+									dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+									throw e;
 								}
 							}}
 							// Banner avatar above the members list — only
@@ -3277,6 +3437,25 @@ export default function App() {
 					onOpenChange={(o) => { if (!o) setModLogRoomId(null); }}
 					roomId={modLogRoomId}
 					transport={transport}
+				/>
+			)}
+			{isAdmin && creds && (
+				<AdminReportsSheet
+					open={adminReportsOpen}
+					onOpenChange={setAdminReportsOpen}
+					accessToken={creds.access_token}
+					// Jump to the targeted room (and message, when the
+					// report is message-scoped) so the admin can review
+					// context before deciding what primitive to apply.
+					// Same plumbing the permalink path uses.
+					onOpenTarget={(roomId, eventId) => {
+						dispatch({ type: "set_active_room", roomId: roomId as RoomId });
+						if (eventId) {
+							setPendingScrollEvent({ roomId: roomId as RoomId, eventId: eventId as EventId });
+						}
+						setAdminReportsOpen(false);
+					}}
+					onCountChanged={setPendingReviewCount}
 				/>
 			)}
 		</div>

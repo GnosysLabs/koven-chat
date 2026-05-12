@@ -2295,6 +2295,57 @@ export class MatrixTransport {
 		await c.redactEvent(roomId, reactionEventId);
 	}
 
+	// ─── Standard admin moderation primitives ──────────────────────
+	// Thin wrappers around the matrix-js-sdk membership / redact /
+	// state-event helpers.  PL checks happen Synapse-side via the
+	// power_levels event — these calls just fail with M_FORBIDDEN if
+	// the caller doesn't have the PL.  The engine endpoint
+	// /api/rooms/:id/mod-actions records the audit row separately;
+	// both fire in parallel from the SPA's perspective.
+
+	async kickFromRoom(roomId: RoomId, userId: UserId, reason?: string): Promise<void> {
+		const c = this.requireClient();
+		await c.kick(roomId, userId, reason);
+	}
+
+	async banFromRoom(roomId: RoomId, userId: UserId, reason?: string): Promise<void> {
+		const c = this.requireClient();
+		await c.ban(roomId, userId, reason);
+	}
+
+	async unbanFromRoom(roomId: RoomId, userId: UserId): Promise<void> {
+		const c = this.requireClient();
+		await c.unban(roomId, userId);
+	}
+
+	/** Redact someone else's message as an admin.  Self-deletes go
+	 * through the engine's /messages/:id/delete endpoint instead so
+	 * the self_deletion mod-log row gets written. */
+	async redactEventAsAdmin(roomId: RoomId, eventId: EventId, reason?: string): Promise<void> {
+		const c = this.requireClient();
+		await c.redactEvent(roomId, eventId, undefined, { reason });
+	}
+
+	/** Set a single user's power level by patching m.room.power_levels.
+	 * Reads the current event, overrides users[userId], PUTs the
+	 * result.  Throws if the room isn't loaded — the caller is
+	 * expected to already be looking at the room (member list is the
+	 * only entry point in v1). */
+	async setUserPowerLevel(roomId: RoomId, userId: UserId, level: number): Promise<void> {
+		const c = this.requireClient();
+		const room = c.getRoom(roomId);
+		if (!room) throw new Error("Room not loaded");
+		const currentEvent = room.currentState.getStateEvents("m.room.power_levels", "");
+		const current = (currentEvent?.getContent() as { users?: Record<string, number> } | undefined) ?? {};
+		const users = { ...(current.users ?? {}), [userId]: level };
+		await c.sendStateEvent(
+			roomId,
+			"m.room.power_levels" as Parameters<typeof c.sendStateEvent>[1],
+			{ ...current, users } as Parameters<typeof c.sendStateEvent>[2],
+			"",
+		);
+	}
+
 	/** Create a new room.  Returns the new room id.
 	 *
 	 * Discord-style invariant: every group room MUST belong to a

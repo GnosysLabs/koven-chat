@@ -160,6 +160,18 @@ export interface ChatPaneProps {
 	// omitted, the trash icon is never shown (e.g. logged-out, DM
 	// with limited capabilities, etc.).
 	onDeleteMessage?(eventId: EventId): Promise<void>;
+	// Admin-redact handler.  Distinct from `onDeleteMessage` (which is
+	// authored-by-viewer or owned-bot-message only): this fires for
+	// admins (PL ≥ 50) acting on someone else's content.  Should
+	// perform the Synapse redact + record the mod_action audit row.
+	// Optional; when omitted, the Shield admin-redact icon is never
+	// shown.  See also `canModerateRoom` below — both required for the
+	// affordance to surface.
+	onAdminRedactMessage?(eventId: EventId): Promise<void>;
+	// True when the viewer has PL ≥ 50 in the active room.  Combined
+	// with onAdminRedactMessage to gate the shield icon next to the
+	// hover toolbar on rows the viewer doesn't own.
+	canModerateRoom?: boolean;
 	// Joined members of the active room.  Drives the @-mention
 	// autocomplete in the compose box.  Optional; when omitted only
 	// bot mxids are suggestible.
@@ -276,6 +288,8 @@ export function ChatPane({
 	serviceMxids,
 	myOwnedBotMxids,
 	onDeleteMessage,
+	onAdminRedactMessage,
+	canModerateRoom,
 	messagesLoaded,
 	members,
 	viewerServer,
@@ -1342,6 +1356,22 @@ export function ChatPane({
 										? () => onDeleteMessage(m.id)
 										: undefined
 								}
+								// Admin redact: surfaced for OTHER people's
+								// (and bots the viewer doesn't own) messages
+								// when the viewer is a room admin.  The shield
+								// icon shares the hover toolbar with the
+								// trash button but is visually + semantically
+								// distinct — moderating someone else's content
+								// vs. removing your own.
+								onAdminRedact={
+									onAdminRedactMessage
+									&& canModerateRoom
+									&& !m.isSelf
+									&& !myOwnedBotMxids?.has(m.sender)
+									&& !m.pending
+										? () => onAdminRedactMessage(m.id)
+										: undefined
+								}
 							/>
 						);
 					})
@@ -1692,7 +1722,7 @@ export function ChatPane({
 function MessageRow({
 	message, avatarMxc, continuesGroup, isFirst, flaggable, roomEncrypted,
 	reactions, flags, onReact, onReply, onFlag, onToggleReactionPill, isBot,
-	isOwnedBot, isHovered, isFlashing, onDelete,
+	isOwnedBot, isHovered, isFlashing, onDelete, onAdminRedact,
 	isDm, receiptsVersion, memberAvatars, memberNames, mentionsViewer, onMentionClick, botMxids, serviceMxids,
 	pollAggregate, viewerUserId, onPollVote, onPollEnd,
 	roomId, onQuote, onSendDmToSender, onBlockSender,
@@ -1747,6 +1777,15 @@ function MessageRow({
 	// await the real network call and show errors inline (403, 502,
 	// network) without flickering closed first.
 	onDelete?(): void | Promise<void>;
+	// Admin redact handler.  Provided only for rows where the viewer
+	// is a room admin (PL ≥ 50) AND the row isn't theirs / their own
+	// bot's.  Calls into the parent's handler which performs the
+	// Synapse redact + records the audit row.  Confirmation copy lives
+	// inline (window.confirm) — the row doesn't get its own confirm
+	// dialog because the action is targeted at someone else's
+	// content and the operator is already an admin (no UI guardrail
+	// beyond a single confirm).
+	onAdminRedact?(): void | Promise<void>;
 	// Drives the SeenIndicator on this row's bubble — DM gets a
 	// "Read 2:41 PM" / nothing pair under the bubble; non-DM rooms
 	// get a small avatar stack + count next to the bubble that
@@ -1822,6 +1861,17 @@ function MessageRow({
 	const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 	const showActions = isHovered || reactOpen || deleteDialogOpen;
 	const handleDelete = onDelete ? () => setDeleteDialogOpen(true) : undefined;
+	// Admin redact uses a plain window.confirm — no row-level dialog
+	// state to maintain because the action targets someone else's
+	// content and the operator is already an admin.  Errors are caught
+	// upstream by the App-level handler.
+	const handleAdminRedact = onAdminRedact
+		? () => {
+			if (typeof window === "undefined") return;
+			if (!window.confirm("Redact this message as an admin? This cannot be undone.")) return;
+			void onAdminRedact();
+		}
+		: undefined;
 	// You can't report your own messages.  Same gate applies to bots
 	// the viewer owns: the owner controls the bot's prompt and config,
 	// so reporting is the wrong remedy — they should just delete the
@@ -1901,6 +1951,7 @@ function MessageRow({
 							onFlagClick={() => setFlagDialogOpen(true)}
 							showFlag={canFlag}
 							onDelete={handleDelete}
+							onAdminRedact={handleAdminRedact}
 							reactOpen={reactOpen}
 							onReactOpenChange={setReactOpen}
 						/>
@@ -2086,6 +2137,7 @@ function MessageRow({
 									onFlagClick={() => setFlagDialogOpen(true)}
 									showFlag={canFlag}
 									onDelete={handleDelete}
+									onAdminRedact={handleAdminRedact}
 									reactOpen={reactOpen}
 									onReactOpenChange={setReactOpen}
 									className="shrink-0"

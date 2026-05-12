@@ -11,7 +11,7 @@ import {
 	PopoverTrigger,
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-import { Flag, Reply, SmilePlus, Trash2 } from "lucide-react";
+import { Flag, Reply, Shield, SmilePlus, Trash2 } from "lucide-react";
 import { InlineEmojiPicker } from "@/components/EmojiPicker";
 
 export interface MessageActionsProps {
@@ -31,6 +31,14 @@ export interface MessageActionsProps {
 	// message to interact with it — a Dialog inside MessageActions
 	// would unmount the moment the toolbar's hover state cleared.
 	onDelete?(): void;
+	// Admin redact affordance.  Distinct from `onDelete` (which is
+	// scoped to the message's own author or to a bot the viewer owns):
+	// this surface is for admins (PL ≥ 50) acting on someone ELSE's
+	// message.  When provided AND the message isn't the viewer's own
+	// (the caller decides), a Shield icon appears at the end of the
+	// toolbar.  The handler is expected to confirm + perform the
+	// redaction + record the audit row.
+	onAdminRedact?(): void;
 	className?: string;
 	// Optional controlled popover state for the React picker.  Lifted
 	// up to the parent message row so the parent can keep the action
@@ -43,7 +51,7 @@ export interface MessageActionsProps {
 }
 
 export function MessageActions({
-	onReact, onReply, onFlagClick, showFlag = true, onDelete, className,
+	onReact, onReply, onFlagClick, showFlag = true, onDelete, onAdminRedact, className,
 	reactOpen: reactOpenProp, onReactOpenChange,
 }: MessageActionsProps) {
 	const [internalReactOpen, setInternalReactOpen] = useState(false);
@@ -123,6 +131,23 @@ export function MessageActions({
 					aria-label="Delete"
 				>
 					<Trash2 className="h-3.5 w-3.5" />
+				</button>
+			)}
+
+			{onAdminRedact && (
+				<button
+					type="button"
+					onClick={onAdminRedact}
+					// Amber tone visually separates the admin-redact
+					// affordance from the destructive self-delete trash
+					// — admins moderating other people's content read
+					// the icon AND the colour as "this is a moderation
+					// action, not your own message".
+					className="p-1 rounded text-muted-foreground hover:text-amber-500 hover:bg-amber-500/10 transition-colors"
+					title="Admin redact"
+					aria-label="Admin redact"
+				>
+					<Shield className="h-3.5 w-3.5" />
 				</button>
 			)}
 		</div>

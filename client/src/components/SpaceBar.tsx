@@ -6,7 +6,7 @@
 import { forwardRef, useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
 import type { Room, Space, SpaceId, UserId } from "@koven/shared";
-import { Bot, Compass, EyeOff, Globe, Plus, Settings, User } from "lucide-react";
+import { Bot, Compass, EyeOff, Globe, Plus, Settings, Shield, User } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { AccountSwitcher } from "@/components/AccountSwitcher";
 import { SpaceTileContextMenu } from "@/components/SpaceTileContextMenu";
@@ -75,6 +75,15 @@ export interface SpaceBarProps {
 	// aren't draggable (the rail is per-user, no PL gate needed, so
 	// the parent always passes a handler when transport is connected).
 	onReorderSpaces?(spaceIds: SpaceId[]): Promise<void> | void;
+
+	// ─── Admin-only rail items ───────────────────────────────────
+	// Shield icon above Settings opens the admin reports queue
+	// (replaces the retired floor-review sheet).  Optional props so
+	// non-admins don't see anything; when isAdmin is true the parent
+	// supplies both `onOpenAdminReports` and `adminReportsBadge`.
+	isAdmin?: boolean;
+	adminReportsBadge?: number;
+	onOpenAdminReports?(): void;
 }
 
 export function SpaceBar({
@@ -104,6 +113,9 @@ export function SpaceBar({
 	onLeaveSpace,
 	onDeleteSpace,
 	onReorderSpaces,
+	isAdmin,
+	adminReportsBadge,
+	onOpenAdminReports,
 }: SpaceBarProps) {
 	const showSwitcher = !!(accounts && onSwitchAccount && onAddAccount && onSignOutAccount);
 	// Per-tile right-click menu.  Single state object {space, x, y}
@@ -255,6 +267,20 @@ export function SpaceBar({
 			</div>
 
 			<div className="flex flex-col items-center gap-1 pb-1">
+				{isAdmin && onOpenAdminReports && (
+					<IconButton
+						onClick={onOpenAdminReports}
+						title={
+							adminReportsBadge && adminReportsBadge > 0
+								? `Admin reports (${adminReportsBadge} open)`
+								: "Admin reports"
+						}
+						ariaLabel="Admin reports"
+						badge={adminReportsBadge}
+					>
+						<Shield className="h-4 w-4" />
+					</IconButton>
+				)}
 				<IconButton onClick={onOpenSettings} title="Settings" ariaLabel="Settings">
 					<Settings className="h-4 w-4" />
 				</IconButton>
@@ -412,7 +438,7 @@ function SortableSpaceTile({
 }
 
 function IconButton({
-	children, onClick, title, ariaLabel, dot, dotClass,
+	children, onClick, title, ariaLabel, dot, dotClass, badge,
 }: {
 	children: React.ReactNode;
 	onClick(): void;
@@ -422,7 +448,11 @@ function IconButton({
 	// admin shield to flag a non-empty review queue.
 	dot?: boolean;
 	dotClass?: string;
+	// Numeric badge — wins over `dot` when both are set.  Used for the
+	// admin-reports open count.  Hidden when 0/undefined.
+	badge?: number;
 }) {
+	const showBadge = typeof badge === "number" && badge > 0;
 	return (
 		<button
 			type="button"
@@ -432,7 +462,14 @@ function IconButton({
 			className="relative h-8 w-8 rounded-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
 		>
 			{children}
-			{dot && (
+			{showBadge ? (
+				<span
+					className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-1 rounded-full ring-2 ring-card bg-destructive text-destructive-foreground text-[9px] font-semibold flex items-center justify-center tabular-nums"
+					aria-hidden
+				>
+					{badge > 99 ? "99+" : badge}
+				</span>
+			) : dot ? (
 				<span
 					className={cn(
 						"absolute top-0.5 right-0.5 h-2 w-2 rounded-full ring-2 ring-card",
@@ -440,7 +477,7 @@ function IconButton({
 					)}
 					aria-hidden
 				/>
-			)}
+			) : null}
 		</button>
 	);
 }

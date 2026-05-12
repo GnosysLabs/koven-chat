@@ -13,7 +13,7 @@ import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { BotBadge } from "@/components/BotBadge";
-import { Ban, Copy, MessageSquare, User, UserX } from "lucide-react";
+import { Ban, Copy, MessageSquare, Shield, ShieldOff, Star, User, UserX } from "lucide-react";
 import type { Member } from "@koven/shared";
 
 export interface MemberListProps {
@@ -76,6 +76,16 @@ export interface MemberListProps {
 	// menu.  Caller routes to the existing transport.startDm /
 	// active-room flow.
 	onStartDm?(userId: string): void | Promise<void>;
+
+	// ─── Standard admin moderation (PL ≥ 50) ─────────────────────
+	// Enables the kick / ban / role-change items on HUMAN rows.  Bots
+	// keep their existing space-wide path above (onBotKickBan).
+	canModerateRoom?: boolean;
+	onKickMember?(userId: string, reason?: string): void | Promise<void>;
+	onBanMember?(userId: string, reason?: string): void | Promise<void>;
+	onPromoteToMod?(userId: string): void | Promise<void>;
+	onPromoteToAdmin?(userId: string): void | Promise<void>;
+	onResetRole?(userId: string): void | Promise<void>;
 }
 
 /** Effective presence for a member.  Bots always read as online;
@@ -116,6 +126,12 @@ export function MemberList({
 	roomAvatarUrl,
 	roomId,
 	roomName,
+	canModerateRoom,
+	onKickMember,
+	onBanMember,
+	onPromoteToMod,
+	onPromoteToAdmin,
+	onResetRole,
 }: MemberListProps) {
 	// Right-click menu state.  Stored as the targeted member +
 	// cursor coords; null when the menu is closed.  We portal the
@@ -144,6 +160,22 @@ export function MemberList({
 	async function handleAction(action: MemberAction) {
 		if (!contextMenu || busyAction) return;
 		const target = contextMenu.userId;
+
+		// Confirm gates for the destructive / permission-altering
+		// branches.  Each variant gets its own copy so admins know
+		// exactly what they're about to do.
+		const confirmCopy: Partial<Record<MemberAction, string>> = {
+			kick_member:    `Kick ${target} from this room?`,
+			ban_member:     `Ban ${target} from this room? They will not be able to rejoin until unbanned.`,
+			promote_mod:    `Promote ${target} to Moderator (PL 50)?`,
+			promote_admin:  `Promote ${target} to Admin (PL 100)? They will be able to moderate you back.`,
+			reset_role:     `Reset ${target} to a regular member (PL 0)?`,
+		};
+		const copy = confirmCopy[action];
+		if (copy && typeof window !== "undefined" && !window.confirm(copy)) {
+			return;
+		}
+
 		setBusyAction(action);
 		try {
 			if (action === "dm" && onStartDm) {
@@ -154,6 +186,16 @@ export function MemberList({
 				try { await navigator.clipboard.writeText(target); } catch { /* no-op */ }
 			} else if ((action === "kick" || action === "ban") && onBotKickBan) {
 				await onBotKickBan(action, target);
+			} else if (action === "kick_member" && onKickMember) {
+				await onKickMember(target);
+			} else if (action === "ban_member" && onBanMember) {
+				await onBanMember(target);
+			} else if (action === "promote_mod" && onPromoteToMod) {
+				await onPromoteToMod(target);
+			} else if (action === "promote_admin" && onPromoteToAdmin) {
+				await onPromoteToAdmin(target);
+			} else if (action === "reset_role" && onResetRole) {
+				await onResetRole(target);
 			}
 			setContextMenu(null);
 		} catch {
@@ -343,6 +385,12 @@ export function MemberList({
 					isSpaceFounder={!!isSpaceFounder}
 					canKickBan={!!canKickBanBots && !!onBotKickBan}
 					canDm={!!onStartDm}
+					canModerateRoom={!!canModerateRoom}
+					canKickMember={!!onKickMember}
+					canBanMember={!!onBanMember}
+					canPromoteToMod={!!onPromoteToMod}
+					canPromoteToAdmin={!!onPromoteToAdmin}
+					canResetRole={!!onResetRole}
 					busyAction={busyAction}
 					onAction={handleAction}
 					onClose={() => setContextMenu(null)}
@@ -352,7 +400,19 @@ export function MemberList({
 	);
 }
 
-type MemberAction = "dm" | "profile" | "copy" | "kick" | "ban";
+type MemberAction =
+	| "dm"
+	| "profile"
+	| "copy"
+	// Bot-targeted, space-wide.  Wired through onBotKickBan.
+	| "kick"
+	| "ban"
+	// Human-targeted, room-scoped admin moderation (PL ≥ 50).
+	| "kick_member"
+	| "ban_member"
+	| "promote_mod"
+	| "promote_admin"
+	| "reset_role";
 
 /** Floating context menu for member rows.  Items vary by target:
  *
@@ -381,6 +441,12 @@ function MemberContextMenu({
 	isSpaceFounder,
 	canKickBan,
 	canDm,
+	canModerateRoom,
+	canKickMember,
+	canBanMember,
+	canPromoteToMod,
+	canPromoteToAdmin,
+	canResetRole,
 	busyAction,
 	onAction,
 	onClose,
@@ -393,6 +459,12 @@ function MemberContextMenu({
 	isSpaceFounder: boolean;
 	canKickBan: boolean;
 	canDm: boolean;
+	canModerateRoom: boolean;
+	canKickMember: boolean;
+	canBanMember: boolean;
+	canPromoteToMod: boolean;
+	canPromoteToAdmin: boolean;
+	canResetRole: boolean;
 	busyAction: string | null;
 	onAction(action: MemberAction): void;
 	onClose(): void;
@@ -446,6 +518,17 @@ function MemberContextMenu({
 	// showFounderKickBan — if the viewer is the founder we don't
 	// double-up.
 	const showOwnerRemove = isBot && !isSelf && canKickBan && isMyBot && !isSpaceFounder;
+	// Standard admin moderation branch: surfaced when the viewer has
+	// PL ≥ 50 in the room AND the target is a human (not a bot — bots
+	// have their own space-wide path above) AND not the viewer
+	// themselves.  Each individual item is then guarded by its own
+	// can* handler so callers can omit handlers without flipping the
+	// whole branch off.
+	const showAdminModeration =
+		!isBot
+		&& !isSelf
+		&& canModerateRoom
+		&& (canKickMember || canBanMember || canPromoteToMod || canPromoteToAdmin || canResetRole);
 
 	return createPortal(
 		<div
@@ -510,6 +593,53 @@ function MemberContextMenu({
 						disabled={!!busyAction}
 						tone="warn"
 					/>
+				</>
+			)}
+			{showAdminModeration && (
+				<>
+					<div className="my-1 h-px bg-border" aria-hidden />
+					{canPromoteToMod && (
+						<MenuItem
+							icon={<Shield className="h-4 w-4" />}
+							label={busyAction === "promote_mod" ? "Promoting…" : "Promote to Moderator"}
+							onClick={() => onAction("promote_mod")}
+							disabled={!!busyAction}
+						/>
+					)}
+					{canPromoteToAdmin && (
+						<MenuItem
+							icon={<Star className="h-4 w-4" />}
+							label={busyAction === "promote_admin" ? "Promoting…" : "Promote to Admin"}
+							onClick={() => onAction("promote_admin")}
+							disabled={!!busyAction}
+						/>
+					)}
+					{canResetRole && (
+						<MenuItem
+							icon={<ShieldOff className="h-4 w-4" />}
+							label={busyAction === "reset_role" ? "Resetting…" : "Reset to Member"}
+							onClick={() => onAction("reset_role")}
+							disabled={!!busyAction}
+						/>
+					)}
+					{canKickMember && (
+						<MenuItem
+							icon={<UserX className="h-4 w-4" />}
+							label={busyAction === "kick_member" ? "Kicking…" : "Kick from room"}
+							onClick={() => onAction("kick_member")}
+							disabled={!!busyAction}
+							tone="warn"
+						/>
+					)}
+					{canBanMember && (
+						<MenuItem
+							icon={<Ban className="h-4 w-4" />}
+							label={busyAction === "ban_member" ? "Banning…" : "Ban from room"}
+							onClick={() => onAction("ban_member")}
+							disabled={!!busyAction}
+							tone="danger"
+						/>
+					)}
 				</>
 			)}
 		</div>,
