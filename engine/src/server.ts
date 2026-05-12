@@ -3997,32 +3997,42 @@ export function startServer(): void {
 							{ status: 502 },
 						);
 					}
-					// Klipy response shape (gif item, sticker + clip
-					// look the same with the kind reflected in `type`):
-					//   { result: true, data: { data: [Item], current_page, per_page, has_next, meta } }
-					// Each Item:
-					//   { id, slug, title, type ("gif"|"sticker"|"clip"),
-					//     file: { hd|md|sm|xs: { gif|webp|jpg|mp4|webm: { url, width, height, size } } },
-					//     blur_preview: "data:image/jpeg;base64,..." }
+					// Klipy returns TWO different item shapes depending
+					// on the media kind:
 					//
-					// Mapping rules:
-					//   preview_url: sm.webp.url, fallback sm.gif.url, fallback sm.jpg.url
-					//   preview_blur: blur_preview verbatim
-					//   full_url: md.gif.url for kind=gif/sticker (animated),
-					//             md.mp4.url for kind=clip
-					//   full_webp_url: md.webp.url when present (modern fallback for the bubble)
-					//   full_mp4_url: md.mp4.url when present (for clip bubbles)
-					//   width, height: from the chosen full format's dims
-					//   mime_type: image/gif | image/webp | video/mp4
-					interface KlipyFormat { url?: string; width?: number; height?: number; size?: number }
-					interface KlipyTier { gif?: KlipyFormat; webp?: KlipyFormat; jpg?: KlipyFormat; mp4?: KlipyFormat; webm?: KlipyFormat }
+					//   Tiered (gifs, presumably stickers): `file` is
+					//   nested by size tier and format, dimensions live
+					//   INSIDE each format object.
+					//     file: { hd|md|sm|xs: { gif|webp|jpg|mp4|webm: { url, width, height, size } } }
+					//     id is a numeric int
+					//
+					//   Flat (clips today; possibly more later): `file`
+					//   is a single object mapping format → URL string,
+					//   with a sibling `file_meta` carrying dimensions
+					//   per format.  No size tiers.  No numeric id at
+					//   all, slug is the only stable handle.
+					//     file:      { mp4: <url>, gif: <url>, webp: <url> }
+					//     file_meta: { mp4: { width, height, size }, ... }
+					//
+					// Detect the shape per item by probing for an object
+					// `file.md` (tiered) vs a string `file.mp4` (flat).
+					// Normalized output is identical either way:
+					//   { id, kind, title, preview_url, preview_blur,
+					//     full_url, full_mp4_url, full_webp_url,
+					//     width, height, mime_type }
+					interface TieredFormat { url?: string; width?: number; height?: number; size?: number }
+					interface TieredTier { gif?: TieredFormat; webp?: TieredFormat; jpg?: TieredFormat; mp4?: TieredFormat; webm?: TieredFormat }
+					interface FlatMeta { width?: number; height?: number; size?: number }
 					interface KlipyItem {
 						id?: number | string;
 						slug?: string;
 						title?: string;
 						type?: string;
 						blur_preview?: string;
-						file?: { hd?: KlipyTier; md?: KlipyTier; sm?: KlipyTier; xs?: KlipyTier };
+						file?:
+							| { hd?: TieredTier; md?: TieredTier; sm?: TieredTier; xs?: TieredTier }
+							| { mp4?: string; gif?: string; webp?: string; jpg?: string };
+						file_meta?: { mp4?: FlatMeta; gif?: FlatMeta; webp?: FlatMeta; jpg?: FlatMeta };
 					}
 					const raw = await r.json() as {
 						result?: boolean;
@@ -4030,35 +4040,94 @@ export function startServer(): void {
 					};
 					const items = raw.data?.data ?? [];
 					const results = items.flatMap(item => {
-						if (!item.id || !item.file) return [];
-						const sm = item.file.sm ?? {};
-						const md = item.file.md ?? {};
-						const previewUrl = sm.webp?.url ?? sm.gif?.url ?? sm.jpg?.url;
-						if (!previewUrl) return [];
+						if (!item.file) return [];
+						// Stable id: prefer numeric id when present;
+						// fall back to slug (clips have no numeric id).
+						const id = item.id != null ? String(item.id) : (item.slug ?? "");
+						if (!id) return [];
+
+						const fileAny = item.file as Record<string, unknown>;
+						const isTiered =
+							(typeof fileAny.md === "object" && fileAny.md !== null) ||
+							(typeof fileAny.sm === "object" && fileAny.sm !== null) ||
+							(typeof fileAny.hd === "object" && fileAny.hd !== null);
+
+						let previewUrl: string | undefined;
+						let fullUrl: string | undefined;
+						let fullMp4Url: string | null = null;
+						let fullWebpUrl: string | null = null;
+						let width = 0;
+						let height = 0;
 						const isClip = kindRaw === "clip";
-						const fullObj = isClip ? md.mp4 : md.gif;
-						const fullUrl = fullObj?.url;
-						if (!fullUrl) return [];
+						const isSticker = kindRaw === "sticker";
+
+						if (isTiered) {
+							const tiered = item.file as { hd?: TieredTier; md?: TieredTier; sm?: TieredTier };
+							const sm = tiered.sm ?? {};
+							const md = tiered.md ?? {};
+							previewUrl = sm.webp?.url ?? sm.gif?.url ?? sm.jpg?.url;
+							if (isSticker) {
+								// Stickers prefer webp at md tier so
+								// transparency is preserved; gif fallback
+								// when md.webp is absent.
+								fullUrl = md.webp?.url ?? md.gif?.url;
+							} else if (isClip) {
+								fullUrl = md.mp4?.url;
+							} else {
+								fullUrl = md.gif?.url;
+							}
+							fullMp4Url = md.mp4?.url ?? null;
+							fullWebpUrl = md.webp?.url ?? null;
+							const dimSource = isClip
+								? md.mp4
+								: isSticker
+									? (md.webp ?? md.gif)
+									: md.gif;
+							width = dimSource?.width ?? 0;
+							height = dimSource?.height ?? 0;
+						} else {
+							// Flat shape: clips today, possibly stickers
+							// or other kinds later if Klipy reshapes.
+							const flat = item.file as { mp4?: string; gif?: string; webp?: string; jpg?: string };
+							const meta = item.file_meta ?? {};
+							previewUrl = flat.webp ?? flat.gif ?? flat.jpg;
+							if (isSticker) {
+								fullUrl = flat.webp ?? flat.gif;
+							} else if (isClip) {
+								fullUrl = flat.mp4;
+							} else {
+								fullUrl = flat.gif;
+							}
+							fullMp4Url = flat.mp4 ?? null;
+							fullWebpUrl = flat.webp ?? null;
+							const dimSource = isClip
+								? meta.mp4
+								: isSticker
+									? (meta.webp ?? meta.gif)
+									: meta.gif;
+							width = dimSource?.width ?? 0;
+							height = dimSource?.height ?? 0;
+						}
+
+						if (!previewUrl || !fullUrl) return [];
+
 						const mimeType = isClip
 							? "video/mp4"
-							: kindRaw === "sticker"
-								? "image/webp"  // stickers render best from the transparent webp
+							: isSticker
+								? "image/webp"
 								: "image/gif";
-						// For stickers we prefer the webp at md tier as the
-						// "full" image so transparency is preserved; the
-						// gif fallback is fine if md.webp is missing.
-						const fullForSticker = md.webp?.url ?? md.gif?.url;
+
 						return [{
-							id: String(item.id),
+							id,
 							kind: kindRaw,
 							title: item.title ?? "",
 							preview_url: previewUrl,
 							preview_blur: item.blur_preview ?? null,
-							full_url: kindRaw === "sticker" ? (fullForSticker ?? fullUrl) : fullUrl,
-							full_mp4_url: md.mp4?.url ?? null,
-							full_webp_url: md.webp?.url ?? null,
-							width: fullObj?.width ?? 0,
-							height: fullObj?.height ?? 0,
+							full_url: fullUrl,
+							full_mp4_url: fullMp4Url,
+							full_webp_url: fullWebpUrl,
+							width,
+							height,
 							mime_type: mimeType,
 						}];
 					});
