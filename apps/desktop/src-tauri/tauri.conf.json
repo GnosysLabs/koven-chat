@@ -49,7 +49,12 @@
         "embedded.provisionprofile": "embedded.provisionprofile"
       }
     },
-    "windows": {}
+    "windows": {},
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": true
+      }
+    }
   },
   "plugins": {
     "updater": {
