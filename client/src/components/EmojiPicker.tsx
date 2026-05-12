@@ -32,18 +32,93 @@ interface EmojiSelection {
 /** Live-theme hook used by both the popover-wrapped and inline
  * picker variants below.  Watches the documentElement's class /
  * data-theme attributes (Settings → Appearance flips these) so the
- * picker swaps palettes without a remount. */
-function useEmojiTheme(): "light" | "dark" {
+ * picker swaps palettes without a remount.
+ *
+ * Returns both:
+ *   - The coarse emoji-mart theme prop ("light" | "dark") so the
+ *     picker's internal default tokens are at least the right
+ *     polarity.
+ *   - A style object with the `--rgb-*` / `--color-*` override
+ *     variables emoji-mart reads to recolour its chrome.  These
+ *     point at Koven's theme tokens (`--background`, `--foreground`,
+ *     `--primary`, `--muted`, `--border`) so the picker reads as
+ *     part of Koven, not a generic light/dark Element-style box.
+ *
+ * `--rgb-*` MUST be a `R, G, B` triplet because emoji-mart wraps
+ * them in `rgb()` and `rgba()` (`rgba(var(--em-rgb-color), .65)`).
+ * Koven's tokens are HSL, so we let the browser do the conversion
+ * via a hidden probe element: set the probe's color to
+ * `hsl(<koven-token>)`, read the computed RGB back, parse the
+ * three numbers.  Costs one DOM insert per token per theme flip;
+ * cheap enough to do synchronously inside useMemo. */
+function useEmojiTheme(): { theme: "light" | "dark"; styleVars: React.CSSProperties } {
 	const [theme, setTheme] = useState<"light" | "dark">(() => detectDarkTheme() ? "dark" : "light");
+	// Re-key when the theme flips OR when Koven's CSS vars change
+	// shape underneath us (currently only via class/data-theme on
+	// the root, which the observer already covers).
+	const [styleVars, setStyleVars] = useState<React.CSSProperties>(() => computeEmojiStyleVars());
 	useEffect(() => {
 		const root = document.documentElement;
 		const observer = new MutationObserver(() => {
 			setTheme(detectDarkTheme() ? "dark" : "light");
+			setStyleVars(computeEmojiStyleVars());
 		});
 		observer.observe(root, { attributes: true, attributeFilter: ["class", "data-theme"] });
 		return () => observer.disconnect();
 	}, []);
-	return theme;
+	return { theme, styleVars };
+}
+
+/** Build the override-var style block for emoji-mart.  Reads the
+ * current values of Koven's HSL tokens, converts them to RGB
+ * triplets, and pairs the result with full-color border vars.
+ * Returns an empty object server-side (no `document`) so SSR
+ * builds don't blow up. */
+function computeEmojiStyleVars(): React.CSSProperties {
+	if (typeof document === "undefined") return {};
+	const bgTriplet = hslVarToRgbTriplet("--background");
+	const fgTriplet = hslVarToRgbTriplet("--foreground");
+	const primaryTriplet = hslVarToRgbTriplet("--primary");
+	const mutedTriplet = hslVarToRgbTriplet("--muted");
+	// React's CSSProperties type rejects CSS custom properties by
+	// default; cast through Record so we can set them without a
+	// per-property `as any`.
+	const vars: Record<string, string> = {};
+	if (bgTriplet) vars["--rgb-background"] = bgTriplet;
+	if (fgTriplet) vars["--rgb-color"] = fgTriplet;
+	if (primaryTriplet) vars["--rgb-accent"] = primaryTriplet;
+	// Search input gets the muted surface so it stands out from the
+	// picker's background the same way Koven's inputs do.
+	if (mutedTriplet) vars["--rgb-input"] = mutedTriplet;
+	// Borders accept full CSS colors so we can hand emoji-mart the
+	// HSL value directly; no triplet conversion needed.
+	vars["--color-border"] = "hsl(var(--border))";
+	vars["--color-border-over"] = "hsl(var(--border))";
+	return vars as React.CSSProperties;
+}
+
+/** Convert one of Koven's HSL theme tokens to an "R, G, B" triplet
+ * string suitable for emoji-mart's `--rgb-*` override vars.
+ * Returns null when the token isn't defined (the picker falls
+ * back to its built-in default in that case). */
+function hslVarToRgbTriplet(cssVarName: string): string | null {
+	const raw = getComputedStyle(document.documentElement)
+		.getPropertyValue(cssVarName)
+		.trim();
+	if (!raw) return null;
+	// Probe div: set its color to hsl(<token>), read the browser-
+	// computed rgb(...) string back.  Cleaner than a hand-rolled
+	// HSL→RGB because we get the exact same rounding the browser
+	// would apply on real elements.
+	const probe = document.createElement("div");
+	probe.style.color = `hsl(${raw})`;
+	probe.style.display = "none";
+	document.body.appendChild(probe);
+	const computed = getComputedStyle(probe).color;
+	document.body.removeChild(probe);
+	const m = /rgba?\((\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)/.exec(computed);
+	if (!m) return null;
+	return `${Math.round(Number(m[1]))}, ${Math.round(Number(m[2]))}, ${Math.round(Number(m[3]))}`;
 }
 
 /** Inline emoji-mart picker without a popover wrapper.  Use this
@@ -61,21 +136,23 @@ export function InlineEmojiPicker({
 	value?: string;
 	onPick(emoji: string): void;
 }) {
-	const theme = useEmojiTheme();
+	const { theme, styleVars } = useEmojiTheme();
 	return (
-		<EmojiMartWrapper
-			theme={theme}
-			value={value}
-			onPick={(selection) => {
-				if (selection?.native) onPick(selection.native);
-			}}
-		/>
+		<div style={styleVars}>
+			<EmojiMartWrapper
+				theme={theme}
+				value={value}
+				onPick={(selection) => {
+					if (selection?.native) onPick(selection.native);
+				}}
+			/>
+		</div>
 	);
 }
 
 export function EmojiPicker({ value, onChange, trigger, align = "start" }: EmojiPickerProps) {
 	const [open, setOpen] = useState(false);
-	const theme = useEmojiTheme();
+	const { theme, styleVars } = useEmojiTheme();
 
 	function pick(selection: EmojiSelection) {
 		if (selection?.native) {
@@ -104,7 +181,9 @@ export function EmojiPicker({ value, onChange, trigger, align = "start" }: Emoji
 				// the viewport edge when Radix flips it.
 				collisionPadding={16}
 			>
-				<EmojiMartWrapper theme={theme} value={value} onPick={pick} />
+				<div style={styleVars}>
+					<EmojiMartWrapper theme={theme} value={value} onPick={pick} />
+				</div>
 			</PopoverContent>
 		</Popover>
 	);
