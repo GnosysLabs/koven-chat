@@ -2229,7 +2229,15 @@ function MessageRow({
 						const t = message.text ?? "";
 						if (t) void navigator.clipboard.writeText(t);
 					}}
-					onCopyLink={() => {
+					// Suppress "Copy message link" inside DMs.  A DM
+					// permalink necessarily identifies both parties to
+					// anyone it's pasted in front of — and unlike room
+					// permalinks (where the room is the context), there's
+					// no meaningful "click to navigate to that
+					// conversation" UX for non-participants either, since
+					// they can't see the DM at all.  Easier to just not
+					// offer the link.
+					onCopyLink={isDm ? undefined : () => {
 						void navigator.clipboard.writeText(buildMessageUrl(roomId, message.id));
 					}}
 					onQuote={() => onQuote?.(message.text ?? "")}

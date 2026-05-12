@@ -191,7 +191,7 @@ export function RoomMentionPill({ intent, original, tone = "other" }: RoomMentio
 			data-room-mention={target}
 			title={safeLabel}
 			className={cn(
-				"inline-flex items-baseline gap-0.5 px-1 -mx-0.5 rounded",
+				"inline-flex items-baseline gap-1 px-1 -mx-0.5 rounded",
 				"font-semibold cursor-pointer no-underline border-b-0",
 				"max-w-[28ch] truncate align-baseline",
 				tone === "self"

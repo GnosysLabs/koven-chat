@@ -28,7 +28,12 @@ export interface MessageContextMenuProps {
 	onReply(): void;
 	onReact(): void;
 	onCopyText(): void;
-	onCopyLink(): void;
+	// Optional — omitted in DMs, where exposing a permalink would
+	// advertise the conversation participants to whoever the link
+	// gets pasted in front of (and non-participants can't navigate
+	// to a DM anyway).  When undefined the "Copy message link" item
+	// is suppressed from the menu entirely.
+	onCopyLink?(): void;
 	onQuote(): void;
 	onDelete?(): void;
 	onFlag?(): void;
@@ -74,11 +79,13 @@ export function MessageContextMenu({
 				onClick: onQuote,
 			});
 		}
-		out.push({
-			label: "Copy message link",
-			icon: <Link2 className="h-4 w-4" />,
-			onClick: onCopyLink,
-		});
+		if (onCopyLink) {
+			out.push({
+				label: "Copy message link",
+				icon: <Link2 className="h-4 w-4" />,
+				onClick: onCopyLink,
+			});
+		}
 
 		// Self vs other actions.
 		if (isSelf && onDelete) {
