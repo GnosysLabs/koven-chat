@@ -1446,7 +1446,12 @@ export async function getRoomSeenBy(roomId: string): Promise<Record<string, stri
 		account_data: { types: [] as string[] },
 	};
 	const filterJson = encodeURIComponent(JSON.stringify(filter));
-	const r = await asFetch(`/_matrix/client/v3/sync?filter=${filterJson}&timeout=0`);
+	// adminFetch (real Synapse admin user, not the appservice).  The
+	// appservice user isn't joined to most rooms — it observes them
+	// through namespace claim rather than membership — so its /sync
+	// returns nothing.  The admin user (koven-svc / SYNAPSE_ADMIN_USER)
+	// IS joined and /sync gives us the full receipt cache.
+	const r = await adminFetch(`/_matrix/client/v3/sync?filter=${filterJson}&timeout=0`);
 	if (!r.ok) return {};
 	const body = (await r.json().catch(() => null)) as {
 		rooms?: {
