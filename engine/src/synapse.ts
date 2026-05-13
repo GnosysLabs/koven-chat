@@ -1415,30 +1415,36 @@ export async function getRoomIconEmoji(roomId: string): Promise<string | null> {
 }
 
 /**
- * Read all `m.read` receipts currently anchored in a room, grouped
- * by the event id they anchor to.  Returns `{}` on any failure
- * (room not visible to the appservice, sync rejection, etc.) so
- * callers can fall back to "no seen-by".
+ * Read `m.read` receipts for a room, rolled-forward so each event
+ * sees every reader whose receipt anchors AT that event OR any
+ * later one.  Mirrors `MatrixTransport.getMessageSeenBy` on the
+ * web (`client/src/lib/matrix.ts`): from the anchor event, walk
+ * forward through the timeline and accumulate the first
+ * occurrence of each user.  A user who has read message #50 shows
+ * on messages #1-50, not just on #50 — which is the visual the
+ * sender actually wants when looking at "seen by".
  *
- * Implemented as a one-shot client `/sync` with `timeout=0`,
- * filtered down to ephemeral `m.receipt` events for the target
- * room only — Synapse's `/sync` is the only API that exposes a
- * room's current receipt state, and at `timeout=0` the request
- * returns immediately with the cached snapshot the homeserver
- * already has.  Authenticated as the appservice user, which is
- * joined to every Koven room.
+ * Implementation:
+ *   1. Use the admin user's `/sync` to grab both the timeline
+ *      (last 250 events — generous so most loaded screens have
+ *      coverage) AND the ephemeral `m.receipt` events.
+ *   2. Build a `userId → readEventIndex` map from receipts.
+ *   3. For each timeline event, the set of readers is every user
+ *      whose `readEventIndex` ≥ this event's index.
  *
- * The shape mirrors the per-event view matrix-js-sdk gives the
- * web client via `Room.getReceiptsForEvent` — `{ eventId: [user1,
- * user2, ...], ... }`.  Bots / services / `@bot-*` are NOT
- * filtered here; the calling endpoint does that so the cleaning
- * logic stays alongside the bot roster it consults.
+ * Returns the rolled-forward `{ eventId: [readers] }` map.
+ * Bots / services / `@bot-*` are NOT filtered here — the calling
+ * endpoint applies the bot-roster filter.
  */
 export async function getRoomSeenBy(roomId: string): Promise<Record<string, string[]>> {
 	const filter = {
 		room: {
 			rooms: [roomId],
-			timeline: { limit: 0 },
+			// 250 events is enough to cover the typical "scroll-back
+			// before the user gives up" window without bloating the
+			// /sync response.  The cap is the same shape the web
+			// client uses for its in-memory timeline.
+			timeline: { limit: 250 },
 			state: { types: [] as string[] },
 			ephemeral: { types: ["m.receipt"] },
 		},
@@ -1449,33 +1455,66 @@ export async function getRoomSeenBy(roomId: string): Promise<Record<string, stri
 	// adminFetch (real Synapse admin user, not the appservice).  The
 	// appservice user isn't joined to most rooms — it observes them
 	// through namespace claim rather than membership — so its /sync
-	// returns nothing.  The admin user (koven-svc / SYNAPSE_ADMIN_USER)
-	// IS joined and /sync gives us the full receipt cache.
+	// returns nothing.  The admin user IS joined and /sync gives us
+	// the full receipt cache.
 	const r = await adminFetch(`/_matrix/client/v3/sync?filter=${filterJson}&timeout=0`);
 	if (!r.ok) return {};
 	const body = (await r.json().catch(() => null)) as {
 		rooms?: {
 			join?: Record<string, {
+				timeline?: { events?: Array<{ event_id?: string }> };
 				ephemeral?: { events?: Array<{ type?: string; content?: Record<string, unknown> }> };
 			}>;
 		};
 	} | null;
-	const events = body?.rooms?.join?.[roomId]?.ephemeral?.events ?? [];
-	const byEvent: Record<string, string[]> = {};
-	for (const ev of events) {
+	const roomData = body?.rooms?.join?.[roomId];
+	const timelineEvents = roomData?.timeline?.events ?? [];
+	const ephemeralEvents = roomData?.ephemeral?.events ?? [];
+
+	// Map event_id → index (ascending: oldest first per Matrix's
+	// timeline convention).
+	const eventIndex = new Map<string, number>();
+	for (let i = 0; i < timelineEvents.length; i++) {
+		const id = timelineEvents[i]?.event_id;
+		if (typeof id === "string") eventIndex.set(id, i);
+	}
+
+	// Each user has ONE current read receipt; if it shows up more
+	// than once in the ephemeral stream, the highest index wins.
+	const userReadIndex = new Map<string, number>();
+	for (const ev of ephemeralEvents) {
 		if (ev?.type !== "m.receipt" || !ev.content) continue;
 		for (const [eventId, types] of Object.entries(ev.content)) {
-			// m.receipt content shape: { eventId: { "m.read": { userId: { ts } }, ... }, ... }
 			const reads = (types as Record<string, unknown> | null)?.["m.read"] as
 				| Record<string, unknown>
 				| undefined;
 			if (!reads) continue;
+			const idx = eventIndex.get(eventId);
+			// Receipts on events that fall outside our 250-event
+			// window are silently dropped — they're for messages
+			// the iOS client almost certainly hasn't paginated to.
+			if (idx === undefined) continue;
 			for (const userId of Object.keys(reads)) {
 				if (typeof userId !== "string" || !userId.startsWith("@")) continue;
-				if (!byEvent[eventId]) byEvent[eventId] = [];
-				byEvent[eventId].push(userId);
+				const existing = userReadIndex.get(userId);
+				if (existing === undefined || idx > existing) {
+					userReadIndex.set(userId, idx);
+				}
 			}
 		}
+	}
+
+	// Roll forward: each event's readers = every user with
+	// userReadIndex ≥ this event's index.  Stored eventId→readers.
+	const byEvent: Record<string, string[]> = {};
+	const allReaders = Array.from(userReadIndex.entries());
+	for (let i = 0; i < timelineEvents.length; i++) {
+		const eventId = timelineEvents[i]?.event_id;
+		if (typeof eventId !== "string") continue;
+		const readers = allReaders
+			.filter(([, readerIdx]) => readerIdx >= i)
+			.map(([userId]) => userId);
+		if (readers.length > 0) byEvent[eventId] = readers;
 	}
 	return byEvent;
 }
