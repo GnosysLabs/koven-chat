@@ -116,14 +116,15 @@ modules:
       auth_token: "${ENGINE_AS_TOKEN}"
 
 # --- TURN / VoIP -----------------------------------------------------
-# coturn runs alongside Synapse in the compose stack.  Synapse hands
-# out short-lived TURN credentials to clients via /voip/turnServer.
-turn_uris:
-  - "turn:${KOVEN_HOSTNAME}:3478?transport=udp"
-  - "turn:${KOVEN_HOSTNAME}:3478?transport=tcp"
-turn_shared_secret: "${TURN_SHARED_SECRET}"
-turn_user_lifetime: 86400000   # 24h — relevant for long calls only
-turn_allow_guests: false
+# Intentionally omitted.  Koven's SPA does WebRTC through Cloudflare
+# RealtimeKit, not via Matrix's native /voip/turnServer flow, so
+# Synapse has no consumers of these settings.  The legacy MatrixCall
+# code path was retired in 2026-05 and coturn was removed from the
+# compose stack at the same time.  If a future Matrix client ever
+# needs TURN credentials from Synapse again, add `turn_uris` +
+# `turn_shared_secret` back here and re-introduce a TURN server
+# (probably out-of-band of Cloudflare's orange-cloud proxy, on a
+# separate hostname kept on DNS-only).
 
 # --- Appservices -----------------------------------------------------
 app_service_config_files:

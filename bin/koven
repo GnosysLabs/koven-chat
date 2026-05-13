@@ -12,8 +12,8 @@
 #   secrets          — print the auto-generated secrets in .env
 #                      (for ops use).
 #
-# Run from the repo root.  Reads/writes `.env`, `synapse-data/`,
-# `docker/coturn/turnserver.conf`, and `client/dist/`.
+# Run from the repo root.  Reads/writes `.env`, `synapse-data/`, and
+# `client/dist/`.
 #
 # This script is plain bash on purpose: it has to work on a fresh VPS
 # before any language toolchain is installed (Bun gets pulled in as
@@ -122,7 +122,9 @@ cmd_setup() {
 	ensure_secret SYNAPSE_FORM_SECRET
 	ensure_secret ENGINE_AS_TOKEN
 	ensure_secret ENGINE_HS_TOKEN
-	ensure_secret TURN_SHARED_SECRET
+	# (TURN_SHARED_SECRET intentionally retired — coturn removed in
+	# 2026-05, Cloudflare RealtimeKit handles WebRTC now.  Existing
+	# installs can leave the value in .env; it's just dead.)
 	# AES-256-GCM key (32 bytes / 64 hex) for at-rest encryption of
 	# per-bot LLM API keys + Synapse access tokens.  Rotating it
 	# breaks every existing bot config; regenerate only on a fresh
@@ -156,11 +158,8 @@ cmd_setup() {
 	# log.config is static — just copy it once if missing.
 	[[ -f synapse-data/log.config ]] || cp docker/synapse/log.config synapse-data/log.config
 
-	# 6. Render coturn config.
-	log "rendering coturn config"
-	# coturn's realm is conventionally the public hostname.
-	export TURN_REALM="$KOVEN_HOSTNAME"
-	render_template docker/coturn/turnserver.conf.template docker/coturn/turnserver.conf
+	# (6. coturn config rendering retired — see homeserver.yaml.template
+	# for the rationale.  Cloudflare RealtimeKit replaced coturn in 2026-05.)
 
 	# 7. Caddyfile.  We render `Caddyfile.template` → `Caddyfile.runtime`
 	#    so the repo stays clean after setup (Caddyfile.runtime is
@@ -443,7 +442,7 @@ cmd_secrets() {
 	[[ -f .env ]] || die "no .env yet — run \`bin/koven setup\` first"
 	# shellcheck disable=SC1091
 	source .env
-	for k in POSTGRES_PASSWORD SYNAPSE_REGISTRATION_SHARED_SECRET ENGINE_AS_TOKEN ENGINE_HS_TOKEN TURN_SHARED_SECRET; do
+	for k in POSTGRES_PASSWORD SYNAPSE_REGISTRATION_SHARED_SECRET ENGINE_AS_TOKEN ENGINE_HS_TOKEN; do
 		printf "%-40s %s\n" "$k" "${!k:-(unset)}"
 	done
 }

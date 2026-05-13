@@ -5,7 +5,12 @@
 #   synapse    — Matrix homeserver (client API only — no federation)
 #   postgres   — Synapse's database
 #   engine     — Koven's governance / admin / profile service
-#   coturn     — TURN server for WebRTC NAT traversal in calls
+#
+# Voice/video calls are NOT handled by a self-hosted TURN server —
+# they go through Cloudflare RealtimeKit (engine/src/calls.ts), which
+# includes TURN infrastructure as part of the service.  An earlier
+# coturn container was removed in 2026-05 once the legacy MatrixCall
+# path retired.
 #
 # All variables come from .env at the repo root.  `bin/koven setup`
 # fills any blank ones with cryptographically-random secrets.  Run
@@ -157,15 +162,14 @@ services:
     depends_on:
       - synapse
 
-  coturn:
-    image: coturn/coturn:latest
-    restart: unless-stopped
-    network_mode: host          # TURN needs the real public IP for the
-                                # SDP it advertises; running on the host
-                                # network avoids Docker NAT tangles.
-    volumes:
-      - ./docker/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
-    command: ["-c", "/etc/coturn/turnserver.conf"]
+  # NOTE: coturn was removed in 2026-05 — all WebRTC voice/video
+  # traffic goes through Cloudflare RealtimeKit (see engine/src/calls.ts),
+  # which has its own TURN infrastructure baked in.  The legacy Matrix
+  # native MatrixCall path that used to depend on a self-hosted coturn
+  # was retired alongside the move to RealtimeKit, leaving no caller of
+  # /voip/turnServer.  Removing coturn also clears one fewer thing
+  # that needs a public-IP-bound port on the box once Cloudflare's
+  # orange-cloud proxy is enabled in front of client.koven.chat.
 
 volumes:
   caddy_data:
