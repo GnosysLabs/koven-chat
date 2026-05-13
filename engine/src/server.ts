@@ -3225,6 +3225,67 @@ export function startServer(): void {
 				}
 			}
 
+			// GET /api/spaces/:spaceId/children-meta
+			//
+			// Returns the Koven-custom category list for a space
+			// (`chat.koven.space.categories`) plus per-child order +
+			// category id (read off each `m.space.child` event on
+			// the space).
+			//
+			// matrix-rust-sdk's Swift FFI doesn't expose generic
+			// state-event reads, and the iOS client needs the same
+			// grouping the web sidebar shows, so we surface this
+			// through the engine the same way we do for
+			// `/api/rooms/icons`.  Public read: a space's child
+			// relationships are already discoverable to anyone who
+			// can peek the space; category names live alongside
+			// them and aren't sensitive.
+			//
+			// Response shape:
+			//   { categories: [{id, name}, ...],
+			//     rooms: { "!childId:server": { order?, categoryId? }, ... } }
+			{
+				const m = path.match(/^\/api\/spaces\/([^/]+)\/children-meta$/);
+				if (req.method === "GET" && m) {
+					const spaceId = decodeURIComponent(m[1]!);
+					const state = await readRoomState(spaceId);
+					if (!state) return json({ categories: [], rooms: {} });
+
+					const catContent = pickStateContent(state, "chat.koven.space.categories") as
+						| { categories?: unknown }
+						| null;
+					const categories: Array<{ id: string; name: string }> =
+						Array.isArray(catContent?.categories)
+							? (catContent!.categories as unknown[])
+								.filter((c): c is { id: string; name: string } =>
+									typeof c === "object" && c !== null
+									&& typeof (c as { id?: unknown }).id === "string"
+									&& typeof (c as { name?: unknown }).name === "string")
+								.map(c => ({ id: c.id, name: c.name }))
+							: [];
+
+					const rooms: Record<string, { order?: string; categoryId?: string }> = {};
+					for (const ev of state) {
+						if (ev.type !== "m.space.child") continue;
+						if (typeof ev.state_key !== "string") continue;
+						const content = ev.content as Record<string, unknown> | undefined;
+						// Cleared child events (no `via`) are no longer
+						// in the space; skip so they don't leak into
+						// the response.
+						if (!content || !Array.isArray(content["via"])) continue;
+						const order = typeof content["order"] === "string"
+							? (content["order"] as string)
+							: undefined;
+						const categoryId = typeof content["chat.koven.category"] === "string"
+							? (content["chat.koven.category"] as string)
+							: undefined;
+						rooms[ev.state_key] = { order, categoryId };
+					}
+
+					return json({ categories, rooms });
+				}
+			}
+
 			if (req.method === "POST" && path === "/api/rooms/icons") {
 				const body = (await req.json().catch(() => null)) as
 					| { room_ids?: unknown }
