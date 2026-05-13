@@ -1,16 +1,24 @@
-// Admin reports queue.  Replaces the old consensus-era floor-review
-// sheet.  Lists member-submitted flags (from the `flags` table on the
-// engine) so instance admins can triage them by hand — there's no
-// vote / collapse / suspension pipeline anymore, just standard Matrix
-// moderation primitives.
+// Reports queue.  Lists member-submitted flags (from the `flags`
+// table on the engine) for the people empowered to act on them.
+// The visibility rule is two-path (enforced server-side; this UI
+// just renders what the engine returns):
+//
+//   - space-mod path: viewers with PL ≥ 50 in the reported room see
+//     reports for that room.
+//   - instance-floor backstop: server admins additionally see
+//     `floor_violation` reports across every space (their legal duty
+//     for CSAM / credible threats / doxxing, even when the report is
+//     in a space they don't moderate).
 //
 // Each row shows reporter + category + rationale + target (message
-// id or room id) plus two actions:
+// id or room id) plus a routing pill telling the viewer WHY they're
+// seeing it — either the space's name (mod path) or a "FLOOR ·
+// instance" badge (floor backstop).  Two actions per row:
 //
 //   - Mark resolved  → POST /api/admin/reports/:id/action
 //   - Dismiss        → POST /api/admin/reports/:id/dismiss
 //
-// The admin already performed the underlying mutation (kick / ban /
+// The actor already performed the underlying mutation (kick / ban /
 // redact / role change) via the room's member list or message
 // toolbar; closing a report here is purely the triage side.
 
@@ -28,13 +36,20 @@ import {
 	markReportActioned,
 	type AdminReport,
 } from "@/lib/instance";
-import { Flag, ExternalLink, Check, X } from "lucide-react";
+import { Flag, ExternalLink, Check, X, AlertTriangle, Shield } from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { Room, Space } from "@koven/shared";
 
 export interface AdminReportsSheetProps {
 	open: boolean;
 	onOpenChange(open: boolean): void;
 	accessToken: string;
+	// Local rooms + spaces — used to render the per-row routing pill.
+	// If the report's room is one the viewer has PL ≥ 50 in, the pill
+	// names that room's space; otherwise the row is only visible via
+	// the floor backstop and the pill reads "FLOOR · instance".
+	rooms: Room[];
+	spaces: Space[];
 	// "Open in room" — wired to App's navigateToRoom + scroll-to-event
 	// plumbing.  When the report targets a message we pass the event
 	// id too so the sheet caller can jump straight to it.  Optional:
@@ -47,7 +62,7 @@ export interface AdminReportsSheetProps {
 }
 
 export function AdminReportsSheet({
-	open, onOpenChange, accessToken, onOpenTarget, onCountChanged,
+	open, onOpenChange, accessToken, rooms, spaces, onOpenTarget, onCountChanged,
 }: AdminReportsSheetProps) {
 	const [reports, setReports] = useState<AdminReport[] | null>(null);
 	const [busyId, setBusyId] = useState<string | null>(null);
@@ -97,11 +112,13 @@ export function AdminReportsSheet({
 		<Dialog open={open} onOpenChange={onOpenChange}>
 			<DialogContent className="sm:max-w-2xl max-h-[80vh] flex flex-col">
 				<DialogHeader>
-					<DialogTitle>Admin reports</DialogTitle>
+					<DialogTitle>Reports</DialogTitle>
 					<DialogDescription>
-						Member-submitted reports awaiting admin triage.  Use the
-						room member list or message toolbar to kick / ban /
-						redact, then mark the report resolved here.
+						Reports about content in spaces you moderate, plus
+						floor-violation reports across the instance if you're
+						a server admin.  Use the room member list or message
+						toolbar to kick / ban / redact, then mark the report
+						resolved here.
 					</DialogDescription>
 				</DialogHeader>
 
@@ -137,6 +154,8 @@ export function AdminReportsSheet({
 									key={r.event_id}
 									r={r}
 									busy={busyId === r.event_id}
+									rooms={rooms}
+									spaces={spaces}
 									onDismiss={() => applyStatus(r.event_id, "dismiss")}
 									onAction={() => applyStatus(r.event_id, "action")}
 									onOpenTarget={onOpenTarget}
@@ -151,16 +170,50 @@ export function AdminReportsSheet({
 }
 
 function ReportRow({
-	r, busy, onDismiss, onAction, onOpenTarget,
+	r, busy, rooms, spaces, onDismiss, onAction, onOpenTarget,
 }: {
 	r: AdminReport;
 	busy: boolean;
+	rooms: Room[];
+	spaces: Space[];
 	onDismiss(): void;
 	onAction(): void;
 	onOpenTarget?(roomId: string, eventId?: string): void;
 }) {
 	const time = new Date(r.created_at).toLocaleString();
 	const isClosed = r.status !== "open";
+	// Routing pill — why is this report visible to the viewer?
+	//
+	// We can't observe the engine's filter decision directly, but the
+	// rules are: (1) viewer has PL ≥ 50 in the reported room → space
+	// mod path; (2) viewer is server admin AND category=floor_violation
+	// → floor backstop.  When the room is in our local roster AND we
+	// hold PL ≥ 50 there, this is (1); otherwise the only remaining
+	// way the engine could have returned this row is (2).  No need to
+	// know server-admin status — the engine wouldn't have returned a
+	// non-floor row to us unless we're PL 50+ in that room (which we
+	// also wouldn't have if the room weren't in our roster).
+	const reportedRoomId = r.target_kind === "room"
+		? (r.target_room_id ?? r.room_id)
+		: r.room_id;
+	const room = rooms.find(rr => rr.id === reportedRoomId);
+	const viewerPl = room?.myPowerLevel ?? 0;
+	const isSpaceModPath = viewerPl >= 50;
+	// Find the parent space's name for the space-mod label.  Koven's
+	// invariant is one parent space per room, so parentSpaceIds[0] is
+	// the right pointer when the room IS a child of a space.  When
+	// the reported "room" IS a space itself (target_kind="room" on
+	// a space), fall back to looking up the space by its own id.
+	let spaceLabel: string | undefined;
+	if (isSpaceModPath && room) {
+		const parentId = room.parentSpaceIds[0];
+		if (parentId) {
+			spaceLabel = spaces.find(s => s.id === parentId)?.name;
+		} else {
+			// Could be a flagged space itself — its id IS a space id.
+			spaceLabel = spaces.find(s => s.id === room.id)?.name;
+		}
+	}
 	return (
 		<li className={cn(
 			"px-3 py-2 rounded border border-border bg-card/50",
@@ -174,6 +227,23 @@ function ReportRow({
 						<span className="text-muted-foreground">
 							{r.target_kind === "room" ? "room report" : "message report"}
 						</span>
+						{isSpaceModPath ? (
+							<span
+								title="You see this report because you have PL ≥ 50 in the reported room"
+								className="inline-flex items-center gap-1 uppercase tracking-wide text-[9px] font-medium px-1.5 py-px rounded bg-amber-500/15 text-amber-500"
+							>
+								<Shield className="h-2.5 w-2.5" />
+								{spaceLabel ?? "your space"}
+							</span>
+						) : (
+							<span
+								title="You see this report because you're a server admin and it's a floor-violation report"
+								className="inline-flex items-center gap-1 uppercase tracking-wide text-[9px] font-medium px-1.5 py-px rounded bg-destructive/15 text-destructive"
+							>
+								<AlertTriangle className="h-2.5 w-2.5" />
+								Floor · instance
+							</span>
+						)}
 						{r.status !== "open" && (
 							<span className={cn(
 								"uppercase tracking-wide text-[9px] font-medium px-1 py-px rounded",

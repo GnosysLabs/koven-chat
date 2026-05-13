@@ -76,12 +76,16 @@ export interface SpaceBarProps {
 	// the parent always passes a handler when transport is connected).
 	onReorderSpaces?(spaceIds: SpaceId[]): Promise<void> | void;
 
-	// ─── Admin-only rail items ───────────────────────────────────
-	// Shield icon above Settings opens the admin reports queue
-	// (replaces the retired floor-review sheet).  Optional props so
-	// non-admins don't see anything; when isAdmin is true the parent
-	// supplies both `onOpenAdminReports` and `adminReportsBadge`.
-	isAdmin?: boolean;
+	// ─── Reports queue rail item ─────────────────────────────────
+	// Shield icon above Settings opens the reports queue.  Shown to
+	// anyone who could see at least one report under the engine's
+	// visibility rule — that's space mods (PL ≥ 50 in any joined
+	// room) plus server admins (who additionally see floor-violation
+	// reports as the platform's legal-floor backstop).  Parent passes
+	// `canOpenAdminReports=true` when EITHER condition holds; the
+	// shield is hidden otherwise.  Badge shows the open-count from
+	// the engine's filtered count endpoint.
+	canOpenAdminReports?: boolean;
 	adminReportsBadge?: number;
 	onOpenAdminReports?(): void;
 }
@@ -113,7 +117,7 @@ export function SpaceBar({
 	onLeaveSpace,
 	onDeleteSpace,
 	onReorderSpaces,
-	isAdmin,
+	canOpenAdminReports,
 	adminReportsBadge,
 	onOpenAdminReports,
 }: SpaceBarProps) {
@@ -267,15 +271,15 @@ export function SpaceBar({
 			</div>
 
 			<div className="flex flex-col items-center gap-1 pb-1">
-				{isAdmin && onOpenAdminReports && (
+				{canOpenAdminReports && onOpenAdminReports && (
 					<IconButton
 						onClick={onOpenAdminReports}
 						title={
 							adminReportsBadge && adminReportsBadge > 0
-								? `Admin reports (${adminReportsBadge} open)`
-								: "Admin reports"
+								? `Reports (${adminReportsBadge} open)`
+								: "Reports"
 						}
-						ariaLabel="Admin reports"
+						ariaLabel="Reports"
 						badge={adminReportsBadge}
 					>
 						<Shield className="h-4 w-4" />

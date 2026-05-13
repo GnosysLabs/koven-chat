@@ -503,14 +503,134 @@ function RoomGroupedList({
 	// Drag state — what's currently being dragged, used by DragOverlay
 	// to render a floating preview of the lifted row.
 	const [activeDragId, setActiveDragId] = useState<string | null>(null);
+
+	// ─── Optimistic move overrides ─────────────────────────────────
+	// dnd-kit animates a dragged item back to its original position
+	// when the drop completes, BEFORE the parent's onMoveRoom promise
+	// has round-tripped to the homeserver and the new `m.space.child`
+	// state event has echoed back through /sync.  Without an
+	// optimistic layer, the user sees:
+	//   1. drop the room
+	//   2. row animates back to where it started (dnd-kit unwinds)
+	//   3. ~200ms later the state event lands, parent re-renders, row
+	//      "pops" into its new position
+	// The fix is to record the predicted (order, category) of the
+	// dragged room locally and apply it to props.groups in render —
+	// the parent's eventual prop update is then a no-op visually
+	// because the local override already moved the row.  Once props
+	// reflect the override, we clear it (and on RPC failure, we clear
+	// it too, surfacing the actual server state).
+	const [pendingMoves, setPendingMoves] = useState<
+		Map<RoomId, { order: string; category: string | null }>
+	>(new Map());
+
+	// Apply pending overrides to props.groups.  In the steady state
+	// (no pending moves) this returns `groups` unchanged so the perf
+	// path is identical.  When overrides are present we flatten,
+	// patch each overridden room's `spaceChildMeta[spaceId]`, and
+	// regroup using the same logic the parent uses (categories list
+	// is reconstructed from the input groups themselves — we don't
+	// have direct access to `Space.categories` here but we don't
+	// need it: the parent already grouped, and we just need to
+	// re-sort/re-bucket).
+	const effectiveGroups = useMemo<RoomGroup[]>(() => {
+		if (pendingMoves.size === 0) return groups;
+
+		// Synthesise the categories list from the non-null groups in
+		// input order.  Preserves admin-defined ordering of categories.
+		const categories: Array<{ id: string; name: string }> = [];
+		for (const g of groups) {
+			if (g.id !== null && g.name !== null) categories.push({ id: g.id, name: g.name });
+		}
+		const knownCategories = new Set(categories.map(c => c.id));
+
+		// Flatten + patch.  Cloning shallowly so we don't mutate the
+		// Room objects the parent owns.
+		const patched: Room[] = [];
+		for (const g of groups) {
+			for (const r of g.rooms) {
+				const ov = pendingMoves.get(r.id);
+				if (!ov) {
+					patched.push(r);
+					continue;
+				}
+				patched.push({
+					...r,
+					spaceChildMeta: {
+						...(r.spaceChildMeta ?? {}),
+						[spaceId]: {
+							order: ov.order,
+							category: ov.category ?? undefined,
+						},
+					},
+				});
+			}
+		}
+
+		// Re-bucket.  Mirrors groupRoomsByCategory's logic but keyed
+		// off the synthesised category list rather than a Space object.
+		const uncategorised: Room[] = [];
+		const byCategory = new Map<string, Room[]>();
+		for (const c of categories) byCategory.set(c.id, []);
+		for (const room of patched) {
+			const meta = room.spaceChildMeta?.[spaceId];
+			const catId = meta?.category;
+			if (catId && knownCategories.has(catId)) byCategory.get(catId)!.push(room);
+			else uncategorised.push(room);
+		}
+
+		const sortRooms = (list: Room[]) => {
+			list.sort((a, b) => {
+				const ao = a.spaceChildMeta?.[spaceId]?.order;
+				const bo = b.spaceChildMeta?.[spaceId]?.order;
+				if (ao !== undefined && bo === undefined) return -1;
+				if (ao === undefined && bo !== undefined) return 1;
+				if (ao !== undefined && bo !== undefined && ao !== bo) return ao < bo ? -1 : 1;
+				return a.name.localeCompare(b.name);
+			});
+		};
+		sortRooms(uncategorised);
+		for (const list of byCategory.values()) sortRooms(list);
+
+		const out: RoomGroup[] = [{ id: null, name: null, rooms: uncategorised }];
+		for (const c of categories) out.push({ id: c.id, name: c.name, rooms: byCategory.get(c.id)! });
+		return out;
+	}, [groups, pendingMoves, spaceId]);
+
+	// Clear overrides whose target state has landed in props.  Runs
+	// every time `groups` changes — the moment the homeserver echo
+	// produces a render where the room's actual order/category matches
+	// the override, we can stop overriding (and the next subsequent
+	// drag will start clean).
+	useEffect(() => {
+		if (pendingMoves.size === 0) return;
+		let next: Map<RoomId, { order: string; category: string | null }> | null = null;
+		for (const g of groups) {
+			for (const r of g.rooms) {
+				const ov = pendingMoves.get(r.id);
+				if (!ov) continue;
+				const meta = r.spaceChildMeta?.[spaceId];
+				const sameOrder = meta?.order === ov.order;
+				// Group id `null` is the uncategorised bucket; equate it
+				// to the override's `null` category.
+				const sameCategory = (g.id ?? null) === (ov.category ?? null);
+				if (sameOrder && sameCategory) {
+					if (!next) next = new Map(pendingMoves);
+					next.delete(r.id);
+				}
+			}
+		}
+		if (next) setPendingMoves(next);
+	}, [groups, spaceId, pendingMoves]);
+
 	const activeDraggedRoom = useMemo(() => {
 		if (!activeDragId) return null;
-		for (const g of groups) {
+		for (const g of effectiveGroups) {
 			const r = g.rooms.find(r => r.id === activeDragId);
 			if (r) return r;
 		}
 		return null;
-	}, [activeDragId, groups]);
+	}, [activeDragId, effectiveGroups]);
 
 	// 6px activation distance — far enough that a normal click on a
 	// room row never accidentally starts a drag.  dnd-kit's default
@@ -521,14 +641,16 @@ function RoomGroupedList({
 
 	// Lookup: which group does each room id live in?  Used by the
 	// drop handler to figure out the destination category + the
-	// new neighbour anchors for the order-key computation.
+	// new neighbour anchors for the order-key computation.  Built
+	// off effectiveGroups so drag-end math sees the (already-applied)
+	// optimistic positions for any earlier pending moves.
 	const groupByRoomId = useMemo(() => {
 		const m = new Map<string, RoomGroup>();
-		for (const g of groups) {
+		for (const g of effectiveGroups) {
 			for (const r of g.rooms) m.set(r.id, g);
 		}
 		return m;
-	}, [groups]);
+	}, [effectiveGroups]);
 
 	function handleDragStart(e: DragStartEvent) {
 		setActiveDragId(String(e.active.id));
@@ -548,7 +670,7 @@ function RoomGroupedList({
 		let destIdx: number;
 		if (overIdStr.startsWith("group:")) {
 			const groupKey = overIdStr.slice("group:".length);
-			destGroup = groups.find(g => (g.id ?? "__uncategorised__") === groupKey);
+			destGroup = effectiveGroups.find(g => (g.id ?? "__uncategorised__") === groupKey);
 			destIdx = destGroup?.rooms.length ?? 0;
 		} else {
 			const overRoomId = overIdStr;
@@ -575,12 +697,39 @@ function RoomGroupedList({
 			console.warn("order-key generation failed; keeping original order", err);
 			return;
 		}
-		void onMoveRoom(spaceId, draggedId, newKey, destGroup.id);
+
+		// Optimistic local apply BEFORE we kick the RPC — so the row
+		// settles at its new position the instant dnd-kit's transform
+		// unwinds (rather than animating back to its origin and then
+		// popping forward when the homeserver echo lands).  The local
+		// override gets cleared by either:
+		//   (a) the useEffect above, when props.groups echoes the new
+		//       order/category back to us, or
+		//   (b) the .catch() below, when the RPC rejects (e.g. PL
+		//       dropped between drag start and drop, network failure).
+		const destCategory = destGroup.id;
+		setPendingMoves(prev => {
+			const next = new Map(prev);
+			next.set(draggedId, { order: newKey, category: destCategory });
+			return next;
+		});
+
+		const result = onMoveRoom(spaceId, draggedId, newKey, destCategory);
+		if (result && typeof (result as Promise<unknown>).then === "function") {
+			(result as Promise<unknown>).catch(() => {
+				setPendingMoves(prev => {
+					if (!prev.has(draggedId)) return prev;
+					const next = new Map(prev);
+					next.delete(draggedId);
+					return next;
+				});
+			});
+		}
 	}
 
 	const body = (
 		<>
-			{groups.map((group) => {
+			{effectiveGroups.map((group) => {
 				const headerKey = group.id ?? "__uncategorised__";
 				const isOpen = !collapsed.has(headerKey);
 				const showHeader = !!group.name;
@@ -705,10 +854,17 @@ function CategoryDropZone({
 		ids.push(`group:${groupKey}`);
 		return ids;
 	}, [rooms, groupKey]);
-	if (!canDrag) return <>{children}</>;
+	// `flex flex-col gap-0.5` gives a 2px separator between consecutive
+	// rows so the active room's background doesn't visually merge with
+	// the rows above and below it (was a steady-state UX papercut —
+	// fixing the same issue in both branches keeps drag + non-drag
+	// rendering identical).  dnd-kit's verticalListSortingStrategy
+	// is approximate anyway, so the tiny gap doesn't visibly throw
+	// off its swap thresholds.
+	if (!canDrag) return <div className="flex flex-col gap-0.5">{children}</div>;
 	return (
 		<SortableContext items={items} strategy={verticalListSortingStrategy}>
-			{children}
+			<div className="flex flex-col gap-0.5">{children}</div>
 			{rooms.length === 0 && (
 				// Empty category gets a visible-but-discreet drop hint.
 				// `useSortable` on the group sentinel id makes it an
@@ -744,10 +900,24 @@ function EmptyCategorySentinel({ groupKey }: { groupKey: string }) {
  * affordance. */
 function DraggableRoomRow(props: React.ComponentProps<typeof RoomRow>) {
 	const sortable = useSortable({ id: props.room.id });
+	// While dragging, the floating DragOverlay portal renders the row
+	// at the cursor.  We make the source slot invisible (opacity 0)
+	// but keep it in layout so:
+	//   - dnd-kit can still measure the source's rect (the DragOverlay
+	//     uses it to size + position the floating clone — collapsing
+	//     the source via `display: none` zeroes the rect and leaves
+	//     the overlay invisible, which was the "drag does nothing"
+	//     symptom);
+	//   - sibling rows don't reflow until the drag actually resolves,
+	//     so the visual cue is "lifted row floats above; everything
+	//     else holds steady until you drop".
+	// Previous `opacity: 0.4` left a visible faded copy behind which
+	// read as a confusing duplicate; opacity: 0 keeps the slot but
+	// removes the ghost.
 	const style = {
 		transform: CSS.Transform.toString(sortable.transform),
 		transition: sortable.transition,
-		opacity: sortable.isDragging ? 0.4 : 1,
+		opacity: sortable.isDragging ? 0 : 1,
 	};
 	return (
 		<div

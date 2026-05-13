@@ -389,9 +389,15 @@ export default function App() {
 	// as a Set for O(1) lookups; updated whenever account_data fires
 	// `m.ignored_user_list`.
 	const [ignoredUsers, setIgnoredUsers] = useState<Set<UserId>>(new Set());
-	// Admin status — drives the shield icon (admin-only) above Settings
-	// in the SpaceBar.  Polled every 60s so newly-granted admin rights
-	// surface without a refresh.
+	// Server-admin status — gates instance-settings endpoints (login
+	// background, logo, etc.) and is one half of the visibility rule
+	// for the reports queue (server admins see floor-violation reports
+	// across every space; see canAccessAdminReports below).  Polled
+	// every 60s so newly-granted admin rights surface without a
+	// refresh.  NOTE: this is NOT "can see the shield icon" anymore —
+	// space mods (PL ≥ 50 in a joined room) get the shield too via
+	// canAccessAdminReports.  Server admin is platform-operator
+	// status, not super-moderator status.
 	const [isAdmin, setIsAdmin] = useState(false);
 	// Admin reports queue (replaces the retired floor-review queue).
 	// Sheet open + open-count badge on the SpaceBar shield button.
@@ -555,13 +561,32 @@ export default function App() {
 		return () => { cancelled = true; };
 	}, [creds]);
 
-	// Admin reports queue poll.  Drives the open-count badge on the
-	// SpaceBar shield icon — pulled once on admin sign-in and every
-	// 60s thereafter.  Same cadence as the admin-status probe above:
-	// admin moderation isn't a sub-second affordance, and polling
-	// faster would burn engine cycles without changing the UX.
+	// Reports-queue visibility gate.  The shield icon + sheet are
+	// available to anyone who could plausibly have a report to act
+	// on under the engine's two-path visibility rule:
+	//
+	//   (1) PL ≥ 50 in any joined room — space owners and moderators
+	//       see reports for content in their spaces.
+	//   (2) Server admin — sees floor-violation reports across the
+	//       whole platform (legal-floor backstop).
+	//
+	// Computing locally lets us avoid burning an engine RPC for users
+	// who have neither (most signed-in users).  The engine still
+	// re-enforces the filter on every list/count/dismiss call — this
+	// is just a polling gate.
+	const canAccessAdminReports = useMemo(() => {
+		if (!creds) return false;
+		if (isAdmin) return true;
+		return state.rooms.some(r => (r.myPowerLevel ?? 0) >= 50);
+	}, [creds, isAdmin, state.rooms]);
+
+	// Reports queue poll.  Drives the open-count badge on the
+	// SpaceBar shield icon — pulled once on sign-in and every 60s
+	// thereafter for callers who could see at least one report.
+	// Cadence: 60s.  Moderation isn't a sub-second affordance, and
+	// polling faster would burn engine cycles for no UX gain.
 	useEffect(() => {
-		if (!creds || !isAdmin) {
+		if (!creds || !canAccessAdminReports) {
 			setPendingReviewCount(0);
 			return;
 		}
@@ -581,7 +606,7 @@ export default function App() {
 			cancelled = true;
 			window.clearInterval(id);
 		};
-	}, [creds, isAdmin]);
+	}, [creds, canAccessAdminReports]);
 
 	// Listen for `open-room` messages posted by the service worker
 	// when the user taps a notification.  The SW can't navigate the
@@ -2294,7 +2319,7 @@ export default function App() {
 					}}
 					onOpenProfile={() => setViewedUserId(creds.user_id as UserId)}
 					onOpenSettings={() => setSettingsOpen(true)}
-					isAdmin={isAdmin}
+					canOpenAdminReports={canAccessAdminReports}
 					adminReportsBadge={pendingReviewCount}
 					onOpenAdminReports={() => setAdminReportsOpen(true)}
 					accounts={accounts}
@@ -2481,6 +2506,14 @@ export default function App() {
 							);
 						} catch (e) {
 							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+							// Re-throw so RoomList's drag handler can drop
+							// its optimistic override and let the row snap
+							// back to its real position.  Without this the
+							// override would persist forever after a
+							// server-side rejection (PL dropped mid-drag,
+							// network failure, etc.) and the row would
+							// look like it moved successfully.
+							throw e;
 						}
 					}}
 				/>
@@ -3637,11 +3670,17 @@ export default function App() {
 					transport={transport}
 				/>
 			)}
-			{isAdmin && creds && (
+			{canAccessAdminReports && creds && (
 				<AdminReportsSheet
 					open={adminReportsOpen}
 					onOpenChange={setAdminReportsOpen}
 					accessToken={creds.access_token}
+					// Per-row routing pill ("space mod" vs "FLOOR ·
+					// instance") needs the local room + space lookups
+					// to render correctly — see AdminReportsSheet's
+					// own doc-block for the rule.
+					rooms={state.rooms}
+					spaces={state.spaces}
 					// Jump to the targeted room (and message, when the
 					// report is message-scoped) so the admin can review
 					// context before deciding what primitive to apply.

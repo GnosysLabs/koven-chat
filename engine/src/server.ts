@@ -28,9 +28,9 @@ import {
 	bootstrapEmailBinding,
 	botMembershipActionsForRoom,
 	countBotsByOwner,
-	countOpenFlags,
 	getFlagByEventId,
 	listAllFlagsForReportQueue,
+	type AdminReportRow,
 	modActionsForRoom,
 	recordModAction,
 	setFlagReviewStatus,
@@ -329,6 +329,77 @@ async function requireAdmin(req: Request): Promise<{ userId: string } | Response
 	if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
 	if (!isAdmin(userId)) return json({ errcode: "M_FORBIDDEN", error: "admin only" }, { status: 403 });
 	return { userId };
+}
+
+/**
+ * Per-report visibility check used by the reports queue endpoints.
+ *
+ * Returns a Map keyed by flag event_id with a boolean: true means
+ * the caller is allowed to see (and act on) that report.  Two paths
+ * grant visibility:
+ *
+ *   - space-mod path: caller has PL ≥ 50 in the row's `room_id`
+ *     (`m.room.power_levels.users[caller]`, falling back to
+ *     `users_default` when not in the map).  This is the standard
+ *     admin/moderator path — the people who own the space see the
+ *     reports for content in their space.
+ *
+ *   - instance-floor backstop: caller is a server admin AND the
+ *     report's category is `floor_violation`.  Lets the operator
+ *     see floor reports from spaces they don't moderate, because
+ *     they have legal responsibility for CSAM / credible threats /
+ *     doxxing regardless of whether they're in that space's mod
+ *     team.  Non-floor reports do NOT cross this boundary — the
+ *     server admin is not a super-moderator.
+ *
+ * Implementation: collects unique reported room ids, fetches PL
+ * state for each in parallel via `readRoomState`, then walks the
+ * rows applying the two rules.  Room-state reads are batched so
+ * one request for the list-all endpoint doesn't fan out to N
+ * Synapse admin-API calls; for the count endpoint where N is
+ * small in practice the cost is bounded.
+ */
+async function computeReportVisibility(
+	rows: AdminReportRow[],
+	callerId: string,
+	isInstanceAdmin: boolean,
+): Promise<Map<string, boolean>> {
+	const visibility = new Map<string, boolean>();
+	if (rows.length === 0) return visibility;
+
+	// Collect unique room ids whose PL we need.  Skip rooms we've
+	// already determined PL for via a previous row.
+	const uniqueRoomIds = new Set<string>();
+	for (const row of rows) uniqueRoomIds.add(row.room_id);
+
+	// Parallel PL fetch.  `readRoomState` returns null when the room
+	// can't be read (deleted, federated, etc.) — treat that as
+	// "caller has no PL" so we err on the side of LESS visibility.
+	const plByRoom = new Map<string, number>();
+	await Promise.all(Array.from(uniqueRoomIds).map(async (roomId) => {
+		const state = await readRoomState(roomId);
+		if (!state) {
+			plByRoom.set(roomId, 0);
+			return;
+		}
+		const pl = pickStateContent(state, "m.room.power_levels", "") as {
+			users?: Record<string, number>;
+			users_default?: number;
+		} | null;
+		const defaultPl = typeof pl?.users_default === "number" ? pl.users_default : 0;
+		const callerPl = typeof pl?.users?.[callerId] === "number"
+			? pl.users[callerId]!
+			: defaultPl;
+		plByRoom.set(roomId, callerPl);
+	}));
+
+	for (const row of rows) {
+		const callerPl = plByRoom.get(row.room_id) ?? 0;
+		const spaceModPath = callerPl >= 50;
+		const floorBackstop = isInstanceAdmin && row.category === "floor_violation";
+		visibility.set(row.event_id, spaceModPath || floorBackstop);
+	}
+	return visibility;
 }
 
 /**
@@ -3468,38 +3539,67 @@ export function startServer(): void {
 				}
 			}
 
-			// ─── Admin reports queue ────────────────────────────────
-			// Member-submitted flags surface here for instance admins to
-			// triage.  Status starts at 'open'; admins flip it to
-			// 'dismissed' (no action warranted) or 'actioned' (admin
-			// already handled it via the standard primitives).
+			// ─── Reports queue ──────────────────────────────────────
+			// Member-submitted flags surface here for triage.  Visibility
+			// is per-row, gated by EITHER:
+			//
+			//   (1) caller has PL ≥ 50 in the reported room (space-mod
+			//       path — owners + moderators see reports for content
+			//       in spaces they have authority over), OR
+			//   (2) caller is a server admin (engine `admins` table) AND
+			//       the report's category is `floor_violation` (instance-
+			//       wide floor backstop — the operator's legal duty for
+			//       CSAM / credible threats / doxxing, regardless of
+			//       which space the content lives in).
+			//
+			// The two conditions overlap when a server admin is also
+			// PL ≥ 50 somewhere; they just see those reports once.  A
+			// server admin who happens to also be the founder of a
+			// space sees their own space's reports via path (1), not
+			// via any "server admin sees everything" shortcut — that
+			// shortcut doesn't exist on purpose.  The server admin is
+			// the platform operator, not a super-moderator.  See
+			// docs/MODERATION.md for the rationale.
+			//
+			// Status starts at 'open'; the visible-to-caller actor
+			// flips it to 'dismissed' (no action warranted) or
+			// 'actioned' (handled via standard primitives like
+			// kick/ban/redact).
 			if (req.method === "GET" && path === "/api/admin/reports") {
-				const auth = await requireAdmin(req);
-				if (auth instanceof Response) return auth;
-				const rows = listAllFlagsForReportQueue().map(r => ({
-					// Identifier is the flag's Matrix event id (the
-					// flags table uses event_id TEXT PRIMARY KEY; there's
-					// no separate INTEGER id).  SPA uses this verbatim in
-					// the dismiss / action endpoints below.
-					event_id: r.event_id,
-					room_id: r.room_id,
-					flagger: r.flagger,
-					target_kind: r.target_kind,
-					// For target_kind='message', target_event_id is the
-					// flagged message id and target_room_id is null.
-					// For target_kind='room', target_event_id is the
-					// flagged room id (room ids start with `!`, event
-					// ids start with `$`; flag-room rows reuse the
-					// target_event_id column for the room id).  The SPA
-					// gets the disambiguated shape it expects without
-					// having to inspect the leading char.
-					target_event_id: r.target_kind === "room" ? null : r.target_event_id,
-					target_room_id:  r.target_kind === "room" ? r.target_event_id : null,
-					category: r.category,
-					rationale: r.rationale,
-					created_at: r.ts,
-					status: r.review_status,
-				}));
+				const token = extractToken(req);
+				const userId = await whoami(token);
+				if (!userId) {
+					return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				}
+				const isInstanceAdmin = isAdmin(userId);
+				const allRows = listAllFlagsForReportQueue();
+				const visibility = await computeReportVisibility(allRows, userId, isInstanceAdmin);
+				const rows = allRows
+					.filter(r => visibility.get(r.event_id))
+					.map(r => ({
+						// Identifier is the flag's Matrix event id (the
+						// flags table uses event_id TEXT PRIMARY KEY; there's
+						// no separate INTEGER id).  SPA uses this verbatim in
+						// the dismiss / action endpoints below.
+						event_id: r.event_id,
+						room_id: r.room_id,
+						flagger: r.flagger,
+						target_kind: r.target_kind,
+						// For target_kind='message', target_event_id is the
+						// flagged message id and target_room_id is null.
+						// For target_kind='room', target_event_id is the
+						// flagged room id (room ids start with `!`, event
+						// ids start with `$`; flag-room rows reuse the
+						// target_event_id column for the room id).  The SPA
+						// gets the disambiguated shape it expects without
+						// having to inspect the leading char.
+						target_event_id: r.target_kind === "room" ? null : r.target_event_id,
+						target_room_id:  r.target_kind === "room" ? r.target_event_id : null,
+						category: r.category,
+						rationale: r.rationale,
+						created_at: r.ts,
+						status: r.review_status,
+					}));
 				return json({ reports: rows });
 			}
 
@@ -3510,8 +3610,11 @@ export function startServer(): void {
 				// decoded id verbatim to the DB lookup.
 				const m = path.match(/^\/api\/admin\/reports\/([^/]+)\/(dismiss|action)$/);
 				if (req.method === "POST" && m) {
-					const auth = await requireAdmin(req);
-					if (auth instanceof Response) return auth;
+					const token = extractToken(req);
+					const userId = await whoami(token);
+					if (!userId) {
+						return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+					}
 					const flagEventId = decodeURIComponent(m[1]!);
 					const verb = m[2] as "dismiss" | "action";
 					const existing = getFlagByEventId(flagEventId);
@@ -3521,20 +3624,45 @@ export function startServer(): void {
 							error: "report not found",
 						}, { status: 404 });
 					}
+					// Per-report visibility check — caller has to be able
+					// to SEE this report under the rules above to act on
+					// it.  Same gate as the list endpoint: a random user
+					// can't dismiss a report just because they know its
+					// id.
+					const isInstanceAdmin = isAdmin(userId);
+					const visibility = await computeReportVisibility([existing], userId, isInstanceAdmin);
+					if (!visibility.get(flagEventId)) {
+						return json({
+							errcode: "M_FORBIDDEN",
+							error: "report not visible to caller",
+						}, { status: 403 });
+					}
 					const nextStatus = verb === "dismiss" ? "dismissed" : "actioned";
 					setFlagReviewStatus(flagEventId, nextStatus);
 					return json({ event_id: flagEventId, status: nextStatus });
 				}
 			}
 
-			// ─── Open-report count for admin polling ────────────────
-			// Tiny helper so the admin shield-icon badge in the SpaceBar
-			// can show a count without paging through the whole report
-			// queue every refresh.
+			// ─── Open-report count for badge polling ─────────────────
+			// Tiny helper so the shield-icon badge in the SpaceBar can
+			// show a count without paging through the whole report
+			// queue every refresh.  Filtered to reports visible to the
+			// caller (same rules as the list endpoint above).  Polled
+			// every 60s by anyone who could plausibly have reports to
+			// see (any space mod plus all server admins) so this needs
+			// to be cheap-ish.
 			if (req.method === "GET" && path === "/api/admin/reports/count") {
-				const auth = await requireAdmin(req);
-				if (auth instanceof Response) return auth;
-				return json({ open: countOpenFlags() });
+				const token = extractToken(req);
+				const userId = await whoami(token);
+				if (!userId) {
+					return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				}
+				const isInstanceAdmin = isAdmin(userId);
+				const openRows = listAllFlagsForReportQueue().filter(r => r.review_status === "open");
+				const visibility = await computeReportVisibility(openRows, userId, isInstanceAdmin);
+				let open = 0;
+				for (const r of openRows) if (visibility.get(r.event_id)) open++;
+				return json({ open });
 			}
 
 			// ─── Self-delete a message ──────────────────────────────

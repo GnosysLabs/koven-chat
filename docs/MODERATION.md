@@ -2,7 +2,7 @@
 
 How moderation works on Koven as built. This document describes what the protocol enforces today. Design ideas that aren't wired up yet aren't claimed here.
 
-Koven is a standard chat platform with standard Matrix admin moderation, with one preserved differentiator: **the mod log is public and append-only**. Spaces have owners (the `room.creator` at power level 100). Owners can promote others to admin (PL 100) or moderator (PL 50). PL ≥ 50 enables: kick a member from the space, ban a member from the space, redact (remove) any message, and change a user's power level. Kick and ban are space-wide by design (Discord-style) — the action fans out across every room in the space plus the space itself, so a banned user is removed everywhere at once and the per-room mod log of every affected room reflects it. PL transitions are gated by Synapse — Koven doesn't reinvent any of this. Members can still flag messages or rooms; flags surface to admins in an admin-only "Reports" sheet reached from a shield icon in the SpaceBar. Admins act on reports with the standard moderation primitives, then mark the report resolved or dismiss it. Every admin action lands in the per-room public mod log forever. That's the consensus-era idea Koven keeps: admins have power, and what they do with it is visible to everyone in the room.
+Koven is a standard chat platform with standard Matrix admin moderation, with one preserved differentiator: **the mod log is public and append-only**. Spaces have owners (the `room.creator` at power level 100). Owners can promote others to admin (PL 100) or moderator (PL 50). PL ≥ 50 enables: kick a member from the space, ban a member from the space, redact (remove) any message, and change a user's power level. Kick and ban are space-wide by design (Discord-style) — the action fans out across every room in the space plus the space itself, so a banned user is removed everywhere at once and the per-room mod log of every affected room reflects it. PL transitions are gated by Synapse — Koven doesn't reinvent any of this. Members can still flag messages or rooms; flags surface to **the people empowered to act on them** in a Reports sheet reached from a shield icon in the SpaceBar — that's the room's own admins/moderators (PL ≥ 50), not the server admin. The server admin is the platform operator, not a super-moderator; they only see reports in spaces they themselves moderate, plus floor-violation reports across the instance as a legal backstop (CSAM / credible threats / doxxing). Mods act on reports with the standard moderation primitives, then mark the report resolved or dismiss it. Every action lands in the per-room public mod log forever. That's the consensus-era idea Koven keeps: admins have power, and what they do with it is visible to everyone in the room.
 
 ---
 
@@ -78,11 +78,20 @@ Reports against messages travel through the room's timeline as Matrix events. Re
 
 Every report immediately appears in the room's public mod log. The mod log is the audit trail; the admin queue is the work queue. They're the same data shaped two different ways.
 
-### What admins see: the Reports sheet
+### Who sees what: the Reports sheet
 
-Admins (PL 100 instance-wide — the engine's `is_admin` bit, not the per-room PL) see a shield icon in the SpaceBar, above Settings. A small badge shows the count of open reports. Click it; the **Reports** sheet opens.
+Reports are scoped per-viewer. Anyone who has at least one report visible under the visibility rule below sees a shield icon in the SpaceBar, above Settings. A small badge shows the count of open reports they can see. Click it; the **Reports** sheet opens.
 
-The sheet lists every open report across every room on the instance, newest first:
+**Visibility rule.** A report on content in room `R` is visible to viewer `V` if either:
+
+1. **Space-mod path:** `V` holds PL ≥ 50 in `R`. Room owners and moderators see reports for content in their own rooms (and, because PL is space-wide in Koven, every room in their space).
+2. **Instance-floor backstop:** `V` is a server admin (the engine's `admins` table) AND the report's category is `floor_violation`. The platform operator sees floor reports across every space — CSAM, credible threats, doxxing — because they have legal responsibility for that content regardless of which space it's in.
+
+The two paths overlap when a server admin is also PL ≥ 50 somewhere; they see those reports once. **A server admin who is not also PL ≥ 50 in space `X` cannot see non-floor reports about space `X`.** This is on purpose: the server admin is the platform operator, not a super-moderator. If you don't moderate that space, you don't see its off-topic reports. The rationale is the same one that drove the consensus → standard-admin pivot — admins-having-power-but-its-visible breaks down if there's a "super-admin" above every space's own admins, so we don't have one.
+
+Each row carries a routing pill telling the viewer WHY they're seeing it: the parent space's name (space-mod path, amber Shield badge) or **FLOOR · instance** (floor backstop, red AlertTriangle badge). Lets a server admin scan the queue and immediately distinguish "reports in my space" from "platform-floor escalations from other spaces I don't moderate."
+
+The row content:
 
 - Reporter mxid.
 - Target — either an excerpt of the flagged message, or the room's name.
@@ -91,13 +100,15 @@ The sheet lists every open report across every room on the instance, newest firs
 
 The expected flow:
 
-1. Admin opens the sheet, sees an open report.
+1. Viewer opens the sheet, sees an open report.
 2. Clicks **Open in room**, scrolls to the message, decides whether to act.
 3. If action is warranted, uses the standard primitive (kick / ban / redact / change PL) from the message toolbar or the user's profile sheet. That call lands a `mod_action` row in the public mod log.
 4. Returns to the sheet, clicks **Mark resolved**. The report transitions from `open` to `actioned`.
 5. If no action is warranted, clicks **Dismiss** instead. The report transitions to `dismissed`.
 
-Both terminal states are final-ish: a dismissed report can be reopened by the engine if a future report against the same target arrives, but admins don't re-edit existing rows.
+The dismiss / action endpoints re-run the visibility check server-side, so a viewer can't act on a report they couldn't see in the first place (e.g. by guessing a flag event id).
+
+Both terminal states are final-ish: a dismissed report can be reopened by the engine if a future report against the same target arrives, but viewers don't re-edit existing rows.
 
 There is no automatic content-classifier today; reports are user-initiated. Operators who want hash-based or model-based pre-screening would have to build that as a separate Synapse module and have it post reports on a bot's behalf.
 
