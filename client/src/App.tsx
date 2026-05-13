@@ -58,11 +58,13 @@ import { ModLogSheet } from "@/components/ModLogSheet";
 import {
 	botKickBanFromSpace,
 	deleteOwnMessage,
+	fetchAdminReports,
 	fetchAdminReportsCount,
 	fetchAdminStatus,
 	fetchRoomParents,
 	flagRoom,
 	recordModAction,
+	type AdminReport,
 } from "@/lib/instance";
 import { AdminReportsSheet } from "@/components/AdminReportsSheet";
 import { fetchIntegrationsStatus } from "@/lib/klipy";
@@ -403,6 +405,14 @@ export default function App() {
 	// Sheet open + open-count badge on the SpaceBar shield button.
 	const [adminReportsOpen, setAdminReportsOpen] = useState(false);
 	const [pendingReviewCount, setPendingReviewCount] = useState(0);
+	// Reports data is held by the PARENT (not by AdminReportsSheet) so
+	// the sheet's Dialog only ever mounts with data already in hand —
+	// no "open → empty header → fetch → fill body" flash.  The shield
+	// click runs an async fetch first, populates this state, then
+	// flips `adminReportsOpen` to true.  When the sheet closes, we
+	// clear it so the next open re-fetches fresh.
+	const [pendingReports, setPendingReports] = useState<AdminReport[] | null>(null);
+	const [isOpeningAdminReports, setIsOpeningAdminReports] = useState(false);
 	// Instance-wide third-party integrations.  Polled once on sign-in
 	// (admin re-saves invalidate it via a refresh — see InstanceAdmin
 	// section).  Drives the GIF picker visibility in the composer.
@@ -2321,7 +2331,24 @@ export default function App() {
 					onOpenSettings={() => setSettingsOpen(true)}
 					canOpenAdminReports={canAccessAdminReports}
 					adminReportsBadge={pendingReviewCount}
-					onOpenAdminReports={() => setAdminReportsOpen(true)}
+					onOpenAdminReports={async () => {
+						// Fetch BEFORE opening so the Dialog never paints
+						// against an empty list — no jarring "open then
+						// fill" flash.  Click is short-circuited if a
+						// previous fetch is still in flight.
+						if (isOpeningAdminReports || !creds?.access_token) return;
+						setIsOpeningAdminReports(true);
+						try {
+							const list = await fetchAdminReports(creds.access_token);
+							setPendingReports(list);
+							setPendingReviewCount(list.filter(r => r.status === "open").length);
+							setAdminReportsOpen(true);
+						} catch (e) {
+							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+						} finally {
+							setIsOpeningAdminReports(false);
+						}
+					}}
 					accounts={accounts}
 					onSwitchAccount={switchAccount}
 					onAddAccount={() => setAddAccountMode(true)}
@@ -2393,7 +2420,6 @@ export default function App() {
 					<div className="contents" data-mobile-pane="list">
 					<BotList
 						bots={myBots}
-						loading={myBotsLoading}
 						error={myBotsError}
 						selectedBotId={selectedBotId}
 						atLimit={(myBots ?? []).length >= 30}
@@ -3675,6 +3701,17 @@ export default function App() {
 					open={adminReportsOpen}
 					onOpenChange={setAdminReportsOpen}
 					accessToken={creds.access_token}
+					// `pendingReports` is null only on first mount before
+					// any open click has run.  Dialog is closed in that
+					// state so the empty-array fallback is never visible
+					// to the user; the next open click fetches fresh and
+					// populates real data before flipping open to true.
+					// Keeping the component mounted across close events
+					// preserves the Dialog's close animation (a mount
+					// gate on `pendingReports !== null` would yank the
+					// portal mid-animation).
+					reports={pendingReports ?? []}
+					onReportsChange={setPendingReports}
 					// Per-row routing pill ("space mod" vs "FLOOR ·
 					// instance") needs the local room + space lookups
 					// to render correctly — see AdminReportsSheet's

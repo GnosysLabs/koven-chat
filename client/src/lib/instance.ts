@@ -480,6 +480,99 @@ export async function markReportActioned(accessToken: string, flagEventId: strin
 	}
 }
 
+// ─── Server-admin instance-level remediation toolkit ───────────────
+// All three endpoints below are gated SERVER-ADMIN-ONLY on the engine
+// (requireAdmin), AND they invoke Synapse's admin API under the
+// engine's admin token to perform destructive operations the caller
+// couldn't perform via the standard PL-gated path.  Used by the
+// Reports sheet for room/space-level reports + floor-violation
+// escalations.  Each writes an `instance_admin_actions` audit row.
+
+export interface InstanceAdminActionBody {
+	reason?: string;
+	related_flag?: string;
+}
+
+/** Hard-delete a room platform-wide.  Kicks every member, purges
+ * history, blocks the room id from re-creation. */
+export async function adminDeleteRoom(
+	accessToken: string,
+	roomId: string,
+	body: InstanceAdminActionBody = {},
+): Promise<void> {
+	const r = await fetch(
+		`${ENGINE_URL}/api/admin/rooms/${encodeURIComponent(roomId)}/delete`,
+		{
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${accessToken}`,
+			},
+			body: JSON.stringify(body),
+		},
+	);
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		throw new Error(`delete room failed: ${r.status} ${txt.slice(0, 200)}`);
+	}
+}
+
+/** Hard-delete a whole space (every child room + the space room).
+ * Returns the count of children that succeeded and the rooms that
+ * failed (network blips on individual children).  Best-effort per
+ * child — a failure on one doesn't abort the rest. */
+export async function adminDeleteSpace(
+	accessToken: string,
+	spaceId: string,
+	body: InstanceAdminActionBody = {},
+): Promise<{ children_deleted: number; children_failed: Array<{ roomId: string; error: string }> }> {
+	const r = await fetch(
+		`${ENGINE_URL}/api/admin/spaces/${encodeURIComponent(spaceId)}/delete`,
+		{
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${accessToken}`,
+			},
+			body: JSON.stringify(body),
+		},
+	);
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		throw new Error(`delete space failed: ${r.status} ${txt.slice(0, 200)}`);
+	}
+	return r.json() as Promise<{
+		children_deleted: number;
+		children_failed: Array<{ roomId: string; error: string }>;
+	}>;
+}
+
+/** Deactivate a user account platform-wide (erase variant — profile
+ * wiped, mxid blocked from re-registration).  The heaviest single
+ * action exposed in the toolkit — caller MUST gate with a typed-
+ * confirm dialog. */
+export async function adminDeactivateUser(
+	accessToken: string,
+	userId: string,
+	body: InstanceAdminActionBody = {},
+): Promise<void> {
+	const r = await fetch(
+		`${ENGINE_URL}/api/admin/users/${encodeURIComponent(userId)}/deactivate`,
+		{
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${accessToken}`,
+			},
+			body: JSON.stringify(body),
+		},
+	);
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		throw new Error(`deactivate user failed: ${r.status} ${txt.slice(0, 200)}`);
+	}
+}
+
 // Records a moderator action to the audit trail.  Caller is expected
 // to perform the underlying Matrix mutation separately (via transport
 // .kickFromRoom etc.) — the engine endpoint only writes the audit

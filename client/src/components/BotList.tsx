@@ -21,7 +21,6 @@ export interface BotListProps {
 	// the chrome but no list / no empty-state.  `[]` = loaded, user
 	// has no bots → "No bots yet" hint shown.
 	bots: BotSummary[] | null;
-	loading: boolean;
 	error: string | null;
 	// Currently-selected bot id, or "new" when the create form is
 	// open, or null when the user is on the empty/picker state.
@@ -40,7 +39,6 @@ export interface BotListProps {
 
 export function BotList({
 	bots,
-	loading,
 	error,
 	selectedBotId,
 	atLimit,
@@ -73,12 +71,25 @@ export function BotList({
 			</div>
 
 			<div className="flex-1 overflow-y-auto p-2 space-y-0.5">
-				{bots === null || loading ? (
-					// Pre-load: render an empty body rather than a
-					// "Loading…" string OR the "No bots yet" CTA.
-					// Either text would flash for the brief window
-					// before the engine returns the roster, then snap
-					// to the real list.
+				{bots === null ? (
+					// Initial-load only — `bots` is null when the
+					// roster fetch has never returned.  Render an empty
+					// body rather than a "Loading…" string OR the "No
+					// bots yet" CTA; either text would flash for the
+					// brief window before the engine returns the
+					// roster, then snap to the real list.
+					//
+					// CRITICAL: don't also gate on `loading`.  After
+					// the first fetch resolves, `bots` is populated and
+					// we keep showing the populated list across
+					// subsequent REFRESHES (e.g. when the user
+					// re-enters the Bots tab — App fires
+					// `refreshMyBots()` to pick up new usage counters,
+					// which flips `loading` to true briefly).  Hiding
+					// the list during a refresh was the "list empties
+					// then pops back in" jarring flash.  Refreshes are
+					// silent; the populated rows stay rendered until
+					// the new data arrives + replaces them in place.
 					null
 				) : error ? (
 					<div className="px-2 py-4 text-xs text-destructive leading-relaxed">{error}</div>

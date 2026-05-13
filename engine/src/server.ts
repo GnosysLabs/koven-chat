@@ -30,6 +30,7 @@ import {
 	countBotsByOwner,
 	getFlagByEventId,
 	listAllFlagsForReportQueue,
+	recordInstanceAdminAction,
 	type AdminReportRow,
 	modActionsForRoom,
 	recordModAction,
@@ -395,9 +396,18 @@ async function computeReportVisibility(
 
 	for (const row of rows) {
 		const callerPl = plByRoom.get(row.room_id) ?? 0;
-		const spaceModPath = callerPl >= 50;
+		// Room/space-level reports route to server admin ONLY.  Rationale:
+		// if a space admin is the offender (running an abusive room or
+		// space), routing the report to them defeats the purpose.  The
+		// platform operator is the escalation path of last resort for
+		// "this whole room/space shouldn't exist."  Message-level reports
+		// stay on the space-mod path because content moderation IS the
+		// space's mods' job.
+		const isRoomLevelReport = row.target_kind === "room";
+		const spaceModPath = !isRoomLevelReport && callerPl >= 50;
 		const floorBackstop = isInstanceAdmin && row.category === "floor_violation";
-		visibility.set(row.event_id, spaceModPath || floorBackstop);
+		const roomLevelEscalation = isRoomLevelReport && isInstanceAdmin;
+		visibility.set(row.event_id, spaceModPath || floorBackstop || roomLevelEscalation);
 	}
 	return visibility;
 }
@@ -3663,6 +3673,178 @@ export function startServer(): void {
 				let open = 0;
 				for (const r of openRows) if (visibility.get(r.event_id)) open++;
 				return json({ open });
+			}
+
+			// ─── Server-admin instance-level toolkit ────────────────
+			// These three endpoints are the escalation paths for
+			// room-level / space-level reports + floor-violation reports
+			// that need platform-side action.  All gated by
+			// `requireAdmin` (server admin only).  All write an audit
+			// row to `instance_admin_actions` keyed back to the
+			// triggering flag (when provided) so the operator's record
+			// is intact even after the underlying room is gone.
+			//
+			// Body shape for all three:
+			//   { reason?: string, related_flag?: string }
+
+			// POST /api/admin/rooms/:roomId/delete
+			// Hard-delete a room: kicks every member, purges history,
+			// prevents the room id from being re-used.  Use for rooms
+			// dedicated to floor violation.
+			{
+				const m = path.match(/^\/api\/admin\/rooms\/([^/]+)\/delete$/);
+				if (req.method === "POST" && m) {
+					const auth = await requireAdmin(req);
+					if (auth instanceof Response) return auth;
+					const roomId = decodeURIComponent(m[1]!);
+					const body = (await req.json().catch(() => ({}))) as {
+						reason?: unknown;
+						related_flag?: unknown;
+					};
+					const reason = typeof body.reason === "string" ? body.reason.slice(0, 1000) : null;
+					const relatedFlag = typeof body.related_flag === "string" ? body.related_flag : null;
+					const res = await adminDeleteRoom({
+						roomId,
+						message: reason ?? "Room removed by server admin (floor / room-report action).",
+					});
+					if ("error" in res) {
+						return json({ errcode: "M_UNKNOWN", error: res.error }, { status: 502 });
+					}
+					const rec = recordInstanceAdminAction({
+						actor: auth.userId,
+						action: "delete_room",
+						target: roomId,
+						reason,
+						relatedFlag,
+					});
+					return json({ id: rec.id, created_at: rec.created_at });
+				}
+			}
+
+			// POST /api/admin/spaces/:spaceId/delete
+			// Hard-delete a whole space tree: enumerates m.space.child
+			// state events, deletes each child room, then deletes the
+			// space room itself.  Best-effort per child — a child that
+			// fails to delete (e.g. already gone) doesn't abort the
+			// rest.  For "this whole community shouldn't exist" cases.
+			{
+				const m = path.match(/^\/api\/admin\/spaces\/([^/]+)\/delete$/);
+				if (req.method === "POST" && m) {
+					const auth = await requireAdmin(req);
+					if (auth instanceof Response) return auth;
+					const spaceId = decodeURIComponent(m[1]!);
+					const body = (await req.json().catch(() => ({}))) as {
+						reason?: unknown;
+						related_flag?: unknown;
+					};
+					const reason = typeof body.reason === "string" ? body.reason.slice(0, 1000) : null;
+					const relatedFlag = typeof body.related_flag === "string" ? body.related_flag : null;
+
+					// Walk m.space.child to find children.  Read state
+					// BEFORE deleting anything — once we start deleting
+					// the order of operations matters: children first,
+					// space last, so the space's mod log isn't lost
+					// while children still reference it.
+					const state = await readRoomState(spaceId);
+					const childIds: string[] = [];
+					if (state) {
+						for (const ev of state) {
+							if (ev.type !== "m.space.child") continue;
+							const childId = ev.state_key;
+							if (!childId) continue;
+							const via = (ev.content as { via?: unknown })?.via;
+							if (!Array.isArray(via) || via.length === 0) continue;
+							childIds.push(childId);
+						}
+					}
+
+					const failed: Array<{ roomId: string; error: string }> = [];
+					const childMessage = reason ?? "Parent space removed by server admin (floor / space-report action).";
+					for (const childId of childIds) {
+						const res = await adminDeleteRoom({ roomId: childId, message: childMessage });
+						if ("error" in res) failed.push({ roomId: childId, error: res.error });
+					}
+					const spaceRes = await adminDeleteRoom({
+						roomId: spaceId,
+						message: reason ?? "Space removed by server admin (floor / space-report action).",
+					});
+					if ("error" in spaceRes) {
+						return json({
+							errcode: "M_UNKNOWN",
+							error: spaceRes.error,
+							children_failed: failed,
+						}, { status: 502 });
+					}
+
+					const rec = recordInstanceAdminAction({
+						actor: auth.userId,
+						action: "delete_space",
+						target: spaceId,
+						reason,
+						relatedFlag,
+					});
+					return json({
+						id: rec.id,
+						created_at: rec.created_at,
+						children_deleted: childIds.length - failed.length,
+						children_failed: failed,
+					});
+				}
+			}
+
+			// POST /api/admin/users/:userId/deactivate
+			// Nuke a user account platform-wide.  Synapse erases the
+			// profile, pseudonymises message authorship, blocks the
+			// mxid from re-registration.  The heaviest single
+			// instance-admin action — caller side MUST gate this
+			// behind a strong confirm.
+			{
+				const m = path.match(/^\/api\/admin\/users\/([^/]+)\/deactivate$/);
+				if (req.method === "POST" && m) {
+					const auth = await requireAdmin(req);
+					if (auth instanceof Response) return auth;
+					const targetUserId = decodeURIComponent(m[1]!);
+					const body = (await req.json().catch(() => ({}))) as {
+						reason?: unknown;
+						related_flag?: unknown;
+					};
+					const reason = typeof body.reason === "string" ? body.reason.slice(0, 1000) : null;
+					const relatedFlag = typeof body.related_flag === "string" ? body.related_flag : null;
+
+					// Belt-and-braces: refuse to deactivate the actor
+					// themselves (they could lock themselves out).  Also
+					// refuse to deactivate another server admin via this
+					// path — server admin to-server admin actions go
+					// through /api/admins/revoke first, then this.
+					if (targetUserId === auth.userId) {
+						return json({
+							errcode: "M_FORBIDDEN",
+							error: "cannot deactivate yourself via this path",
+						}, { status: 403 });
+					}
+					if (isAdmin(targetUserId)) {
+						return json({
+							errcode: "M_FORBIDDEN",
+							error: "target is a server admin — revoke admin first via /api/admins/revoke",
+						}, { status: 403 });
+					}
+
+					const ok = await deactivateUser(targetUserId, /* erase */ true);
+					if (!ok) {
+						return json({
+							errcode: "M_UNKNOWN",
+							error: "synapse deactivate refused (user may not exist on this homeserver)",
+						}, { status: 502 });
+					}
+					const rec = recordInstanceAdminAction({
+						actor: auth.userId,
+						action: "deactivate_user",
+						target: targetUserId,
+						reason,
+						relatedFlag,
+					});
+					return json({ id: rec.id, created_at: rec.created_at });
+				}
 			}
 
 			// ─── Self-delete a message ──────────────────────────────

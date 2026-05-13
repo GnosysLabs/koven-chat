@@ -22,7 +22,7 @@
 // redact / role change) via the room's member list or message
 // toolbar; closing a report here is purely the triage side.
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
 	Dialog,
 	DialogContent,
@@ -31,12 +31,14 @@ import {
 	DialogTitle,
 } from "@/components/ui/dialog";
 import {
-	fetchAdminReports,
+	adminDeactivateUser,
+	adminDeleteRoom,
+	adminDeleteSpace,
 	dismissReport,
 	markReportActioned,
 	type AdminReport,
 } from "@/lib/instance";
-import { Flag, ExternalLink, Check, X, AlertTriangle, Shield } from "lucide-react";
+import { AlertTriangle, Check, ExternalLink, Flag, Shield, Trash2, UserX, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Room, Space } from "@koven/shared";
 
@@ -44,6 +46,18 @@ export interface AdminReportsSheetProps {
 	open: boolean;
 	onOpenChange(open: boolean): void;
 	accessToken: string;
+	// Reports list, pre-fetched by the parent BEFORE this sheet is
+	// mounted.  No internal `null` state inside the sheet — by the
+	// time we render, the data is in hand and the Dialog opens
+	// already populated.  This is the no-flash render gate per the
+	// "jarring" rule: the parent's open-handler fetches first, then
+	// flips `open` to true with `reports` already set.  The sheet
+	// has no mounted-but-empty frame to flash through.
+	reports: AdminReport[];
+	// Bubble local optimistic mutations (dismiss / action) back up to
+	// the parent so the open-count badge + any subsequent re-opens
+	// reflect the new state.  Called with the new reports array.
+	onReportsChange(reports: AdminReport[]): void;
 	// Local rooms + spaces — used to render the per-row routing pill.
 	// If the report's room is one the viewer has PL ≥ 50 in, the pill
 	// names that room's space; otherwise the row is only visible via
@@ -62,25 +76,14 @@ export interface AdminReportsSheetProps {
 }
 
 export function AdminReportsSheet({
-	open, onOpenChange, accessToken, rooms, spaces, onOpenTarget, onCountChanged,
+	open, onOpenChange, accessToken, reports, onReportsChange,
+	rooms, spaces, onOpenTarget, onCountChanged,
 }: AdminReportsSheetProps) {
-	const [reports, setReports] = useState<AdminReport[] | null>(null);
 	const [busyId, setBusyId] = useState<string | null>(null);
 	// Local "filter to open only" toggle.  Default true — admins
 	// almost always want the queue (the closed-set view is occasional
-	// auditing).  Cheap client-side filter; engine returns the full
-	// set in one shot.
+	// auditing).  Cheap client-side filter over the props.
 	const [showOpenOnly, setShowOpenOnly] = useState(true);
-
-	useEffect(() => {
-		if (!open) return;
-		let cancelled = false;
-		setReports(null);
-		fetchAdminReports(accessToken).then(list => {
-			if (!cancelled) setReports(list);
-		});
-		return () => { cancelled = true; };
-	}, [open, accessToken]);
 
 	async function applyStatus(eventId: string, kind: "dismiss" | "action") {
 		if (busyId) return;
@@ -88,15 +91,17 @@ export function AdminReportsSheet({
 		try {
 			if (kind === "dismiss") await dismissReport(accessToken, eventId);
 			else await markReportActioned(accessToken, eventId);
-			// Local optimistic update — flip the row's status so the
+			// Optimistic update — flip the row's status so the
 			// "show open only" filter immediately hides it without a
-			// full refetch.
-			setReports(prev => prev?.map(r =>
+			// full refetch.  Bubble the new list up to the parent so
+			// the badge count and subsequent re-opens see it too.
+			const next = reports.map(r =>
 				r.event_id === eventId
-					? { ...r, status: kind === "dismiss" ? "dismissed" : "actioned" }
+					? { ...r, status: kind === "dismiss" ? ("dismissed" as const) : ("actioned" as const) }
 					: r,
-			) ?? prev);
-			const remaining = (reports ?? []).filter(r => r.event_id !== eventId && r.status === "open").length;
+			);
+			onReportsChange(next);
+			const remaining = next.filter(r => r.status === "open").length;
 			onCountChanged?.(remaining);
 		} catch (err) {
 			console.warn("admin reports: applyStatus failed", err);
@@ -105,8 +110,53 @@ export function AdminReportsSheet({
 		}
 	}
 
-	const visible = (reports ?? []).filter(r => !showOpenOnly || r.status === "open");
-	const openCount = (reports ?? []).filter(r => r.status === "open").length;
+	// Server-admin floor-toolkit actions for room-target reports.
+	// Each does the destructive Synapse-admin operation, then marks
+	// the triggering report as actioned (one click handles both
+	// audit sides).  Wraps applyStatus's optimistic-update +
+	// bubbling pattern so the row visually flips to "actioned"
+	// without a re-fetch.  Caller is expected to have run a confirm
+	// dialog BEFORE invoking; this fn does no confirm of its own.
+	async function applyDestructive(
+		eventId: string,
+		kind: "delete_room" | "delete_space" | "deactivate_user",
+		target: string,
+	) {
+		if (busyId) return;
+		setBusyId(eventId);
+		try {
+			const body = { related_flag: eventId };
+			if (kind === "delete_room") await adminDeleteRoom(accessToken, target, body);
+			else if (kind === "delete_space") await adminDeleteSpace(accessToken, target, body);
+			else await adminDeactivateUser(accessToken, target, body);
+			// Mark the report actioned now that the underlying
+			// remediation succeeded — saves the operator a click.
+			await markReportActioned(accessToken, eventId).catch(() => {
+				/* destructive op already landed; audit-row failure is
+				 * non-fatal.  Leaving the row in "open" status is the
+				 * worst case and a manual click fixes it. */
+			});
+			const next = reports.map(r =>
+				r.event_id === eventId
+					? { ...r, status: "actioned" as const }
+					: r,
+			);
+			onReportsChange(next);
+			const remaining = next.filter(r => r.status === "open").length;
+			onCountChanged?.(remaining);
+		} catch (err) {
+			// Surface the error so the operator sees that the
+			// destructive op DIDN'T run — important because the row
+			// stays open and the action wasn't taken.
+			window.alert(`Action failed: ${err instanceof Error ? err.message : String(err)}`);
+			console.warn("admin reports: applyDestructive failed", err);
+		} finally {
+			setBusyId(null);
+		}
+	}
+
+	const visible = reports.filter(r => !showOpenOnly || r.status === "open");
+	const openCount = reports.filter(r => r.status === "open").length;
 
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
@@ -125,7 +175,7 @@ export function AdminReportsSheet({
 				<div className="flex items-center justify-between text-xs text-muted-foreground py-1">
 					<span>
 						{openCount} open
-						{reports && reports.length > openCount && (
+						{reports.length > openCount && (
 							<> · {reports.length - openCount} closed</>
 						)}
 					</span>
@@ -141,7 +191,7 @@ export function AdminReportsSheet({
 				</div>
 
 				<div className="flex-1 overflow-y-auto -mx-6 px-6">
-					{reports === null ? null : visible.length === 0 ? (
+					{visible.length === 0 ? (
 						<div className="text-sm text-muted-foreground italic py-6 text-center border border-dashed border-border rounded">
 							{showOpenOnly
 								? "No open reports.  Nice."
@@ -158,6 +208,9 @@ export function AdminReportsSheet({
 									spaces={spaces}
 									onDismiss={() => applyStatus(r.event_id, "dismiss")}
 									onAction={() => applyStatus(r.event_id, "action")}
+									onDeleteRoom={(roomId) => applyDestructive(r.event_id, "delete_room", roomId)}
+									onDeleteSpace={(spaceId) => applyDestructive(r.event_id, "delete_space", spaceId)}
+									onDeactivateUser={(userId) => applyDestructive(r.event_id, "deactivate_user", userId)}
 									onOpenTarget={onOpenTarget}
 								/>
 							))}
@@ -171,6 +224,7 @@ export function AdminReportsSheet({
 
 function ReportRow({
 	r, busy, rooms, spaces, onDismiss, onAction, onOpenTarget,
+	onDeleteRoom, onDeleteSpace, onDeactivateUser,
 }: {
 	r: AdminReport;
 	busy: boolean;
@@ -179,6 +233,15 @@ function ReportRow({
 	onDismiss(): void;
 	onAction(): void;
 	onOpenTarget?(roomId: string, eventId?: string): void;
+	// Server-admin floor-toolkit handlers, only invoked for
+	// `target_kind === "room"` rows.  Each takes the appropriate
+	// target id (roomId for delete-room, spaceId for delete-space,
+	// userId for deactivate-creator) so the row can do its own
+	// lookups from `rooms` + `spaces` and hand the parent a clean
+	// invocation.
+	onDeleteRoom(roomId: string): void | Promise<void>;
+	onDeleteSpace(spaceId: string): void | Promise<void>;
+	onDeactivateUser(userId: string): void | Promise<void>;
 }) {
 	const time = new Date(r.created_at).toLocaleString();
 	const isClosed = r.status !== "open";
@@ -309,9 +372,131 @@ function ReportRow({
 							</>
 						)}
 					</div>
+					{!isClosed && r.target_kind === "room" && (
+						<FloorToolkitRow
+							r={r}
+							rooms={rooms}
+							spaces={spaces}
+							busy={busy}
+							onDeleteRoom={onDeleteRoom}
+							onDeleteSpace={onDeleteSpace}
+							onDeactivateUser={onDeactivateUser}
+						/>
+					)}
 				</div>
 			</div>
 		</li>
+	);
+}
+
+/** Server-admin destructive-actions row.  Only appears on
+ * room-target reports (which route to server admin only — see
+ * computeReportVisibility in the engine).  Three buttons:
+ *
+ *   - Delete room      → adminDeleteRoom
+ *   - Delete space     → adminDeleteSpace (only when the reported room IS a space)
+ *   - Deactivate owner → adminDeactivateUser (only when we can identify the creator from local state)
+ *
+ * Every action is gated behind a strong confirm.  The deactivate
+ * path additionally requires the operator to type the user's mxid
+ * to confirm — it's the most catastrophic single action available
+ * via the toolkit.
+ */
+function FloorToolkitRow({
+	r, rooms, spaces, busy,
+	onDeleteRoom, onDeleteSpace, onDeactivateUser,
+}: {
+	r: AdminReport;
+	rooms: Room[];
+	spaces: Space[];
+	busy: boolean;
+	onDeleteRoom(roomId: string): void | Promise<void>;
+	onDeleteSpace(spaceId: string): void | Promise<void>;
+	onDeactivateUser(userId: string): void | Promise<void>;
+}) {
+	const reportedRoomId = r.target_room_id ?? r.room_id;
+	// Is the reported "room" actually a Matrix space?  Look it up
+	// in the spaces roster; if present, offer Delete-space as a
+	// distinct action (walks m.space.child + deletes everything).
+	const reportedSpace = spaces.find(s => s.id === reportedRoomId);
+	const isSpace = !!reportedSpace;
+	// Creator lookup — for the Deactivate-creator button.  Tries
+	// the room first (regular rooms), then the space (when the
+	// target IS a space).  When we can't identify a creator
+	// (room not in our local roster — possible if we're not joined),
+	// the button is hidden rather than guessing.
+	const reportedRoom = rooms.find(rr => rr.id === reportedRoomId);
+	const creatorId = reportedRoom?.creatorId ?? reportedSpace?.creatorId ?? null;
+	return (
+		<div className="mt-2 pt-2 border-t border-destructive/20 flex items-center gap-2 flex-wrap">
+			<span className="text-[10px] uppercase tracking-wide text-destructive/80 font-medium">
+				Floor toolkit
+			</span>
+			<button
+				type="button"
+				disabled={busy}
+				onClick={async () => {
+					if (typeof window === "undefined") return;
+					const label = isSpace ? "this space (without its child rooms)" : "this room";
+					if (!window.confirm(
+						`Permanently delete ${label}?\n\n`
+						+ `Every member will be kicked.  Message history will be purged.  `
+						+ `This can't be undone.`,
+					)) return;
+					await onDeleteRoom(reportedRoomId);
+				}}
+				className="inline-flex items-center gap-1 px-2 py-1 rounded border border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive/20 text-[11px] disabled:opacity-50"
+			>
+				<Trash2 className="h-3 w-3" />
+				Delete room
+			</button>
+			{isSpace && (
+				<button
+					type="button"
+					disabled={busy}
+					onClick={async () => {
+						if (typeof window === "undefined") return;
+						if (!window.confirm(
+							`Permanently delete this ENTIRE SPACE, including every child room inside it?\n\n`
+							+ `Every member of every room will be kicked.  Every message history will be purged.  `
+							+ `This can't be undone.`,
+						)) return;
+						await onDeleteSpace(reportedRoomId);
+					}}
+					className="inline-flex items-center gap-1 px-2 py-1 rounded border border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive/20 text-[11px] disabled:opacity-50"
+				>
+					<Trash2 className="h-3 w-3" />
+					Delete whole space
+				</button>
+			)}
+			{creatorId && (
+				<button
+					type="button"
+					disabled={busy}
+					onClick={async () => {
+						if (typeof window === "undefined") return;
+						// Typed-confirm — the user has to retype the mxid
+						// to proceed.  Catastrophic action, no slips.
+						const typed = window.prompt(
+							`Permanently deactivate the creator of this ${isSpace ? "space" : "room"}?\n\n`
+							+ `User: ${creatorId}\n\n`
+							+ `Their account will be erased platform-wide:\n`
+							+ `  • They cannot log in again, ever.\n`
+							+ `  • Their profile is wiped.\n`
+							+ `  • Their messages are pseudonymised.\n`
+							+ `  • Their mxid is blocked from re-registration.\n\n`
+							+ `Type the user's mxid exactly to confirm:`,
+						);
+						if (typed !== creatorId) return;
+						await onDeactivateUser(creatorId);
+					}}
+					className="inline-flex items-center gap-1 px-2 py-1 rounded border border-destructive/60 bg-destructive/20 text-destructive hover:bg-destructive/30 text-[11px] disabled:opacity-50 font-medium"
+				>
+					<UserX className="h-3 w-3" />
+					Deactivate creator
+				</button>
+			)}
+		</div>
 	);
 }
 

@@ -364,6 +364,36 @@ db.exec(`
 	CREATE INDEX IF NOT EXISTS idx_mod_actions_room_ts
 		ON mod_actions(room_id, created_at DESC);
 
+	-- Instance-admin actions — sibling to mod_actions for moderation
+	-- events that aren't scoped to a single room.  Specifically:
+	-- delete_room / delete_space / deactivate_user via the server-
+	-- admin floor-violation + room-report escalation toolkit.  We
+	-- can't write these to mod_actions because that table requires
+	-- a room_id, and the operations either span multiple rooms
+	-- (delete_space) or destroy the very room they'd be logged to
+	-- (delete_room).  related_flag links the action back to the
+	-- specific report that triggered it, so the audit trail reads:
+	-- "@operator deleted room ! abc because of flag $xyz".
+	CREATE TABLE IF NOT EXISTS instance_admin_actions (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		actor         TEXT NOT NULL,
+		-- 'delete_room' | 'delete_space' | 'deactivate_user'
+		action        TEXT NOT NULL,
+		-- Room id (delete_room / delete_space) or user mxid
+		-- (deactivate_user).
+		target        TEXT NOT NULL,
+		-- Operator-supplied free text.  Capped at 1000 chars at the
+		-- endpoint.
+		reason        TEXT,
+		-- Optional flag event_id this action was triggered by, so the
+		-- reports queue can hand the actor a "you already acted on
+		-- this" affordance + back-link.
+		related_flag  TEXT,
+		created_at    INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_instance_admin_actions_ts
+		ON instance_admin_actions(created_at DESC);
+
 	-- Per-bot knowledge files.  Plain-text reference material the
 	-- bot owner uploads (FAQs, character bios, project docs).  Each
 	-- file's full content is concatenated into the system prompt at
@@ -2115,6 +2145,34 @@ export function recordModAction(opts: {
 		opts.targetEventId ?? null,
 		opts.newPowerLevel ?? null,
 		opts.reason ?? null,
+		createdAt,
+	);
+	return { id: Number(r.lastInsertRowid), created_at: createdAt };
+}
+
+// ─── Instance-admin actions (server-admin floor toolkit) ───────────
+
+export type InstanceAdminAction = "delete_room" | "delete_space" | "deactivate_user";
+
+const insertInstanceAdminActionStmt = db.prepare(`
+	INSERT INTO instance_admin_actions (actor, action, target, reason, related_flag, created_at)
+	VALUES (?, ?, ?, ?, ?, ?)
+`);
+
+export function recordInstanceAdminAction(opts: {
+	actor: string;
+	action: InstanceAdminAction;
+	target: string;
+	reason?: string | null;
+	relatedFlag?: string | null;
+}): { id: number; created_at: number } {
+	const createdAt = Date.now();
+	const r = insertInstanceAdminActionStmt.run(
+		opts.actor,
+		opts.action,
+		opts.target,
+		opts.reason ?? null,
+		opts.relatedFlag ?? null,
 		createdAt,
 	);
 	return { id: Number(r.lastInsertRowid), created_at: createdAt };
