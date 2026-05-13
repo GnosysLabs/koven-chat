@@ -919,18 +919,19 @@ export function startServer(): void {
 				// Bypass for the desktop shell: the WebView serves the
 				// SPA from `tauri://localhost` / `tauri.localhost`, an
 				// origin Cloudflare's site-key validation rejects.  The
-				// desktop client sets `X-Koven-Client: desktop` so we
-				// can skip the captcha gate for it without wiring up
-				// per-origin Cloudflare configs.  Threat-model trade-
-				// off: a bot can spoof the header to bypass captcha
-				// here, but the email rate-limit + send-failure paths
-				// still apply, and bots overwhelmingly target the
-				// public web (where this header isn't set).
+				// desktop + iOS clients set `X-Koven-Client: desktop`
+				// or `X-Koven-Client: ios` so we can skip the captcha
+				// gate without wiring up per-origin Cloudflare configs.
+				// Threat-model trade-off: a bot can spoof the header
+				// to bypass captcha here, but the email rate-limit +
+				// send-failure paths still apply, and bots overwhelmingly
+				// target the public web (where this header isn't set).
 				const cfg = readInstanceConfig();
 				const turnstileSecret = cfg["turnstile_secret_key"]?.trim();
 				const turnstileSite = cfg["turnstile_site_key"]?.trim();
-				const isDesktopClient = req.headers.get("x-koven-client") === "desktop";
-				if (turnstileSecret && turnstileSite && !isDesktopClient) {
+				const clientHeader = req.headers.get("x-koven-client") ?? "";
+				const isTrustedClient = clientHeader === "desktop" || clientHeader === "ios";
+				if (turnstileSecret && turnstileSite && !isTrustedClient) {
 					const token = typeof body.turnstile_token === "string"
 						? body.turnstile_token.trim()
 						: "";
