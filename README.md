@@ -342,4 +342,13 @@ See `engine/src/` for the audit primitives in detail. The interesting files:
 
 ## License
 
-MIT. See [`LICENSE`](./LICENSE).
+GNU Affero General Public License v3.0 or later. See [`LICENSE`](./LICENSE).
+
+The relicense from MIT happened in 2026-05.  Commits before that point are reachable in git history under the MIT License; everything after the relicense commit, and the combined work, is AGPL v3.
+
+Practical implications:
+
+- You can fork Koven, modify it, and run it (including as a hosted service) — that's the whole point of AGPL.
+- If you run a **modified** Koven instance that users interact with over a network, you must make your modified source available to those users. Unmodified deployments don't owe anyone source beyond what's already public here.
+- Any derivative work that combines Koven with other code distributes under AGPL v3 too.
+- If you want Koven embedded into a closed-source product, that's not compatible with AGPL — talk to <hello@gnosyslabs.xyz>.
