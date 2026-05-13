@@ -26,6 +26,7 @@ import { MobileTopBar } from "@/components/MobileTopBar";
 import { MobileTabBar, type MobileTab } from "@/components/MobileTabBar";
 import { MobileMeScreen } from "@/components/MobileMeScreen";
 import { isMobileShell } from "@/lib/mobile";
+import { wipeLocalCacheAndRestart } from "@/lib/recovery";
 import { parseShareIntent, clearShareUrl, type ShareIntent } from "@/lib/inviteLink";
 import { ChatPane } from "@/components/ChatPane";
 import { SpaceLanding } from "@/components/SpaceLanding";
@@ -2002,10 +2003,28 @@ export default function App() {
 	}
 
 	// If transport boot failed (most commonly: rust-crypto WASM
-	// failing to initialize), render a hard error instead of letting
-	// the user into a half-broken app.  Without this gate a crypto
-	// init failure silently produces an app that can't send DMs and
+	// failing to initialize, or — on Linux desktop — WebKitGTK
+	// IDB getting into a stuck-lock state from a prior crashed
+	// instance), render a hard error instead of letting the user
+	// into a half-broken app.  Without this gate a crypto init
+	// failure silently produces an app that can't send DMs and
 	// won't surface the encryption setup sheet.
+	//
+	// Two recovery affordances:
+	//   - "Sign out and try again" runs handleSignOut, which goes
+	//     through the normal transport.stop() teardown.  Works for
+	//     the common case where IDB is functional but the session
+	//     itself is in a bad state (stale auth token, key-backup
+	//     mismatch, etc.).
+	//   - "Wipe local cache and restart" calls wipeLocalCacheAndRestart,
+	//     which on desktop invokes a Rust command to nuke the WebView
+	//     data dir on disk (bypassing IDB entirely) and exits the
+	//     process; on web it best-effort-wipes every IDB DB on the
+	//     origin plus localStorage / sessionStorage and reloads.
+	//     This is the path for the "can't open IDB at all" failure
+	//     mode — sign-out can't fix it because sign-out itself uses
+	//     IDB on its way out.  Strong confirm copy on the button
+	//     because the user loses their session unconditionally.
 	if (bootError) {
 		return (
 			<div className="h-full flex items-center justify-center p-8 bg-background">
@@ -2014,13 +2033,42 @@ export default function App() {
 					<div className="text-xs text-muted-foreground leading-relaxed border border-destructive/40 bg-destructive/10 rounded px-3 py-2 text-left">
 						{bootError}
 					</div>
-					<button
-						type="button"
-						className="text-xs text-muted-foreground hover:text-foreground underline"
-						onClick={handleSignOut}
-					>
-						Sign out and try again
-					</button>
+					<div className="flex flex-col items-center gap-2 pt-2">
+						<button
+							type="button"
+							className="text-xs text-muted-foreground hover:text-foreground underline"
+							onClick={handleSignOut}
+						>
+							Sign out and try again
+						</button>
+						<button
+							type="button"
+							className="text-xs text-destructive/80 hover:text-destructive underline"
+							onClick={async () => {
+								const confirmed = typeof window === "undefined"
+									|| window.confirm(
+										"Wipe all local Koven data on this device and restart?\n\n"
+										+ "Every account on this device will be signed out and "
+										+ "every cached message will be removed.  You'll need to "
+										+ "sign back in with your email code.\n\n"
+										+ "Use this when 'Sign out and try again' doesn't work.",
+									);
+								if (!confirmed) return;
+								try {
+									await wipeLocalCacheAndRestart();
+								} catch (e) {
+									dispatch({
+										type: "error",
+										message: e instanceof Error
+											? `Wipe failed: ${e.message}`
+											: `Wipe failed: ${String(e)}`,
+									});
+								}
+							}}
+						>
+							Wipe local cache and restart
+						</button>
+					</div>
 				</div>
 			</div>
 		);

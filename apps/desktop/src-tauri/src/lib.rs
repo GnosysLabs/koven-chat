@@ -133,6 +133,90 @@ fn reveal_app(app: tauri::AppHandle) -> Result<(), String> {
 	Ok(())
 }
 
+/// Wipe the WebView's local-data + cache directories, then exit the
+/// app.  Surfaced via the SPA's "Couldn't start the client" error
+/// screen as a last-resort recovery when IDB itself has gotten into
+/// a state the normal sign-out path can't recover from (most
+/// commonly: a stuck WebKitGTK storage-process lock from a prior
+/// crashed instance — symptom is "DomException UnknownError (0):
+/// Unable to establish IDB database file").
+///
+/// What we wipe:
+///   - `app_local_data_dir()`  — WebKitGTK / WKWebView storage on
+///     Linux + macOS, WebView2 user-data folder on Windows.  Holds
+///     IndexedDB, LocalStorage, cookies, service-worker registrations.
+///   - `app_cache_dir()`       — WebView disk cache.  Not strictly
+///     needed for the IDB-stuck case but cheap to clear and rules
+///     out cache-driven mismatches as a side cause.
+///
+/// What we DON'T wipe:
+///   - `app_config_dir()` — Tauri's own per-app settings (window
+///     state, etc.).  Untouched so the user's chrome/decoration
+///     prefs survive.
+///   - `~/.config/koven-release/` — release credentials, outside
+///     this app's dirs anyway.
+///
+/// Best-effort: `remove_dir_all` is called per-target and errors
+/// are collected, not propagated.  A single locked file (e.g. on
+/// Windows with WebView2 holding an open SQLite handle to a file
+/// inside the dir) won't abort the whole wipe — the rest of the
+/// directory still goes, and even a partial wipe is enough to
+/// unstick the IDB corruption pattern that motivates this path.
+///
+/// After the wipe we exit with status 0 on a brief background-
+/// thread delay.  Reason for the delay: the IPC reply to the SPA
+/// is in flight when we call this and a synchronous `app.exit(0)`
+/// races against that flush — the SPA would see a disconnect
+/// instead of a clean success.  200 ms is plenty for the response
+/// to hit the WebView before we shut down.
+///
+/// We don't try to relaunch from inside the wipe — Tauri 2's
+/// restart API behaves differently across platforms (and isn't a
+/// reliable round-trip through WebView teardown on Linux).  The
+/// SPA shows a "Koven has been reset — relaunch the app to sign
+/// back in" message and the user double-clicks the AppImage / app
+/// icon themselves.
+#[tauri::command]
+fn wipe_local_cache_and_exit(app: tauri::AppHandle) -> Result<(), String> {
+	let local_data = app
+		.path()
+		.app_local_data_dir()
+		.map_err(|e| format!("app_local_data_dir: {e}"))?;
+	let cache = app
+		.path()
+		.app_cache_dir()
+		.map_err(|e| format!("app_cache_dir: {e}"))?;
+
+	let mut wiped: Vec<String> = Vec::new();
+	let mut failed: Vec<String> = Vec::new();
+
+	for dir in [&local_data, &cache] {
+		if !dir.exists() {
+			continue;
+		}
+		match std::fs::remove_dir_all(dir) {
+			Ok(_) => wiped.push(dir.display().to_string()),
+			Err(e) => failed.push(format!("{}: {}", dir.display(), e)),
+		}
+	}
+
+	log::info!(
+		"wipe_local_cache_and_exit: wiped={:?} failed={:?} — exiting",
+		wiped,
+		failed,
+	);
+
+	// Detach the exit on a worker so the IPC reply to the SPA
+	// flushes before the process terminates.  See doc comment.
+	let handle = app.clone();
+	std::thread::spawn(move || {
+		std::thread::sleep(std::time::Duration::from_millis(200));
+		handle.exit(0);
+	});
+
+	Ok(())
+}
+
 /// JS injected into every page before the SPA scripts run.  Catches
 /// `<a target="_blank">` clicks and `window.open()` calls and routes
 /// the URL through the WebView's top-level navigation, where the Rust
@@ -427,11 +511,12 @@ pub fn run() {
 					mac_rounded_corners::hide_traffic_lights,
 					reveal_app,
 					save_download,
+					wipe_local_cache_and_exit,
 				]
 			}
 			#[cfg(not(target_os = "macos"))]
 			{
-				tauri::generate_handler![reveal_app, save_download]
+				tauri::generate_handler![reveal_app, save_download, wipe_local_cache_and_exit]
 			}
 		})
 		.setup(move |app| {
