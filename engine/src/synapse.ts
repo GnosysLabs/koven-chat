@@ -1415,6 +1415,67 @@ export async function getRoomIconEmoji(roomId: string): Promise<string | null> {
 }
 
 /**
+ * Read all `m.read` receipts currently anchored in a room, grouped
+ * by the event id they anchor to.  Returns `{}` on any failure
+ * (room not visible to the appservice, sync rejection, etc.) so
+ * callers can fall back to "no seen-by".
+ *
+ * Implemented as a one-shot client `/sync` with `timeout=0`,
+ * filtered down to ephemeral `m.receipt` events for the target
+ * room only — Synapse's `/sync` is the only API that exposes a
+ * room's current receipt state, and at `timeout=0` the request
+ * returns immediately with the cached snapshot the homeserver
+ * already has.  Authenticated as the appservice user, which is
+ * joined to every Koven room.
+ *
+ * The shape mirrors the per-event view matrix-js-sdk gives the
+ * web client via `Room.getReceiptsForEvent` — `{ eventId: [user1,
+ * user2, ...], ... }`.  Bots / services / `@bot-*` are NOT
+ * filtered here; the calling endpoint does that so the cleaning
+ * logic stays alongside the bot roster it consults.
+ */
+export async function getRoomSeenBy(roomId: string): Promise<Record<string, string[]>> {
+	const filter = {
+		room: {
+			rooms: [roomId],
+			timeline: { limit: 0 },
+			state: { types: [] as string[] },
+			ephemeral: { types: ["m.receipt"] },
+		},
+		presence: { types: [] as string[] },
+		account_data: { types: [] as string[] },
+	};
+	const filterJson = encodeURIComponent(JSON.stringify(filter));
+	const r = await asFetch(`/_matrix/client/v3/sync?filter=${filterJson}&timeout=0`);
+	if (!r.ok) return {};
+	const body = (await r.json().catch(() => null)) as {
+		rooms?: {
+			join?: Record<string, {
+				ephemeral?: { events?: Array<{ type?: string; content?: Record<string, unknown> }> };
+			}>;
+		};
+	} | null;
+	const events = body?.rooms?.join?.[roomId]?.ephemeral?.events ?? [];
+	const byEvent: Record<string, string[]> = {};
+	for (const ev of events) {
+		if (ev?.type !== "m.receipt" || !ev.content) continue;
+		for (const [eventId, types] of Object.entries(ev.content)) {
+			// m.receipt content shape: { eventId: { "m.read": { userId: { ts } }, ... }, ... }
+			const reads = (types as Record<string, unknown> | null)?.["m.read"] as
+				| Record<string, unknown>
+				| undefined;
+			if (!reads) continue;
+			for (const userId of Object.keys(reads)) {
+				if (typeof userId !== "string" || !userId.startsWith("@")) continue;
+				if (!byEvent[eventId]) byEvent[eventId] = [];
+				byEvent[eventId].push(userId);
+			}
+		}
+	}
+	return byEvent;
+}
+
+/**
  * Read a single timeline event's sender + minimal metadata.  Used by
  * the self-delete authorization check: the engine needs to know who
  * originally sent a message before it'll let someone redact it.

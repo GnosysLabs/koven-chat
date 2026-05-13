@@ -128,6 +128,7 @@ import {
 	getRoomIconEmoji,
 	getRoomJoinRule,
 	getRoomKovenMeta,
+	getRoomSeenBy,
 	getRoomNsfw,
 	getRoomNameAndCreator,
 	getSpaceChildRoomIds,
@@ -3331,6 +3332,64 @@ export function startServer(): void {
 					if (meta.nsfw) nsfw.push(id);
 				}
 				return json({ icons, nsfw });
+			}
+
+			// GET /api/rooms/:roomId/seen-by
+			//
+			// Per-event "seen by" rollup for the iOS client.
+			// matrix-rust-sdk's Swift FFI doesn't expose
+			// `Room.getReceiptsForEvent` like matrix-js-sdk does on
+			// the web — iOS only sees receipts on events that pass
+			// the SDK's timeline filter, which means receipts
+			// anchored to filtered state events are invisible.  We
+			// route iOS through this endpoint so it gets the same
+			// receipt map the web has via direct SDK access.
+			//
+			// Bots, services, and `@bot-*` mxids are filtered server-
+			// side so every client gets the same view without
+			// having to maintain its own roster.  The current user
+			// is NOT excluded — iOS strips itself from the list at
+			// render time (it knows its own mxid; the engine
+			// doesn't from this unauthenticated call).
+			//
+			// Response shape: `{ "byEvent": { "$evtid": ["@u1:s",
+			// ...], ... } }` — each user appears under the single
+			// event their read-receipt currently anchors to,
+			// mirroring the per-event view.
+			{
+				const m = path.match(/^\/api\/rooms\/([^/]+)\/seen-by$/);
+				if (req.method === "GET" && m) {
+					const roomId = decodeURIComponent(m[1]!);
+					const raw = await getRoomSeenBy(roomId);
+
+					const botRoster = new Set(listAllBotMxids());
+					const services = new Set<string>();
+					if (config.engineUserId) services.add(config.engineUserId);
+					if (config.synapseAdminUser) {
+						const r = config.synapseAdminUser.trim();
+						const mxid = r.startsWith("@") ? r : `@${r}:${config.homeserverName}`;
+						services.add(mxid);
+					}
+
+					const byEvent: Record<string, string[]> = {};
+					for (const [eventId, userIds] of Object.entries(raw)) {
+						const filtered = userIds.filter(uid => {
+							if (botRoster.has(uid)) return false;
+							if (services.has(uid)) return false;
+							// Deleted-bot fallback: matrix has no
+							// "redact a receipt" verb so stale
+							// `@bot-*` receipts persist after the
+							// bot row is dropped.  The reserved
+							// namespace is bots-only — no human can
+							// have it.
+							if (uid.startsWith("@bot-")) return false;
+							return true;
+						});
+						if (filtered.length > 0) byEvent[eventId] = filtered;
+					}
+
+					return json({ byEvent });
+				}
 			}
 
 			// GET /api/rooms/:roomId/parents
