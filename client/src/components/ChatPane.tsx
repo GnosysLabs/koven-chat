@@ -43,7 +43,6 @@ import { MarkdownContent } from "@/components/MarkdownContent";
 import { isMobileShell } from "@/lib/mobile";
 import { hapticImpact } from "@/lib/haptics";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { useVirtualizer, type VirtualItem } from "@tanstack/react-virtual";
 
 // Heuristic: does this body have any markdown shape?  Cheap regex
 // pass — looks for headings, lists, fenced code, emphasis, links,
@@ -426,10 +425,11 @@ export function ChatPane({
 		el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
 	}, [draft]);
 	const scrollRef = useRef<HTMLDivElement | null>(null);
-	// Inner spacer = the `height: getTotalSize()` div the virtualizer
-	// positions items inside.  Doubles as the target the chatVisible
-	// ResizeObserver watches to know when content has settled.
-	const spacerRef = useRef<HTMLDivElement | null>(null);
+	// Inner list wrapper.  Holds every message row directly (no
+	// virtualization).  Used as a target for ResizeObserver
+	// (chatVisible) and as the walk-children root for the
+	// save/restore-scroll-state machinery below.
+	const listRef = useRef<HTMLDivElement | null>(null);
 	// Used by the scroll handler to detect a meaningful upward
 	// scroll gesture so we can dismiss the keyboard (Discord-style).
 	const lastScrollTopRef = useRef(0);
@@ -456,7 +456,7 @@ export function ChatPane({
 		// network can't trap the loader forever.
 		const STABLE_MS = 500;
 		const HARD_TIMEOUT_MS = 4000;
-		const inner = spacerRef.current;
+		const inner = listRef.current;
 		if (!inner) { setChatVisible(true); return; }
 		let cancelled = false;
 		let stableTimer: number | null = null;
@@ -532,53 +532,126 @@ export function ChatPane({
 	const noMoreHistoryRef = useRef<Set<string>>(new Set());
 	const [loadingMore, setLoadingMore] = useState(false);
 
-	// ─── Virtualizer ─────────────────────────────────────────────
-	// Matches the TanStack Virtual "dynamic" docs example verbatim:
-	// minimal options (count + getScrollElement + estimateSize +
-	// getItemKey), default `useFlushSync: true`, no
-	// `shouldAdjustScrollPositionOnItemSizeChange` (every previous
-	// override was fighting iOS WKWebView's native momentum scroll
-	// or producing render-tearing).
+	// ─── Element-style scroll-state preservation ────────────────
+	// Modelled directly on element-web's ScrollPanel.tsx, which has
+	// years of polish on the Matrix-chat scroll problem.  Plain
+	// browser scroll (no virtualisation) plus an anchor-based state
+	// machine that keeps the user's visual position stable across
+	// updates.
 	//
-	// `getItemKey` MUST be a stable function reference — when it
-	// changes, the virtualizer invalidates its measurement cache,
-	// which forces every visible row to re-measure on every render
-	// and produces visible thrashing.  We stash `messages` in a ref
-	// and let `getItemKey` look up by current ref, so the function
-	// reference stays stable across the component's lifetime even
-	// though it returns up-to-date data.
-	const messagesRef = useRef(messages);
-	useLayoutEffect(() => { messagesRef.current = messages; }, [messages]);
-	const getItemKey = useCallback(
-		(index: number) => messagesRef.current[index]?.id ?? index,
-		[],
-	);
-	const estimateSize = useCallback(() => 80, []);
-	const virtualizer = useVirtualizer({
-		count: messages.length,
-		getScrollElement: () => scrollRef.current,
-		estimateSize,
-		getItemKey,
-	});
+	// Two states:
+	//   - stuckAtBottom: viewport is at the bottom; new messages
+	//     auto-scroll down to the new bottom.
+	//   - tracked: viewport is anchored to a specific message
+	//     identified by id, with `pixelOffset` = the distance from
+	//     the bottom of that message to the bottom of the viewport
+	//     at the time we saved.  When content changes (older messages
+	//     prepend, an image decodes above the viewport, etc.), the
+	//     tracked message's offsetTop moves; we re-set scroll so the
+	//     tracked message ends up at the same visual position.
+	//
+	// All restoration uses scrollBy(diff), NEVER `scrollTop = X`.
+	// Element learnt the hard way that reading scrollTop and writing
+	// it back yields stale values on some browsers and produces a
+	// visible jump.  scrollBy operates on the live offset and is
+	// jump-free.
+	type ScrollState =
+		| { stuckAtBottom: true }
+		| { stuckAtBottom: false; trackedToken: string; pixelOffset: number };
+	const scrollStateRef = useRef<ScrollState>({ stuckAtBottom: true });
 
-	// ─── Auto-snap to bottom ────────────────────────────────────
-	// Fires whenever `followBottomRef.current` is true (set by the
-	// scroll handler when the user is near the bottom, re-armed on
-	// every room change).  scrollToIndex with `align: 'end'` puts
-	// the last message's bottom edge at the viewport's bottom edge.
+	// Save the current scroll position as either "stuck at bottom" or
+	// "anchored to message X at offset Y from viewport bottom."  Walks
+	// the list children from the bottom up, finding the lowest message
+	// whose top is still above the viewport bottom (i.e. the deepest
+	// fully-visible message).  That becomes the anchor.
+	const saveScrollState = useCallback(() => {
+		const el = scrollRef.current;
+		const list = listRef.current;
+		if (!el || !list) return;
+		// At-bottom check — match element's wiggle of 1px to absorb
+		// fractional scrollTop values on some browsers.
+		if (el.scrollHeight - (el.scrollTop + el.clientHeight) <= 1) {
+			scrollStateRef.current = { stuckAtBottom: true };
+			return;
+		}
+		const viewportBottom = el.scrollTop + el.clientHeight;
+		const tiles = list.children;
+		let tracked: HTMLElement | null = null;
+		for (let i = tiles.length - 1; i >= 0; i--) {
+			const tile = tiles[i] as HTMLElement;
+			if (!tile.dataset?.scrollTokens) continue;
+			if (tile.offsetTop < viewportBottom) {
+				tracked = tile;
+				break;
+			}
+		}
+		if (!tracked) return;
+		const token = tracked.dataset.scrollTokens!;
+		scrollStateRef.current = {
+			stuckAtBottom: false,
+			trackedToken: token,
+			pixelOffset: (tracked.offsetTop + tracked.clientHeight) - viewportBottom,
+		};
+	}, []);
+
+	// Restore the saved scroll state after a render.  Either snaps to
+	// bottom (stuckAtBottom) or scrolls so the tracked message lands at
+	// the same visual offset from the viewport bottom (anchored).
+	// Uses scrollBy(diff) — relative, never absolute — to avoid the
+	// stale-scrollTop jump element-web warns about.
+	const restoreScrollState = useCallback(() => {
+		const el = scrollRef.current;
+		const list = listRef.current;
+		if (!el || !list) return;
+		const state = scrollStateRef.current;
+		if (state.stuckAtBottom) {
+			if (el.scrollTop !== el.scrollHeight) {
+				el.scrollTop = el.scrollHeight;
+			}
+			return;
+		}
+		const tiles = list.children;
+		let tracked: HTMLElement | null = null;
+		for (let i = 0; i < tiles.length; i++) {
+			const tile = tiles[i] as HTMLElement;
+			if (tile.dataset?.scrollTokens === state.trackedToken) {
+				tracked = tile;
+				break;
+			}
+		}
+		if (!tracked) return;
+		const desiredViewportBottom = (tracked.offsetTop + tracked.clientHeight) - state.pixelOffset;
+		const desiredScrollTop = desiredViewportBottom - el.clientHeight;
+		const diff = desiredScrollTop - el.scrollTop;
+		if (Math.abs(diff) > 0.5) {
+			el.scrollBy(0, diff);
+		}
+	}, []);
+
+	// Re-arm stuckAtBottom on room change / call-view exit; ALSO when
+	// messages first populate on a fresh-mount room.  The
+	// useLayoutEffect just below runs restoreScrollState — which will
+	// snap to bottom because we set stuckAtBottom here.
 	useEffect(() => {
 		const isRoomChange = prevRoomIdRef.current !== room?.id;
 		const becameVisible = wasInCallViewRef.current && !isInActiveCallRoom;
 		prevRoomIdRef.current = room?.id;
 		wasInCallViewRef.current = isInActiveCallRoom;
 		if (isRoomChange || becameVisible) {
+			scrollStateRef.current = { stuckAtBottom: true };
 			followBottomRef.current = true;
 			setScrolledUp(false);
 		}
-		if (!followBottomRef.current) return;
-		if (messages.length === 0) return;
-		virtualizer.scrollToIndex(messages.length - 1, { align: 'end' });
-	}, [room?.id, messages.length, isInActiveCallRoom, virtualizer]);
+	}, [room?.id, isInActiveCallRoom]);
+
+	// Restore scroll state after every commit.  useLayoutEffect runs
+	// SYNCHRONOUSLY after DOM mutations but BEFORE the browser paints,
+	// so the user never sees the wrong scroll position.  This is where
+	// both stay-at-bottom and prepend-anchoring actually take effect.
+	useLayoutEffect(() => {
+		restoreScrollState();
+	});
 
 	// ─── Permalink scroll-to-event ─────────────────────────────────
 	// When the parent hands us a `scrollToEvent` target (typically
@@ -621,20 +694,30 @@ export function ChatPane({
 		const idx = messages.findIndex(m => m.id === scrollToEvent.eventId);
 		if (idx >= 0) {
 			const id = scrollToEvent.eventId;
-			// Wait one frame so the virtualizer has rendered the
-			// target row (it may have just committed prepended
-			// events).  +1 because index 0 is the loader.
+			// Wait one frame so the DOM has the target row mounted
+			// at its final position (the previous render may have
+			// just committed prepended events from a pagination pass).
 			const raf = requestAnimationFrame(() => {
-				virtualizer.scrollToIndex(idx, { align: 'center', behavior: 'smooth' });
+				const tile = listRef.current?.querySelector(
+					`[data-scroll-tokens="${CSS.escape(id)}"]`,
+				);
+				if (tile instanceof HTMLElement) {
+					tile.scrollIntoView({ block: "center", behavior: "smooth" });
+					// Disarm stuck-at-bottom so the restoreScrollState
+					// effect doesn't yank us right back down.
+					scrollStateRef.current = {
+						stuckAtBottom: false,
+						trackedToken: id,
+						pixelOffset: 0,
+					};
+					followBottomRef.current = false;
+				}
 				setFlashingEventId(id);
 				if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
 				flashTimerRef.current = setTimeout(
 					() => setFlashingEventId(null),
 					2000,
 				);
-				// Disarm the follow-bottom lock so the auto-snap
-				// effect doesn't immediately yank us back down.
-				followBottomRef.current = false;
 			});
 			onScrolledToEvent?.();
 			return () => cancelAnimationFrame(raf);
@@ -674,6 +757,10 @@ export function ChatPane({
 		const el = scrollRef.current;
 		if (!el) return;
 		const onScroll = () => {
+			// First: persist where we are so the next commit can
+			// restore us if the message list changes underneath.
+			saveScrollState();
+
 			const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
 			const atBottom = distance < 100;
 			followBottomRef.current = atBottom;
@@ -687,17 +774,17 @@ export function ChatPane({
 			const wantShow = distance >= 200;
 			setScrolledUp(prev => (prev === wantShow ? prev : wantShow));
 
-			// Discord-style "hit the wall" pagination, driven by
-			// the virtualizer's index window rather than scrollTop
-			// (the virtualizer's coordinates are more reliable than
-			// the raw DOM measurements once items start measuring
-			// in dynamically).  Fire when the earliest virtual item
-			// is the first message (index 0).
-			const items = virtualizer.getVirtualItems();
-			const firstItem = items[0];
+			// Pagination trigger: element-web's pattern.  Fire when
+			// scrollTop is within one screen-height of the first
+			// tile's offsetTop (i.e. the user is within a screen of
+			// the top of the loaded timeline).  Reading offsetTop
+			// directly from the DOM is more reliable than scrollTop
+			// thresholds — the first tile's offsetTop is stable as
+			// long as no items above it (none) have changed size.
+			const firstTile = listRef.current?.firstElementChild as HTMLElement | undefined;
 			if (
-				firstItem &&
-				firstItem.index <= 0 &&
+				firstTile &&
+				el.scrollTop - firstTile.offsetTop < el.clientHeight &&
 				!loadingMoreRef.current &&
 				room &&
 				onLoadMoreHistory &&
@@ -732,7 +819,7 @@ export function ChatPane({
 		};
 		el.addEventListener("scroll", onScroll, { passive: true });
 		return () => el.removeEventListener("scroll", onScroll);
-	}, [room?.id, onLoadMoreHistory, virtualizer]);
+	}, [room?.id, onLoadMoreHistory, saveScrollState]);
 
 	// Proactive pagination when the timeline doesn't overflow the
 	// scroll container.  matrix-js-sdk's initial /sync only loads
@@ -760,11 +847,13 @@ export function ChatPane({
 		// room before /sync has populated its timeline produces no
 		// results and we'd just spin.
 		if (messages.length === 0) return;
-		// Underflow check: the virtualizer's total content size
-		// fits inside the scroll container with room to spare.
-		// Use a small slack (16px) so near-exact fits don't trigger
-		// when only a single line of padding is missing.
-		if (virtualizer.getTotalSize() >= el.clientHeight - 16) return;
+		// Underflow check: the inner list fits inside the scroll
+		// container with room to spare.  Use a small slack (16px) so
+		// near-exact fits don't trigger when only a single line of
+		// padding is missing.
+		const inner = listRef.current;
+		if (!inner) return;
+		if (inner.clientHeight >= el.clientHeight - 16) return;
 		const roomId = room.id;
 		loadingMoreRef.current = true;
 		setLoadingMore(true);
@@ -778,7 +867,7 @@ export function ChatPane({
 				loadingMoreRef.current = false;
 				setLoadingMore(false);
 			});
-	}, [room?.id, messages.length, onLoadMoreHistory, room, virtualizer]);
+	}, [room?.id, messages.length, onLoadMoreHistory, room]);
 
 	// Global hover tracking for the message-action toolbar.
 	//
@@ -1246,144 +1335,111 @@ export function ChatPane({
 					/>
 				</div>
 			)}
-			{/* TanStack Virtual scroll container — modelled directly on
-			    the dynamic-row docs example: `overflowY: auto`,
-			    `contain: strict`, `overflowAnchor: none`, plus the
-			    block-translation pattern (single absolute wrapper
-			    translated by items[0].start, items naturally flowing
-			    inside).  The loader is rendered as an OVERLAY above
-			    the spacer rather than as a virtualizer row so its
-			    visibility doesn't perturb item measurements. */}
+			{/* Plain browser-scroll container — modelled directly on
+			    element-web's ScrollPanel.  Every message renders
+			    directly in flow; no virtualisation.  Native scroll =
+			    perfect iOS momentum.  Each message wrapper carries a
+			    `data-scroll-tokens={msg.id}` attribute that the
+			    save/restore-scroll-state machinery uses to anchor the
+			    viewport across content changes (prepends, image
+			    decodes, etc.). */}
 			{messagesLoaded && messages.length > 0 ? (<>
 				<div
 					ref={scrollRef}
 					className="absolute inset-0 overflow-y-auto overscroll-contain"
-					style={{
-						overflowAnchor: "none",
-						contain: "strict",
-					}}
+					style={{ overflowAnchor: "none" }}
 				>
-					<div
-						ref={spacerRef}
-						style={{
-							height: virtualizer.getTotalSize(),
-							width: "100%",
-							position: "relative",
-						}}
-					>
-						{(() => {
-							const items = virtualizer.getVirtualItems();
-							const offset = items[0]?.start ?? 0;
+					<div ref={listRef}>
+						{messages.map((m, dataIndex) => {
+							const prev = dataIndex > 0 ? messages[dataIndex - 1] : undefined;
+							const sameGroup =
+								!!prev &&
+								prev.sender === m.sender &&
+								m.timestamp - prev.timestamp <= GROUP_WINDOW_MS &&
+								!m.replyTo;
+							const separator = computeDateSeparator(prev?.timestamp, m.timestamp);
 							return (
-								<div
-									style={{
-										position: "absolute",
-										top: 0,
-										left: 0,
-										width: "100%",
-										transform: `translateY(${offset}px)`,
-									}}
-								>
-									{items.map((virtualRow: VirtualItem) => {
-										const dataIndex = virtualRow.index;
-										const m = messages[dataIndex];
-										if (!m) return null;
-										const prev = dataIndex > 0 ? messages[dataIndex - 1] : undefined;
-										const sameGroup =
-											!!prev &&
-											prev.sender === m.sender &&
-											m.timestamp - prev.timestamp <= GROUP_WINDOW_MS &&
-											!m.replyTo;
-										const separator = computeDateSeparator(prev?.timestamp, m.timestamp);
-										return (
-											<div
-												key={virtualRow.key}
-												data-index={virtualRow.index}
-												ref={virtualizer.measureElement}
-											>
-												{separator && <DateSeparator label={separator} />}
-												<MessageRow
-													message={m}
-													avatarMxc={memberAvatars.get(m.sender)}
-													continuesGroup={sameGroup}
-													isFirst={dataIndex === 0}
-													flaggable={flaggable}
-													roomEncrypted={!!room.encrypted}
-													reactions={reactionsByMessage.get(m.id) ?? []}
-													flags={flagsByMessage.get(m.id)}
-													isDm={room.kind === "dm"}
-													receiptsVersion={receiptsVersion ?? 0}
-													memberAvatars={memberAvatars}
-													memberNames={memberNamesByUserId}
-													mentionsViewer={
-														!m.isSelf && !!viewerUserId && messageMentionsUser(m, viewerUserId)
-													}
-													onMentionClick={(userId) => onOpenProfile?.(userId)}
-													onOpenSenderProfile={(userId) => onOpenProfile?.(userId)}
-													botMxids={botMxids}
-													serviceMxids={serviceMxids}
-													pollAggregate={pollsByMessage?.get(m.id)}
-													viewerUserId={viewerUserId}
-													onPollVote={onVoteOnPoll}
-													onPollEnd={onEndPoll}
-													onReact={(emoji) => toggleReaction(m, emoji)}
-													onReply={() => setReplyTarget(m)}
-													roomId={room.id}
-													onQuote={(text) => {
-														const quoted = text.split("\n").map(l => `> ${l}`).join("\n");
-														setDraft(prev => prev ? `${quoted}\n\n${prev}` : `${quoted}\n\n`);
-														setReplyTarget(m);
-														requestAnimationFrame(() => {
-															composeInputRef.current?.focus();
-														});
-													}}
-													onSendDmToSender={onSendDm
-														? () => { void onSendDm(m.sender as UserId); }
-														: undefined}
-													onBlockSender={onBlockSender
-														? () => { void onBlockSender(m.sender as UserId); }
-														: undefined}
-													onFlag={(category, rationale) => onFlag(m.id, category, rationale)}
-													isBot={!!botMxids?.has(m.sender)}
-													isOwnedBot={!!myOwnedBotMxids?.has(m.sender)}
-													isHovered={hoveredMessageId === m.id}
-													isFlashing={flashingEventId === m.id}
-													onToggleReactionPill={(reaction) => {
-														if (reaction.myReactionId) onUnreact(reaction);
-														else onReact(m.id, reaction.key);
-													}}
-													onDelete={
-														onDeleteMessage && (
-															m.isSelf || !!myOwnedBotMxids?.has(m.sender)
-														)
-															&& !m.pending
-															? () => onDeleteMessage(m.id)
-															: undefined
-													}
-													onAdminRedact={
-														onAdminRedactMessage
-															&& canModerateRoom
-															&& room.kind !== "dm"
-															&& !m.isSelf
-															&& !myOwnedBotMxids?.has(m.sender)
-															&& !m.pending
-																? () => onAdminRedactMessage(m.id)
-																: undefined
-													}
-												/>
-											</div>
-										);
-									})}
+								<div key={m.id} data-scroll-tokens={m.id}>
+									{separator && <DateSeparator label={separator} />}
+									<MessageRow
+										message={m}
+										avatarMxc={memberAvatars.get(m.sender)}
+										continuesGroup={sameGroup}
+										isFirst={dataIndex === 0}
+										flaggable={flaggable}
+										roomEncrypted={!!room.encrypted}
+										reactions={reactionsByMessage.get(m.id) ?? []}
+										flags={flagsByMessage.get(m.id)}
+										isDm={room.kind === "dm"}
+										receiptsVersion={receiptsVersion ?? 0}
+										memberAvatars={memberAvatars}
+										memberNames={memberNamesByUserId}
+										mentionsViewer={
+											!m.isSelf && !!viewerUserId && messageMentionsUser(m, viewerUserId)
+										}
+										onMentionClick={(userId) => onOpenProfile?.(userId)}
+										onOpenSenderProfile={(userId) => onOpenProfile?.(userId)}
+										botMxids={botMxids}
+										serviceMxids={serviceMxids}
+										pollAggregate={pollsByMessage?.get(m.id)}
+										viewerUserId={viewerUserId}
+										onPollVote={onVoteOnPoll}
+										onPollEnd={onEndPoll}
+										onReact={(emoji) => toggleReaction(m, emoji)}
+										onReply={() => setReplyTarget(m)}
+										roomId={room.id}
+										onQuote={(text) => {
+											const quoted = text.split("\n").map(l => `> ${l}`).join("\n");
+											setDraft(prev => prev ? `${quoted}\n\n${prev}` : `${quoted}\n\n`);
+											setReplyTarget(m);
+											requestAnimationFrame(() => {
+												composeInputRef.current?.focus();
+											});
+										}}
+										onSendDmToSender={onSendDm
+											? () => { void onSendDm(m.sender as UserId); }
+											: undefined}
+										onBlockSender={onBlockSender
+											? () => { void onBlockSender(m.sender as UserId); }
+											: undefined}
+										onFlag={(category, rationale) => onFlag(m.id, category, rationale)}
+										isBot={!!botMxids?.has(m.sender)}
+										isOwnedBot={!!myOwnedBotMxids?.has(m.sender)}
+										isHovered={hoveredMessageId === m.id}
+										isFlashing={flashingEventId === m.id}
+										onToggleReactionPill={(reaction) => {
+											if (reaction.myReactionId) onUnreact(reaction);
+											else onReact(m.id, reaction.key);
+										}}
+										onDelete={
+											onDeleteMessage && (
+												m.isSelf || !!myOwnedBotMxids?.has(m.sender)
+											)
+												&& !m.pending
+												? () => onDeleteMessage(m.id)
+												: undefined
+										}
+										onAdminRedact={
+											onAdminRedactMessage
+												&& canModerateRoom
+												&& room.kind !== "dm"
+												&& !m.isSelf
+												&& !myOwnedBotMxids?.has(m.sender)
+												&& !m.pending
+													? () => onAdminRedactMessage(m.id)
+													: undefined
+										}
+									/>
 								</div>
 							);
-						})()}
+						})}
 					</div>
 				</div>
-				{/* Pulsing-favicon loader.  Rendered as an OVERLAY at
-				    the top of the chat surface — outside the
-				    virtualizer's spacer — so its appearance and
-				    disappearance don't shift item measurements.
-				    Visible only while a pagination fetch is in flight. */}
+				{/* Pulsing-favicon loader.  Absolutely positioned at
+				    the top of the chat surface, opacity-toggled by
+				    `loadingMore`.  Doesn't take up flow space, so
+				    its appearance / disappearance doesn't shift the
+				    user's scroll position. */}
 				{loadingMore && (
 					<div
 						className="absolute top-0 left-0 right-0 z-20 flex items-center justify-center py-3 pointer-events-none"
@@ -1423,14 +1479,12 @@ export function ChatPane({
 				<button
 					type="button"
 					onClick={() => {
+						const el = scrollRef.current;
+						if (!el) return;
 						followBottomRef.current = true;
 						setScrolledUp(false);
-						if (messages.length > 0) {
-							virtualizer.scrollToIndex(messages.length - 1, {
-								align: 'end',
-								behavior: 'smooth',
-							});
-						}
+						scrollStateRef.current = { stuckAtBottom: true };
+						el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
 					}}
 					className={cn(
 						"absolute bottom-3 left-1/2 -translate-x-1/2",
