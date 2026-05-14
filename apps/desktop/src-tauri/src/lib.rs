@@ -559,6 +559,32 @@ fn drain_pending_call(handoff: tauri::State<'_, CallHandoff>) -> Option<PendingC
 	handoff.0.lock().ok().and_then(|mut g| g.take())
 }
 
+/// Reverse of `spawn_call_window`: the call window hands the meeting
+/// back to the main window.  Stashes the new params in the same
+/// handoff slot, then emits `call-reattach-ready` to the main
+/// window so its CallProvider can drain + start the call without
+/// the user clicking anything.  The call window is expected to
+/// close itself afterwards (we don't close from here because the
+/// caller usually wants to wait for its own cleanup to finish
+/// first, e.g. meeting.leaveRoom()).
+#[tauri::command]
+async fn pop_in_to_main(
+	app: tauri::AppHandle,
+	handoff: tauri::State<'_, CallHandoff>,
+	params: PendingCall,
+) -> Result<(), String> {
+	match handoff.0.lock() {
+		Ok(mut g) => *g = Some(params),
+		Err(poisoned) => {
+			let mut g = poisoned.into_inner();
+			*g = Some(params);
+		}
+	}
+	app.emit_to("main", "call-reattach-ready", ())
+		.map_err(|e| e.to_string())?;
+	Ok(())
+}
+
 pub fn run() {
 	// Pin a free local port up front so the `is_internal` check + the
 	// webview URL agree on the same number.  Production only —
@@ -682,6 +708,7 @@ pub fn run() {
 					wipe_local_cache_and_exit,
 					spawn_call_window,
 					drain_pending_call,
+					pop_in_to_main,
 				]
 			}
 			#[cfg(not(target_os = "macos"))]
@@ -692,6 +719,7 @@ pub fn run() {
 					wipe_local_cache_and_exit,
 					spawn_call_window,
 					drain_pending_call,
+					pop_in_to_main,
 				]
 			}
 		})

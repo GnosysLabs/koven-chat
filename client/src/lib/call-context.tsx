@@ -37,7 +37,15 @@ import {
 	useRealtimeKitClient,
 } from "@cloudflare/realtimekit-react";
 import { joinCall, pingCallPresenceJoined, pingCallPresenceLeft } from "@/lib/calls-api";
-import { isDesktopShell, spawnCallWindow } from "@/lib/native-window";
+import {
+	closeCurrentWindow,
+	drainPendingCall,
+	isCallWindow,
+	isDesktopShell,
+	popInToMain as ipcPopInToMain,
+	setPopInActive,
+	spawnCallWindow,
+} from "@/lib/native-window";
 import { HOMESERVER_URL } from "@/lib/urls";
 import type { RoomId } from "@koven/shared";
 
@@ -128,6 +136,11 @@ interface CallContextValue {
 	// (RealtimeKit's WebRTC session can't cross JS contexts).
 	// No-op outside the desktop shell.
 	popOutToWindow(): Promise<void>;
+	// Inverse of popOutToWindow: pop the call from a popped-out
+	// window back into the main window.  Mints a fresh token,
+	// notifies main, leaves the call window's meeting, then closes
+	// the call window.  Only meaningful inside the call window.
+	popInToMain(): Promise<void>;
 }
 
 const CallContext = createContext<CallContextValue | null>(null);
@@ -447,9 +460,144 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 		}
 	}, [activeCall, meeting, endCall]);
 
+	const popInToMain = useCallback(async (): Promise<void> => {
+		// Only meaningful inside the call window's CallProvider:
+		// the main window doesn't have a separate OS window to pop
+		// FROM.  Bail safely if invoked elsewhere.
+		if (!isDesktopShell() || !isCallWindow()) return;
+		if (!activeCall) return;
+
+		// Capture the user's current mic + cam state so main resumes
+		// with the same devices live.  Same reasoning as
+		// popOutToWindow's audioOn/videoOn capture.
+		const audioOn = meeting?.self.audioEnabled ?? activeCall.defaults?.audio ?? false;
+		const videoOn = meeting?.self.videoEnabled ?? activeCall.defaults?.video ?? false;
+
+		// Mint a fresh single-use auth token for main to join with.
+		let freshAuthToken: string;
+		try {
+			const r = await joinCall({
+				accessToken: activeCall.accessToken,
+				roomId: activeCall.roomId,
+			});
+			freshAuthToken = r.authToken;
+		} catch (err) {
+			console.error("popInToMain: token mint failed", err);
+			setError(err instanceof Error ? err.message : String(err));
+			return;
+		}
+
+		const params = {
+			roomId: activeCall.roomId,
+			roomName: activeCall.roomName,
+			authToken: freshAuthToken,
+			accessToken: activeCall.accessToken,
+			isDm: !!activeCall.isDm,
+			defaultAudio: audioOn,
+			defaultVideo: videoOn,
+		};
+
+		// Suppress CallWindowBoot's auto-close-on-idle for the
+		// duration of this flow.  endCall flips phase to idle which
+		// would otherwise race the explicit close at the end —
+		// closing too early could kill the JS context before we've
+		// finished telling main to take over.
+		setPopInActive(true);
+		try {
+			// Leave this window's meeting first so the participant
+			// slot is free when main joins.  endCall awaits
+			// leaveRoom() which keeps presence + ring cleanup
+			// running on the engine side.
+			try {
+				await endCall();
+			} catch (err) {
+				console.warn("popInToMain: endCall threw, continuing", err);
+			}
+
+			// Notify main: Rust stashes the params and emits
+			// `call-reattach-ready` so main's CallProvider takes
+			// over.  Awaited so we know the IPC reached Rust before
+			// we close the JS context.
+			try {
+				await ipcPopInToMain(params);
+			} catch (err) {
+				console.error("popInToMain: IPC failed", err);
+				setError(err instanceof Error ? err.message : String(err));
+				return;
+			}
+
+			// Close our OS window.  Main is already on its way to
+			// rejoining; nothing more for us to do here.
+			try {
+				await closeCurrentWindow();
+			} catch (err) {
+				console.warn("popInToMain: closeCurrentWindow threw", err);
+			}
+		} finally {
+			setPopInActive(false);
+		}
+	}, [activeCall, meeting, endCall]);
+
+	// Main-window listener for the call window's pop-in flow.  When
+	// the call window invokes `pop_in_to_main`, Rust emits
+	// `call-reattach-ready` here; we drain the freshly-stashed
+	// params and resume the call with skipPrejoin so the user lands
+	// directly back in the joined state.  Only the main window
+	// binds this — the call window doesn't need to listen to
+	// itself.
+	useEffect(() => {
+		if (!isDesktopShell()) return;
+		if (isCallWindow()) return;
+		let unlisten: (() => void) | undefined;
+		let cancelled = false;
+		void (async () => {
+			try {
+				const { listen } = await import("@tauri-apps/api/event");
+				const off = await listen("call-reattach-ready", async () => {
+					try {
+						const params = await drainPendingCall();
+						if (!params) {
+							console.warn("call-reattach: drain returned no params");
+							return;
+						}
+						startCall({
+							roomId: params.roomId as RoomId,
+							roomName: params.roomName,
+							authToken: params.authToken,
+							accessToken: params.accessToken,
+							isDm: params.isDm,
+							isAnsweringRing: true,
+							defaults: {
+								audio: params.defaultAudio,
+								video: params.defaultVideo,
+							},
+							skipPrejoin: true,
+						});
+					} catch (err) {
+						console.error("call-reattach: handler threw", err);
+					}
+				});
+				if (cancelled) {
+					off();
+					return;
+				}
+				unlisten = off;
+			} catch (err) {
+				console.warn("call-reattach: listen failed", err);
+			}
+		})();
+		return () => {
+			cancelled = true;
+			if (unlisten) unlisten();
+		};
+		// startCall is stable across renders (useCallback with []), so
+		// the listener never needs to re-bind.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, []);
+
 	const value = useMemo<CallContextValue>(
-		() => ({ activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall, popOutToWindow }),
-		[activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall, popOutToWindow],
+		() => ({ activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall, popOutToWindow, popInToMain }),
+		[activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall, popOutToWindow, popInToMain],
 	);
 
 	// Always render the RealtimeKitProvider — even when meeting is

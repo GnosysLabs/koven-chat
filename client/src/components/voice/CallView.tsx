@@ -48,6 +48,7 @@ import {
 	MonitorUp,
 	MonitorOff,
 	PhoneOff,
+	PictureInPicture,
 	PictureInPicture2,
 	Video,
 	VideoOff,
@@ -231,7 +232,7 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 	// Click a thumbnail to pin; click the spotlight to unpin;
 	// ‹ › arrows cycle.  Auto-clears if the pinned participant
 	// leaves the room.
-	const { spotlitId: pinnedId, setSpotlight, activeCall, popOutToWindow } = useCall();
+	const { spotlitId: pinnedId, setSpotlight, activeCall, popOutToWindow, popInToMain } = useCall();
 
 	// FaceTime-style pop-out: only offered in the desktop shell's
 	// main window.  Hidden in plain browsers (no native pop-out path
@@ -240,6 +241,13 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 	// so the two affordances stay in sync.
 	const onPopOut = isDesktopShell() && !isCallWindow()
 		? () => { void popOutToWindow(); }
+		: undefined;
+
+	// Inverse of pop-out: send the call back into the main window
+	// and close this OS window.  Only meaningful inside the call
+	// window.
+	const onPopIn = isCallWindow()
+		? () => { void popInToMain(); }
 		: undefined;
 
 	// Fullscreen toggle is wired inside the call window only.  The
@@ -427,6 +435,7 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 							toggleScreen={toggleScreen}
 							onLeave={onLeave}
 							onPopOut={onPopOut}
+							onPopIn={onPopIn}
 							onFullscreen={onFullscreen}
 						/>
 					)}
@@ -459,6 +468,7 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 							toggleScreen={toggleScreen}
 							onLeave={onLeave}
 							onPopOut={onPopOut}
+							onPopIn={onPopIn}
 							onFullscreen={onFullscreen}
 						/>
 						<ThumbnailStrip
@@ -492,7 +502,7 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 function ControlBar({
 	floating, audioOn, videoOn, screenOn,
 	toggleAudio, toggleVideo, toggleScreen, onLeave,
-	onPopOut, onFullscreen,
+	onPopOut, onPopIn, onFullscreen,
 }: {
 	floating: boolean;
 	audioOn: boolean;
@@ -506,6 +516,9 @@ function ControlBar({
 	// Undefined when the affordance isn't applicable to the current
 	// host (browser, mobile shell, or the call window itself).
 	onPopOut?: () => void;
+	// Inverse of onPopOut: send the call back into the main window.
+	// Only set inside the popped-out call window; undefined elsewhere.
+	onPopIn?: () => void;
 	// Toggle native fullscreen on the current OS window.  Only set
 	// inside the popped-out call window; undefined elsewhere.
 	onFullscreen?: () => void;
@@ -572,6 +585,17 @@ function ControlBar({
 					className="h-11 w-11 rounded-full flex items-center justify-center bg-muted hover:bg-accent text-foreground transition-colors"
 				>
 					<PictureInPicture2 className="h-5 w-5" />
+				</button>
+			)}
+			{onPopIn && (
+				<button
+					type="button"
+					onClick={onPopIn}
+					aria-label="Send call back to main window"
+					title="Send call back to main window"
+					className="h-11 w-11 rounded-full flex items-center justify-center bg-muted hover:bg-accent text-foreground transition-colors"
+				>
+					<PictureInPicture className="h-5 w-5" />
 				</button>
 			)}
 			{onFullscreen && (

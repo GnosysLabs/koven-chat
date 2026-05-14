@@ -31,6 +31,7 @@ import { CallProvider, useCall } from "@/lib/call-context";
 import { InCallPane } from "@/components/voice/InCallPane";
 import {
 	closeCurrentWindow,
+	isPopInActive,
 	type PendingCall,
 } from "@/lib/native-window";
 import { Button } from "@/components/ui/button";
@@ -101,13 +102,17 @@ function CallWindowBoot({ pendingCall }: { pendingCall: PendingCall }) {
 
 	// Track whether we've ever been in a live phase, so we only
 	// auto-close after a real call ended (vs. closing immediately
-	// on mount because phase is still "idle").
+	// on mount because phase is still "idle").  The pop-in flow
+	// also takes phase through idle as part of its handoff, but
+	// closes the window itself at a controlled moment after
+	// notifying main; skip auto-close in that case so we don't
+	// race the explicit close.
 	useEffect(() => {
 		if (call.phase !== "idle") {
 			wasActiveRef.current = true;
 			return;
 		}
-		if (wasActiveRef.current) {
+		if (wasActiveRef.current && !isPopInActive()) {
 			void closeCurrentWindow();
 		}
 	}, [call.phase]);

@@ -101,3 +101,33 @@ export async function closeCurrentWindow(): Promise<void> {
 	const win = getCurrentWebviewWindow();
 	await win.close();
 }
+
+/** Hand the call back to the main window: stash fresh params and
+ *  emit `call-reattach-ready` to the main window so its
+ *  CallProvider can pick up where we left off without the user
+ *  clicking anything.  Counterpart to `spawnCallWindow`. */
+export async function popInToMain(params: PendingCall): Promise<void> {
+	if (!isDesktopShell()) {
+		throw new Error("popInToMain: not running inside the desktop shell");
+	}
+	const { invoke } = await import("@tauri-apps/api/core");
+	await invoke("pop_in_to_main", { params });
+}
+
+// Module-level flag used to coordinate the call window's pop-in
+// flow with its auto-close-on-idle behaviour.  popInToMain leaves
+// the meeting (phase → idle, which the CallWindowBoot effect treats
+// as "close the window"), but we want the explicit close inside
+// popInToMain to be the one that happens, AFTER we've notified main
+// and let the IPC settle.  Setting this flag for the duration of
+// the pop-in suppresses the auto-close race.  Module-level so it
+// survives across React renders + Strict-Mode remounts.
+let popInActive = false;
+
+export function setPopInActive(value: boolean): void {
+	popInActive = value;
+}
+
+export function isPopInActive(): boolean {
+	return popInActive;
+}

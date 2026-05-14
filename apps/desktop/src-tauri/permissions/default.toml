@@ -64,6 +64,11 @@ identifier = "allow-drain-pending-call"
 description = "Claim the call params the main window stashed for the call window; called once on call-window boot."
 commands.allow = ["drain_pending_call"]
 
+[[permission]]
+identifier = "allow-pop-in-to-main"
+description = "Hand the call back to the main window: stash fresh params and notify main to take over.  Invoked from the call window's pop-in button."
+commands.allow = ["pop_in_to_main"]
+
 [default]
 description = "All locally-defined desktop-shell commands the SPA invokes."
 permissions = [
@@ -75,4 +80,5 @@ permissions = [
   "allow-save-download",
   "allow-spawn-call-window",
   "allow-drain-pending-call",
+  "allow-pop-in-to-main",
 ]
