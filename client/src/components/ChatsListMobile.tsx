@@ -24,7 +24,7 @@
 // `transport.getRoomMessages` (in-memory; no network call).
 
 import { useMemo, useState } from "react";
-import { MessageSquare, Lock, BellOff, PenSquare, ChevronRight } from "lucide-react";
+import { MessageSquare, Lock, BellOff, PenSquare } from "lucide-react";
 import type { Message, Room, RoomId, UserId } from "@koven/shared";
 import type { MatrixTransport } from "@/lib/matrix";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
@@ -253,15 +253,6 @@ function ChatRow({
 						{preview}
 					</div>
 				</div>
-				{/* Trailing disclosure chevron — signals "this opens a
-				    push view" to match the iOS HIG drill-in cue used
-				    by SpacesListMobile and the Me-tab grouped lists.
-				    Sits outside the content column so the time stamp
-				    keeps its right-aligned spot on the first row. */}
-				<ChevronRight
-					className="h-[18px] w-[18px] shrink-0 self-center text-muted-foreground/40"
-					strokeWidth={2.5}
-				/>
 			</button>
 		</>
 	);
