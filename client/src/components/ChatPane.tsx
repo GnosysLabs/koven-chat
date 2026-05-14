@@ -284,6 +284,22 @@ const JUMP_TO_NEWEST_PX = 200;
 const TOP_PAGINATION_PX = 1.25;
 const SEPARATOR_ESTIMATE_PX = 30;
 
+// Browser-native CSS scroll anchoring.  When supported, the engine
+// keeps the visible content visually stable across DOM mutations
+// (prepends from pagination, row-height changes from media decode
+// or reaction adds) synchronously with layout, inside the
+// compositor.  That's the only way to preserve scroll position on
+// iOS WKWebView without interrupting touch-momentum scrolling — a
+// JS-driven `scrollBy` kills the inertia animation and forces the
+// recomposite that reads visually as "bubbles disappear and reappear
+// at a different position."  Supported in iOS Safari 17+ (released
+// 2023), Chrome, and Firefox.  Cached at module load.
+const SUPPORTS_OVERFLOW_ANCHOR: boolean = (() => {
+	if (typeof CSS === "undefined" || typeof CSS.supports !== "function") return false;
+	try { return CSS.supports("overflow-anchor", "auto"); }
+	catch { return false; }
+})();
+
 // Cap for the multi-attachment composer.  10 mirrors Discord's
 // per-message attachment limit and stops a "select all 250 files in
 // this folder" mistake from spamming the room with 250 events.
@@ -537,6 +553,18 @@ export function ChatPane({
 		| { stuckAtBottom: false; trackedToken: string; offsetFromStart: number };
 	const scrollStateRef = useRef<ScrollState>({ stuckAtBottom: true });
 
+	// On mobile (iOS WKWebView in particular) we hand scroll-position
+	// preservation back to the browser via CSS `overflow-anchor` when
+	// it's supported.  Programmatic `scrollBy` during a momentum
+	// scroll kills the native inertia and forces a recomposite of the
+	// scroll surface — visible to the user as bubbles vanishing and
+	// reappearing at a different position when older history loads in.
+	// Browser-native anchoring runs in the compositor synchronously
+	// with layout, so it doesn't fight momentum.  Desktop keeps the
+	// existing TanStack-Virtual + manual restoration path because the
+	// virtualizer's measurement system needs explicit scroll math.
+	const useBrowserAnchoring = isMobileShell && SUPPORTS_OVERFLOW_ANCHOR;
+
 	const getItemKey = useCallback(
 		(index: number) => messages[index]?.id ?? `missing-${index}`,
 		[messages],
@@ -567,12 +595,26 @@ export function ChatPane({
 
 	// Scroll preservation.  Desktop uses TanStack's measured row
 	// positions; mobile uses DOM offsets so iOS momentum scroll does
-	// not fight late virtualizer measurements.
+	// not fight late virtualizer measurements.  When browser-native
+	// anchoring is in use (mobile + supported), the per-row tracking
+	// is unnecessary — `overflow-anchor: auto` keeps the visible
+	// content stable for us — so we only track the at-bottom flag
+	// (still needed to gate the follow-bottom auto-scroll) and skip
+	// the O(n) DOM walk that previously ran on every scroll event.
 	const saveScrollState = useCallback(() => {
 		const el = scrollRef.current;
 		if (!el) return;
 		if (el.scrollHeight - (el.scrollTop + el.clientHeight) <= 1) {
 			scrollStateRef.current = { stuckAtBottom: true };
+			return;
+		}
+		if (useBrowserAnchoring) {
+			if (!scrollStateRef.current.stuckAtBottom) return;
+			scrollStateRef.current = {
+				stuckAtBottom: false,
+				trackedToken: "",
+				offsetFromStart: 0,
+			};
 			return;
 		}
 		const scrollTop = Math.max(0, el.scrollTop);
@@ -604,7 +646,7 @@ export function ChatPane({
 			trackedToken: message.id,
 			offsetFromStart: Math.max(0, scrollTop - tracked.start),
 		};
-	}, [isMobileShell, messages, rowVirtualizer]);
+	}, [isMobileShell, useBrowserAnchoring, messages, rowVirtualizer]);
 
 	const restoreScrollState = useCallback(() => {
 		const el = scrollRef.current;
@@ -622,6 +664,15 @@ export function ChatPane({
 			return;
 		}
 		if (isMobileShell) {
+			if (useBrowserAnchoring) {
+				// `overflow-anchor: auto` on the scroll container preserves
+				// the user's visual position across DOM mutations
+				// synchronously in the compositor.  A programmatic scroll
+				// here would interrupt iOS WKWebView's touch-momentum
+				// animation and force a recomposite — the original cause
+				// of the "bubbles disappear and reappear" jank.
+				return;
+			}
 			const row = listRef.current?.querySelector(
 				`[data-scroll-tokens="${CSS.escape(state.trackedToken)}"]`,
 			);
@@ -639,7 +690,7 @@ export function ChatPane({
 			align: "start",
 			behavior: "auto",
 		});
-	}, [isMobileShell, messages, rowVirtualizer, scrollToBottom]);
+	}, [isMobileShell, useBrowserAnchoring, messages, rowVirtualizer, scrollToBottom]);
 
 	// Re-arm stuckAtBottom on room change / call-view exit; ALSO when
 	// messages first populate on a fresh-mount room.  The
@@ -1412,11 +1463,20 @@ export function ChatPane({
 				   so leaving the room mid-call doesn't drop the call. */
 				<InCallPane roomName={room.name} />
 			) : (<>
-			{/* Browser scroll anchoring is disabled on the chat surface.
-			    The tracked-message anchor above is the single source
-			    of truth; letting the browser also adjust scrollTop
-			    creates double corrections during prepends and media
-			    decode. */}
+			{/* Scroll-anchoring policy:
+			    - Desktop: `overflow-anchor: none` + TanStack-Virtual
+			      manual measurements.  The virtualizer's measurement
+			      system is the single source of truth; browser
+			      anchoring on top of it would double-correct during
+			      prepends and media decode.
+			    - Mobile (when supported): `overflow-anchor: auto`
+			      hands position preservation to the browser, which
+			      runs in the compositor synchronously with layout.
+			      That's the only way to maintain visual position on
+			      iOS WKWebView without a JS `scrollBy` killing
+			      touch-momentum scrolling.  Manual restoration is
+			      suppressed in `restoreScrollState` for this case so
+			      we don't double-correct. */}
 			<div className="relative flex-1 min-h-0 overflow-hidden">
 			{/* Desktop keeps the TanStack Virtual path that feels good
 			    in browser.  Mobile renders rows in native DOM flow so
@@ -1427,7 +1487,7 @@ export function ChatPane({
 					ref={scrollRef}
 					className="absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-contain px-4"
 					style={{
-						overflowAnchor: "none",
+						overflowAnchor: useBrowserAnchoring ? "auto" : "none",
 						WebkitOverflowScrolling: "touch",
 						touchAction: "pan-y",
 					}}
