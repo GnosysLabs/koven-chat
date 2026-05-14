@@ -1298,7 +1298,7 @@ export function ChatPane({
 			    anchor above are the single source of truth; letting
 			    the browser also adjust scrollTop creates double
 			    corrections during prepends and image decode. */}
-			<div className="relative flex-1 min-h-0">
+			<div className="relative flex-1 min-h-0 overflow-hidden">
 			{/* Pulsing-favicon loading overlay (mobile only).
 			    Sits above the message scroll area while messages +
 			    media are still settling.  pointer-events-none so
@@ -1329,7 +1329,7 @@ export function ChatPane({
 			{messagesLoaded && messages.length > 0 ? (<>
 				<div
 					ref={scrollRef}
-					className="absolute inset-0 overflow-y-auto overscroll-contain"
+					className="absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-contain px-4"
 					style={{ overflowAnchor: "none" }}
 				>
 					<div
