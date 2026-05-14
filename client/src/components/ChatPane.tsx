@@ -5,6 +5,7 @@
 // bubble color; everyone else uses the muted card color.
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useDrag } from "@use-gesture/react";
 import type { EventId, FlagAggregate, FlagCategory, Member, Message, PollAggregate, ReactionAggregate, Room, RoomId, UserId } from "@koven/shared";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -2052,62 +2053,79 @@ function MessageRowComponent({
 	// Right-click context menu state.  Cursor-positioned, dismissed
 	// via the generic ContextMenu primitive's outside-mousedown handler.
 	const [ctxMenuPos, setCtxMenuPos] = useState<{ x: number; y: number } | null>(null);
-	// Long-press handling for touch.  iOS users get the context
-	// menu on a sustained press; same menu the right-click uses on
-	// desktop.  500ms threshold matches iOS Messages.  Cancelled by
-	// any move or release before the timer fires.
+	// Touch gesture stack: long-press for context menu + horizontal
+	// swipe-right to reply.  Driven by useDrag from @use-gesture/react
+	// for unified pointer handling.  The previous hand-rolled
+	// touchstart/touchmove version had no drag affordance: the row
+	// didn't follow the finger, so the swipe felt invisible until
+	// the haptic + commit fired and users thought it was broken.
+	// Now the row visibly translates with the finger up to a soft
+	// cap, rubber-bands past it, and snaps back on release.
+	const rowRef = useRef<HTMLDivElement | null>(null);
 	const longPressTimerRef = useRef<number | null>(null);
 	const longPressStartRef = useRef<{ x: number; y: number } | null>(null);
-	const cancelLongPress = useCallback(() => {
-		if (longPressTimerRef.current !== null) {
+	const swipeRepliedRef = useRef(false);
+	const SWIPE_REPLY_THRESHOLD = 56;
+	const SWIPE_SOFT_CAP = 96;
+	const dragBind = useDrag(({ first, last, active, movement: [mx, my], xy, tap }) => {
+		// Touchdown: arm the long-press timer at the press anchor.
+		// 500ms threshold matches iOS Messages.
+		if (first) {
+			longPressStartRef.current = { x: xy[0], y: xy[1] };
+			swipeRepliedRef.current = false;
+			longPressTimerRef.current = window.setTimeout(() => {
+				void hapticImpact("medium");
+				const start = longPressStartRef.current;
+				if (start) setCtxMenuPos(start);
+				longPressTimerRef.current = null;
+			}, 500);
+		}
+		// Any meaningful movement disqualifies the long-press.
+		if (longPressTimerRef.current !== null && (Math.abs(mx) > 8 || Math.abs(my) > 8)) {
 			window.clearTimeout(longPressTimerRef.current);
 			longPressTimerRef.current = null;
 		}
-		longPressStartRef.current = null;
-	}, []);
-	// Swipe-right-to-reply.  Captured alongside the long-press
-	// gesture so both share the same touchstart anchor — long-press
-	// fires if the finger stays put; swipe fires if it travels
-	// right past the threshold without going vertical.
-	const SWIPE_REPLY_THRESHOLD = 56;
-	const swipeRepliedRef = useRef(false);
-	const handleTouchStart = useCallback((e: React.TouchEvent) => {
-		const t = e.touches[0];
-		if (!t) return;
-		longPressStartRef.current = { x: t.clientX, y: t.clientY };
-		swipeRepliedRef.current = false;
-		longPressTimerRef.current = window.setTimeout(() => {
-			void hapticImpact("medium");
-			const start = longPressStartRef.current;
-			if (start) setCtxMenuPos(start);
-			longPressTimerRef.current = null;
-		}, 500);
-	}, []);
-	const handleTouchMove = useCallback((e: React.TouchEvent) => {
-		const t = e.touches[0];
-		const start = longPressStartRef.current;
-		if (!t || !start) return;
-		const dx = t.clientX - start.x;
-		const dy = t.clientY - start.y;
-		const absDx = Math.abs(dx);
-		const absDy = Math.abs(dy);
-		// Any movement >8px cancels the long-press.
-		if (absDx > 8 || absDy > 8) {
+		// Cleanup on release runs FIRST — and unconditionally.  Earlier
+		// version short-circuited on `tap` before this block, which left
+		// the long-press timer armed past the tap's release; the timer
+		// then fired 500ms later and the context menu opened from what
+		// the user had registered as a normal tap.
+		if (last) {
 			if (longPressTimerRef.current !== null) {
 				window.clearTimeout(longPressTimerRef.current);
 				longPressTimerRef.current = null;
 			}
+			longPressStartRef.current = null;
 		}
-		// Horizontal swipe right past threshold → reply.  Only fires
-		// once per gesture; require the horizontal component to
-		// dominate so vertical scrolls don't accidentally trigger.
-		if (!swipeRepliedRef.current && dx > SWIPE_REPLY_THRESHOLD && absDx > absDy * 1.5) {
+		// Taps + no-ref: skip the drag visuals.  Tap is mutually
+		// exclusive with a committed swipe (use-gesture only marks
+		// `tap` when movement stayed below its tap threshold), so we
+		// don't need to commit a reply here.
+		if (tap || !rowRef.current) return;
+		// Rightward drag only.  Vertical pan is left to the browser
+		// via touch-action: pan-y on the row, so iOS scroll still
+		// works naturally.  Soft cap at 96px with light rubber-banding
+		// past it so the row visibly resists past the commit threshold
+		// without hard-stopping (which feels broken on iOS).
+		const dx = Math.max(0, mx);
+		const tx = dx <= SWIPE_SOFT_CAP
+			? dx
+			: SWIPE_SOFT_CAP + (dx - SWIPE_SOFT_CAP) * 0.3;
+		if (active) {
+			rowRef.current.style.transform = `translateX(${tx}px)`;
+			rowRef.current.style.transition = "none";
+		} else {
+			rowRef.current.style.transform = "";
+			rowRef.current.style.transition = "transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1)";
+		}
+		if (last && dx >= SWIPE_REPLY_THRESHOLD && !swipeRepliedRef.current) {
 			swipeRepliedRef.current = true;
 			void hapticImpact("light");
 			onReply();
-			longPressStartRef.current = null;
 		}
-	}, [onReply]);
+	}, {
+		pointer: { touch: true },
+	});
 	// Popover state stays local to the row — only relevant for THIS
 	// row's React picker.  Combined with the parent-supplied
 	// `isHovered` to keep the toolbar visible while the user picks
@@ -2276,7 +2294,7 @@ function MessageRowComponent({
 				// native menu instead of our context menu.  Desktop
 				// keeps selection enabled (cursor / copy via Cmd-C
 				// is the standard expectation there).
-				isMobileShell && "select-none [-webkit-user-select:none] [-webkit-touch-callout:none]",
+				isMobileShell && "select-none [-webkit-user-select:none] [-webkit-touch-callout:none] touch-pan-y",
 			)}
 			onContextMenu={(e) => {
 				// Suppress when right-clicking inside an interactive
@@ -2287,10 +2305,8 @@ function MessageRowComponent({
 				e.stopPropagation();
 				setCtxMenuPos({ x: e.clientX, y: e.clientY });
 			}}
-			onTouchStart={handleTouchStart}
-			onTouchMove={handleTouchMove}
-			onTouchEnd={cancelLongPress}
-			onTouchCancel={cancelLongPress}
+			ref={rowRef}
+			{...dragBind()}
 		>
 			<AvatarSlot
 				mxc={avatarMxc}
