@@ -130,15 +130,34 @@ function extractStartSeconds(path: string): number | undefined {
 	return undefined;
 }
 
-/** Privacy-respecting embed URL.  `youtube-nocookie.com` skips the
- * tracking cookies the regular embed sets until the user clicks
- * play, which matters in a chat client where embeds auto-load. */
+/** Embed URL for the iframe player.
+ *
+ * Using regular `youtube.com/embed/` (not nocookie) because nocookie
+ * has stricter origin validation that fails in Capacitor's
+ * `capacitor://` WebView origin and shows Error 153 "Video player
+ * configuration error" on every embed.  Regular youtube.com accepts
+ * the cross-origin parent.
+ *
+ * Params:
+ *   - `playsinline=1` — iOS WKWebView refuses to render an embed
+ *     without this; it's the iOS-specific autoplay-policy attribute
+ *     YouTube checks for the inline player.
+ *   - `rel=0` — don't surface unrelated video suggestions on end.
+ *
+ * Deliberately omitted: `origin=` and `enablejsapi=1`.  Those pair
+ * together for postMessage-based control of the player; without
+ * enablejsapi the origin param is unused and can confuse YouTube's
+ * handshake. */
 export function buildEmbedUrl(videoId: string, startSeconds?: number): string {
-	const base = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(videoId)}`;
+	const base = `https://www.youtube.com/embed/${encodeURIComponent(videoId)}`;
+	const params = new URLSearchParams({
+		playsinline: "1",
+		rel: "0",
+	});
 	if (startSeconds && startSeconds > 0) {
-		return `${base}?start=${startSeconds}`;
+		params.set("start", String(startSeconds));
 	}
-	return base;
+	return `${base}?${params.toString()}`;
 }
 
 /** True when `url` is recognised as a YouTube link.  Cheap test

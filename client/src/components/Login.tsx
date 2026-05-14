@@ -15,6 +15,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { isMobileShell } from "@/lib/mobile";
+import { isNativeShell } from "@/lib/nativeShell";
+import { LoginMobile } from "@/components/LoginMobile";
 import type { MatrixCredentials } from "@/lib/matrix";
 import { fetchInstanceConfig, resolveAssetUrl, type InstanceConfig } from "@/lib/instance";
 import {
@@ -40,7 +42,26 @@ export interface LoginProps {
 
 type Step = "email" | "code";
 
-export function Login({ onLoggedIn, addingAccount, onCancelAddAccount }: LoginProps) {
+// Top-level router: mobile viewports get the iOS-HIG layout
+// (LoginMobile), everyone else gets the original desktop glass-card
+// design defined in LoginDesktop below.  Splitting the desktop
+// JSX into its own sub-component means React's hook order stays
+// stable when `isMobileShell` flips on viewport resize — each
+// branch is a different component, so hooks reset cleanly.
+export function Login(props: LoginProps) {
+	if (isMobileShell) {
+		return (
+			<LoginMobile
+				onLoggedIn={props.onLoggedIn}
+				addingAccount={props.addingAccount}
+				onCancelAddAccount={props.onCancelAddAccount}
+			/>
+		);
+	}
+	return <LoginDesktop {...props} />;
+}
+
+function LoginDesktop({ onLoggedIn, addingAccount, onCancelAddAccount }: LoginProps) {
 	const [step, setStep] = useState<Step>("email");
 	const [email, setEmail] = useState("");
 	const [code, setCode] = useState("");
@@ -88,14 +109,26 @@ export function Login({ onLoggedIn, addingAccount, onCancelAddAccount }: LoginPr
 
 	const brandName = instance.name?.trim() || "Koven";
 	const tagline = instance.login_tagline?.trim();
-	// Brand background image on desktop only.  Mobile uses a flat
-	// `#0a0a0c` canvas (matching iOS's PWA safe-area fill) so the
-	// home-indicator system strip blends seamlessly — see the
-	// useEffect above for the rationale.
-	const bgUrl = isMobileShell
-		? null
-		: resolveAssetUrl(instance.login_background_url);
-	const logoUrl = resolveAssetUrl(instance.logo_url);
+	// Brand background image.  Three branches:
+	//   - Native shell (Capacitor iOS / Tauri desktop / etc.): force
+	//     the local mobile wallpaper so login feels branded even when
+	//     the server-side `instance.login_background_url` hasn't loaded
+	//     yet (the bundle ships the asset, no network round-trip).
+	//   - Mobile browser: keep the flat `#0a0a0c` canvas so the
+	//     home-indicator system strip blends seamlessly.
+	//   - Desktop browser: server-configured admin wallpaper.
+	const inNativeShell = isNativeShell();
+	const bgUrl = inNativeShell
+		? "/login-bg-mobile.png"
+		: isMobileShell
+			? null
+			: resolveAssetUrl(instance.login_background_url);
+	// Same shape for the wordmark — prefer the locally-bundled mark
+	// in native shells so the splash → login transition doesn't flash
+	// a missing image while the server logo loads.
+	const logoUrl = inNativeShell
+		? "/koven-wordmark.png"
+		: resolveAssetUrl(instance.logo_url);
 
 	function reset() {
 		setStep("email");

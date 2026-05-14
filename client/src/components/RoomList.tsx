@@ -295,7 +295,7 @@ function recencyOf(room: Room): number {
 	return room.lastActiveTs || 0;
 }
 
-interface RoomGroup {
+export interface RoomGroup {
 	/** `null` for the implicit "Uncategorised" bucket rendered above
 	 * the admin-defined categories (Discord-style); a category id from
 	 * `Space.categories` otherwise. */
@@ -319,7 +319,7 @@ interface RoomGroup {
  * the space.categories list (orphan reference, e.g. category was
  * renamed/deleted) fall through to the uncategorised group so the
  * room doesn't vanish from the sidebar. */
-function groupRoomsByCategory(rooms: Room[], space: Space): RoomGroup[] {
+export function groupRoomsByCategory(rooms: Room[], space: Space): RoomGroup[] {
 	const spaceId = space.id;
 	const known = new Set(space.categories.map(c => c.id));
 	const uncategorised: Room[] = [];

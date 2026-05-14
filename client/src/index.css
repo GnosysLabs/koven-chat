@@ -620,6 +620,31 @@
 		 * UI.  Suppressing it doesn't break our explicit
 		 * `:active` styles where we add them. */
 		-webkit-tap-highlight-color: transparent;
+		/* Kill text selection + the iOS Copy/Look Up/Translate
+		 * callout app-wide on mobile.  Native iOS chat apps don't
+		 * let you select arbitrary UI text; touch text-selection
+		 * gets triggered on accidental long-press and competes
+		 * with our own long-press menus.  Specific text surfaces
+		 * that NEED selection (message bodies for "Copy text",
+		 * code blocks) opt back in with `select-text`.
+		 */
+		-webkit-user-select: none;
+		user-select: none;
+		-webkit-touch-callout: none;
+	}
+	/* Inputs always need to allow selection so the user can
+	 * position the caret, drag-select, etc.  And anything tagged
+	 * with the standard Tailwind `select-text` utility opts back
+	 * in.  Without this, typing into the composer or editing a
+	 * room name on mobile would be impossible. */
+	.mobile-shell input,
+	.mobile-shell textarea,
+	.mobile-shell [contenteditable="true"],
+	.mobile-shell .select-text,
+	.mobile-shell .select-text * {
+		-webkit-user-select: auto;
+		user-select: auto;
+		-webkit-touch-callout: default;
 	}
 	.mobile-shell body {
 		/* Disable iOS rubber-band overscroll at the document

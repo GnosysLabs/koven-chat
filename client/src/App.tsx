@@ -26,6 +26,7 @@ import { MobileTopBar } from "@/components/MobileTopBar";
 import { MobileTabBar, type MobileTab } from "@/components/MobileTabBar";
 import { MobileMeScreen } from "@/components/MobileMeScreen";
 import { isMobileShell } from "@/lib/mobile";
+import { applyNativeShellTweaks } from "@/lib/nativeShell";
 import { wipeLocalCacheAndRestart } from "@/lib/recovery";
 import { parseShareIntent, clearShareUrl, type ShareIntent } from "@/lib/inviteLink";
 import { ChatPane } from "@/components/ChatPane";
@@ -54,6 +55,11 @@ import { ProfileSheet } from "@/components/ProfileSheet";
 import { AppSettingsSheet } from "@/components/AppSettingsSheet";
 import { EncryptionSetupSheet } from "@/components/EncryptionSetupSheet";
 import { EncryptionUnlockSheet } from "@/components/EncryptionUnlockSheet";
+import { ConnectingMobile } from "@/components/ConnectingMobile";
+import { SpacesListMobile } from "@/components/SpacesListMobile";
+import { SpaceHomeMobile } from "@/components/SpaceHomeMobile";
+import { ChatsListMobile } from "@/components/ChatsListMobile";
+import { ExploreMobile } from "@/components/ExploreMobile";
 import { ModLogSheet } from "@/components/ModLogSheet";
 import {
 	botKickBanFromSpace,
@@ -100,6 +106,12 @@ function escapeRegex(s: string): string {
 }
 
 export default function App() {
+	// Koven: apply native-shell tweaks once on mount.  No-op outside
+	// Capacitor (iOS / Android), so this is safe to run on every host.
+	useEffect(() => {
+		void applyNativeShellTweaks();
+	}, []);
+
 	// Multi-account model.
 	//
 	// `accounts` holds every account the user has logged into on this
@@ -223,6 +235,7 @@ export default function App() {
 				}
 			}
 			setMobileMeOpen(false);
+			setMobileSpacesOpen(false);
 
 			// Invite state — just land in the right tab, don't
 			// auto-open the room.
@@ -293,6 +306,13 @@ export default function App() {
 	// because it isn't really a chat surface; pressing any other
 	// tab clears it without disturbing the underlying activeSpace.
 	const [mobileMeOpen, setMobileMeOpen] = useState(false);
+	// Mobile-only "Spaces" tab — when true, the bottom-tab "Spaces"
+	// view covers the panels with the spaces list / drill-in.  Same
+	// pattern as `mobileMeOpen`.  When a space is drilled into,
+	// `mobileSelectedSpaceId` holds its id; clearing it returns to
+	// the spaces list inside the same overlay.
+	const [mobileSpacesOpen, setMobileSpacesOpen] = useState(false);
+	const [mobileSelectedSpaceId, setMobileSelectedSpaceId] = useState<SpaceId | null>(null);
 	// Shared bilateral-DM-delete dialog state.  Driven by two entry
 	// points (the DmProfilePanel button on the right sidebar AND the
 	// sidebar room-row right-click "Delete conversation" item), both
@@ -2008,13 +2028,23 @@ export default function App() {
 
 	// Hard mobile block.  When the viewport / pointer detection in
 	// lib/mobile.ts reports a mobile context AND we're not running
-	// inside the Tauri desktop shell (which can be resized small but
-	// IS still the desktop app), render a takeover that points users
-	// to the desktop installer.  Mobile UX is in development; better
-	// to be honest than ship a half-broken first impression.
-	const isTauriDesktop = typeof window !== "undefined"
-		&& (window as { __KOVEN_DESKTOP__?: boolean }).__KOVEN_DESKTOP__ === true;
-	if (isMobileShell && !isTauriDesktop) {
+	// inside any native shell, render a takeover that points users to
+	// the desktop installer.  The block is meant for mobile browsers
+	// — when the same web bundle is wrapped by a native shell
+	// (Tauri desktop, Capacitor iOS / Android, …) we trust the shell
+	// to gate launch on a supported platform.
+	//
+	// Detection markers:
+	//   - `window.isTauri`          — Tauri 2 (any platform)
+	//   - `window.Capacitor`        — Capacitor (iOS / Android shells)
+	//   - `__KOVEN_DESKTOP__`       — legacy fallback from the desktop
+	//                                 init-script in case the runtime
+	//                                 markers are ever missing
+	const isNativeShell = typeof window !== "undefined"
+		&& ((window as { isTauri?: boolean }).isTauri === true
+			|| (window as { Capacitor?: unknown }).Capacitor !== undefined
+			|| (window as { __KOVEN_DESKTOP__?: boolean }).__KOVEN_DESKTOP__ === true);
+	if (isMobileShell && !isNativeShell) {
 		return <MobileBlockScreen />;
 	}
 
@@ -2114,6 +2144,12 @@ export default function App() {
 	// we let the rest of the app render here, a slow start would flash
 	// an unprotected UI (no setup sheet, no unlock sheet) for a beat.
 	if (!transport || encState === null) {
+		// iOS HIG full-screen branded surface on mobile; the original
+		// inline status line stays on desktop where it fits the nav-
+		// bar / sync-banner chrome around it.
+		if (isMobileShell) {
+			return <ConnectingMobile />;
+		}
 		return (
 			<div className="h-full flex items-center justify-center p-8 bg-background text-xs text-muted-foreground">
 				Connecting…
@@ -2276,7 +2312,9 @@ export default function App() {
 					onBack={
 						state.activeRoomId
 							? () => dispatch({ type: "set_active_room", roomId: null })
-							: undefined
+							: (mobileSpacesOpen && mobileSelectedSpaceId)
+								? () => setMobileSelectedSpaceId(null)
+								: undefined
 					}
 					rightSlot={
 						<NotificationBell
@@ -2445,7 +2483,7 @@ export default function App() {
 				    pattern Bots / Spaces Overview use above. */}
 				{isMobileShell && state.activeSpace?.kind === "explore" ? (
 					<div className="contents" data-mobile-pane="list">
-						<ExplorePane
+						<ExploreMobile
 							transport={transport}
 							rooms={state.rooms}
 							spaces={state.spaces}
@@ -2464,6 +2502,34 @@ export default function App() {
 				{state.activeSpace?.kind !== "explore"
 					&& state.activeSpace?.kind !== "bots" && (
 				<div className="contents" data-mobile-pane="list">
+				{/* Mobile DM list gets the iOS Messages-style
+				    ChatsListMobile (large title, full-width rows
+				    with avatar + name + preview + timestamp +
+				    unread dot).  Desktop and mobile space-room
+				    lists still go through RoomList — that handles
+				    DnD ordering, categories, and the desktop
+				    sidebar density it's tuned for. */}
+				{isMobileShell && state.activeSpace?.kind === "dms" ? (
+					<ChatsListMobile
+						rooms={state.rooms}
+						transport={transport}
+						currentUserId={creds.user_id as UserId}
+						onSelectRoom={navigateToRoom}
+						onCreateRoom={() => setStartDmOpen(true)}
+						onAcceptInvite={async (roomId) => {
+							const accepted = await acceptInviteWithGate(roomId);
+							if (accepted) dispatch({ type: "set_active_room", roomId: accepted });
+						}}
+						onDeclineInvite={async (roomId) => {
+							if (!transport) return;
+							try {
+								await transport.declineInvite(roomId);
+							} catch (e) {
+								dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+							}
+						}}
+					/>
+				) : (
 				<RoomList
 					rooms={state.rooms}
 					spaces={state.spaces}
@@ -2543,6 +2609,7 @@ export default function App() {
 						}
 					}}
 				/>
+				)}
 				</div>
 				)}
 				<div className="contents" data-mobile-pane="main">
@@ -3214,10 +3281,10 @@ export default function App() {
 				// through behind the rows.  Repaint the body's gradient
 				// on top of bg-background so this overlay has the same
 				// coloured aura every other mobile screen has.
-				<div className="fixed inset-x-0 z-30 flex flex-col bg-background"
+				<div className="fixed inset-x-0 z-30 flex flex-col bg-background border-b border-foreground/10"
 				     style={{
 				         top: "calc(env(safe-area-inset-top) + 48px)",
-				         bottom: "calc(env(safe-area-inset-bottom) + 56px)",
+				         bottom: "calc(env(safe-area-inset-bottom) + 49px)",
 				         backgroundImage: "var(--bg-gradient)",
 				         backgroundAttachment: "fixed",
 				         backgroundRepeat: "no-repeat",
@@ -3233,6 +3300,75 @@ export default function App() {
 					/>
 				</div>
 			)}
+			{/* Spaces tab overlay.  Mirrors the Me overlay: same
+			    fixed-position envelope, same gradient repaint, same
+			    z-30.  Two-level inside: SpacesListMobile when no
+			    space is selected, SpaceHomeMobile after drill-in.
+			    Selecting a room from inside SpaceHome dispatches
+			    set_active_room, which clears the tab bar and lets
+			    the ChatPane below this overlay take over. */}
+			{isMobileShell && mobileSpacesOpen && !state.activeRoomId && (
+				<div className="fixed inset-x-0 z-30 flex flex-col bg-background border-b border-foreground/10"
+				     style={{
+				         top: "calc(env(safe-area-inset-top) + 48px)",
+				         bottom: "calc(env(safe-area-inset-bottom) + 49px)",
+				         backgroundImage: "var(--bg-gradient)",
+				         backgroundAttachment: "fixed",
+				         backgroundRepeat: "no-repeat",
+				         backgroundSize: "cover",
+				     }}
+				>
+					{mobileSelectedSpaceId
+						? (() => {
+							const space = state.spaces.find(s => s.id === mobileSelectedSpaceId);
+							if (!space) {
+								// Space disappeared (left it, server pruned).
+								// Bail back to the list so the user has
+								// somewhere coherent to land.
+								setMobileSelectedSpaceId(null);
+								return null;
+							}
+							const childRooms = state.rooms.filter(
+								r => r.parentSpaceIds.includes(mobileSelectedSpaceId),
+							);
+							// Set activeSpace so existing handlers
+							// (openCreateRoomGated, InviteSheet, etc.)
+							// see "we're in this space" without us
+							// having to thread the id through each
+							// one.  Tracked by the useEffect just
+							// above this overlay block.
+							return (
+								<SpaceHomeMobile
+									space={space}
+									rooms={childRooms}
+									currentUserId={creds.user_id as UserId}
+									onSelectRoom={(roomId) => {
+										dispatch({ type: "set_active_space", space: { kind: "space", id: mobileSelectedSpaceId } });
+										dispatch({ type: "set_active_room", roomId });
+									}}
+									onAddRoom={() => {
+										dispatch({ type: "set_active_space", space: { kind: "space", id: mobileSelectedSpaceId } });
+										void openCreateRoomGated();
+									}}
+									onInvite={() => {
+										setInvitingRoomId(mobileSelectedSpaceId as unknown as RoomId);
+									}}
+									onOpenSettings={() => {
+										setEditingSpaceId(mobileSelectedSpaceId);
+									}}
+								/>
+							);
+						})()
+						: (
+							<SpacesListMobile
+								spaces={state.spaces}
+								rooms={state.rooms}
+								onOpenSpace={(id) => setMobileSelectedSpaceId(id as SpaceId)}
+							/>
+						)
+					}
+				</div>
+			)}
 			{/* Hide the tab bar in a chat — chats are "push" views
 			    that take over the screen until the user pops back
 			    via the top-bar arrow.  iMessage / Telegram / Slack
@@ -3243,16 +3379,20 @@ export default function App() {
 					active={
 						mobileMeOpen
 							? "me"
-							: state.activeSpace?.kind === "explore"
-								? "explore"
-								: "chats"
+							: mobileSpacesOpen
+								? "spaces"
+								: state.activeSpace?.kind === "explore"
+									? "explore"
+									: "chats"
 					}
 					onChange={(tab: MobileTab) => {
-						// Switching tabs always clears the Me overlay
-						// + drops any open chat so the user sees the
-						// tab's landing screen on first tap.
+						// Switching tabs always clears the Me/Spaces
+						// overlays + drops any open chat so the user
+						// sees the tab's landing screen on first tap.
 						setMobileMeOpen(tab === "me");
-						if (tab === "me") return;
+						setMobileSpacesOpen(tab === "spaces");
+						if (tab !== "spaces") setMobileSelectedSpaceId(null);
+						if (tab === "me" || tab === "spaces") return;
 						dispatch({ type: "set_active_room", roomId: null });
 						if (tab === "chats") {
 							dispatch({ type: "set_active_space", space: { kind: "dms" } });

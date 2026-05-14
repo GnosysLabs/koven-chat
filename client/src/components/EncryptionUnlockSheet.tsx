@@ -24,6 +24,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Lock } from "lucide-react";
+import { isMobileShell } from "@/lib/mobile";
+import { isNativeShell } from "@/lib/nativeShell";
+import { EncryptionUnlockMobile } from "@/components/EncryptionUnlockMobile";
 
 export interface EncryptionUnlockSheetProps {
 	open: boolean;
@@ -34,10 +37,31 @@ export interface EncryptionUnlockSheetProps {
 	onSignOut(): void;
 }
 
-export function EncryptionUnlockSheet({ open, onUnlock, onUnlocked, onSignOut }: EncryptionUnlockSheetProps) {
+// Top-level router.  Mobile viewports get the iOS-HIG full-screen
+// surface; desktop keeps the Radix Dialog defined below.  Splitting
+// this way means desktop JSX stays byte-for-byte unchanged.
+export function EncryptionUnlockSheet(props: EncryptionUnlockSheetProps) {
+	if (!props.open) return null;
+	if (isMobileShell) {
+		return (
+			<EncryptionUnlockMobile
+				onUnlock={props.onUnlock}
+				onUnlocked={props.onUnlocked}
+				onSignOut={props.onSignOut}
+			/>
+		);
+	}
+	return <EncryptionUnlockDesktop {...props} />;
+}
+
+function EncryptionUnlockDesktop({ open, onUnlock, onUnlocked, onSignOut }: EncryptionUnlockSheetProps) {
 	const [input, setInput] = useState("");
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
+	// Koven: native shells (Capacitor iOS / Tauri) paint the brand
+	// wallpaper + wordmark on this pre-auth surface so it matches the
+	// login screen rather than landing on a flat dark sheet.
+	const inNativeShell = isNativeShell();
 
 	async function submit(e: React.FormEvent) {
 		e.preventDefault();
@@ -69,10 +93,20 @@ export function EncryptionUnlockSheet({ open, onUnlock, onUnlocked, onSignOut }:
 			    the user has stashed in localStorage; the same recipe
 			    runs on desktop AND mobile so we don't fork the UI. */}
 			<DialogContent
-				className="sm:max-w-md [&>button]:hidden force-midnight"
+				className="sm:max-w-md [&>button]:hidden force-midnight max-sm:bg-cover max-sm:bg-center max-sm:bg-no-repeat"
+				style={inNativeShell ? {
+					backgroundImage: "url(/login-bg-mobile.png)",
+				} : undefined}
 				onInteractOutside={(e) => e.preventDefault()}
 				onEscapeKeyDown={(e) => e.preventDefault()}
 			>
+				{inNativeShell && (
+					<img
+						src="/koven-wordmark.png"
+						alt="Koven"
+						className="max-sm:block hidden mx-auto max-h-16 max-w-[60%] object-contain mb-4"
+					/>
+				)}
 				<DialogHeader>
 					<DialogTitle className="flex items-center gap-2">
 						<Lock className="h-4 w-4 text-primary" />

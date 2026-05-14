@@ -4,6 +4,7 @@
 // text.
 
 import { ENGINE_URL } from "@/lib/urls";
+import { isCapacitor } from "@/lib/nativeShell";
 import type { MatrixCredentials } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
 
@@ -26,15 +27,16 @@ export async function requestEmailCode(
 	email: string,
 	opts: { turnstileToken?: string | null } = {},
 ): Promise<RequestCodeResult> {
-	// Desktop app — Cloudflare can't validate the WebView's origin
-	// (`tauri://localhost` / `https://tauri.localhost`) so the
-	// Turnstile widget would just render an "unable to connect"
-	// error.  Desktop binaries are distributed via signed GitHub
-	// releases so the threat model that justifies Turnstile (email-
-	// spam bots hitting the public web) doesn't apply; engine
-	// reads the X-Koven-Client header below and skips the captcha
-	// gate when set.  Existing email rate-limits stay in place
-	// regardless.
+	// Native-shell captcha bypass.  Cloudflare can't validate the
+	// WebView origin in either Tauri (`tauri://localhost`) or
+	// Capacitor iOS (`capacitor://localhost`), so the Turnstile
+	// widget can't render in those shells.  Both ship as signed
+	// binaries (GitHub releases for desktop, App Store for iOS) so
+	// the threat model that justifies Turnstile — email-spam bots
+	// hitting the public web — doesn't apply.  The engine matches
+	// `X-Koven-Client: desktop|ios` and skips the captcha gate
+	// (server.ts ~ line 934).  Email rate-limits + send-failure
+	// paths still apply on both code paths.
 	//
 	// Same bypass for local Vite dev — Turnstile site key is bound
 	// to client.koven.chat so the widget refuses to render on
@@ -46,6 +48,7 @@ export async function requestEmailCode(
 	const isDev = import.meta.env.DEV;
 	const headers: Record<string, string> = { "Content-Type": "application/json" };
 	if (isDesktop || isDev) headers["X-Koven-Client"] = "desktop";
+	else if (isCapacitor()) headers["X-Koven-Client"] = "ios";
 	let r: Response;
 	try {
 		r = await fetch(`${ENGINE_URL}/api/auth/request-code`, {

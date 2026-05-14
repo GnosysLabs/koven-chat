@@ -4,7 +4,7 @@
 // renders in its own rounded bubble.  Self messages use the primary
 // bubble color; everyone else uses the muted card color.
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { EventId, FlagAggregate, FlagCategory, Member, Message, PollAggregate, ReactionAggregate, Room, RoomId, UserId } from "@koven/shared";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -40,6 +40,10 @@ import { PollCard } from "@/components/PollCard";
 import { CreatePollDialog } from "@/components/CreatePollDialog";
 import { GallerySheet } from "@/components/GallerySheet";
 import { MarkdownContent } from "@/components/MarkdownContent";
+import { isMobileShell } from "@/lib/mobile";
+import { hapticImpact } from "@/lib/haptics";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { useVirtualizer, type VirtualItem } from "@tanstack/react-virtual";
 
 // Heuristic: does this body have any markdown shape?  Cheap regex
 // pass — looks for headings, lists, fenced code, emphasis, links,
@@ -103,7 +107,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import { AlertTriangle, ArrowDown, BarChart3, Check, CheckCheck, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Images, Lock, Paperclip, Play, Scale, Settings, X } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, BarChart3, Check, CheckCheck, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Images, Lock, MessageSquare as MessageSquareIcon, Paperclip, Play, Plus, Scale, Settings, X } from "lucide-react";
 
 export interface ChatPaneProps {
 	room: Room | null;
@@ -387,6 +391,10 @@ export function ChatPane({
 	// itself once the m.poll.start send resolves).
 	const [pollDialogOpen, setPollDialogOpen] = useState(false);
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
+	// Mobile composer collapses paperclip / poll / GIF behind a `+`
+	// button (iMessage app-picker convention).  Open state lives here
+	// so menu items can close the popover after picking.
+	const [composerMenuOpen, setComposerMenuOpen] = useState(false);
 	const composeInputRef = useRef<HTMLTextAreaElement | null>(null);
 	// Auto-grow the composer to fit its content (Discord-style).  Runs
 	// on every draft change: clear the inline height so scrollHeight
@@ -418,7 +426,65 @@ export function ChatPane({
 		el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
 	}, [draft]);
 	const scrollRef = useRef<HTMLDivElement | null>(null);
-	const scrollContentRef = useRef<HTMLDivElement | null>(null);
+	// Inner spacer = the `height: getTotalSize()` div the virtualizer
+	// positions items inside.  Doubles as the target the chatVisible
+	// ResizeObserver watches to know when content has settled.
+	const spacerRef = useRef<HTMLDivElement | null>(null);
+	// Used by the scroll handler to detect a meaningful upward
+	// scroll gesture so we can dismiss the keyboard (Discord-style).
+	const lastScrollTopRef = useRef(0);
+	// Mobile: hide the message timeline behind a pulsing-favicon
+	// overlay until messages + media have settled.  Eliminates the
+	// "thrashing" feel where bubbles pop in one-by-one and images
+	// reflow the layout as they decode.  Reset whenever the user
+	// switches rooms so the loader fires for every chat open.
+	const [chatVisible, setChatVisible] = useState(false);
+	const roomId = room?.id;
+	useEffect(() => {
+		setChatVisible(false);
+	}, [roomId]);
+	useEffect(() => {
+		if (!messagesLoaded || chatVisible) return;
+		// Wait for the content height to stabilize.  Querying
+		// <img> elements doesn't work for Matrix media (the src
+		// is set async after a /_matrix/media fetch + decryption,
+		// so my scan would miss images that haven't been wired
+		// up yet).  A ResizeObserver on the scroll content fires
+		// every time anything inside grows / decodes / changes
+		// size — when it stops firing for STABLE_MS, the timeline
+		// has settled and we can reveal.  Hard 4s cap so a slow
+		// network can't trap the loader forever.
+		const STABLE_MS = 500;
+		const HARD_TIMEOUT_MS = 4000;
+		const inner = spacerRef.current;
+		if (!inner) { setChatVisible(true); return; }
+		let cancelled = false;
+		let stableTimer: number | null = null;
+		const scheduleReveal = () => {
+			if (stableTimer !== null) window.clearTimeout(stableTimer);
+			stableTimer = window.setTimeout(() => {
+				if (!cancelled) setChatVisible(true);
+			}, STABLE_MS);
+		};
+		const ro = new ResizeObserver(() => {
+			// Any resize resets the "stable for N ms" clock.
+			scheduleReveal();
+		});
+		ro.observe(inner);
+		// Kick off the timer even if nothing resizes (e.g.
+		// empty rooms whose ResizeObserver fires only once
+		// with the initial measurement).
+		scheduleReveal();
+		const hardCap = window.setTimeout(() => {
+			if (!cancelled) setChatVisible(true);
+		}, HARD_TIMEOUT_MS);
+		return () => {
+			cancelled = true;
+			ro.disconnect();
+			if (stableTimer !== null) window.clearTimeout(stableTimer);
+			window.clearTimeout(hardCap);
+		};
+	}, [messagesLoaded, chatVisible, roomId]);
 	// Active-call gate.  Discord-style: voice and chat are SEPARATE
 	// views even when they share a room.  We only swap the message
 	// area for the call surface when the user has explicitly
@@ -454,143 +520,136 @@ export function ChatPane({
 	// keep the ref version too because the scroll handlers run
 	// outside the React render cycle and need synchronous reads.
 	const [scrolledUp, setScrolledUp] = useState(false);
-
-	// Re-arm the lock and snap to bottom on:
-	//   - room change (fresh enter into a different room)
-	//   - messages.length change (new message arrives, follow if at bottom)
-	//   - call view exit (the scroll container was UNMOUNTED while
-	//     in call view; remounting it gives us a fresh DOM node
-	//     with scrollTop=0 — without re-snapping here, the user
-	//     lands at the top of history every time they leave the
-	//     call view).
-	// `prevRoomIdRef` distinguishes "fresh room enter" from
-	// "messages.length changed in the same room"; `wasInCallViewRef`
-	// catches the call-view → chat-view transition where neither
-	// room.id nor messages.length necessarily changed.
 	const wasInCallViewRef = useRef(false);
+
+	// Pagination state.  `loadingMoreRef` is the synchronous gate
+	// (scroll handler reads it without waiting on React commit);
+	// `loadingMore` is the React mirror that drives the pulsing-
+	// favicon loader row at index 0.  `noMoreHistoryRef` caches
+	// rooms whose Synapse timeline we've walked to the start so we
+	// don't keep firing /messages for nothing.
+	const loadingMoreRef = useRef(false);
+	const noMoreHistoryRef = useRef<Set<string>>(new Set());
+	const [loadingMore, setLoadingMore] = useState(false);
+
+	// ─── Virtualizer ─────────────────────────────────────────────
+	// TanStack Virtual replaces the previous manual scroll/resize/
+	// auto-snap machinery (~250 lines of multi-stage RAF + setTimeout
+	// + ResizeObserver re-snap that was producing the "seizure" jank
+	// users reported).
+	//
+	// `count = messages.length + 1`: index 0 is a loader row whose
+	// estimated size flips between 0 (idle) and 64px (paginating).
+	// Keeping the loader inside the virtualizer's coordinate space
+	// means its appearance/disappearance plays nicely with item
+	// measurements and scrollToIndex math.
+	//
+	// `getItemKey` returns stable Matrix event ids so the measurement
+	// cache follows content across prepends — when a 20-event
+	// pagination commits, message previously at index 1 (now at
+	// index 21) keeps its cached height instead of forcing a remeasure.
+	//
+	// `shouldAdjustScrollPositionOnItemSizeChange` returns true for
+	// items above the viewport: when estimated sizes resolve to real
+	// sizes via measureElement, the virtualizer shifts scrollOffset
+	// to compensate, so the user's visible content doesn't jolt as
+	// images decode.
+	const LOADER_KEY = "__loader__";
+	const count = messages.length + 1;
+	const getItemKey = useCallback((index: number) => {
+		if (index === 0) return LOADER_KEY;
+		const m = messages[index - 1];
+		return m ? m.id : index;
+	}, [messages]);
+	const estimateSize = useCallback((index: number) => {
+		if (index === 0) return loadingMore ? 64 : 0;
+		return 80;
+	}, [loadingMore]);
+	const virtualizer = useVirtualizer({
+		count,
+		getScrollElement: () => scrollRef.current,
+		estimateSize,
+		getItemKey,
+		overscan: 8,
+	});
+
+	// `shouldAdjustScrollPositionOnItemSizeChange` is an instance
+	// property in the installed v3.x of @tanstack/virtual-core
+	// (not a constructor option).  Returning true for items above
+	// the viewport means: when an estimated size resolves to its
+	// real size, the virtualizer compensates scrollOffset so the
+	// user's visible content stays put.  This is the core piece
+	// that prevents the "everything jumps around as images decode"
+	// jank.
+	virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) =>
+		(instance.scrollOffset !== null) && item.start < instance.scrollOffset;
+
+	// Re-measure when the loader row's size class changes.  Without
+	// this, the cached estimateSize for index 0 keeps stale and the
+	// virtualizer doesn't realise the loader expanded/collapsed.
 	useEffect(() => {
-		const el = scrollRef.current;
-		if (!el) return;
+		virtualizer.measure();
+	}, [loadingMore, virtualizer]);
+
+	// ─── Prepend-anchor preservation ─────────────────────────────
+	// When older messages prepend (Discord-style "hit the wall"
+	// pagination), the user's scrollTop in pixels still points at
+	// where they were — but the message they were reading just got
+	// shifted down by the total size of the prepended rows.  We
+	// detect the prepend by watching for `messages[0].id` to change
+	// while length grows, then add the totalSize delta to scrollTop
+	// in a useLayoutEffect (before paint).  Combined with
+	// `shouldAdjustScrollPositionOnItemSizeChange`, this keeps the
+	// reader visually anchored even as the prepended messages'
+	// estimated sizes resolve to real sizes.
+	const prevTotalSizeRef = useRef(0);
+	const prevFirstIdRef = useRef<string | null>(null);
+	const prevMessagesLenRef = useRef(0);
+	const prevRoomForAnchorRef = useRef<string | undefined>(undefined);
+	useLayoutEffect(() => {
+		const currentTotal = virtualizer.getTotalSize();
+		const currentLen = messages.length;
+		const currentFirstId = messages[0]?.id ?? null;
+		const isRoomChange = prevRoomForAnchorRef.current !== room?.id;
+		if (
+			!isRoomChange &&
+			prevFirstIdRef.current &&
+			currentFirstId &&
+			prevFirstIdRef.current !== currentFirstId &&
+			currentLen > prevMessagesLenRef.current
+		) {
+			const delta = currentTotal - prevTotalSizeRef.current;
+			if (delta > 0 && scrollRef.current) {
+				scrollRef.current.scrollTop += delta;
+			}
+		}
+		prevTotalSizeRef.current = currentTotal;
+		prevFirstIdRef.current = currentFirstId;
+		prevMessagesLenRef.current = currentLen;
+		prevRoomForAnchorRef.current = room?.id;
+	});
+
+	// ─── Auto-snap to bottom on room change / call-view exit ────
+	// Single scrollToIndex call replaces the previous multi-stage
+	// snap()/RAF/setTimeout chain.  The virtualizer keeps the
+	// viewport pinned to the bottom as images decode (via
+	// shouldAdjustScrollPositionOnItemSizeChange), so we don't
+	// need staggered re-snaps.
+	useEffect(() => {
 		const isRoomChange = prevRoomIdRef.current !== room?.id;
 		const becameVisible = wasInCallViewRef.current && !isInActiveCallRoom;
 		prevRoomIdRef.current = room?.id;
 		wasInCallViewRef.current = isInActiveCallRoom;
 		if (isRoomChange || becameVisible) {
 			followBottomRef.current = true;
-			// Wipe the "scrolled up" badge when transitioning
-			// rooms or exiting call view — onScroll will re-set
-			// it the moment a meaningful upward scroll happens.
 			setScrolledUp(false);
 		}
 		if (!followBottomRef.current) return;
-
-		// Belt-and-suspenders multi-snap.  scrollHeight at this
-		// moment reflects ONLY the content React has already laid
-		// out — async work (image / avatar decoding, web-fonts
-		// settling, lazy-decoded video posters) keeps growing the
-		// content for a few frames after.  A single scrollTop
-		// assignment lands at "current bottom," which becomes
-		// "above the new bottom" the moment another asset loads.
-		//
-		// Extra wrinkle on initial load: the FIRST snap usually
-		// undershoots because messages haven't fully decoded.  As
-		// more content loads, the browser fires `scroll` events
-		// (the assignment + content growth combo).  onScroll then
-		// reads `distance > 100` and flips followBottomRef = false
-		// EVEN THOUGH the user hasn't touched anything — at which
-		// point ResizeObserver-driven re-snaps stop firing (they're
-		// gated on followBottomRef) and the user is left stranded
-		// somewhere mid-history.
-		//
-		// Counter: during the initial-snap window (first ~1500ms
-		// after a room change / call-view exit), force
-		// followBottomRef back to true before each snap.  The user
-		// hasn't actually scrolled — any drift is content growth
-		// under them — so "stay pinned to the bottom" is the
-		// correct interpretation.  After the window expires, the
-		// onScroll handler can do its normal job.
-		const snap = () => {
-			if (!scrollRef.current) return;
-			followBottomRef.current = true;
-			scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-		};
-		snap();
-		const raf = requestAnimationFrame(snap);
-		// Stagger snaps across the typical late-load window
-		// (avatars, images, embed posters all decode within ~1s
-		// on a fast machine; slow connections take longer but the
-		// ResizeObserver picks those up).
-		const t1 = window.setTimeout(snap, 100);
-		const t2 = window.setTimeout(snap, 300);
-		const t3 = window.setTimeout(snap, 600);
-		const t4 = window.setTimeout(snap, 1200);
-		return () => {
-			cancelAnimationFrame(raf);
-			window.clearTimeout(t1);
-			window.clearTimeout(t2);
-			window.clearTimeout(t3);
-			window.clearTimeout(t4);
-		};
-	}, [messages.length, room?.id, isInActiveCallRoom]);
-
-	// Continuous re-snap on content resize.  ResizeObserver fires
-	// every time the inner content's height changes — async image
-	// decodes, paginated history loading, reactions getting added,
-	// etc.  As long as `followBottomRef.current` is true (user
-	// hasn't scrolled up) we keep the viewport pinned to the bottom.
-	//
-	// IMPORTANT: re-binds when `isInActiveCallRoom` flips so the
-	// observer attaches to the freshly-mounted scroll container
-	// after the call view goes away.  The previous version had
-	// an empty dep list — if the container wasn't mounted at
-	// FIRST mount (because the call view was on top), the
-	// ResizeObserver never attached, and snapping was broken
-	// for the rest of the session.
-	useEffect(() => {
-		const inner = scrollContentRef.current;
-		const el = scrollRef.current;
-		if (!inner || !el) return;
-		const ro = new ResizeObserver(() => {
-			if (followBottomRef.current && scrollRef.current) {
-				scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-			}
-		});
-		ro.observe(inner);
-		return () => ro.disconnect();
-	}, [isInActiveCallRoom]);
-
-	// Watch user scroll position to maintain followBottomRef + drive
-	// the "load more history when scrolled near the top" pagination
-	// fetch.  Flip followBottom false when scrolled above the
-	// bottom-stick threshold; flip true when back inside it.  100px
-	// feels generous — matches the visual "I'm basically at the
-	// bottom" intuition without requiring exact pixel-perfect
-	// anchoring.
-	const loadingMoreRef = useRef(false);
-	const noMoreHistoryRef = useRef<Set<string>>(new Set());
-	// Captured BEFORE pagination, restored INSIDE the useLayoutEffect
-	// below as soon as React commits the longer messages array.  Holds
-	// the "distance from bottom" so the formula is invariant to the
-	// number / size of prepended events:
-	//
-	//   newScrollTop = newScrollHeight - distFromBottom
-	//
-	// If null, no restore is pending — useLayoutEffect is a no-op.
-	//
-	// Why a ref + useLayoutEffect instead of the previous rAF: rAF
-	// fires AFTER the browser has already painted the wrong position
-	// once, so the user sees a single-frame jump where the new
-	// (older) content appears above and their reading position
-	// shifts down.  useLayoutEffect runs after DOM mutation but
-	// BEFORE paint, so the corrected scrollTop is what gets painted.
-	const pendingRestoreRef = useRef<number | null>(null);
-	useLayoutEffect(() => {
-		const el = scrollRef.current;
-		if (!el) return;
-		if (pendingRestoreRef.current === null) return;
-		el.scrollTop = el.scrollHeight - pendingRestoreRef.current;
-		pendingRestoreRef.current = null;
-	}, [messages.length]);
+		if (messages.length === 0) return;
+		// Index of the last real message in the virtualizer's
+		// coordinate space (offset by 1 for the loader row).
+		virtualizer.scrollToIndex(messages.length, { align: 'end' });
+	}, [room?.id, messages.length, isInActiveCallRoom, virtualizer]);
 
 	// ─── Permalink scroll-to-event ─────────────────────────────────
 	// When the parent hands us a `scrollToEvent` target (typically
@@ -630,25 +689,23 @@ export function ChatPane({
 			scrollAttemptsRef.current = 0;
 		}
 
-		const found = messages.some(m => m.id === scrollToEvent.eventId);
-		if (found) {
+		const idx = messages.findIndex(m => m.id === scrollToEvent.eventId);
+		if (idx >= 0) {
 			const id = scrollToEvent.eventId;
-			// Wait one frame so the DOM has the row mounted at its
-			// final position (the previous render may have just
-			// committed prepended events from a pagination pass).
+			// Wait one frame so the virtualizer has rendered the
+			// target row (it may have just committed prepended
+			// events).  +1 because index 0 is the loader.
 			const raf = requestAnimationFrame(() => {
-				const el = scrollRef.current?.querySelector(
-					`[data-message-id="${CSS.escape(id)}"]`,
+				virtualizer.scrollToIndex(idx + 1, { align: 'center', behavior: 'smooth' });
+				setFlashingEventId(id);
+				if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+				flashTimerRef.current = setTimeout(
+					() => setFlashingEventId(null),
+					2000,
 				);
-				if (el instanceof HTMLElement) {
-					el.scrollIntoView({ block: "center", behavior: "smooth" });
-					setFlashingEventId(id);
-					if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
-					flashTimerRef.current = setTimeout(
-						() => setFlashingEventId(null),
-						2000,
-					);
-				}
+				// Disarm the follow-bottom lock so the auto-snap
+				// effect doesn't immediately yank us back down.
+				followBottomRef.current = false;
 			});
 			onScrolledToEvent?.();
 			return () => cancelAnimationFrame(raf);
@@ -671,8 +728,10 @@ export function ChatPane({
 		if (loadingMoreRef.current || !onLoadMoreHistory) return;
 		scrollAttemptsRef.current += 1;
 		loadingMoreRef.current = true;
+		setLoadingMore(true);
 		void onLoadMoreHistory(room.id as RoomId).then((grew) => {
 			loadingMoreRef.current = false;
+			setLoadingMore(false);
 			if (!grew) noMoreHistoryRef.current.add(scrollToEvent.roomId);
 			// State change on grew=true re-runs this effect with the
 			// newer messages list; grew=false flips noMoreHistoryRef
@@ -699,51 +758,52 @@ export function ChatPane({
 			const wantShow = distance >= 200;
 			setScrolledUp(prev => (prev === wantShow ? prev : wantShow));
 
-			// Pagination trigger.  matrix-js-sdk's startClient pulls
-			// initialSyncLimit (200) events per room initially;
-			// without this the user can't scroll past the initial
-			// batch even though Synapse has the full history.  Fire
-			// while the user is still 1000px from the top so the
-			// next 500-event chunk lands BEFORE they reach it — the
-			// scroll never has to stall waiting on the network round-
-			// trip.  The noMoreHistoryRef Set caches "this room has
-			// no more history" so we don't keep firing requests at
-			// the start of the room.
+			// Discord-style "hit the wall" pagination, driven by
+			// the virtualizer's index window rather than scrollTop
+			// (the virtualizer's coordinates are more reliable than
+			// the raw DOM measurements once items start measuring
+			// in dynamically).  Fire when the earliest virtual item
+			// is the loader or the first message.
+			const items = virtualizer.getVirtualItems();
+			const firstItem = items[0];
 			if (
-				el.scrollTop < 1000 &&
+				firstItem &&
+				firstItem.index <= 1 &&
 				!loadingMoreRef.current &&
 				room &&
 				onLoadMoreHistory &&
 				!noMoreHistoryRef.current.has(room.id)
 			) {
 				loadingMoreRef.current = true;
-				// Capture pre-fetch geometry now so the useLayoutEffect
-				// above has the right anchor as soon as React commits
-				// the new messages.  scrollHeight - scrollTop = the
-				// distance from the bottom; preserving that across
-				// the resize keeps the user looking at exactly the
-				// same row regardless of how much content prepends.
-				pendingRestoreRef.current = el.scrollHeight - el.scrollTop;
+				setLoadingMore(true);
 				const roomId = room.id;
 				onLoadMoreHistory(roomId)
 					.then((gotMore) => {
-						if (!gotMore) {
-							noMoreHistoryRef.current.add(roomId);
-							// Nothing came back — no commit will fire
-							// the restore effect, so clear the pending
-							// anchor here so a later pagination doesn't
-							// re-use a stale value.
-							pendingRestoreRef.current = null;
-						}
+						if (!gotMore) noMoreHistoryRef.current.add(roomId);
 					})
 					.finally(() => {
 						loadingMoreRef.current = false;
+						setLoadingMore(false);
 					});
+			}
+
+			// Mobile only: dismiss the on-screen keyboard when the
+			// user scrolls UP by a meaningful amount.  Discord does
+			// this — once you're reading history, the keyboard just
+			// gets in the way.  24px of upward delta is enough to
+			// disqualify rubber-band overscroll without being so
+			// large that a deliberate scroll-up doesn't trigger.
+			if (isMobileShell) {
+				const delta = el.scrollTop - lastScrollTopRef.current;
+				if (delta < -24 && distance > 100) {
+					composeInputRef.current?.blur();
+				}
+				lastScrollTopRef.current = el.scrollTop;
 			}
 		};
 		el.addEventListener("scroll", onScroll, { passive: true });
 		return () => el.removeEventListener("scroll", onScroll);
-	}, [room?.id, onLoadMoreHistory]);
+	}, [room?.id, onLoadMoreHistory, virtualizer]);
 
 	// Proactive pagination when the timeline doesn't overflow the
 	// scroll container.  matrix-js-sdk's initial /sync only loads
@@ -763,8 +823,7 @@ export function ChatPane({
 	// takes over once the user actually has something to scroll.
 	useEffect(() => {
 		const el = scrollRef.current;
-		const inner = scrollContentRef.current;
-		if (!el || !inner) return;
+		if (!el) return;
 		if (!room || !onLoadMoreHistory) return;
 		if (loadingMoreRef.current) return;
 		if (noMoreHistoryRef.current.has(room.id)) return;
@@ -772,19 +831,14 @@ export function ChatPane({
 		// room before /sync has populated its timeline produces no
 		// results and we'd just spin.
 		if (messages.length === 0) return;
-		// Underflow check: the inner content fits inside the scroll
-		// container with room to spare.  Use a small slack (16px) so
-		// near-exact fits don't trigger when only a single line of
-		// padding is missing — that's not actually a "no more
-		// history" problem, just an uninteresting edge case.
-		if (inner.clientHeight >= el.clientHeight - 16) return;
+		// Underflow check: the virtualizer's total content size
+		// fits inside the scroll container with room to spare.
+		// Use a small slack (16px) so near-exact fits don't trigger
+		// when only a single line of padding is missing.
+		if (virtualizer.getTotalSize() >= el.clientHeight - 16) return;
 		const roomId = room.id;
 		loadingMoreRef.current = true;
-		// No scroll-anchor to preserve here — we're at scrollTop = 0
-		// (otherwise the regular scroll-handler path would have
-		// fired), and the user expects new content to APPEAR above
-		// without their viewport jumping.  pendingRestoreRef stays
-		// null; useLayoutEffect doesn't run.
+		setLoadingMore(true);
 		onLoadMoreHistory(roomId)
 			.then((gotMore) => {
 				if (!gotMore) {
@@ -793,8 +847,9 @@ export function ChatPane({
 			})
 			.finally(() => {
 				loadingMoreRef.current = false;
+				setLoadingMore(false);
 			});
-	}, [room?.id, messages.length, onLoadMoreHistory, room]);
+	}, [room?.id, messages.length, onLoadMoreHistory, room, virtualizer]);
 
 	// Global hover tracking for the message-action toolbar.
 	//
@@ -1053,6 +1108,7 @@ export function ChatPane({
 		// child shrink below content, so flex-1 + overflow-y-auto
 		// constrain to the available height as intended.
 		<div className="flex-1 flex flex-col min-w-0 min-h-0">
+			<div className="shrink-0">
 			{/* Suppress the chat-room header when the call view is on
 			    top — the header relates to the room's chat (name,
 			    settings, mod log, flag) and would just be a tease
@@ -1216,6 +1272,7 @@ export function ChatPane({
 					isDm={room.kind === "dm"}
 				/>
 			)}
+			</div>
 
 			{isInActiveCallRoom ? (
 				/* In-call view replaces the normal chat surface for
@@ -1238,160 +1295,210 @@ export function ChatPane({
 			    handler hasn't fired yet (e.g. between the SDK's
 			    timeline mutation and React's commit). */}
 			<div className="relative flex-1 min-h-0">
-			<div ref={scrollRef} className="absolute inset-0 overflow-y-auto px-4 py-4" style={{ overflowAnchor: "auto" }}>
-				{/* Inner content wrapper exists ONLY so the
-				    ResizeObserver in the auto-scroll effect has a
-				    single observable element whose size reflects the
-				    full timeline height (including async image
-				    decodes).  Without it the observer would only
-				    track the first message row.  Layout-neutral —
-				    block-level div, no margins/padding. */}
-				<div ref={scrollContentRef}>
-				{!messagesLoaded ? (
-					// Initial timeline still loading.  Render nothing
-					// rather than flashing "No messages yet." — the
-					// banner only fires when we've genuinely confirmed
-					// the room is empty (load completed, list length 0).
-					null
-				) : messages.length === 0 ? (
-					<div className="text-xs text-muted-foreground italic mt-8 text-center">No messages yet.</div>
-				) : (
-					messages.map((m, i) => {
-						const prev = messages[i - 1];
-						const sameGroup =
-							!!prev &&
-							prev.sender === m.sender &&
-							m.timestamp - prev.timestamp <= GROUP_WINDOW_MS &&
-							!m.replyTo; // a reply is always its own visual group
-						return (
-							<MessageRow
-								key={m.id}
-								message={m}
-								avatarMxc={memberAvatars.get(m.sender)}
-								continuesGroup={sameGroup}
-								isFirst={i === 0}
-								flaggable={flaggable}
-								roomEncrypted={!!room.encrypted}
-								reactions={reactionsByMessage.get(m.id) ?? []}
-								flags={flagsByMessage.get(m.id)}
-								isDm={room.kind === "dm"}
-								receiptsVersion={receiptsVersion ?? 0}
-								memberAvatars={memberAvatars}
-								memberNames={memberNamesByUserId}
-								mentionsViewer={
-									!m.isSelf && !!viewerUserId && messageMentionsUser(m, viewerUserId)
-								}
-								onMentionClick={(userId) => onOpenProfile?.(userId)}
-								onOpenSenderProfile={(userId) => onOpenProfile?.(userId)}
-								botMxids={botMxids}
-								serviceMxids={serviceMxids}
-								pollAggregate={pollsByMessage?.get(m.id)}
-								viewerUserId={viewerUserId}
-								onPollVote={onVoteOnPoll}
-								onPollEnd={onEndPoll}
-								onReact={(emoji) => toggleReaction(m, emoji)}
-								onReply={() => setReplyTarget(m)}
-								// Right-click context menu callbacks.
-								// Quote inserts the message text into
-								// the composer prefixed with `> ` (one
-								// per line) — same shape as the Matrix
-								// reply fallback so quoting + replying
-								// reads as natural conversation.
-								roomId={room.id}
-								onQuote={(text) => {
-									const quoted = text.split("\n").map(l => `> ${l}`).join("\n");
-									setDraft(prev => prev ? `${quoted}\n\n${prev}` : `${quoted}\n\n`);
-									setReplyTarget(m);
-									// Focus the composer so the user can
-									// just start typing.
-									requestAnimationFrame(() => {
-										composeInputRef.current?.focus();
-									});
-								}}
-								onSendDmToSender={onSendDm
-									? () => { void onSendDm(m.sender as UserId); }
-									: undefined}
-								onBlockSender={onBlockSender
-									? () => { void onBlockSender(m.sender as UserId); }
-									: undefined}
-								onFlag={(category, rationale) => onFlag(m.id, category, rationale)}
-								isBot={!!botMxids?.has(m.sender)}
-								// True when the sender is a bot the viewer owns —
-								// drives the flag→delete swap on the action toolbar
-								// (you can't flag your own bot's output, you delete
-								// it instead).  Computed at the parent because
-								// `myOwnedBotMxids` lives up here; cheap O(1) lookup.
-								isOwnedBot={!!myOwnedBotMxids?.has(m.sender)}
-								isHovered={hoveredMessageId === m.id}
-								isFlashing={flashingEventId === m.id}
-								onToggleReactionPill={(reaction) => {
-									if (reaction.myReactionId) onUnreact(reaction);
-									else onReact(m.id, reaction.key);
-								}}
-								// Delete button is shown only when:
-								//   - parent supplied a handler, AND
-								//   - the viewer is the sender OR owns the bot
-								//     that sent it.
-								// Bot ownership comes from the App-level set; the
-								// engine re-checks server-side, so a tampered SPA
-								// can't actually delete other users' content.
-								onDelete={
-									onDeleteMessage && (
-										m.isSelf || !!myOwnedBotMxids?.has(m.sender)
-									)
-										// Suppress delete on pending (local-echo)
-										// events — their id is a SDK-synthetic
-										// stand-in until /sync acks the real
-										// homeserver event id, so a redaction
-										// would 404 with M_NOT_FOUND.  Once the
-										// event flips to confirmed, the row
-										// re-renders with pending=false and the
-										// trash icon comes back automatically.
-										&& !m.pending
-										// Return the promise (don't `void` it) so
-										// the DeleteAction dialog can await the
-										// real network call and surface errors
-										// inline if the engine rejects (403 for
-										// "not your bot", 502 for redaction
-										// failure, network drop).
-										? () => onDeleteMessage(m.id)
-										: undefined
-								}
-								// Admin redact: surfaced for OTHER people's
-								// (and bots the viewer doesn't own) messages
-								// when the viewer is a room admin.  The shield
-								// icon shares the hover toolbar with the
-								// trash button but is visually + semantically
-								// distinct — moderating someone else's content
-								// vs. removing your own.
-								//
-								// Suppressed in DMs.  Matrix creates DMs with
-								// both parties at PL 100 so `canModerateRoom`
-								// reads true, but there is no admin / member
-								// asymmetry in a two-party DM and no public
-								// mod log to audit against — the shield would
-								// be redactingly someone else's message under
-								// the pretense of moderation, which is just
-								// "deleting their message", and that's a
-								// boundary we don't want a one-click button
-								// for.  Each party can still self-delete
-								// their own messages via the trash icon.
-								onAdminRedact={
-									onAdminRedactMessage
-									&& canModerateRoom
-									&& room.kind !== "dm"
-									&& !m.isSelf
-									&& !myOwnedBotMxids?.has(m.sender)
-									&& !m.pending
-										? () => onAdminRedactMessage(m.id)
-										: undefined
-								}
-							/>
-						);
-					})
-				)}
+			{/* Pulsing-favicon loading overlay (mobile only).
+			    Sits above the message scroll area while messages +
+			    media are still settling.  pointer-events-none so
+			    taps fall through to the scroll container.  Fades
+			    out smoothly once `chatVisible` flips to true. */}
+			{isMobileShell && (
+				<div
+					className={cn(
+						"absolute inset-0 z-10 flex items-center justify-center pointer-events-none",
+						"transition-opacity duration-300",
+						chatVisible ? "opacity-0" : "opacity-100",
+					)}
+					aria-hidden={chatVisible}
+				>
+					<img
+						src="/favicon.png"
+						alt=""
+						className="size-16 animate-pulse"
+						style={{ filter: "drop-shadow(0 0 24px rgba(0,0,0,0.4))" }}
+					/>
 				</div>
-			</div>
+			)}
+			{/* TanStack Virtual scroll container.  Owns the scrolling
+			    behaviour:
+			    - DOM windowing (only mount visible rows + overscan)
+			    - Dynamic measurement via ref={virtualizer.measureElement}
+			    - Scroll-position adjustment when items resize past
+			      their estimates (shouldAdjustScrollPositionOnItemSizeChange)
+			    - Block-translation layout — the entire item batch
+			      is translated as a unit so smooth-scroll math
+			      stays correct.
+			    See the useVirtualizer setup near the top of this
+			    component for the rest of the wiring. */}
+			{messagesLoaded && messages.length > 0 ? (
+				<div
+					ref={scrollRef}
+					className="absolute inset-0 overflow-y-auto overscroll-contain"
+					style={{
+						overflowAnchor: "none",
+						contain: "strict",
+						WebkitOverflowScrolling: "touch",
+					}}
+				>
+					<div
+						ref={spacerRef}
+						style={{
+							height: virtualizer.getTotalSize(),
+							width: "100%",
+							position: "relative",
+						}}
+					>
+						{(() => {
+							const items = virtualizer.getVirtualItems();
+							const offset = items[0]?.start ?? 0;
+							return (
+								<div
+									style={{
+										position: "absolute",
+										top: 0,
+										left: 0,
+										width: "100%",
+										transform: `translateY(${offset}px)`,
+									}}
+								>
+									{items.map((virtualRow: VirtualItem) => {
+										// Index 0 is the loader row.  When
+										// loadingMore is true it renders the
+										// pulsing favicon; otherwise it's a
+										// 0-height spacer (still rendered so
+										// the virtualizer's measurement of
+										// index 0 stays consistent).
+										if (virtualRow.index === 0) {
+											return (
+												<div
+													key={virtualRow.key}
+													data-index={virtualRow.index}
+													ref={virtualizer.measureElement}
+												>
+													{loadingMore ? (
+														<div
+															className="flex items-center justify-center py-6 select-none"
+															aria-live="polite"
+															aria-label="Loading older messages"
+														>
+															<img
+																src="/favicon.png"
+																alt=""
+																className="size-10 animate-pulse"
+																style={{ filter: "drop-shadow(0 0 16px rgba(0,0,0,0.4))" }}
+															/>
+														</div>
+													) : null}
+												</div>
+											);
+										}
+										const dataIndex = virtualRow.index - 1;
+										const m = messages[dataIndex];
+										if (!m) return null;
+										const prev = dataIndex > 0 ? messages[dataIndex - 1] : undefined;
+										const sameGroup =
+											!!prev &&
+											prev.sender === m.sender &&
+											m.timestamp - prev.timestamp <= GROUP_WINDOW_MS &&
+											!m.replyTo;
+										const separator = computeDateSeparator(prev?.timestamp, m.timestamp);
+										return (
+											<div
+												key={virtualRow.key}
+												data-index={virtualRow.index}
+												ref={virtualizer.measureElement}
+											>
+												{separator && <DateSeparator label={separator} />}
+												<MessageRow
+													message={m}
+													avatarMxc={memberAvatars.get(m.sender)}
+													continuesGroup={sameGroup}
+													isFirst={dataIndex === 0}
+													flaggable={flaggable}
+													roomEncrypted={!!room.encrypted}
+													reactions={reactionsByMessage.get(m.id) ?? []}
+													flags={flagsByMessage.get(m.id)}
+													isDm={room.kind === "dm"}
+													receiptsVersion={receiptsVersion ?? 0}
+													memberAvatars={memberAvatars}
+													memberNames={memberNamesByUserId}
+													mentionsViewer={
+														!m.isSelf && !!viewerUserId && messageMentionsUser(m, viewerUserId)
+													}
+													onMentionClick={(userId) => onOpenProfile?.(userId)}
+													onOpenSenderProfile={(userId) => onOpenProfile?.(userId)}
+													botMxids={botMxids}
+													serviceMxids={serviceMxids}
+													pollAggregate={pollsByMessage?.get(m.id)}
+													viewerUserId={viewerUserId}
+													onPollVote={onVoteOnPoll}
+													onPollEnd={onEndPoll}
+													onReact={(emoji) => toggleReaction(m, emoji)}
+													onReply={() => setReplyTarget(m)}
+													roomId={room.id}
+													onQuote={(text) => {
+														const quoted = text.split("\n").map(l => `> ${l}`).join("\n");
+														setDraft(prev => prev ? `${quoted}\n\n${prev}` : `${quoted}\n\n`);
+														setReplyTarget(m);
+														requestAnimationFrame(() => {
+															composeInputRef.current?.focus();
+														});
+													}}
+													onSendDmToSender={onSendDm
+														? () => { void onSendDm(m.sender as UserId); }
+														: undefined}
+													onBlockSender={onBlockSender
+														? () => { void onBlockSender(m.sender as UserId); }
+														: undefined}
+													onFlag={(category, rationale) => onFlag(m.id, category, rationale)}
+													isBot={!!botMxids?.has(m.sender)}
+													isOwnedBot={!!myOwnedBotMxids?.has(m.sender)}
+													isHovered={hoveredMessageId === m.id}
+													isFlashing={flashingEventId === m.id}
+													onToggleReactionPill={(reaction) => {
+														if (reaction.myReactionId) onUnreact(reaction);
+														else onReact(m.id, reaction.key);
+													}}
+													onDelete={
+														onDeleteMessage && (
+															m.isSelf || !!myOwnedBotMxids?.has(m.sender)
+														)
+															&& !m.pending
+															? () => onDeleteMessage(m.id)
+															: undefined
+													}
+													onAdminRedact={
+														onAdminRedactMessage
+															&& canModerateRoom
+															&& room.kind !== "dm"
+															&& !m.isSelf
+															&& !myOwnedBotMxids?.has(m.sender)
+															&& !m.pending
+																? () => onAdminRedactMessage(m.id)
+																: undefined
+													}
+												/>
+											</div>
+										);
+									})}
+								</div>
+							);
+						})()}
+					</div>
+				</div>
+			) : !messagesLoaded ? null : (
+				isMobileShell ? (
+					<div className="flex flex-col items-center justify-center gap-3 py-16 px-6 text-center">
+						<div className="size-16 rounded-2xl bg-foreground/[0.06] flex items-center justify-center">
+							<MessageSquareIcon className="size-7 text-muted-foreground" strokeWidth={1.8} />
+						</div>
+						<div className="text-[17px] font-medium text-foreground">No messages yet</div>
+						<p className="text-[15px] text-muted-foreground max-w-[260px] leading-snug">
+							Say hi to start the conversation.
+						</p>
+					</div>
+				) : (
+					<div className="text-xs text-muted-foreground italic mt-8 text-center">No messages yet.</div>
+				)
+			)}
 			{/* "Jump to newest" floating button — Discord / Slack
 			    pattern.  Appears at the bottom-center of the
 			    scroll area when the user has scrolled meaningfully
@@ -1402,11 +1509,14 @@ export function ChatPane({
 				<button
 					type="button"
 					onClick={() => {
-						const el = scrollRef.current;
-						if (!el) return;
-						el.scrollTop = el.scrollHeight;
 						followBottomRef.current = true;
 						setScrolledUp(false);
+						if (messages.length > 0) {
+							virtualizer.scrollToIndex(messages.length, {
+								align: 'end',
+								behavior: 'smooth',
+							});
+						}
 					}}
 					className={cn(
 						"absolute bottom-3 left-1/2 -translate-x-1/2",
@@ -1454,7 +1564,24 @@ export function ChatPane({
 					</div>
 				</div>
 			) : (
-			<div className="border-t border-border p-3">
+			<div
+				className={cn(
+					"border-t",
+					isMobileShell
+						// Mobile: translucent material that matches the
+						// MobileTopBar / MobileTabBar so the composer
+						// feels like part of the system chrome.  Extends
+						// through env(safe-area-inset-bottom) so the
+						// home-indicator strip blends in.
+						? "bg-card/70 backdrop-blur-2xl backdrop-saturate-150 border-foreground/10 px-3 pt-2"
+						: "border-border p-3",
+				)}
+				style={
+					isMobileShell
+						? { paddingBottom: "max(env(safe-area-inset-bottom), 0.5rem)" }
+						: undefined
+				}
+			>
 				<TypingIndicator
 					userIds={typingUserIds ?? []}
 					members={members ?? null}
@@ -1490,82 +1617,170 @@ export function ChatPane({
 					onSubmit={e => { e.preventDefault(); send(); }}
 					className="flex gap-2 items-end"
 				>
+					{/* Hidden file input — referenced by both desktop
+					    inline button and the mobile "+" picker. */}
 					{onSendAttachment && (
-						<>
-							<input
-								ref={fileInputRef}
-								type="file"
-								multiple
-								className="hidden"
-								onChange={e => {
-									const list = e.target.files;
-									if (list && list.length > 0) {
-										pickAttachments(Array.from(list));
-									}
-									// Reset so the same file(s) can be re-
-									// picked after a remove + re-attach.
-									e.target.value = "";
-								}}
-								disabled={uploading}
-							/>
-							<button
-								type="button"
-								onClick={() => fileInputRef.current?.click()}
-								disabled={uploading || pendingAttachments.length >= MAX_PENDING_ATTACHMENTS}
-								className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-								title={
-									pendingAttachments.length >= MAX_PENDING_ATTACHMENTS
-										? `Up to ${MAX_PENDING_ATTACHMENTS} files per message`
-										: "Attach files"
+						<input
+							ref={fileInputRef}
+							type="file"
+							multiple
+							className="hidden"
+							onChange={e => {
+								const list = e.target.files;
+								if (list && list.length > 0) {
+									pickAttachments(Array.from(list));
 								}
-								aria-label="Attach files"
-							>
-								<Paperclip className="h-4 w-4" />
-							</button>
-						</>
+								// Reset so the same file(s) can be re-
+								// picked after a remove + re-attach.
+								e.target.value = "";
+							}}
+							disabled={uploading}
+						/>
 					)}
-					{onCreatePoll && (
-						// Poll button — opens the create-poll modal.  Sits
-						// between the paperclip and the GIF pill so the
-						// "media-ish actions" cluster reads as one group.
-						<button
-							type="button"
-							onClick={() => setPollDialogOpen(true)}
-							disabled={uploading || pendingAttachments.length > 0}
-							className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-							title="Create a poll"
-							aria-label="Create a poll"
-						>
-							<BarChart3 className="h-4 w-4" />
-						</button>
-					)}
-					{onSendAttachment && klipyEnabled && accessToken && (
-						// GIF picker — Discord-style "GIF" text pill.  Sized
-						// to h-8 so it shares a baseline with the paperclip
-						// button (which is h-4 icon + p-2 = 32px); items-end
-						// on the surrounding form keeps both anchored to
-						// the bottom of the multi-line composer.
-						<MediaPicker
-							accessToken={accessToken}
-							disabled={uploading || pendingAttachments.length > 0}
-							onPick={sendMedia}
-						>
-							<button
-								type="button"
-								disabled={uploading || pendingAttachments.length > 0}
-								className={cn(
-									"h-8 px-2 rounded-md inline-flex items-center justify-center",
-									"text-[10px] font-bold tracking-wide",
-									"text-muted-foreground hover:text-foreground hover:bg-accent",
-									"border border-foreground/20 hover:border-foreground/40",
-									"transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
+					{isMobileShell ? (
+						// iMessage-style attachments picker.  All
+						// media/poll/GIF entries live behind a single
+						// "+" button so the composer doesn't crowd the
+						// row.  Tap → popover; choose → action fires,
+						// popover dismisses.
+						<Popover open={composerMenuOpen} onOpenChange={setComposerMenuOpen}>
+							<PopoverTrigger asChild>
+								<button
+									type="button"
+									disabled={uploading}
+									aria-label="Add attachment"
+									className={cn(
+										"shrink-0 size-9 rounded-full",
+										"text-foreground bg-foreground/[0.08] active:bg-foreground/[0.16]",
+										"flex items-center justify-center transition-colors",
+										"disabled:opacity-40 disabled:cursor-not-allowed",
+									)}
+								>
+									<Plus className="size-[20px]" strokeWidth={2.5} />
+								</button>
+							</PopoverTrigger>
+							<PopoverContent side="top" align="start" className="w-56 p-1">
+								{onSendAttachment && (
+									<button
+										type="button"
+										disabled={pendingAttachments.length >= MAX_PENDING_ATTACHMENTS}
+										onClick={() => {
+											setComposerMenuOpen(false);
+											void hapticImpact("light");
+											// Delay one tick so the popover
+											// can dismiss before the system
+											// file picker takes over input
+											// focus.
+											setTimeout(() => fileInputRef.current?.click(), 0);
+										}}
+										className={cn(
+											"w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-[15px]",
+											"hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
+										)}
+									>
+										<Paperclip className="size-[18px] text-muted-foreground" />
+										<span>Photos &amp; Files</span>
+									</button>
 								)}
-								title="Send a GIF"
-								aria-label="Send a GIF"
-							>
-								GIF
-							</button>
-						</MediaPicker>
+								{onCreatePoll && (
+									<button
+										type="button"
+										disabled={pendingAttachments.length > 0}
+										onClick={() => {
+											setComposerMenuOpen(false);
+											void hapticImpact("light");
+											setPollDialogOpen(true);
+										}}
+										className={cn(
+											"w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-[15px]",
+											"hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
+										)}
+									>
+										<BarChart3 className="size-[18px] text-muted-foreground" />
+										<span>Poll</span>
+									</button>
+								)}
+								{onSendAttachment && klipyEnabled && accessToken && (
+									<MediaPicker
+										accessToken={accessToken}
+										disabled={pendingAttachments.length > 0}
+										onPick={(m) => {
+											setComposerMenuOpen(false);
+											sendMedia(m);
+										}}
+									>
+										<button
+											type="button"
+											disabled={pendingAttachments.length > 0}
+											onClick={() => void hapticImpact("light")}
+											className={cn(
+												"w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-[15px]",
+												"hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
+											)}
+										>
+											<span className="inline-flex items-center justify-center size-[18px] text-[10px] font-bold tracking-wide text-muted-foreground border border-current rounded-sm">
+												GIF
+											</span>
+											<span>GIF</span>
+										</button>
+									</MediaPicker>
+								)}
+							</PopoverContent>
+						</Popover>
+					) : (
+						<>
+							{onSendAttachment && (
+								<button
+									type="button"
+									onClick={() => fileInputRef.current?.click()}
+									disabled={uploading || pendingAttachments.length >= MAX_PENDING_ATTACHMENTS}
+									className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+									title={
+										pendingAttachments.length >= MAX_PENDING_ATTACHMENTS
+											? `Up to ${MAX_PENDING_ATTACHMENTS} files per message`
+											: "Attach files"
+									}
+									aria-label="Attach files"
+								>
+									<Paperclip className="h-4 w-4" />
+								</button>
+							)}
+							{onCreatePoll && (
+								<button
+									type="button"
+									onClick={() => setPollDialogOpen(true)}
+									disabled={uploading || pendingAttachments.length > 0}
+									className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+									title="Create a poll"
+									aria-label="Create a poll"
+								>
+									<BarChart3 className="h-4 w-4" />
+								</button>
+							)}
+							{onSendAttachment && klipyEnabled && accessToken && (
+								<MediaPicker
+									accessToken={accessToken}
+									disabled={uploading || pendingAttachments.length > 0}
+									onPick={sendMedia}
+								>
+									<button
+										type="button"
+										disabled={uploading || pendingAttachments.length > 0}
+										className={cn(
+											"h-8 px-2 rounded-md inline-flex items-center justify-center shrink-0",
+											"text-[10px] font-bold tracking-wide",
+											"text-muted-foreground hover:text-foreground hover:bg-accent",
+											"border border-foreground/20 hover:border-foreground/40",
+											"transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
+										)}
+										title="Send a GIF"
+										aria-label="Send a GIF"
+									>
+										GIF
+									</button>
+								</MediaPicker>
+							)}
+						</>
 					)}
 					<div className="relative flex-1">
 						{mentionToken && matches.length > 0 && (
@@ -1652,46 +1867,65 @@ export function ChatPane({
 							// or queue another message while the previous one's
 							// attachment is still being uploaded.
 							disabled={uploading}
-							autoFocus
+							// Desktop: focus on chat open so the user
+							// can start typing immediately.  Mobile:
+							// don't pop the iOS keyboard when entering
+							// a chat — Discord / iMessage convention.
+							// User taps the composer when ready to type.
+							autoFocus={!isMobileShell}
 							className={cn(
-								// Match the Input component's visual style so the
-								// composer slot looks identical at single-line
-								// (one row).  Auto-grow handled by the layout
-								// effect below — reset height to auto, then
-								// set to scrollHeight, capped at max-h.
-								"flex w-full rounded-md border border-foreground/15 bg-transparent px-3 py-1.5 text-base shadow-sm transition-colors",
-								"hover:border-foreground/25",
+								"flex w-full transition-colors",
 								"placeholder:text-muted-foreground",
-								// Tone down the focus accent on dark themes — `--ring`
-							// resolves to the bright theme primary, which next
-							// to the muted bubble row felt over-saturated.  Plain
-							// `ring-1` plus a 50%-alpha primary border is enough
-							// affordance without lighting up the whole composer.
-							"focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:border-ring",
-							"dark:focus-visible:ring-primary/40 dark:focus-visible:border-primary/40",
 								"disabled:cursor-not-allowed disabled:opacity-50",
-								"md:text-sm",
-								// Disable the manual resize handle — auto-grow
-								// drives height; a manual handle would fight it.
-								"resize-none",
-								// Prevent overflow scrollbar flash while resizing
-								// — overflow only kicks in once we hit max-h.
-								"overflow-y-auto",
+								"resize-none overflow-y-auto",
+								"leading-normal",
 								// Cap the height so a 50-line paste doesn't eat
 								// the chat.  Tracks Discord — about 12 rows.
 								"max-h-[50vh]",
-								// Snug single-line baseline.  leading-normal +
-								// py-1.5 lands at ~36px to match the Input
-								// component's h-9.
-								"leading-normal min-h-9",
+								isMobileShell
+									// iOS-style pill: tinted fill, no border, generous padding.
+									? "rounded-[18px] bg-foreground/[0.08] focus:bg-foreground/[0.12] border-0 px-4 py-2 text-[16px] min-h-9 outline-none ring-0 focus:outline-none focus:ring-0"
+									// Desktop: shadcn Input-matched look with focus ring.
+									: cn(
+										"rounded-md border border-foreground/15 bg-transparent px-3 py-1.5 text-base shadow-sm",
+										"hover:border-foreground/25",
+										// Tone down the focus accent on dark themes — `--ring`
+										// resolves to the bright theme primary, which next
+										// to the muted bubble row felt over-saturated.  Plain
+										// `ring-1` plus a 50%-alpha primary border is enough
+										// affordance without lighting up the whole composer.
+										"focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:border-ring",
+										"dark:focus-visible:ring-primary/40 dark:focus-visible:border-primary/40",
+										"md:text-sm",
+										"min-h-9",
+									),
 							)}
 						/>
 					</div>
-					{/* Send button removed — Enter on the input submits the
-					    form, same flow modern chat clients (Discord,
-					    Telegram, iMessage) use.  The placeholder swaps to
-					    "Sending…" while an attachment uploads so we still
-					    have a visible "in flight" indicator. */}
+					{/* Desktop: no send button — Enter submits the
+					    form (same flow Discord / Telegram / iMessage
+					    use).  Mobile: an iOS-style paper-arrow send
+					    button surfaces when the draft has content or
+					    attachments are pending.  Tap-to-send is the
+					    primary affordance on touch; the placeholder
+					    "Sending…" doubles as the in-flight state. */}
+					{isMobileShell && (draft.trim().length > 0 || pendingAttachments.length > 0) && (
+						<button
+							type="submit"
+							disabled={uploading}
+							onClick={() => void hapticImpact("medium")}
+							aria-label="Send"
+							className={cn(
+								"shrink-0 size-9 rounded-full",
+								"bg-primary text-primary-foreground",
+								"flex items-center justify-center",
+								"active:opacity-80 transition-opacity",
+								"disabled:opacity-50",
+							)}
+						>
+							<ArrowUp className="size-5" strokeWidth={2.75} />
+						</button>
+					)}
 				</form>
 			</div>
 			)}
@@ -1856,6 +2090,62 @@ function MessageRow({
 	// Right-click context menu state.  Cursor-positioned, dismissed
 	// via the generic ContextMenu primitive's outside-mousedown handler.
 	const [ctxMenuPos, setCtxMenuPos] = useState<{ x: number; y: number } | null>(null);
+	// Long-press handling for touch.  iOS users get the context
+	// menu on a sustained press; same menu the right-click uses on
+	// desktop.  500ms threshold matches iOS Messages.  Cancelled by
+	// any move or release before the timer fires.
+	const longPressTimerRef = useRef<number | null>(null);
+	const longPressStartRef = useRef<{ x: number; y: number } | null>(null);
+	const cancelLongPress = useCallback(() => {
+		if (longPressTimerRef.current !== null) {
+			window.clearTimeout(longPressTimerRef.current);
+			longPressTimerRef.current = null;
+		}
+		longPressStartRef.current = null;
+	}, []);
+	// Swipe-right-to-reply.  Captured alongside the long-press
+	// gesture so both share the same touchstart anchor — long-press
+	// fires if the finger stays put; swipe fires if it travels
+	// right past the threshold without going vertical.
+	const SWIPE_REPLY_THRESHOLD = 56;
+	const swipeRepliedRef = useRef(false);
+	const handleTouchStart = useCallback((e: React.TouchEvent) => {
+		const t = e.touches[0];
+		if (!t) return;
+		longPressStartRef.current = { x: t.clientX, y: t.clientY };
+		swipeRepliedRef.current = false;
+		longPressTimerRef.current = window.setTimeout(() => {
+			void hapticImpact("medium");
+			const start = longPressStartRef.current;
+			if (start) setCtxMenuPos(start);
+			longPressTimerRef.current = null;
+		}, 500);
+	}, []);
+	const handleTouchMove = useCallback((e: React.TouchEvent) => {
+		const t = e.touches[0];
+		const start = longPressStartRef.current;
+		if (!t || !start) return;
+		const dx = t.clientX - start.x;
+		const dy = t.clientY - start.y;
+		const absDx = Math.abs(dx);
+		const absDy = Math.abs(dy);
+		// Any movement >8px cancels the long-press.
+		if (absDx > 8 || absDy > 8) {
+			if (longPressTimerRef.current !== null) {
+				window.clearTimeout(longPressTimerRef.current);
+				longPressTimerRef.current = null;
+			}
+		}
+		// Horizontal swipe right past threshold → reply.  Only fires
+		// once per gesture; require the horizontal component to
+		// dominate so vertical scrolls don't accidentally trigger.
+		if (!swipeRepliedRef.current && dx > SWIPE_REPLY_THRESHOLD && absDx > absDy * 1.5) {
+			swipeRepliedRef.current = true;
+			void hapticImpact("light");
+			onReply();
+			longPressStartRef.current = null;
+		}
+	}, [onReply]);
 	// Popover state stays local to the row — only relevant for THIS
 	// row's React picker.  Combined with the parent-supplied
 	// `isHovered` to keep the toolbar visible while the user picks
@@ -1880,7 +2170,11 @@ function MessageRow({
 	// + including it in `showActions` keeps the toolbar AND the
 	// dialog visible until the operator commits or cancels.
 	const [adminRedactDialogOpen, setAdminRedactDialogOpen] = useState(false);
-	const showActions = isHovered || reactOpen || deleteDialogOpen || adminRedactDialogOpen;
+	// Hover toolbar is desktop-only — on touch, :hover sticks after
+	// any tap and the toolbar floats permanently, looking broken.
+	// Mobile users get the same actions via long-press (handled by
+	// the touch handlers below) which opens MessageContextMenu.
+	const showActions = !isMobileShell && (isHovered || reactOpen || deleteDialogOpen || adminRedactDialogOpen);
 	const handleDelete = onDelete ? () => setDeleteDialogOpen(true) : undefined;
 	const handleAdminRedact = onAdminRedact
 		? () => setAdminRedactDialogOpen(true)
@@ -1913,10 +2207,18 @@ function MessageRow({
 	//     Discord, iMessage) does on reaction toggle and is what
 	//     makes "no reactions" stacks feel natural.
 	const hasReactions = reactions.length > 0;
-	const rowPadding = cn(
-		continuesGroup ? "pt-0" : "pt-4",
-		hasReactions ? "pb-7" : "pb-0.5",
-	);
+	// Mobile: tighter rhythm.  The reaction pills now flow inside
+	// the seen-row wrapper underneath the bubble (instead of being
+	// absolutely positioned and needing a reserved `pb-7` landing
+	// zone), so the row never needs the extra 26px of bottom gutter
+	// for reactions.  New-group top is also pulled in from 16px →
+	// 8px since mobile viewports waste vertical space fast.
+	const rowPadding = isMobileShell
+		? cn(continuesGroup ? "pt-0" : "pt-2", "pb-0.5")
+		: cn(
+			continuesGroup ? "pt-0" : "pt-4",
+			hasReactions ? "pb-7" : "pb-0.5",
+		);
 
 	// Discord-style mention highlight: left accent border + faint
 	// background wash spanning the full row.  Subtle but unmissable
@@ -1998,7 +2300,22 @@ function MessageRow({
 	return (
 		<div
 			data-message-id={message.id}
-			className={cn("flex gap-3 items-start", rowPadding, mentionHighlight, flashHighlight)}
+			className={cn(
+				"flex gap-3 items-start",
+				rowPadding,
+				mentionHighlight,
+				flashHighlight,
+				// On mobile, suppress native text-selection +
+				// the iOS Copy / Look Up / Translate callout so
+				// our long-press handler can fire cleanly with
+				// haptic feedback.  Without this, WebKit intercepts
+				// the press, selects the word, and pops its native
+				// menu before the JS timer fires — user gets the
+				// native menu instead of our context menu.  Desktop
+				// keeps selection enabled (cursor / copy via Cmd-C
+				// is the standard expectation there).
+				isMobileShell && "select-none [-webkit-user-select:none] [-webkit-touch-callout:none]",
+			)}
 			onContextMenu={(e) => {
 				// Suppress when right-clicking inside an interactive
 				// element that has its own context menu (media, links).
@@ -2008,6 +2325,10 @@ function MessageRow({
 				e.stopPropagation();
 				setCtxMenuPos({ x: e.clientX, y: e.clientY });
 			}}
+			onTouchStart={handleTouchStart}
+			onTouchMove={handleTouchMove}
+			onTouchEnd={cancelLongPress}
+			onTouchCancel={cancelLongPress}
 		>
 			<AvatarSlot
 				mxc={avatarMxc}
@@ -2099,7 +2420,11 @@ function MessageRow({
 							// encrypted rooms — see roomEncrypted prop above.
 							<UrlPreviewSlot text={message.text} />
 						)}
-						{reactions.length > 0 && (
+						{/* Desktop: reactions float absolute beneath the
+						    bubble at the left edge.  Mobile: rendered
+						    inside the seen-row wrapper below so they
+						    sit in line with the seen-by avatars. */}
+						{reactions.length > 0 && !isMobileShell && (
 							<div className="absolute left-0 top-full">
 								<ReactionPills reactions={reactions} onToggle={onToggleReactionPill} />
 							</div>
@@ -2120,12 +2445,49 @@ function MessageRow({
 						    when in row flow, leaving an 18px gap
 						    below every bubble.  Now the bubble alone
 						    defines row height. */}
-						<div className="absolute top-0 left-full ml-2 flex flex-row items-center gap-2 shrink-0 whitespace-nowrap">
+						<div
+							className={cn(
+								"flex flex-row items-center gap-2",
+								// Desktop: anchor next to the bubble's
+								// right edge — shrink-0 + whitespace-
+								// nowrap keep the toolbar + seen-by
+								// indicator on a single line beside
+								// the bubble.
+								// Mobile: flow underneath the bubble.
+								// Reactions + seen-by share this row;
+								// flex-wrap so a long reaction strip
+								// wraps gracefully instead of pushing
+								// the seen avatars off-screen.
+								// Self → right-aligned to match the
+								// sent bubble's right edge; non-self →
+								// left-aligned under the received
+								// bubble.
+								isMobileShell
+									// Always left-aligned beneath the
+									// bubble to match Koven's left-
+									// aligned bubble column.
+									? "mt-1 flex-wrap justify-start"
+									: "absolute top-0 left-full ml-2 shrink-0 whitespace-nowrap",
+							)}
+						>
+						{/* Mobile: reactions in line with seen-by.
+						    Limited to the most-recent 4 (slice from
+						    the tail) so the row stays inside the
+						    bubble's width on phone-sized viewports. */}
+						{isMobileShell && reactions.length > 0 && (
+							<ReactionPills
+								reactions={reactions.slice(-4)}
+								onToggle={onToggleReactionPill}
+							/>
+						)}
 						{/* Seen-by indicator on YOUR sent messages.
 						    DM rooms get a "Read · time" line; group
 						    rooms get an avatar stack + count that
-						    opens a modal listing every reader. */}
-						{message.isSelf && !message.pending && (
+						    opens a modal listing every reader.
+						    Suppressed on mobile to reduce clutter —
+						    expected to surface via long-press menu
+						    once that's wired. */}
+						{message.isSelf && !message.pending && !isMobileShell && (
 							<SeenIndicator
 								roomId={message.roomId}
 								eventId={message.id}
@@ -2149,21 +2511,28 @@ function MessageRow({
 						    deliberately fluid so popovers from the
 						    react-picker / delete-confirm don't get
 						    constrained on first paint. */}
-						<div className="min-h-8 flex items-start">
-							{showActions && (
-								<MessageActions
-									onReact={onReact}
-									onReply={onReply}
-									onFlagClick={() => setFlagDialogOpen(true)}
-									showFlag={canFlag}
-									onDelete={handleDelete}
-									onAdminRedact={handleAdminRedact}
-									reactOpen={reactOpen}
-									onReactOpenChange={setReactOpen}
-									className="shrink-0"
-								/>
-							)}
-						</div>
+						{/* On desktop the slot reserves h-8 so hovering
+						    doesn't shift layout.  On mobile the
+						    toolbar never renders (long-press menu
+						    instead), so the empty slot would just
+						    bloat every row by 32px — drop it. */}
+						{!isMobileShell && (
+							<div className="min-h-8 flex items-start">
+								{showActions && (
+									<MessageActions
+										onReact={onReact}
+										onReply={onReply}
+										onFlagClick={() => setFlagDialogOpen(true)}
+										showFlag={canFlag}
+										onDelete={handleDelete}
+										onAdminRedact={handleAdminRedact}
+										reactOpen={reactOpen}
+										onReactOpenChange={setReactOpen}
+										className="shrink-0"
+									/>
+								)}
+							</div>
+						)}
 					</div>
 				</div>
 			</div>
@@ -2356,7 +2725,14 @@ function MessageBubble({
 	// markdown paragraphs/lists handle their own whitespace, and
 	// keeping pre-wrap on top of them would re-introduce the literal
 	// blank lines between blocks.
-	const baseBubble = "inline-block max-w-[60ch] px-3 py-2 rounded-xl text-sm leading-snug break-words";
+	// On mobile cap against the viewport directly (vw) so the bubble
+	// can't out-grow the screen — the desktop `60ch` cap is character-
+	// based and doesn't constrain on phones (and `%` resolves against
+	// the bubble's `w-fit` parent which is itself content-sized).
+	const baseBubble = cn(
+		"inline-block px-3 py-2 rounded-2xl text-[15px] leading-snug break-words",
+		isMobileShell ? "max-w-[72vw]" : "max-w-[60ch] text-sm rounded-xl",
+	);
 	// On light themes `--primary` is already a dark surface, so the
 	// bubble reads fine.  On dark themes `--primary` is the bright
 	// theme-accent (e.g. neon pink, vivid cyan) which washes out
@@ -2441,7 +2817,7 @@ function MessageBubble({
 				// Match the bubble's max-width semantics so the line
 				// can wrap into 2 if 3 large glyphs don't fit on the
 				// row, but otherwise paint with no chrome.
-				"max-w-[60ch]",
+				isMobileShell ? "max-w-[78%]" : "max-w-[60ch]",
 			)}>
 				<div className={cn(sizeClass, "leading-none break-words")}>
 					{message.text}
@@ -3469,6 +3845,53 @@ function TypingIndicator({
 			</span>
 			<span className="truncate">
 				{label}<span aria-hidden>…</span>
+			</span>
+		</div>
+	);
+}
+
+// ── Date separators ──────────────────────────────────────────────
+//
+// Inline timeline markers shown between message groups when there's
+// a meaningful gap.  iOS Messages convention: every day boundary
+// gets a date label (Today / Yesterday / weekday / full date), and
+// significant within-day gaps (>1 hour) get a time stamp.  Combined
+// into a single centered label so the timeline still scans cleanly.
+
+const SEPARATOR_TIME_GAP_MS = 60 * 60_000; // 1 hour
+
+function computeDateSeparator(prevTs: number | undefined, currentTs: number): string | null {
+	if (!currentTs) return null;
+	const current = new Date(currentTs);
+	if (prevTs === undefined) return formatSeparator(current);
+	const prev = new Date(prevTs);
+	const sameDay = prev.toDateString() === current.toDateString();
+	if (!sameDay) return formatSeparator(current);
+	if (currentTs - prevTs > SEPARATOR_TIME_GAP_MS) {
+		return current.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+	}
+	return null;
+}
+
+function formatSeparator(d: Date): string {
+	const today = new Date();
+	const yesterday = new Date(today);
+	yesterday.setDate(today.getDate() - 1);
+	const dayLabel =
+		d.toDateString() === today.toDateString()      ? "Today"
+		: d.toDateString() === yesterday.toDateString() ? "Yesterday"
+		: (today.getTime() - d.getTime() < 7 * 24 * 60 * 60_000)
+			? d.toLocaleDateString(undefined, { weekday: "long" })
+			: d.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
+	const timeLabel = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+	return `${dayLabel} ${timeLabel}`;
+}
+
+function DateSeparator({ label }: { label: string }) {
+	return (
+		<div className="w-full flex items-center justify-center py-2 select-none">
+			<span className="text-[11px] uppercase tracking-wider font-semibold text-muted-foreground/80 text-center">
+				{label}
 			</span>
 		</div>
 	);

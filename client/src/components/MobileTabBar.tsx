@@ -1,34 +1,33 @@
-// MobileTabBar — solid tab bar that leans into the iOS home-
-// indicator strip rather than fighting it.  The bar's bg-card extends
-// through the safe-area zone at the bottom, and each tab button
-// shares the same colour with rounded top corners — so each tab
-// reads as a piece of the bar that pokes up into the content.
+// MobileTabBar — translucent edge-to-edge iOS tab bar (iOS 15-25
+// style, pre-Liquid-Glass).  Tried a floating Liquid Glass pill;
+// the edge-to-edge form reads better against Koven's chat surfaces.
 //
-// Replaces an earlier floating-glass pill design.  The pill always
-// fought the persistent home-indicator strip iOS / the Tauri mobile
-// shell paints below it; this version embraces the strip and treats
-// it as the bar's foundation.
-//
-// Five tabs:
-//
-//   • Chats   — DMs only (1:1 conversations)
-//   • Rooms   — orphan rooms not assigned to any space (small groups
-//               that don't belong to a community)
-//   • Spaces  — list of joined spaces; drilling in shows that
-//               space's channel list (RoomList)
-//   • Explore — discover new public rooms / spaces
+// Four tabs:
+//   • Chats   — DMs (1:1 conversations)
+//   • Spaces  — list of joined spaces, drill in to see rooms
+//   • Explore — discover public spaces / rooms
 //   • Me      — profile + settings + sign out
 //
-// Layout note: the outer <nav> still occupies vertical space so the
-// `bottom: calc(env(safe-area-inset-bottom) + 56px)` in App.tsx's
-// content overlays continues to work — the parent doesn't have to
-// know we changed style.
+// Hidden in a chat (App.tsx gates rendering on `!state.activeRoomId`).
+//
+// HIG calibration:
+//   - 49pt content row.
+//   - Translucent bg-card/70 + backdrop-blur-2xl + saturate-150 lets
+//     content tint through the material (the half of iOS Materials
+//     that pairs with the blur — without the saturation boost the
+//     blur reads washed-out).
+//   - 0.5pt top hairline.
+//   - The translucent strip extends through env(safe-area-inset-bottom)
+//     so the bar reads as one continuous piece down to the screen edge.
+//   - Active state: stroke 2.5 + 27pt + text-foreground; inactive
+//     stroke 1.9 + 25pt + text-muted-foreground.  Label semibold when
+//     active, medium when not.
 
 import type { ReactNode } from "react";
-import { MessageSquare, Compass, User } from "lucide-react";
+import { MessageSquare, Compass, LayoutGrid, User } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export type MobileTab = "chats" | "explore" | "me";
+export type MobileTab = "chats" | "spaces" | "explore" | "me";
 
 interface MobileTabBarProps {
 	active: MobileTab;
@@ -41,13 +40,28 @@ interface MobileTabBarProps {
 interface TabDef {
 	key: MobileTab;
 	label: string;
-	icon: ReactNode;
+	render(active: boolean): ReactNode;
+}
+
+const ICON_SIZE_ACTIVE = 27;
+const ICON_SIZE_INACTIVE = 25;
+
+function tabIcon(Comp: typeof MessageSquare, active: boolean): ReactNode {
+	return (
+		<Comp
+			width={active ? ICON_SIZE_ACTIVE : ICON_SIZE_INACTIVE}
+			height={active ? ICON_SIZE_ACTIVE : ICON_SIZE_INACTIVE}
+			strokeWidth={active ? 2.5 : 1.9}
+			className="block transition-[width,height,stroke-width] duration-150"
+		/>
+	);
 }
 
 const TABS: TabDef[] = [
-	{ key: "chats",   label: "Chats",   icon: <MessageSquare className="h-[18px] w-[18px]" strokeWidth={2.2} /> },
-	{ key: "explore", label: "Explore", icon: <Compass       className="h-[18px] w-[18px]" strokeWidth={2.2} /> },
-	{ key: "me",      label: "Me",      icon: <User          className="h-[18px] w-[18px]" strokeWidth={2.2} /> },
+	{ key: "chats",   label: "Chats",   render: (a) => tabIcon(MessageSquare, a) },
+	{ key: "spaces",  label: "Spaces",  render: (a) => tabIcon(LayoutGrid,    a) },
+	{ key: "explore", label: "Explore", render: (a) => tabIcon(Compass,       a) },
+	{ key: "me",      label: "Me",      render: (a) => tabIcon(User,          a) },
 ];
 
 export function MobileTabBar({ active, onChange, unreadByTab }: MobileTabBarProps) {
@@ -56,24 +70,23 @@ export function MobileTabBar({ active, onChange, unreadByTab }: MobileTabBarProp
 			aria-label="Primary"
 			className={cn(
 				"shrink-0 w-full",
-				// Bg-background = the same colour the safe-area /
-				// home-indicator strip paints with.  We do NOT pad
-				// for the safe area inside the bar — that just adds a
-				// big visible gap below the labels.  Instead the
-				// bar ends right under its content, and the OS-
-				// reserved strip below paints with the body's
-				// bg-background (= bar's bg) and reads as a seamless
-				// continuation of the bar.
-				"bg-background",
-				// Top corners rounded on the container itself.
-				// Buttons inside stay flat.
-				"rounded-t-3xl",
-				// Top hairline separates the bar from chat content
-				// scrolling above it.
-				"border-t border-border",
+				// Translucent material — bg-card carries the theme so
+				// light themes get a light-translucent bar, dark themes
+				// dark-translucent.  Saturation boost is the missing
+				// half of iOS Materials — without it the backdrop blur
+				// reads washed-out next to native bars.
+				"bg-card/70 backdrop-blur-2xl backdrop-saturate-150",
+				"border-t border-foreground/10",
 			)}
+			style={{
+				// Extend the translucent material down through the
+				// home-indicator safe-area zone so the bar reads as
+				// one continuous piece rather than ending above a
+				// solid-bg strip.
+				paddingBottom: "env(safe-area-inset-bottom)",
+			}}
 		>
-			<div className="flex items-stretch px-1">
+			<div className="flex items-stretch px-1 h-[49px]">
 				{TABS.map(t => {
 					const isActive = active === t.key;
 					const unread = unreadByTab?.[t.key] ?? 0;
@@ -86,36 +99,23 @@ export function MobileTabBar({ active, onChange, unreadByTab }: MobileTabBarProp
 							aria-label={t.label}
 							className={cn(
 								"flex-1 flex flex-col items-center justify-center gap-0.5",
-								// Generous top padding gives the icons
-								// room to breathe under the bar's
-								// rounded top edge; bottom stays tight
-								// so labels sit close to the safe-area
-								// strip below.
-								"pt-3 pb-1.5 px-1",
+								"py-1 px-1",
 								"transition-colors duration-150",
-								"select-none",
-								// No per-button bg fill — only the
-								// glyph + label colour signals which
-								// tab is active.  Keeps the bar
-								// reading as a single solid surface
-								// with the buttons just sitting on it.
-								isActive ? "text-primary" : "text-muted-foreground",
+								"select-none active:opacity-60",
+								isActive ? "text-foreground" : "text-muted-foreground",
 							)}
 						>
 							<div className="relative">
-								{t.icon}
+								{t.render(isActive)}
 								{unread > 0 ? (
 									<span
 										className={cn(
-											"absolute -top-1.5 -right-1.5",
-											"min-w-[14px] h-3.5 px-1",
+											"absolute -top-1 -right-1.5",
+											"min-w-[16px] h-4 px-1",
 											"rounded-full bg-destructive text-destructive-foreground",
-											"text-[9px] font-bold leading-none",
+											"text-[10px] font-bold leading-none",
 											"flex items-center justify-center",
-											// Ring matches the bar's bg
-											// so the dot reads as
-											// floating above the icon.
-											"ring-2 ring-background",
+											"ring-2 ring-card",
 										)}
 									>
 										{unread > 99 ? "99+" : unread}
@@ -123,7 +123,8 @@ export function MobileTabBar({ active, onChange, unreadByTab }: MobileTabBarProp
 								) : null}
 							</div>
 							<span className={cn(
-								"text-[10px] leading-none font-medium tracking-wide",
+								"text-[10px] leading-none tracking-wide",
+								isActive ? "font-semibold" : "font-medium",
 							)}>
 								{t.label}
 							</span>

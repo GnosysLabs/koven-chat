@@ -20,6 +20,7 @@
 import { createPortal } from "react-dom";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
+import { isMobileShell } from "@/lib/mobile";
 import { Check, ChevronRight } from "lucide-react";
 
 // ───────────────────── Item shape ─────────────────────
@@ -133,21 +134,25 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
 	if (typeof document === "undefined") return null;
 
 	// Cursor clamp.  Estimate menu size to keep it inside the
-	// viewport.  Width is roughly fixed at 220px; height grows with
-	// item count + dividers.  We over-estimate by 8px on each side
-	// so the menu never bleeds past the viewport edge.
-	const itemHeight = 32;
-	const dividerHeight = 9;
-	const verticalPadding = 8;
+	// viewport.  Mobile rows are 44pt tall + wider padding so the
+	// estimates must scale up there — otherwise the menu can extend
+	// off the right or bottom edge of the screen.  Pulled from the
+	// MenuRow / SubmenuRow Tailwind classes above.
+	const itemHeight = isMobileShell ? 44 : 32;
+	const dividerHeight = isMobileShell ? 13 : 9;
+	const verticalPadding = isMobileShell ? 12 : 8;
 	const estHeight = items.reduce(
 		(acc, it) => acc + (it.kind === "divider" ? dividerHeight : itemHeight),
 		verticalPadding * 2,
 	);
-	const menuW = 220;
+	const menuW = isMobileShell ? 280 : 220;
 	const vw = typeof window !== "undefined" ? window.innerWidth : 1200;
 	const vh = typeof window !== "undefined" ? window.innerHeight : 800;
-	const left = Math.min(x, vw - menuW - 8);
-	const top = Math.min(y, vh - estHeight - 8);
+	// Math.max(8, ...) clamps the left edge to >=8px so the menu
+	// also can't bleed off the LEFT side (e.g. when the user opens
+	// it from a short bubble near the left edge).
+	const left = Math.max(8, Math.min(x, vw - menuW - 8));
+	const top = Math.max(8, Math.min(y, vh - estHeight - 8));
 
 	return createPortal(
 		<div
@@ -191,7 +196,10 @@ function MenuRow({ item, onCloseRoot }: { item: ContextMenuItem; onCloseRoot(): 
 				onCloseRoot();
 			}}
 			className={cn(
-				"w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors",
+				"w-full flex items-center gap-2 text-left transition-colors",
+				// 44pt min target on mobile (HIG); 32pt rows on
+				// desktop where pointer precision is higher.
+				isMobileShell ? "min-h-11 px-4 py-2.5 text-[15px]" : "px-3 py-1.5 text-sm",
 				disabled
 					? "text-muted-foreground/50 cursor-not-allowed"
 					: item.danger
@@ -200,14 +208,15 @@ function MenuRow({ item, onCloseRoot }: { item: ContextMenuItem; onCloseRoot(): 
 			)}
 		>
 			<span className={cn(
-				"shrink-0 w-4 h-4 flex items-center justify-center",
+				"shrink-0 flex items-center justify-center",
+				isMobileShell ? "w-5 h-5" : "w-4 h-4",
 				disabled ? "text-muted-foreground/40" : (item.danger ? "text-destructive" : "text-muted-foreground"),
 			)}>
 				{item.icon}
 			</span>
 			<span className="flex-1 truncate">{item.label}</span>
 			{item.checked && (
-				<Check className="h-3.5 w-3.5 shrink-0 text-primary" />
+				<Check className={cn("shrink-0 text-primary", isMobileShell ? "h-4 w-4" : "h-3.5 w-3.5")} />
 			)}
 		</button>
 	);
@@ -259,14 +268,19 @@ function SubmenuRow({
 		const rect = ref.current?.getBoundingClientRect();
 		if (!rect) return;
 		// Anchor to the right edge; flip to the left when there isn't
-		// room.  Uses a generous 220px width estimate matching the
-		// parent menu.
-		const submenuW = 220;
+		// room.  Width estimate scales with the menu's row sizing
+		// (mobile rows are 44pt + wider so the submenu is wider too).
+		const submenuW = isMobileShell ? 280 : 220;
 		const vw = typeof window !== "undefined" ? window.innerWidth : 1200;
-		const left = rect.right + submenuW + 8 > vw
-			? rect.left - submenuW
-			: rect.right;
-		setSubmenuPos({ left, top: rect.top });
+		const vh = typeof window !== "undefined" ? window.innerHeight : 800;
+		const flipsLeft = rect.right + submenuW + 8 > vw;
+		const rawLeft = flipsLeft ? rect.left - submenuW : rect.right;
+		// Hard clamp to viewport on both axes so a submenu opened
+		// near the screen edge can never render off-screen.
+		const submenuH = item.items.length * (isMobileShell ? 44 : 32) + 16;
+		const left = Math.max(8, Math.min(rawLeft, vw - submenuW - 8));
+		const top = Math.max(8, Math.min(rect.top, vh - submenuH - 8));
+		setSubmenuPos({ left, top });
 		setOpen(true);
 	};
 
@@ -286,20 +300,22 @@ function SubmenuRow({
 				// and inaccessible to touch input.
 				onClick={() => { if (!open) showSubmenu(); }}
 				className={cn(
-					"w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors",
+					"w-full flex items-center gap-2 text-left transition-colors",
+					isMobileShell ? "min-h-11 px-4 py-2.5 text-[15px]" : "px-3 py-1.5 text-sm",
 					item.disabled
 						? "text-muted-foreground/50 cursor-not-allowed"
 						: "hover:bg-accent focus:bg-accent focus:outline-none",
 				)}
 			>
 				<span className={cn(
-					"shrink-0 w-4 h-4 flex items-center justify-center",
+					"shrink-0 flex items-center justify-center",
+					isMobileShell ? "w-5 h-5" : "w-4 h-4",
 					item.disabled ? "text-muted-foreground/40" : "text-muted-foreground",
 				)}>
 					{item.icon}
 				</span>
 				<span className="flex-1 truncate">{item.label}</span>
-				<ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+				<ChevronRight className={cn("shrink-0 text-muted-foreground", isMobileShell ? "h-4 w-4" : "h-3.5 w-3.5")} />
 			</button>
 			{open && submenuPos && createPortal(
 				<div

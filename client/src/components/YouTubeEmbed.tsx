@@ -5,8 +5,9 @@
 // reads as a media block rather than text.
 //
 // Sized to ~max-w-md (matching image attachments) with a 16:9
-// aspect ratio.  Uses the youtube-nocookie domain for privacy —
-// no cookies set until the user actually clicks play.
+// aspect ratio.  Uses regular `youtube.com/embed/` — the nocookie
+// variant fails in Capacitor's `capacitor://` WebView origin with
+// Error 153; regular YouTube accepts the cross-origin parent.
 
 import { buildEmbedUrl } from "@/lib/youtube";
 
@@ -31,11 +32,15 @@ export function YouTubeEmbed({ videoId, startSeconds }: YouTubeEmbedProps) {
 					// `accelerometer` + `gyroscope` are required for VR /
 					// 360° videos; `picture-in-picture` lets the user pop
 					// out of the bubble; `web-share` enables the in-iframe
-					// share button.  No `autoplay` — chat is noisy enough
-					// without 12 videos starting at once.
-					allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+					// share button.  `autoplay` is listed so the
+					// user-initiated play gesture works (the URL doesn't
+					// pass `autoplay=1`).
+					allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
 					allowFullScreen
-					referrerPolicy="strict-origin-when-cross-origin"
+					// No `referrerPolicy` override — Capacitor's
+					// `capacitor://` origin produces no valid Referer
+					// header anyway; letting the browser default cuts
+					// out one variable in YouTube's origin check.
 					className="absolute inset-0 w-full h-full border-0 block"
 				/>
 			</div>

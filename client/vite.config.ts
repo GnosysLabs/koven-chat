@@ -37,7 +37,20 @@ export default defineConfig({
 	// the moment it runs.  Excluding the package from pre-bundling
 	// lets Vite serve the .wasm directly alongside the .mjs entry.
 	optimizeDeps: {
-		exclude: ["@matrix-org/matrix-sdk-crypto-wasm"],
+		exclude: ["@matrix-org/matrix-sdk-crypto-wasm", "@capacitor/keyboard", "@capacitor/haptics"],
+	},
+	build: {
+		rollupOptions: {
+			// `@capacitor/*` plugins are only present in the Capacitor
+			// iOS / Android bundles (loaded from
+			// `koven-ios/node_modules`).  Web + Tauri desktop never
+			// resolve them; the dynamic `import()`s in `nativeShell.ts`
+			// + `haptics.ts` are wrapped in try/catch so the runtime
+			// failures are silent.  Marking them external prevents
+			// Rollup from aborting the build because it can't find the
+			// module.
+			external: ["@capacitor/keyboard", "@capacitor/haptics"],
+		},
 	},
 	server: {
 		// 1420 is Tauri's convention.  Pre-empts most random-Vite-on-

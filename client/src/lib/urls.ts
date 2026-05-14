@@ -34,6 +34,21 @@
 // logo, tagline) loads as empty defaults, and the email-code login
 // "succeeds" without ever calling the engine.  Detect the bundle at
 // runtime and point both URLs at the canonical homeserver.
+//
+// Capacitor iOS shell: same class of bug, different mechanism.  We
+// configure `iosScheme: "https"` in capacitor.config.json hoping the
+// SPA serves from `https://client.koven.chat`, but iOS WKWebView
+// reserves the `https` scheme and refuses to let Capacitor register
+// a custom handler for it — see CAPInstanceDescriptor.normalize(),
+// which silently resets the scheme to the default `capacitor` when
+// `WKWebView.handlesURLScheme()` already claims it.  Net result: the
+// SPA actually loads from `capacitor://client.koven.chat/index.html`
+// and every relative `/api/...` fetch hits Capacitor's WKURLScheme-
+// Handler, which only knows how to serve bundled assets and returns
+// a 404 for unknown paths.  The fix is identical to Tauri's: detect
+// the shell and route both URLs at the canonical `https://` host.
+// Absolute `https://*` URLs go through normal WKWebView networking
+// because the scheme handler is only registered for `capacitor`.
 
 const KOVEN_BUNDLED_HOST = "https://client.koven.chat";
 
@@ -69,11 +84,22 @@ export function isTauriBundle(): boolean {
 	return !!(window as KovenWindow).__KOVEN_DESKTOP__;
 }
 
+/** True when the SPA is running inside a Capacitor iOS WebView.
+ * Mirrors `isTauriBundle()` so the URL resolution below can treat
+ * both shells the same way: they each need an absolute remote URL
+ * because their local origins (`capacitor://...` / `tauri://...`)
+ * can't reach the engine through relative paths. */
+function isCapacitorBundle(): boolean {
+	if (typeof window === "undefined") return false;
+	return (window as { Capacitor?: unknown }).Capacitor !== undefined;
+}
+
+const isNativeBundle = isTauriBundle() || isCapacitorBundle();
 
 export const HOMESERVER_URL =
 	(import.meta.env.VITE_HOMESERVER_URL as string | undefined)
-	?? (isTauriBundle() ? KOVEN_BUNDLED_HOST : pageOrigin());
+	?? (isNativeBundle ? KOVEN_BUNDLED_HOST : pageOrigin());
 
 export const ENGINE_URL =
 	(import.meta.env.VITE_ENGINE_URL as string | undefined)
-	?? (isTauriBundle() ? KOVEN_BUNDLED_HOST : "");
+	?? (isNativeBundle ? KOVEN_BUNDLED_HOST : "");
