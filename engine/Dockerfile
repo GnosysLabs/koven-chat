@@ -15,12 +15,13 @@ COPY package.json bun.lock ./
 COPY shared/package.json ./shared/
 COPY engine/package.json ./engine/
 COPY client/package.json ./client/
-# apps/desktop is a workspace member but its sources never reach the
-# runtime image — we only copy its package.json here so frozen-
-# lockfile install can resolve every workspace entry the lockfile
-# references.  Without this Bun bails with "lockfile had changes" on
-# the desktop devDependencies (@tauri-apps/cli) it can't account for.
+# apps/desktop and apps/mobile are workspace members but their sources
+# never reach the runtime image — we only copy their package.json files
+# here so frozen-lockfile install can resolve every workspace entry the
+# lockfile references.  Without these Bun bails with "Workspace not
+# found" for any entry in the root workspaces array it can't locate.
 COPY apps/desktop/package.json ./apps/desktop/
+COPY apps/mobile/package.json ./apps/mobile/
 RUN bun install --production --frozen-lockfile
 
 FROM oven/bun:1 AS runtime
