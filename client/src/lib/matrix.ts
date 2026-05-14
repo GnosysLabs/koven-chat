@@ -4649,6 +4649,205 @@ export class MatrixTransport {
 		this.emitRoomList();
 	}
 
+	/**
+	 * Hard-delete a single non-space room (channel inside a space)
+	 * for every member.  Asks the engine to call Synapse's admin
+	 * purge API server-side, which kicks every member, blocks
+	 * re-joins, and removes the entire event history from the
+	 * database in one atomic transaction.
+	 *
+	 * Authorisation is enforced server-side: the engine checks the
+	 * caller is a joined member with PL ≥ 100 (founder/admin) on the
+	 * room.  Lower-PL members see a 403 and should use the regular
+	 * leave gesture instead.
+	 *
+	 * Unlike the old client-side `deleteRoom`, this does NOT depend
+	 * on the caller's matrix-js-sdk having enough PL to issue kicks
+	 * one by one — the homeserver does everything with its admin
+	 * token.  The only client-side work left is unlinking the room
+	 * from its parent space's `m.space.child` state (otherwise the
+	 * SpaceBar would keep a ghost tile pointing at a now-purged
+	 * room), and clearing the local matrix-js-sdk cache so the SPA
+	 * stops rendering it before the next /sync settles.
+	 */
+	async purgeRoom(roomId: RoomId): Promise<void> {
+		const c = this.requireClient();
+		const token = this.creds?.access_token;
+		if (!token) throw new Error("purgeRoom: no access token");
+
+		// Read parent space refs BEFORE the purge — once the room is
+		// gone on the homeserver, its `m.space.parent` state is
+		// unreadable, so we'd have nothing to walk to unlink from.
+		const parentSpaceIds: string[] = [];
+		const sdkRoom = c.getRoom(roomId);
+		if (sdkRoom) {
+			const parents = sdkRoom.currentState.getStateEvents("m.space.parent") ?? [];
+			for (const ev of parents) {
+				const parentId = ev.getStateKey();
+				if (parentId) parentSpaceIds.push(parentId);
+			}
+		}
+
+		// Server-side purge.  One round-trip, atomic on the
+		// homeserver.  The engine validates auth and PL before
+		// touching anything.
+		const res = await fetch(`${ENGINE_URL}/api/rooms/${encodeURIComponent(roomId)}/delete`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${token}`,
+			},
+		});
+		if (!res.ok) {
+			let detail = "";
+			try {
+				const body = await res.json() as { error?: string; detail?: string };
+				detail = body.error ? `: ${body.error}${body.detail ? ` (${body.detail})` : ""}` : "";
+			} catch {
+				// fall through with generic message
+			}
+			throw new Error(`Server-side room delete failed (HTTP ${res.status})${detail}`);
+		}
+
+		// Unlink from every parent space we recorded above so the
+		// space tile doesn't keep a ghost child pointing at a now-
+		// purged room.  Best-effort: if the user lacks PL to write
+		// state on a parent (rare in Koven's founder-owned model),
+		// skip it — the destructive work is already done.
+		for (const parentId of parentSpaceIds) {
+			try {
+				await c.sendStateEvent(parentId, "m.space.child" as any, {}, roomId);
+			} catch (err) {
+				console.warn(`purgeRoom: failed to unlink ${roomId} from space ${parentId}`, err);
+			}
+		}
+
+		// Local cleanup.  `markRoomDeletedLocally` immediately
+		// removes the room from the SPA's filtered room list; the
+		// leave + forget calls nudge matrix-js-sdk's local cache to
+		// drop the SdkRoom object entirely.  Both swallow errors —
+		// the homeserver-side delete is authoritative.
+		this.markRoomDeletedLocally(roomId);
+		await c.leave(roomId).catch(() => {/* already gone server-side */});
+		await c.forget(roomId).catch(() => {/* ok if not supported */});
+		this.emitRoomList();
+		this.emitSpaceList();
+	}
+
+	/**
+	 * Hard-delete an entire space and every child room beneath it,
+	 * for every member, server-side.  Asks the engine to walk the
+	 * space's `m.space.child` state events, call Synapse's admin
+	 * purge API for each child room, and finally purge the space
+	 * room itself.  Each per-room operation is atomic on the
+	 * homeserver (block + purge in one DELETE call); the loop is
+	 * best-effort, a single failing child does not abort the rest.
+	 *
+	 * Authorisation: the engine checks the caller is a joined
+	 * member of the SPACE with PL ≥ 100.  Koven's createSpace
+	 * + createRoomInSpace land the founder at PL 100 in both the
+	 * space and every child, so a space-level check transitively
+	 * covers the children; the engine's admin token bypasses any
+	 * child PL it doesn't have anyway.
+	 *
+	 * Returns the set of room ids the engine actually purged plus
+	 * any per-child failures so the UI can surface them.  Local
+	 * cleanup runs against the engine's reported `deleted_children`
+	 * set, not the client's locally-known child list, so the SPA
+	 * stays in step with the homeserver in the partial-failure case.
+	 */
+	async purgeSpace(spaceId: SpaceId): Promise<{
+		deletedChildren: string[];
+		failedChildren: Array<{ roomId: string; error: string }>;
+	}> {
+		const c = this.requireClient();
+		const token = this.creds?.access_token;
+		if (!token) throw new Error("purgeSpace: no access token");
+
+		// Capture a local snapshot of child ids as a fallback for
+		// the local UI cleanup.  The engine walks state itself, so
+		// this isn't sent up; it's only used if the engine response
+		// is unparseable (shouldn't happen) so we still flush
+		// something from the local cache.
+		const localChildIds: string[] = [];
+		const space = c.getRoom(spaceId);
+		if (space) {
+			const childEvents = space.currentState.getStateEvents("m.space.child") ?? [];
+			for (const ev of childEvents) {
+				const childId = ev.getStateKey();
+				if (!childId) continue;
+				const content = ev.getContent() as { via?: string[] };
+				if (!Array.isArray(content.via) || content.via.length === 0) continue;
+				localChildIds.push(childId);
+			}
+		}
+
+		// Server-side purge of the whole tree.  One round-trip; the
+		// engine handles the child walk and the per-room admin DELETE
+		// calls.
+		const res = await fetch(`${ENGINE_URL}/api/spaces/${encodeURIComponent(spaceId)}/delete`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${token}`,
+			},
+		});
+		if (!res.ok) {
+			let detail = "";
+			try {
+				const body = await res.json() as { error?: string; detail?: string };
+				detail = body.error ? `: ${body.error}${body.detail ? ` (${body.detail})` : ""}` : "";
+			} catch {
+				// fall through with generic message
+			}
+			throw new Error(`Server-side space delete failed (HTTP ${res.status})${detail}`);
+		}
+
+		// Take the engine's report of what was actually purged.  If
+		// the response shape is somehow malformed, fall back to the
+		// locally-known child list so the SPA at least matches what
+		// the user was looking at before the click.
+		let deletedChildren: string[] = localChildIds;
+		let failedChildren: Array<{ roomId: string; error: string }> = [];
+		try {
+			const body = await res.json() as {
+				deleted_children?: unknown;
+				failed_children?: unknown;
+			};
+			if (Array.isArray(body.deleted_children)) {
+				deletedChildren = body.deleted_children.filter((x): x is string => typeof x === "string");
+			}
+			if (Array.isArray(body.failed_children)) {
+				failedChildren = body.failed_children.filter(
+					(x): x is { roomId: string; error: string } =>
+						typeof x === "object" && x !== null
+						&& typeof (x as { roomId?: unknown }).roomId === "string"
+						&& typeof (x as { error?: unknown }).error === "string",
+				);
+			}
+		} catch {
+			// Body wasn't JSON or didn't match — proceed with local
+			// best-effort.  The server-side delete still ran.
+		}
+
+		// Drop every purged room from the local matrix-js-sdk store
+		// plus mark them deleted locally so the SPA stops rendering
+		// them immediately.  Include the space room itself last so
+		// the SpaceBar tile vanishes after the channels do.
+		for (const childId of deletedChildren) {
+			this.markRoomDeletedLocally(childId);
+			c.leave(childId).catch(() => {/* already gone server-side */});
+			c.forget(childId).catch(() => {/* ok if not supported */});
+		}
+		this.markRoomDeletedLocally(spaceId);
+		c.leave(spaceId).catch(() => {/* already gone server-side */});
+		c.forget(spaceId).catch(() => {/* ok if not supported */});
+		this.emitRoomList();
+		this.emitSpaceList();
+
+		return { deletedChildren, failedChildren };
+	}
+
 	/** Pull the current room list as our shared `Room` shape.  Spaces are filtered out. */
 	getRooms(): Room[] {
 		if (!this.client) return [];

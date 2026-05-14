@@ -1082,14 +1082,14 @@ function RoomRow({
 						});
 					}}
 					onDelete={isFounder ? () => {
-						// Defer to leave for now — proper room
-						// deletion is a Synapse-admin path that
-						// requires extra plumbing.  The Founder-only
-						// "Delete" wording is the safest near-term
-						// approximation: leaving as the only PL=100
-						// member tombstones the room for the engine.
-						transport.leaveRoom(room.id).catch(err => {
-							console.warn("RoomRow: delete (leave) failed", err);
+						// Server-side hard-delete via the engine's
+						// admin purge API.  Kicks every member,
+						// blocks rejoin, wipes the event history
+						// in one atomic transaction.  See
+						// `purgeRoom` in matrix.ts and POST
+						// /api/rooms/:roomId/delete in the engine.
+						transport.purgeRoom(room.id).catch(err => {
+							console.warn("RoomRow: purge failed", err);
 						});
 					} : undefined}
 					onOpenProfile={room.kind === "dm" && room.dmUserId && onOpenProfile

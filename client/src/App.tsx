@@ -2506,17 +2506,15 @@ export default function App() {
 						});
 					}}
 					onDeleteSpace={(id) => {
-						// "Delete" semantics: same as leave for now,
-						// proper space tombstoning is a Synapse-admin
-						// path that requires extra plumbing.  Founder-
-						// only via the right-click gate.
+						// Hard delete: server-side purge of the space
+						// and every child room via the engine.  Kicks
+						// every member, blocks rejoin, wipes history.
+						// Founder-only via the right-click gate (the
+						// engine also re-validates PL 100).
 						if (state.activeSpace?.kind === "space" && state.activeSpace.id === id) {
 							dispatch({ type: "set_active_space", space: { kind: "dms" } });
 						}
-						// Same cascade as onLeaveSpace: a "delete" that
-						// only left the space-shaped parent would strand
-						// the user in the child rooms.
-						transport?.leaveSpaceWithChildren(id as SpaceId).catch(err => {
+						transport?.purgeSpace(id as SpaceId).catch(err => {
 							dispatch({ type: "error", message: err instanceof Error ? err.message : String(err) });
 						});
 					}}
@@ -3772,15 +3770,20 @@ export default function App() {
 					// Close the sheet + bounce out of the space BEFORE
 					// the deletion fires.  Without this, the user
 					// watches a settings panel for the space they're
-					// in the middle of nuking sit there for several
-					// seconds while the redaction + leave round-trips
-					// run, which reads as "did the click even
-					// register?"  Errors from deleteSpace still
-					// surface via the global error toast.
+					// in the middle of nuking sit there while the
+					// server-side purge runs, which reads as "did the
+					// click even register?"  Errors from purgeSpace
+					// still surface via the global error toast.
+					//
+					// childIds is captured by the sheet for the
+					// confirmation copy; the engine re-derives the
+					// child list from state itself so we don't pass
+					// it through to purgeSpace.
+					void childIds;
 					setEditingSpaceId(null);
 					dispatch({ type: "set_active_room", roomId: null });
 					dispatch({ type: "set_active_space", space: { kind: "dms" } });
-					await transport.deleteSpace(spaceId as RoomId, childIds as RoomId[]);
+					await transport.purgeSpace(spaceId as SpaceId);
 				}}
 				lookupChildName={(roomId) => {
 					// Resolve via the SPA's room cache.  Falls back to
@@ -3817,7 +3820,10 @@ export default function App() {
 				}}
 				onDelete={async (roomId) => {
 					if (!transport) throw new Error("Not connected");
-					await transport.deleteRoom(roomId as RoomId);
+					// Server-side hard-delete via the engine's admin
+					// purge API.  Kicks every member, blocks rejoin,
+					// wipes history in one atomic transaction.
+					await transport.purgeRoom(roomId as RoomId);
 					setEditingRoomId(null);
 					dispatch({ type: "set_active_room", roomId: null });
 				}}

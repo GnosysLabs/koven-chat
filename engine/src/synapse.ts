@@ -709,6 +709,47 @@ export async function isSpaceRoom(roomId: string): Promise<boolean> {
 }
 
 /**
+ * Read a user's effective power level in a room.  Looks at
+ * `m.room.power_levels.users[userId]` first; falls back to
+ * `users_default` (0 when absent); finally falls back to the
+ * `m.room.create.creator` field, which Synapse treats as PL 100
+ * on rooms that never published a power-levels event.
+ *
+ * Returns null only when the room state itself is unreadable — that
+ * way callers can distinguish "unknown PL, refuse" from "user is
+ * present but has PL 0" cleanly.  A user that doesn't appear anywhere
+ * in the room's history still resolves to a numeric PL via the
+ * defaults; this matches Matrix's own auth-check semantics.
+ */
+export async function readPowerLevelForUser(
+	roomId: string,
+	userId: string,
+): Promise<number | null> {
+	const state = await readRoomState(roomId);
+	if (!state) return null;
+	const pl = pickStateContent(state, "m.room.power_levels", "");
+	if (pl) {
+		const users = (pl as { users?: Record<string, unknown> }).users;
+		if (users && typeof users === "object") {
+			const v = users[userId];
+			if (typeof v === "number") return v;
+		}
+		const def = (pl as { users_default?: unknown }).users_default;
+		if (typeof def === "number") return def;
+	}
+	// No PL event — fall back to creator semantics.  In room versions
+	// 1-10 this is `m.room.create.creator`; v11+ moved the creator to
+	// `m.room.create.sender` and dropped the explicit field.  Check both.
+	const create = pickStateContent(state, "m.room.create", "");
+	if (create) {
+		const creator = (create as { creator?: unknown; sender?: unknown }).creator
+			?? (create as { creator?: unknown; sender?: unknown }).sender;
+		if (typeof creator === "string" && creator === userId) return 100;
+	}
+	return 0;
+}
+
+/**
  * Read the user ids of the room's currently-joined members via
  * Synapse's admin /members endpoint (NOT the client API — see
  * `readRoomState` for the rationale that applies here too: the

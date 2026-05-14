@@ -2152,7 +2152,12 @@ export function recordModAction(opts: {
 
 // ─── Instance-admin actions (server-admin floor toolkit) ───────────
 
-export type InstanceAdminAction = "delete_room" | "delete_space" | "deactivate_user";
+export type InstanceAdminAction =
+	| "delete_room"
+	| "delete_space"
+	| "deactivate_user"
+	| "delete_room_by_owner"
+	| "delete_space_by_owner";
 
 const insertInstanceAdminActionStmt = db.prepare(`
 	INSERT INTO instance_admin_actions (actor, action, target, reason, related_flag, created_at)

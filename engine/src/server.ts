@@ -134,6 +134,7 @@ import {
 	getSpaceChildRoomIds,
 	inviteUserToRoom,
 	isSpaceRoom,
+	readPowerLevelForUser,
 	kickOrBanAs,
 	leaveRoomAs,
 	joinRoomIfNeeded,
@@ -1592,6 +1593,234 @@ export function startServer(): void {
 						}, { status: 502 });
 					}
 					return json({ ok: true });
+				}
+			}
+
+			// POST /api/rooms/:roomId/delete
+			//
+			// User-gated hard delete for a single non-space room
+			// (channel inside a space).  Mirrors /api/dm/delete but
+			// authorises on power-level, not DM shape.  Caller must
+			// hold PL ≥ 100 in the room — i.e. be the founder, or
+			// have been explicitly promoted to admin by the founder.
+			// PL 100 is the right gate because Koven's createRoom
+			// always lands the creator at PL 100 (matrix.ts:2780)
+			// with users_default 0 for everyone else, so this is the
+			// universal "this person owns the room" check.
+			//
+			// Refuses spaces.  Space deletion has its own endpoint
+			// because it needs to walk m.space.child and purge every
+			// member of the tree, not just the one room — letting
+			// a space pass through here would purge the space-room
+			// only and leave its channels orphaned.
+			//
+			// Action: Synapse admin DELETE /v2/rooms/{id} with
+			// block:true and purge:true.  Kicks every member server-
+			// side, blocks future re-joins, removes the entire event
+			// history from the database.  No matrix-js-sdk client
+			// gymnastics required — the homeserver does it all in
+			// one async background job.
+			{
+				const m = path.match(/^\/api\/rooms\/([^/]+)\/delete$/);
+				if (req.method === "POST" && m) {
+					const userId = await whoami(extractToken(req));
+					if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+					const roomId = decodeURIComponent(m[1]!);
+					if (!roomId.startsWith("!") || !roomId.includes(":")) {
+						return json({ errcode: "M_INVALID_PARAM", error: "room_id required" }, { status: 400 });
+					}
+					// Spaces have their own endpoint — refuse here so a
+					// stray call doesn't purge the space room and leave
+					// its children dangling.
+					try {
+						if (await isSpaceRoom(roomId)) {
+							return json({ errcode: "M_FORBIDDEN", error: "use /api/spaces/:spaceId/delete for spaces" }, { status: 403 });
+						}
+					} catch (err) {
+						console.warn(`/api/rooms/${roomId}/delete: isSpaceRoom failed`, err);
+						return json({ errcode: "M_UNKNOWN", error: "could not verify room type" }, { status: 502 });
+					}
+					// Caller must be in the room.  Without this check a
+					// stranger could nuke any room id they happened to
+					// learn (room ids aren't secret in Matrix).
+					let members: string[] = [];
+					try {
+						members = await getJoinedMembers(roomId);
+					} catch (err) {
+						console.warn(`/api/rooms/${roomId}/delete: getJoinedMembers failed`, err);
+						return json({ errcode: "M_UNKNOWN", error: "could not verify membership" }, { status: 502 });
+					}
+					if (!members.includes(userId)) {
+						return json({ errcode: "M_FORBIDDEN", error: "not a member of this room" }, { status: 403 });
+					}
+					// Power-level gate.  Must be PL ≥ 100 (founder/admin)
+					// to wield the nuke.  Anything else falls through to
+					// "use the regular Leave action."
+					let pl: number | null = null;
+					try {
+						pl = await readPowerLevelForUser(roomId, userId);
+					} catch (err) {
+						console.warn(`/api/rooms/${roomId}/delete: readPowerLevelForUser failed`, err);
+						return json({ errcode: "M_UNKNOWN", error: "could not verify power level" }, { status: 502 });
+					}
+					if (pl === null) {
+						return json({ errcode: "M_UNKNOWN", error: "could not read room state" }, { status: 502 });
+					}
+					if (pl < 100) {
+						return json({ errcode: "M_FORBIDDEN", error: "must be room owner (PL 100) to delete" }, { status: 403 });
+					}
+					const result = await adminDeleteRoom({
+						roomId,
+						message: "Channel deleted by the room owner.",
+					});
+					if ("error" in result) {
+						return json({
+							errcode: "M_UNKNOWN",
+							error: result.error,
+							detail: result.detail,
+						}, { status: 502 });
+					}
+					recordInstanceAdminAction({
+						actor: userId,
+						action: "delete_room_by_owner",
+						target: roomId,
+					});
+					return json({ ok: true });
+				}
+			}
+
+			// POST /api/spaces/:spaceId/delete
+			//
+			// User-gated hard delete for an entire space tree.  Walks
+			// m.space.child state events on the space, purges every
+			// child room via Synapse admin DELETE, then purges the
+			// space room itself.  All atomic-per-room on the Synapse
+			// side: block:true + purge:true wipes the event history
+			// AND kicks all members in one server-side transaction.
+			//
+			// Authorisation: caller must hold PL ≥ 100 in the SPACE.
+			// Koven's createSpace + createRoomInSpace land the
+			// founder at PL 100 in both the space and its children
+			// (matrix.ts:2780 and :2885-2909), so a space-level
+			// founder check transitively covers every child.  The
+			// admin token used by adminDeleteRoom bypasses room PL
+			// anyway — what matters is whether the caller is
+			// authorised to make the call in the first place.
+			//
+			// Best-effort children: a single failing child does not
+			// abort the rest of the loop.  We collect failures in
+			// the response so the client can surface them, but we
+			// always proceed to delete the space room at the end —
+			// getting MOST of the way through is better than rolling
+			// back into a half-deleted state.
+			{
+				const m = path.match(/^\/api\/spaces\/([^/]+)\/delete$/);
+				if (req.method === "POST" && m) {
+					const userId = await whoami(extractToken(req));
+					if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+					const spaceId = decodeURIComponent(m[1]!);
+					if (!spaceId.startsWith("!") || !spaceId.includes(":")) {
+						return json({ errcode: "M_INVALID_PARAM", error: "space_id required" }, { status: 400 });
+					}
+					// Confirm it really is a space.  Same reason as the
+					// reverse check in /api/rooms/:roomId/delete: each
+					// endpoint owns one shape and refuses the other so a
+					// misrouted call can't do the wrong scope of damage.
+					try {
+						if (!(await isSpaceRoom(spaceId))) {
+							return json({ errcode: "M_FORBIDDEN", error: "target is not a space" }, { status: 403 });
+						}
+					} catch (err) {
+						console.warn(`/api/spaces/${spaceId}/delete: isSpaceRoom failed`, err);
+						return json({ errcode: "M_UNKNOWN", error: "could not verify room type" }, { status: 502 });
+					}
+					// Must be a joined member of the space.
+					let members: string[] = [];
+					try {
+						members = await getJoinedMembers(spaceId);
+					} catch (err) {
+						console.warn(`/api/spaces/${spaceId}/delete: getJoinedMembers failed`, err);
+						return json({ errcode: "M_UNKNOWN", error: "could not verify membership" }, { status: 502 });
+					}
+					if (!members.includes(userId)) {
+						return json({ errcode: "M_FORBIDDEN", error: "not a member of this space" }, { status: 403 });
+					}
+					// Power-level gate on the SPACE.  Founder transitively
+					// owns the children (Koven's invariant), so we only
+					// need to authorise once.
+					let pl: number | null = null;
+					try {
+						pl = await readPowerLevelForUser(spaceId, userId);
+					} catch (err) {
+						console.warn(`/api/spaces/${spaceId}/delete: readPowerLevelForUser failed`, err);
+						return json({ errcode: "M_UNKNOWN", error: "could not verify power level" }, { status: 502 });
+					}
+					if (pl === null) {
+						return json({ errcode: "M_UNKNOWN", error: "could not read space state" }, { status: 502 });
+					}
+					if (pl < 100) {
+						return json({ errcode: "M_FORBIDDEN", error: "must be space owner (PL 100) to delete" }, { status: 403 });
+					}
+					// Walk m.space.child to find the children.  Read
+					// state BEFORE deleting anything — order matters:
+					// children first, space last, so the space's child
+					// references are still valid while we process them.
+					// Skip child events with empty/missing `via` array,
+					// those are "tombstoned" entries the space admin
+					// already removed.
+					const state = await readRoomState(spaceId);
+					const childIds: string[] = [];
+					if (state) {
+						for (const ev of state) {
+							if (ev.type !== "m.space.child") continue;
+							const childId = ev.state_key;
+							if (!childId) continue;
+							const via = (ev.content as { via?: unknown })?.via;
+							if (!Array.isArray(via) || via.length === 0) continue;
+							childIds.push(childId);
+						}
+					}
+
+					const failedChildren: Array<{ roomId: string; error: string }> = [];
+					const deletedChildren: string[] = [];
+					const childMessage = "Parent space deleted by the space owner.";
+					for (const childId of childIds) {
+						const res = await adminDeleteRoom({ roomId: childId, message: childMessage });
+						if ("error" in res) {
+							failedChildren.push({ roomId: childId, error: res.error });
+						} else {
+							deletedChildren.push(childId);
+						}
+					}
+					const spaceRes = await adminDeleteRoom({
+						roomId: spaceId,
+						message: "Space deleted by the space owner.",
+					});
+					if ("error" in spaceRes) {
+						// Children may have been purged already; surface
+						// both halves of the result so the client knows
+						// what actually got cleaned.
+						return json({
+							errcode: "M_UNKNOWN",
+							error: spaceRes.error,
+							detail: spaceRes.detail,
+							deleted_children: deletedChildren,
+							failed_children: failedChildren,
+						}, { status: 502 });
+					}
+					recordInstanceAdminAction({
+						actor: userId,
+						action: "delete_space_by_owner",
+						target: spaceId,
+						reason: failedChildren.length > 0
+							? `partial: ${failedChildren.length} child(ren) failed`
+							: null,
+					});
+					return json({
+						ok: true,
+						deleted_children: deletedChildren,
+						failed_children: failedChildren,
+					});
 				}
 			}
 

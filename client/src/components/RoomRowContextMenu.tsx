@@ -202,10 +202,13 @@ export function RoomRowContextMenu({
 			});
 		}
 
-		// Leave / Delete.  Founders can delete (which leaves +
-		// tombstones the room); everyone else just leaves.  DMs use
-		// the "Delete conversation" wording instead of "Leave room"
-		// — matches what users actually expect when they end a chat.
+		// Leave / Delete.  Founders can delete (server-side purge
+		// via the engine admin API — kicks every member, blocks
+		// rejoin, wipes history); everyone else just leaves their
+		// own membership.  DMs use the "Delete conversation"
+		// wording instead of "Leave room" — matches what users
+		// actually expect when they end a chat, and is wired to
+		// the bilateral DM purge path.
 		if (isFounder && !isDm && onDelete) {
 			out.push({
 				label: "Delete room",
