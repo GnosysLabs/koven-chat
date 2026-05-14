@@ -197,7 +197,30 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 				// ceiling for group calls (higher rates can starve
 				// other peers' camera bandwidth on constrained uplinks).
 				// 1080p cap keeps bitrate sane on retina displays.
+				//
+				// Note on screenshare system audio: RealtimeKit's
+				// internal getScreenShareTracks() already passes
+				// `audio: true` to getDisplayMedia, so the SDK IS
+				// asking the OS for tab/system audio.  Whether it
+				// arrives depends on what the user picks in the
+				// browser/OS picker: Chrome only offers "Share tab
+				// audio" for Tab capture and "Share system audio" for
+				// Entire Screen capture (macOS Sequoia / Windows);
+				// Window capture never includes audio.  Nothing to
+				// configure on our side — it's a browser limitation.
+				//
+				// Audio processing: turn on the three standard WebRTC
+				// processors so calls match Discord/Meet/Zoom out of
+				// the box.  The SDK defaults these to off.  NB the
+				// `noiseSupression` key is misspelled in RealtimeKit's
+				// type (one 's'); we have to match that or it gets
+				// silently dropped.
 				mediaConfiguration: {
+					audio: {
+						echoCancellation: true,
+						noiseSupression: true,
+						autoGainControl: true,
+					},
 					screenshare: {
 						frameRate: { ideal: 30, max: 30 },
 						width: { max: 1920 },
@@ -232,13 +255,40 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 	useEffect(() => {
 		if (!meeting || phase !== "connecting") return;
 		if (activeCall?.skipPrejoin) {
-			void meeting.joinRoom()
-				.then(() => setPhase("joined"))
-				.catch(err => {
+			// `defaults.audio` / `defaults.video` are HINTS to the
+			// SDK, not activation commands — the actual mic/cam
+			// publishers are only attached when enableAudio() /
+			// enableVideo() resolve.  In the normal flow,
+			// PreJoinScreen does that for us via its toggle pills
+			// before the user hits Join.  The pop-out flow skips
+			// PreJoinScreen, so without this step the new SDK
+			// session joined without a mic track — UI showed mic
+			// "on" (audioEnabled mirrored the default) but
+			// remote participants heard nothing.  Mirror what
+			// PreJoinScreen does: toggle on first, then join.
+			//
+			// Errors are caught per-call so a failed mic (e.g.
+			// permission denied) doesn't block joining — the user
+			// still gets into the room, just muted, and can retry
+			// from the in-call control bar.
+			void (async () => {
+				try {
+					if (activeCall.defaults?.audio) {
+						try { await meeting.self.enableAudio(); }
+						catch (e) { console.warn("CallProvider: pop-out enableAudio failed", e); }
+					}
+					if (activeCall.defaults?.video) {
+						try { await meeting.self.enableVideo(); }
+						catch (e) { console.warn("CallProvider: pop-out enableVideo failed", e); }
+					}
+					await meeting.joinRoom();
+					setPhase("joined");
+				} catch (err) {
 					console.error("CallProvider: auto-join (pop-out) failed", err);
 					const msg = err instanceof Error ? err.message : String(err);
 					setError(msg);
-				});
+				}
+			})();
 			return;
 		}
 		setPhase("prejoin");
