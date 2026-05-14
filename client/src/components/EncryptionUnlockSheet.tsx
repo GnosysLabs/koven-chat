@@ -25,7 +25,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Lock } from "lucide-react";
 import { isMobileShell } from "@/lib/mobile";
-import { isNativeShell } from "@/lib/nativeShell";
 import { EncryptionUnlockMobile } from "@/components/EncryptionUnlockMobile";
 
 export interface EncryptionUnlockSheetProps {
@@ -58,10 +57,6 @@ function EncryptionUnlockDesktop({ open, onUnlock, onUnlocked, onSignOut }: Encr
 	const [input, setInput] = useState("");
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
-	// Koven: native shells (Capacitor iOS / Tauri) paint the brand
-	// wallpaper + wordmark on this pre-auth surface so it matches the
-	// login screen rather than landing on a flat dark sheet.
-	const inNativeShell = isNativeShell();
 
 	async function submit(e: React.FormEvent) {
 		e.preventDefault();
@@ -90,23 +85,15 @@ function EncryptionUnlockDesktop({ open, onUnlock, onUnlocked, onSignOut }: Encr
 			    "Sign out instead" link below is the proper escape.
 			    `force-midnight` keeps this pre-auth surface visually
 			    consistent with the login screen no matter what theme
-			    the user has stashed in localStorage; the same recipe
-			    runs on desktop AND mobile so we don't fork the UI. */}
+			    the user has stashed in localStorage; the mobile
+			    variant (EncryptionUnlockMobile) paints its own brand
+			    wallpaper, so the desktop variant stays a plain Radix
+			    sheet on the midnight surface. */}
 			<DialogContent
-				className="sm:max-w-md [&>button]:hidden force-midnight max-sm:bg-cover max-sm:bg-center max-sm:bg-no-repeat"
-				style={inNativeShell ? {
-					backgroundImage: "url(/login-bg-mobile.png)",
-				} : undefined}
+				className="sm:max-w-md [&>button]:hidden force-midnight"
 				onInteractOutside={(e) => e.preventDefault()}
 				onEscapeKeyDown={(e) => e.preventDefault()}
 			>
-				{inNativeShell && (
-					<img
-						src="/koven-wordmark.png"
-						alt="Koven"
-						className="max-sm:block hidden mx-auto max-h-16 max-w-[60%] object-contain mb-4"
-					/>
-				)}
 				<DialogHeader>
 					<DialogTitle className="flex items-center gap-2">
 						<Lock className="h-4 w-4 text-primary" />

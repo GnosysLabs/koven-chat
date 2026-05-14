@@ -31,7 +31,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Copy, Download, Lock } from "lucide-react";
 import { isMobileShell } from "@/lib/mobile";
-import { isNativeShell } from "@/lib/nativeShell";
 import { EncryptionSetupMobile } from "@/components/EncryptionSetupMobile";
 
 export interface EncryptionSetupSheetProps {
@@ -69,9 +68,6 @@ export function EncryptionSetupSheet(props: EncryptionSetupSheetProps) {
 }
 
 function EncryptionSetupDesktop({ open, onSetup, onComplete, onSignOut }: EncryptionSetupSheetProps) {
-	// Koven: paint the brand wallpaper + wordmark on native shells so
-	// this pre-auth surface matches the login screen.
-	const inNativeShell = isNativeShell();
 	const [step, setStep] = useState<Step>("passphrase");
 	const [passphrase, setPassphrase] = useState("");
 	const [confirm, setConfirm] = useState("");
@@ -140,20 +136,10 @@ function EncryptionSetupDesktop({ open, onSetup, onComplete, onSignOut }: Encryp
 		// the proper escape hatch and signposts itself clearly.
 		<Dialog open={open} onOpenChange={() => {}}>
 			<DialogContent
-				className="sm:max-w-md [&>button]:hidden max-sm:bg-cover max-sm:bg-center max-sm:bg-no-repeat"
-				style={inNativeShell ? {
-					backgroundImage: "url(/login-bg-mobile.png)",
-				} : undefined}
+				className="sm:max-w-md [&>button]:hidden"
 				onInteractOutside={(e) => e.preventDefault()}
 				onEscapeKeyDown={(e) => e.preventDefault()}
 			>
-				{inNativeShell && (
-					<img
-						src="/koven-wordmark.png"
-						alt="Koven"
-						className="max-sm:block hidden mx-auto max-h-16 max-w-[60%] object-contain mb-4"
-					/>
-				)}
 				<DialogHeader>
 					<DialogTitle className="flex items-center gap-2">
 						<Lock className="h-4 w-4 text-primary" />
