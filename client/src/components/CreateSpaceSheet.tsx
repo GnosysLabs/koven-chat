@@ -1,11 +1,11 @@
 // Create-space dialog — name + topic + avatar + emoji + visibility
-// + encryption + NSFW.
+// + NSFW.
 //
 // Layout mirrors CreateRoomSheet (which itself mirrors
 // RoomEditSheet / SpaceEditSheet): narrow `sm:max-w-md` dialog,
 // 14×14 avatar tile on the left with action column on the right
 // (Upload / Set Emoji / Remove), name + topic inputs, then the
-// space-specific knobs (visibility, encryption, NSFW) below.
+// space-specific knobs (visibility, NSFW) below.
 // The create + edit flows now read as the same form in two states.
 
 import { useRef, useState } from "react";
@@ -23,7 +23,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { EmojiPicker } from "@/components/EmojiPicker";
 import { cn } from "@/lib/utils";
-import { Camera, EyeOff, Globe, Lock, Smile, Trash2 } from "lucide-react";
+import { Camera, EyeOff, Globe, Smile, Trash2 } from "lucide-react";
 
 export interface CreateSpaceSheetProps {
 	open: boolean;
@@ -37,7 +37,6 @@ export interface CreateSpaceSheetProps {
 		// the space's m.space-typed room after create.
 		iconEmoji: string;
 		nsfw: boolean;
-		e2eeRequired: boolean;
 	}): Promise<void>;
 	/** Same gate as the room create form — only shows the NSFW toggle
 	 * when the viewer's account has "Show NSFW rooms" enabled. */
@@ -50,19 +49,11 @@ export function CreateSpaceSheet({ open, onOpenChange, onCreate, showNsfw }: Cre
 	const [iconEmoji, setIconEmoji] = useState("");
 	const [visibility, setVisibility] = useState<"public" | "private">("public");
 	const [nsfw, setNsfw] = useState(false);
-	const [e2eeRequired, setE2eeRequired] = useState(false);
 	const [avatarFile, setAvatarFile] = useState<File | undefined>(undefined);
 	const [avatarPreview, setAvatarPreview] = useState<string | undefined>(undefined);
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
-	// E2EE only makes sense inside a private space — encrypted public
-	// spaces are forbidden by governance because the engine can't run
-	// consensus moderation on what it can't read.  When the user flips
-	// visibility back to public, we silently clear the encryption
-	// switch so the two settings can't drift out of sync.
-	const canEncrypt = visibility === "private";
-	const effectiveE2eeRequired = canEncrypt && e2eeRequired;
 
 	function reset() {
 		setName("");
@@ -70,7 +61,6 @@ export function CreateSpaceSheet({ open, onOpenChange, onCreate, showNsfw }: Cre
 		setIconEmoji("");
 		setVisibility("public");
 		setNsfw(false);
-		setE2eeRequired(false);
 		setAvatarFile(undefined);
 		setAvatarPreview(undefined);
 		setError(null);
@@ -102,7 +92,6 @@ export function CreateSpaceSheet({ open, onOpenChange, onCreate, showNsfw }: Cre
 				avatarFile,
 				iconEmoji: iconEmoji.trim(),
 				nsfw,
-				e2eeRequired: effectiveE2eeRequired,
 			});
 			reset();
 			onOpenChange(false);
@@ -249,33 +238,6 @@ export function CreateSpaceSheet({ open, onOpenChange, onCreate, showNsfw }: Cre
 							/>
 						</div>
 					</div>
-
-					{/* End-to-end encryption: only meaningful on private
-					    spaces.  When on, every child room is forced
-					    encrypted + private, permanently (Matrix can't
-					    disable encryption on a room once on).  The
-					    whole section is hidden when visibility is
-					    public: showing the same control disabled was
-					    just noise that pushed the Create button below
-					    the fold without offering anything actionable. */}
-					{canEncrypt && (
-						<div className="flex items-start justify-between gap-3 rounded-md border border-border p-3">
-							<div className="space-y-0.5 flex-1 min-w-0">
-								<Label htmlFor="space-e2ee" className="cursor-pointer flex items-center gap-1.5">
-									<Lock className="h-3.5 w-3.5 text-muted-foreground" />
-									End-to-end encryption
-								</Label>
-								<p className="text-xs text-muted-foreground leading-relaxed">
-									Forces every room in this space to be encrypted &amp; private. <strong className="text-foreground">Koven moderation can&rsquo;t apply</strong>, flags, collapse, and the mod log go silent in every child room. <strong className="text-foreground">This can&rsquo;t be reversed.</strong>
-								</p>
-							</div>
-							<Switch
-								id="space-e2ee"
-								checked={effectiveE2eeRequired}
-								onCheckedChange={setE2eeRequired}
-							/>
-						</div>
-					)}
 
 					{showNsfw && (
 						<div className="flex items-start justify-between gap-3 rounded-md border border-border p-3">

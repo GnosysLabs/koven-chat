@@ -79,15 +79,7 @@ export function SpaceHomeMobile({
 						</p>
 					)}
 					<div className="mt-2 flex flex-wrap items-center justify-center gap-1.5">
-						{space.e2eeRequired && (
-							<MetaPill
-								tone="emerald"
-								icon={<Lock className="h-3 w-3" strokeWidth={2.5} />}
-							>
-								End-to-end encrypted
-							</MetaPill>
-						)}
-						{space.kind === "private" && !space.e2eeRequired && (
+						{space.kind === "private" && (
 							<MetaPill tone="neutral">Private</MetaPill>
 						)}
 					</div>

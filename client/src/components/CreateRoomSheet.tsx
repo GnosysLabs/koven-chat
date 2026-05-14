@@ -8,20 +8,10 @@
 //
 // Discord-style invariant: the new room ALWAYS lives inside the
 // currently active space, and silently inherits the space's
-// privacy + NSFW + encryption posture.  No room-level visibility
-// toggle, no room-level NSFW toggle, no room-level encryption
-// toggle — the inheritance is implicit.  Public space → public
-// not-encrypted rooms; private space → restricted-join in-space
-// rooms; private space with the e2ee_required policy → every room
-// is encrypted; NSFW space → NSFW rooms.
-//
-// The encryption decision is made once at space creation and
-// applied to every child room.  Per-room opt-in was removed
-// because mixing encrypted and unencrypted rooms inside the same
-// space created an inconsistent moderation surface (some rooms
-// flag-able, some not) that was hard to communicate to users.
-// The whole-space decision is simpler to reason about and matches
-// the "this space is or isn't moderated" mental model.
+// privacy + NSFW posture.  No room-level visibility toggle, no
+// room-level NSFW toggle.  The inheritance is implicit:
+// public space → public rooms; private space → restricted-join
+// in-space rooms; NSFW space → NSFW rooms.
 
 import { useRef, useState } from "react";
 import {

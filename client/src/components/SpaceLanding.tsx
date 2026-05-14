@@ -76,22 +76,6 @@ export function SpaceLanding({
 							End-to-end encrypted
 						</div>
 					)}
-					{/* E2EE-required space pill.  Shown alongside / instead
-					    of the DM pill above when the space was created
-					    with the "all rooms encrypted" policy.  The title
-					    spells out the full trade so the user can see why
-					    flag / mod-log / reputation affordances are missing
-					    inside this space — and why we wanted them to
-					    understand the cost up front. */}
-					{variant === "real" && space.e2eeRequired && (
-						<div
-							className="mt-2 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-500/5 text-emerald-500/90 text-[11px] font-medium"
-							title="Every room in this space is end-to-end encrypted. The engine can't read messages here, so Koven moderation doesn't apply — there's no flag affordance, no community collapse, no public mod log entries. Activity in encrypted rooms also doesn't count toward your reputation score, since reputation is built from posts the engine can index."
-						>
-							<Lock className="h-3 w-3" />
-							End-to-end encrypted &middot; not moderated
-						</div>
-					)}
 					{(showAddRoom || showInvite || showSettings || showStartDm) && (
 						<div className="flex flex-col items-center gap-1.5 mt-3">
 							{/* Primary row: ambient actions (Start DM,

@@ -311,6 +311,45 @@ export async function adminCreateUser(opts: {
 }
 
 /**
+ * Concurrency-limited fan-out helper.  Runs `fn` over `items` with at
+ * most `concurrency` calls in flight at any moment.  Used by the
+ * appservice-transaction cascades (newSpaceChildren → admin-join every
+ * space member; newSpaceJoiners → admin-join the new joiner into every
+ * child room).  The old serial `for...of` loop took ~50ms × N members
+ * to fan out, which is fine at 5 members and felt sluggish past 20.
+ *
+ * Why not Promise.all everything: at 100 members that's 100 concurrent
+ * admin-join requests slammed into one Synapse worker, which produces
+ * queue buildup that starves the appservice /transactions response
+ * (Bun is single-event-loop, Synapse-side workers are bounded).  A
+ * small pool (8) keeps Synapse comfortable while still finishing 100-
+ * member fan-outs in ~1s instead of ~6s.
+ */
+export async function poolAll<T, R>(
+	items: T[],
+	concurrency: number,
+	fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+	const out: R[] = new Array(items.length);
+	let cursor = 0;
+	async function worker() {
+		while (true) {
+			const idx = cursor++;
+			if (idx >= items.length) return;
+			// Guarded by the cursor check above.  The cast is to
+			// satisfy `noUncheckedIndexedAccess`, which has no way to
+			// see that idx < items.length.
+			out[idx] = await fn(items[idx] as T, idx);
+		}
+	}
+	const workerCount = Math.min(concurrency, items.length);
+	const workers: Promise<void>[] = [];
+	for (let i = 0; i < workerCount; i++) workers.push(worker());
+	await Promise.all(workers);
+	return out;
+}
+
+/**
  * Admin-join a user to a room or space using Synapse's admin
  * `POST /_synapse/admin/v1/join/<roomIdOrAlias>` endpoint.  Synapse
  * mints an `m.room.member` join event with the target user's identity,

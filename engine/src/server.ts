@@ -140,6 +140,7 @@ import {
 	listAllRooms,
 	loginAsUser,
 	pickStateContent,
+	poolAll,
 	readRoomState,
 	registerAppserviceUser,
 	repairRoomInvitePL,
@@ -182,7 +183,13 @@ async function autoJoinDefaultSpace(userId: string, spaceId: string): Promise<vo
 		}
 
 		const childIds = await getSpaceChildRoomIds(spaceId);
-		await Promise.all(childIds.map(async childId => {
+		// Concurrency 8 to match the appservice-transaction cascades.
+		// Default-space onboarding only fires once per new signup, so
+		// the bound is mostly for consistency, but at scale (a default
+		// space with 50 public rooms × N signups/sec) a Promise.all-
+		// everything fan-out could spike Synapse load disproportionate
+		// to the actual user-facing benefit.
+		await poolAll(childIds, 8, async childId => {
 			const rule = await getRoomJoinRule(childId);
 			// "public" auto-joinable; "knock" still needs membership but
 			// admin-join works because the admin can override.  Anything
@@ -195,7 +202,7 @@ async function autoJoinDefaultSpace(userId: string, spaceId: string): Promise<vo
 					`engine: default-space child join ${userId} → ${childId} failed: ${r.error} ${r.detail ?? ""}`,
 				);
 			}
-		}));
+		});
 	} catch (err) {
 		console.warn(`engine: autoJoinDefaultSpace ${userId} → ${spaceId} threw`, err);
 	}
@@ -4879,21 +4886,26 @@ export function startServer(): void {
 								// is still excluded inside the helper.
 								const members = await getAllJoinedMembers(spaceId);
 								const localSuffix = `:${config.homeserverName}`;
-								for (const userId of members) {
-									// Only act on local users — admin/v1/join
-									// can't cross-federate.  Federated
-									// members get auto-joined by their own
-									// homeserver's engine processing the
-									// same m.space.child event.
-									if (!userId.endsWith(localSuffix)) continue;
-									// The linker is already in the room
-									// (they wrote the m.space.child),
-									// adminJoinUserToRoom is idempotent so
-									// this is a no-op anyway, but the
-									// explicit skip saves a round-trip.
-									if (userId === sender) continue;
+								// Filter to the actual targets up-front so
+								// the duration log + ok/err tallies reflect
+								// real work rather than skipped no-ops.
+								const targets = members.filter(
+									userId => userId.endsWith(localSuffix) && userId !== sender,
+								);
+								if (targets.length === 0) continue;
+								const startedAt = Date.now();
+								let okCount = 0;
+								let errCount = 0;
+								// Concurrency 8.  See poolAll's comment for
+								// why we don't fire all-N in parallel.
+								// admin/v1/join can't cross-federate, so
+								// federated members get auto-joined by
+								// their own homeserver's engine processing
+								// the same m.space.child event.
+								await poolAll(targets, 8, async userId => {
 									const result = await adminJoinUserToRoom(userId, childId);
 									if ("error" in result) {
+										errCount++;
 										// Log per-user failures but don't
 										// abort — getting most members in is
 										// better than rolling back any.
@@ -4902,8 +4914,13 @@ export function startServer(): void {
 											result.error,
 											result.detail ?? "",
 										);
+									} else {
+										okCount++;
 									}
-								}
+								});
+								console.log(
+									`engine: cascade fan-out room=${childId} members=${targets.length} ok=${okCount} err=${errCount} duration=${Date.now() - startedAt}ms`,
+								);
 							} catch (err) {
 								console.error(
 									`engine: auto-join cascade for child=${childId} parent=${spaceId} failed`,
@@ -4952,11 +4969,18 @@ export function startServer(): void {
 								console.log(
 									`engine: space-join cascade — user=${userId} space=${roomId} children=${childIds.length}`,
 								);
-								for (const childId of childIds) {
+								const startedAt = Date.now();
+								let okCount = 0;
+								let errCount = 0;
+								let skipCount = 0;
+								await poolAll(childIds, 8, async childId => {
 									try {
 										// Skip sub-spaces — same rule as
 										// newSpaceChildren above.
-										if (await isSpaceRoom(childId)) continue;
+										if (await isSpaceRoom(childId)) {
+											skipCount++;
+											return;
+										}
 										// Only auto-join rooms with rules
 										// that make sense for a cascade.
 										// Public + knock + restricted all
@@ -4965,22 +4989,32 @@ export function startServer(): void {
 										// gated and require an explicit
 										// invitation.
 										const rule = await getRoomJoinRule(childId);
-										if (rule !== "public" && rule !== "knock" && rule !== "restricted") continue;
+										if (rule !== "public" && rule !== "knock" && rule !== "restricted") {
+											skipCount++;
+											return;
+										}
 										const result = await adminJoinUserToRoom(userId, childId);
 										if ("error" in result) {
+											errCount++;
 											console.warn(
 												`engine: space-join cascade ${userId} → ${childId} failed:`,
 												result.error,
 												result.detail ?? "",
 											);
+										} else {
+											okCount++;
 										}
 									} catch (err) {
+										errCount++;
 										console.warn(
 											`engine: space-join cascade child=${childId} failed`,
 											err,
 										);
 									}
-								}
+								});
+								console.log(
+									`engine: space-join cascade done user=${userId} space=${roomId} ok=${okCount} err=${errCount} skip=${skipCount} duration=${Date.now() - startedAt}ms`,
+								);
 							} catch (err) {
 								console.error(
 									`engine: space-join cascade for user=${userId} space=${roomId} failed`,
