@@ -3332,8 +3332,28 @@ export default function App() {
 					    something is pushed over it. */}
 					<div
 						className={`flex-1 flex flex-col min-h-0 mobile-push-underlayer${meStack !== "root" ? " is-pushed" : ""}`}
-						style={{ paddingTop: "env(safe-area-inset-top)" }}
 					>
+						<MobileTopBar
+							rightSlot={
+								<NotificationBell
+									notifications={visibleNotifications}
+									onOpenRoom={openRoomFromNotification}
+									resolveDisplayName={(userId) => {
+										if (!transport) return null;
+										for (const r of state.rooms) {
+											const members = transport.getRoomMembers(r.id) ?? [];
+											const m = members.find(mb => mb.userId === userId);
+											if (m?.displayName) return m.displayName;
+										}
+										return null;
+									}}
+									resolveRoomName={(roomId) =>
+										state.rooms.find(r => r.id === roomId)?.name ?? null
+									}
+									accessToken={creds.access_token}
+								/>
+							}
+						/>
 						<MobileMeScreen
 							userId={creds.user_id}
 							avatarMxc={myAvatarMxc}
