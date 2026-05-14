@@ -570,7 +570,16 @@ export function ChatPane({
 		getScrollElement: () => scrollRef.current,
 		estimateSize,
 		getItemKey,
-		overscan: 8,
+		// `useFlushSync: false` defers React renders to the batched
+		// scheduler instead of synchronously flushing during scroll
+		// events.  On iOS WKWebView this is the difference between
+		// silky-smooth momentum scroll and "horrible, unusable" jank,
+		// because the synchronous default blocks the compositor for
+		// the duration of every reconcile.
+		useFlushSync: false,
+		// Small overscan so each scroll tick mounts/unmounts a tiny
+		// number of (heavy, un-memoised) MessageRow components.
+		overscan: 4,
 	});
 
 	// `shouldAdjustScrollPositionOnItemSizeChange` is an instance
@@ -580,9 +589,12 @@ export function ChatPane({
 	// real size, the virtualizer compensates scrollOffset so the
 	// user's visible content stays put.  This is the core piece
 	// that prevents the "everything jumps around as images decode"
-	// jank.
-	virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) =>
-		(instance.scrollOffset !== null) && item.start < instance.scrollOffset;
+	// jank.  Assigned via useEffect (not every render) so we don't
+	// burn allocations on each commit.
+	useEffect(() => {
+		virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) =>
+			(instance.scrollOffset !== null) && item.start < instance.scrollOffset;
+	}, [virtualizer]);
 
 	// Re-measure when the loader row's size class changes.  Without
 	// this, the cached estimateSize for index 0 keeps stale and the
@@ -627,7 +639,7 @@ export function ChatPane({
 		prevFirstIdRef.current = currentFirstId;
 		prevMessagesLenRef.current = currentLen;
 		prevRoomForAnchorRef.current = room?.id;
-	});
+	}, [messages, room?.id, virtualizer]);
 
 	// ─── Auto-snap to bottom on room change / call-view exit ────
 	// Single scrollToIndex call replaces the previous multi-stage
@@ -1333,9 +1345,19 @@ export function ChatPane({
 					ref={scrollRef}
 					className="absolute inset-0 overflow-y-auto overscroll-contain"
 					style={{
+						// `overflowAnchor: "none"` disables the browser's
+						// automatic scroll-anchoring — we drive scroll
+						// position adjustments ourselves via the
+						// useLayoutEffect that watches `messages[0].id`.
 						overflowAnchor: "none",
+						// `contain: strict` is recommended by the
+						// TanStack Virtual docs: tells the browser this
+						// element is its own layout / paint / size
+						// boundary, so the huge virtualizer spacer inside
+						// can't cause reflow of anything outside.
+						// Critical for keeping the page above stable as
+						// items measure in.
 						contain: "strict",
-						WebkitOverflowScrolling: "touch",
 					}}
 				>
 					<div

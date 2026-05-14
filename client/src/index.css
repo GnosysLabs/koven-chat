@@ -654,6 +654,32 @@
 		 * peeks at the WebView's white default behind the canvas.
 		 */
 		overscroll-behavior-y: none;
+		/* Capacitor's WKWebView wraps the document in a native
+		 * UIScrollView that scrolls vertically whenever the DOM is
+		 * taller than the viewport — even when overflow:visible
+		 * would normally just bleed.  In practice, our virtualizer
+		 * sets its inner spacer to `getTotalSize()` px (potentially
+		 * 10–20k px) inside an `overflow-y:auto` scroll container —
+		 * but iOS lets the user pan the entire page anyway,
+		 * shifting the chat surface up while exposing the safe area
+		 * below.  Lock the document height to 100dvh + clip
+		 * overflow at the body so the only scroll surface is the
+		 * chat container itself.
+		 *
+		 * `display-mode: standalone` would catch this for installed
+		 * PWAs, but Capacitor's WebView doesn't set that mode — so
+		 * we anchor on `.mobile-shell` (which Capacitor + Tauri
+		 * mobile both inject on <html>) instead.
+		 */
+		height: 100dvh;
+		overflow: hidden;
+		position: fixed;
+		inset: 0;
+		width: 100%;
+	}
+	.mobile-shell html {
+		height: 100dvh;
+		overflow: hidden;
 	}
 
 	/* ── Installed PWA — lock the document so iOS can't rubber-
