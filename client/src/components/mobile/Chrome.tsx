@@ -14,6 +14,7 @@
 //     card background.  16pt horizontal screen margin.
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useDrag } from "@use-gesture/react";
 import { ChevronLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -167,9 +168,12 @@ export function ErrorBanner({ message }: { message: string }) {
  * the push always covers it during the animation.
  */
 const EXIT_DURATION_MS = 240;
+const SNAP_DURATION_MS = 220;
 const EDGE_ZONE_PX = 24;
 const POP_DISTANCE_THRESHOLD = 0.4; // 40% of width
 const POP_VELOCITY_THRESHOLD = 0.5; // px/ms
+const EXIT_EASE = "cubic-bezier(0.4, 0, 0.7, 0.28)";
+const SNAP_EASE = "cubic-bezier(0.32, 0.72, 0.18, 1)";
 
 export function PushSlot({
 	visible,
@@ -192,20 +196,16 @@ export function PushSlot({
 	const latchedChild = useRef<ReactNode>(children);
 	if (visible) latchedChild.current = children;
 
-	// Drag state — `dragX` is the live offset in px; null means
-	// "not dragging right now," so CSS animations stay in charge.
-	// Storing the live x in a ref + driving the inline style with
-	// requestAnimationFrame avoids re-rendering every pointermove,
-	// which would tank the framerate on lower-end iPhones.
-	const dragState = useRef<{
-		pointerId: number;
-		startX: number;
-		startTime: number;
-		lastX: number;
-		lastTime: number;
-		width: number;
-	} | null>(null);
-	const [dragX, setDragX] = useState<number | null>(null);
+	// Two refs replace the dragX state from the previous hand-rolled
+	// pointer-event version: `activeRef` tracks whether the current
+	// gesture is one we accepted (started within the edge zone), and
+	// `dragPoppedRef` tells the mount/exit useEffect below to skip
+	// the CSS-keyframe exit animation when the gesture already drove
+	// the slot off-screen imperatively.  Skipping is critical — the
+	// CSS keyframe starts from translateX(0) and would visibly snap
+	// the slot back before re-running the slide-out.
+	const activeRef = useRef(false);
+	const dragPoppedRef = useRef(false);
 
 	useEffect(() => {
 		if (visible) {
@@ -215,9 +215,25 @@ export function PushSlot({
 			}
 			setExiting(false);
 			setMounted(true);
+			// Re-entering — drop any leftover inline transform from a
+			// prior drag-snap-back so the CSS enter keyframe runs
+			// cleanly from translateX(100%).
+			const slot = slotRef.current;
+			if (slot) {
+				slot.style.transform = "";
+				slot.style.transition = "";
+			}
 			return;
 		}
 		if (!mounted) return;
+		if (dragPoppedRef.current) {
+			// The drag committed the pop; the slot is already at
+			// translateX(100%) via the imperative animation.  Just
+			// unmount on the next tick — no CSS keyframe needed.
+			dragPoppedRef.current = false;
+			setMounted(false);
+			return;
+		}
 		setExiting(true);
 		exitTimer.current = setTimeout(() => {
 			setMounted(false);
@@ -232,104 +248,141 @@ export function PushSlot({
 		};
 	}, [visible, mounted]);
 
-	function handlePointerDown(e: React.PointerEvent) {
-		if (!onPop || !visible || exiting) return;
-		// Only the primary pointer; mouse left button only.  Ignore
-		// touches that don't start near the left edge — anywhere
-		// else and we let the underlying view handle the gesture
-		// (scrolling, taps, etc.).
-		if (e.pointerType === "mouse" && e.button !== 0) return;
+	// useDrag from @use-gesture/react.  Replaces the hand-rolled
+	// pointer-event handlers that drove a dragX setState on every
+	// move — every move triggered a React re-render, which compounded
+	// jank on lower-end iPhones.  Now the transform is mutated
+	// directly on the DOM node during the drag, then a CSS transition
+	// carries the final snap-back / pop animation.
+	//
+	// Edge-zone check happens on `first`: drags starting outside the
+	// left 24px are cancelled so vertical scrolls / content taps
+	// inside the view pass through untouched.  `axis: "x"` keeps
+	// vertical pans from triggering this gesture even when they
+	// start in the edge zone, so the user can scroll the push view
+	// itself without accidentally swiping back.
+	const dragBind = useDrag(({ first, last, active, movement: [mx], velocity: [vx], xy, cancel }) => {
 		const slot = slotRef.current;
 		if (!slot) return;
-		const rect = slot.getBoundingClientRect();
-		const relX = e.clientX - rect.left;
-		if (relX > EDGE_ZONE_PX) return;
-		const now = performance.now();
-		dragState.current = {
-			pointerId: e.pointerId,
-			startX: e.clientX,
-			startTime: now,
-			lastX: e.clientX,
-			lastTime: now,
-			width: rect.width,
-		};
-		setDragX(0);
-		try { slot.setPointerCapture(e.pointerId); } catch { /* older browsers */ }
-	}
+		if (first) {
+			if (!onPop || !visible || exiting) {
+				cancel();
+				return;
+			}
+			const rect = slot.getBoundingClientRect();
+			const relX = xy[0] - rect.left;
+			if (relX > EDGE_ZONE_PX) {
+				cancel();
+				return;
+			}
+			activeRef.current = true;
+		}
+		if (!activeRef.current) return;
 
-	function handlePointerMove(e: React.PointerEvent) {
-		const st = dragState.current;
-		if (!st || e.pointerId !== st.pointerId) return;
-		// Track only rightward drag — anything left of start is
-		// clamped to 0 so the view can't slide off-screen-left.
-		const dx = Math.max(0, e.clientX - st.startX);
-		st.lastX = e.clientX;
-		st.lastTime = performance.now();
-		setDragX(dx);
-	}
-
-	function endDrag(e: React.PointerEvent, cancelled: boolean) {
-		const st = dragState.current;
-		if (!st || e.pointerId !== st.pointerId) return;
-		dragState.current = null;
-		try { slotRef.current?.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
-		if (cancelled) {
-			setDragX(null);
+		if (active) {
+			// Track only rightward drag.  Clamp at 0 so the view
+			// can't slide off-screen-left.  No transition — the
+			// transform follows the finger 1:1.
+			const dx = Math.max(0, mx);
+			slot.style.transition = "none";
+			slot.style.transform = `translateX(${dx}px)`;
 			return;
 		}
-		const dx = Math.max(0, e.clientX - st.startX);
-		const dt = Math.max(1, performance.now() - st.startTime);
-		const velocity = dx / dt;
-		const past = dx > st.width * POP_DISTANCE_THRESHOLD;
-		const flick = velocity > POP_VELOCITY_THRESHOLD && dx > 24;
-		if ((past || flick) && onPop) {
-			// Commit the pop.  Drop dragX so the CSS exit animation
-			// takes over from translateX(0); a small visual jump
-			// from `dx → 0 → exit-anim` is acceptable and snappier
-			// than carrying the drag offset through to the exit.
-			setDragX(null);
-			onPop();
-		} else {
-			// Snap back — null clears the inline style, returning
-			// the slot to its CSS-anchored translateX(0).  A short
-			// transition is applied via the snap-back class.
-			setDragX(null);
+		if (last) {
+			activeRef.current = false;
+			const dx = Math.max(0, mx);
+			const width = slot.offsetWidth || window.innerWidth || 1;
+			const past = dx > width * POP_DISTANCE_THRESHOLD;
+			const flick = vx > POP_VELOCITY_THRESHOLD && dx > 24;
+
+			if ((past || flick) && onPop) {
+				// Commit the pop.  Continue the animation from the
+				// current drag offset off the right edge — duration
+				// scales with the remaining distance so a fast
+				// flick completes quickly while a slow drag near
+				// the threshold takes the full exit duration.
+				dragPoppedRef.current = true;
+				const remainingFraction = Math.max(0, (width - dx) / width);
+				const duration = Math.max(
+					120,
+					Math.round(EXIT_DURATION_MS * remainingFraction),
+				);
+				slot.style.transition = `transform ${duration}ms ${EXIT_EASE}`;
+				slot.style.transform = "translateX(100%)";
+				window.setTimeout(() => onPop(), duration);
+			} else {
+				// Snap back to docked position.  After the snap
+				// completes, clear the inline transform so future
+				// state changes (re-pop via the back button, etc.)
+				// fall through to the CSS keyframes.
+				slot.style.transition = `transform ${SNAP_DURATION_MS}ms ${SNAP_EASE}`;
+				slot.style.transform = "translateX(0)";
+				window.setTimeout(() => {
+					const s = slotRef.current;
+					if (!s || activeRef.current) return;
+					s.style.transition = "";
+					s.style.transform = "";
+				}, SNAP_DURATION_MS + 20);
+			}
 		}
-	}
+	}, {
+		pointer: { touch: true, mouse: true },
+		axis: "x",
+	});
 
 	if (!mounted) return null;
-
-	const dragging = dragX !== null && dragState.current !== null;
-	const inlineTransform = dragX !== null && dragState.current !== null
-		? { transform: `translateX(${dragX}px)` }
-		: undefined;
 
 	return (
 		<div
 			ref={slotRef}
-			onPointerDown={handlePointerDown}
-			onPointerMove={handlePointerMove}
-			onPointerUp={(e) => endDrag(e, false)}
-			onPointerCancel={(e) => endDrag(e, true)}
+			{...dragBind()}
 			className={cn(
 				"absolute inset-0 z-10",
-				"bg-background",
-				// CSS animation classes only when NOT actively
-				// dragging — we drive the transform inline during
-				// the drag, then let the CSS take over for the
-				// snap-back transition or the post-pop exit.
-				!dragging && (exiting ? "mobile-push-exit" : "mobile-push-enter"),
-				dragX !== null && !dragging && "mobile-push-snap",
+				// `flex flex-col` so children that size themselves
+				// via `flex-1` (ChatPane, SpaceHomeMobile) actually
+				// fill the slot.  Without this they collapsed to
+				// natural content height, leaving an "empty" PushSlot
+				// below them — which on the chat use exposed the
+				// parallaxed list underneath, and on the space
+				// detail use broke scrolling because the
+				// `flex-1 overflow-y-auto` container had no defined
+				// height to scroll within.
+				"flex flex-col",
+				// NOTE: no `bg-background` here.  When PushSlot is
+				// used as a direct child of `data-mobile-pane="main"`
+				// (the chat overlay), index.css's
+				// `.mobile-shell [data-mobile-pane] > * { background:
+				// transparent !important }` rule strips the wrapper's
+				// background, letting the parallaxed list pane peek
+				// through.  The opaque layer is painted by the nested
+				// `<div>` below instead — a grandchild of the pane,
+				// so the !important rule doesn't reach it.
+				// CSS keyframes drive enter + non-drag exit.  During
+				// a drag, the inline transform overrides whatever
+				// would be coming from the keyframe.  If the drag
+				// commits a pop, dragPoppedRef suppresses the exit
+				// keyframe entirely — the imperative animation
+				// already drove the slot off-screen.
+				!dragPoppedRef.current && (exiting ? "mobile-push-exit" : "mobile-push-enter"),
 				"touch-pan-y",
 			)}
-			style={{
-				backgroundImage: "var(--bg-gradient)",
-				backgroundAttachment: "fixed",
-				backgroundRepeat: "no-repeat",
-				backgroundSize: "cover",
-				...inlineTransform,
-			}}
 		>
+			{/* Opaque bg layer.  Nested one level deeper than the
+			    slot wrapper so the pane-level transparent !important
+			    rule (which only targets direct children of the pane)
+			    can't reach it.  -z-10 puts it behind the latched
+			    child while staying inside the slot's own stacking
+			    context (the slot itself is z-10 in the pane). */}
+			<div
+				aria-hidden
+				className="absolute inset-0 -z-10 bg-background pointer-events-none"
+				style={{
+					backgroundImage: "var(--bg-gradient)",
+					backgroundAttachment: "fixed",
+					backgroundRepeat: "no-repeat",
+					backgroundSize: "cover",
+				}}
+			/>
 			{latchedChild.current}
 		</div>
 	);

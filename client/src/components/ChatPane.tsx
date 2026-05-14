@@ -44,6 +44,7 @@ import { MarkdownContent } from "@/components/MarkdownContent";
 import { isMobileShell } from "@/lib/mobile";
 import { hapticImpact } from "@/lib/haptics";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { MobileReactionSheet } from "@/components/MobileReactionSheet";
 
 // Heuristic: does this body have any markdown shape?  Cheap regex
 // pass — looks for headings, lists, fenced code, emphasis, links,
@@ -107,7 +108,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import { AlertTriangle, ArrowDown, ArrowUp, BarChart3, Check, CheckCheck, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Globe, Images, Lock, MessageSquare as MessageSquareIcon, Paperclip, Play, Plus, Scale, Settings, X } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, BarChart3, Check, CheckCheck, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Images, Lock, MessageSquare as MessageSquareIcon, Paperclip, Play, Plus, Scale, Settings, X } from "lucide-react";
 
 export interface ChatPaneProps {
 	room: Room | null;
@@ -1058,6 +1059,7 @@ export function ChatPane({
 				key={m.id}
 				data-index={index}
 				data-message-id={m.id}
+				className="-mx-4 px-4"
 				style={{
 					contentVisibility: "auto",
 					containIntrinsicSize: `auto ${ROW_INTRINSIC_HEIGHT_PX}px`,
@@ -1091,14 +1093,6 @@ export function ChatPane({
 					onReact={(emoji) => toggleReaction(m, emoji)}
 					onReply={() => setReplyTarget(m)}
 					roomId={activeRoom.id}
-					onQuote={(text) => {
-						const quoted = text.split("\n").map(l => `> ${l}`).join("\n");
-						setDraft(prev => prev ? `${quoted}\n\n${prev}` : `${quoted}\n\n`);
-						setReplyTarget(m);
-						requestAnimationFrame(() => {
-							composeInputRef.current?.focus();
-						});
-					}}
 					onSendDmToSender={onSendDm
 						? () => { void onSendDm(m.sender as UserId); }
 						: undefined}
@@ -1186,14 +1180,6 @@ export function ChatPane({
 					</div>
 				</div>
 				<div className="flex items-center gap-2 shrink-0">
-					{room.kind === "public" && (
-						<RoomBadge
-							icon={<Globe className="h-3 w-3" />}
-							label="Public"
-							tone="default"
-							title="Anyone on the homeserver can find and join."
-						/>
-					)}
 					{room.kind === "private" && (
 						<RoomBadge
 							icon={<EyeOff className="h-3 w-3" />}
@@ -1366,7 +1352,7 @@ export function ChatPane({
 					// at the bottom on new messages for free.
 					<div
 						ref={scrollRef}
-						className="absolute inset-0 overflow-y-auto overflow-x-hidden px-4"
+						className="absolute inset-0 overflow-y-auto overflow-x-hidden px-4 pb-3"
 						style={{
 							display: "flex",
 							flexDirection: "column-reverse",
@@ -1418,7 +1404,7 @@ export function ChatPane({
 					// bottom" case that column-reverse got for free.
 					<div
 						ref={scrollRef}
-						className="absolute inset-0 overflow-y-auto overflow-x-hidden px-4"
+						className="absolute inset-0 overflow-y-auto overflow-x-hidden px-4 pb-3"
 						style={{
 							overflowAnchor: "auto",
 						}}
@@ -1447,7 +1433,28 @@ export function ChatPane({
 						<div ref={bottomSentinelRef} aria-hidden style={{ height: 1 }} />
 					</div>
 				)
-			) : !messagesLoaded ? null : (
+			) : !messagesLoaded ? (
+				// Initial timeline still landing — show the same pulsing
+				// favicon throbber the pagination loader uses, sized up
+				// and centred in the chat area.  Replaces the blank gap
+				// users used to see while matrix-js-sdk delivered the
+				// first batch, which made messages appear to "pop in
+				// one by one" as they hydrated.  Cleared automatically
+				// once the parent flips `messagesLoaded` true (see
+				// App.tsx's loadedTimelines Set).
+				<div
+					className="absolute inset-0 flex items-center justify-center"
+					aria-live="polite"
+					aria-label="Loading messages"
+				>
+					<img
+						src="/favicon.png"
+						alt=""
+						className="size-12 animate-pulse"
+						style={{ filter: "drop-shadow(0 0 24px rgba(0,0,0,0.5))" }}
+					/>
+				</div>
+			) : (
 				isMobileShell ? (
 					<div className="flex flex-col items-center justify-center gap-3 py-16 px-6 text-center">
 						<div className="size-16 rounded-2xl bg-foreground/[0.06] flex items-center justify-center">
@@ -1519,6 +1526,7 @@ export function ChatPane({
 				</div>
 			) : (
 			<div
+				data-composer-wrapper
 				className={cn(
 					"border-t",
 					isMobileShell
@@ -1532,7 +1540,18 @@ export function ChatPane({
 				)}
 				style={
 					isMobileShell
-						? { paddingBottom: "max(env(safe-area-inset-bottom), 0.5rem)" }
+						// Read from `--composer-pb` (defined in index.css).
+						// Two signals collapse this to 0 while the soft
+						// keyboard is up: (1) html.kb-open via Capacitor's
+						// keyboardWillShow event (see nativeShell.ts), and
+						// (2) :focus-within on this wrapper as a CSS-only
+						// fallback for non-Capacitor mobile browsers and
+						// cold-launch races.  Without the collapse there's
+						// a ~34pt black band between the textarea and the
+						// keyboard, because iOS's env(safe-area-inset-bottom)
+						// keeps reporting the home-indicator inset even
+						// when the keyboard covers it.
+						? { paddingBottom: "var(--composer-pb)" }
 						: undefined
 				}
 			>
@@ -1936,7 +1955,7 @@ function MessageRowComponent({
 	isOwnedBot, isHovered, isFlashing, onDelete, onAdminRedact,
 	isDm, receiptsVersion, memberAvatars, memberNames, mentionsViewer, onMentionClick, botMxids, serviceMxids,
 	pollAggregate, viewerUserId, onPollVote, onPollEnd,
-	roomId, onQuote, onSendDmToSender, onBlockSender,
+	roomId, onSendDmToSender, onBlockSender,
 	onOpenSenderProfile,
 }: {
 	message: Message;
@@ -2038,7 +2057,6 @@ function MessageRowComponent({
 	// the matrix.to message link; the callbacks come from ChatPane,
 	// which has the transport reference.
 	roomId: string;
-	onQuote?(text: string): void;
 	onSendDmToSender?(): void;
 	onBlockSender?(): void;
 	// Click handler for the sender's avatar + display name in the
@@ -2561,7 +2579,6 @@ function MessageRowComponent({
 					onCopyLink={isDm ? undefined : () => {
 						void navigator.clipboard.writeText(buildMessageUrl(roomId, message.id));
 					}}
-					onQuote={() => onQuote?.(message.text ?? "")}
 					onDelete={onDelete && !message.pending ? () => setDeleteDialogOpen(true) : undefined}
 					onFlag={canFlag ? () => setFlagDialogOpen(true) : undefined}
 					// "Send DM to sender" is meaningless inside a DM —
@@ -2571,6 +2588,21 @@ function MessageRowComponent({
 					onSendDmToSender={isDm ? undefined : onSendDmToSender}
 					onBlockSender={onBlockSender}
 					onClose={() => setCtxMenuPos(null)}
+				/>
+			)}
+			{/* Mobile-only React picker.  Desktop anchors the picker to
+			    the SmilePlus button inside MessageActions, which is hover-
+			    gated and never mounts on mobile.  The proper mobile shape
+			    is a bottom sheet: full-width, slides up, swipe-down or
+			    tap-backdrop to dismiss.  Picker fills the sheet. */}
+			{isMobileShell && (
+				<MobileReactionSheet
+					open={reactOpen}
+					onClose={() => setReactOpen(false)}
+					onPick={(emoji) => {
+						onReact(emoji);
+						setReactOpen(false);
+					}}
 				/>
 			)}
 		</div>
@@ -2634,7 +2666,6 @@ function messageRowPropsEqual(
 	if (!!prev.onAdminRedact !== !!next.onAdminRedact) return false;
 	if (!!prev.onSendDmToSender !== !!next.onSendDmToSender) return false;
 	if (!!prev.onBlockSender !== !!next.onBlockSender) return false;
-	if (!!prev.onQuote !== !!next.onQuote) return false;
 	if (!!prev.onOpenSenderProfile !== !!next.onOpenSenderProfile) return false;
 	if (!!prev.onPollVote !== !!next.onPollVote) return false;
 	if (!!prev.onPollEnd !== !!next.onPollEnd) return false;

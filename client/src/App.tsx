@@ -2537,6 +2537,11 @@ export default function App() {
 						transport={transport}
 						currentUserId={creds.user_id as UserId}
 						botMxids={botMxids}
+						// Same gate RoomList uses for its empty hint — wait
+						// until matrix-js-sdk has fanned rooms into state.rooms
+						// before showing "No chats yet."  Otherwise the EmptyState
+						// flashes during initial sync.
+						roomsLoaded={state.syncState === "syncing" || state.syncState === "ready"}
 						onSelectRoom={navigateToRoom}
 						onCreateRoom={() => setStartDmOpen(true)}
 						onAcceptInvite={async (roomId) => {
@@ -2636,7 +2641,15 @@ export default function App() {
 				</div>
 				)}
 				<div className="contents" data-mobile-pane="main">
-				{state.activeSpace?.kind === "explore" ? (
+				{/* On mobile the main pane is reserved exclusively for the
+				    chat (wrapped in PushSlot below) so it can slide in
+				    from the right.  Explore / Bots / SpaceLanding render
+				    in the LIST pane on mobile (see ExploreMobile,
+				    BotList, SpaceHomeMobile above) — gating these
+				    branches on !isMobileShell keeps them from doubling
+				    up on the absolute-overlay main pane and covering
+				    the mobile list pane underneath. */}
+				{!isMobileShell && state.activeSpace?.kind === "explore" ? (
 					<ExplorePane
 						transport={transport}
 						rooms={state.rooms}
@@ -2653,7 +2666,7 @@ export default function App() {
 							}
 						}}
 					/>
-				) : state.activeSpace?.kind === "bots" ? (
+				) : !isMobileShell && state.activeSpace?.kind === "bots" ? (
 					<BotsPane
 						accessToken={creds?.access_token ?? null}
 						currentUserId={creds?.user_id ?? null}
@@ -2685,7 +2698,7 @@ export default function App() {
 							void fetchAllBotMxids().then(setBotMxids);
 						}}
 					/>
-				) : showSpaceLanding && activeSpaceObj ? (
+				) : !isMobileShell && showSpaceLanding && activeSpaceObj ? (
 					<SpaceLanding
 						space={activeSpaceObj}
 						rooms={roomsInActiveSpace}
@@ -2709,6 +2722,20 @@ export default function App() {
 						onSelectRoom={navigateToRoom}
 					/>
 				) : (
+				(() => {
+					// ChatPane lives inside a PushSlot on mobile so it
+					// slides in from the right when activeRoomId becomes
+					// set, matching the iOS push the Me tab uses for
+					// Profile / Settings.  Swipe-from-left-edge OR
+					// PushSlot's exit animation reveals the list pane
+					// underneath (now kept mounted as the push
+					// underlayer via the [data-mobile-view="chat"]
+					// rules in index.css).  IIFE so the ChatPane element
+					// is defined once and wrapped conditionally —
+					// otherwise the ~200-line prop block would have to
+					// be duplicated across the mobile and desktop
+					// branches.
+					const chatPane = (
 				<ChatPane
 					room={activeRoom}
 					messages={messages}
@@ -2933,6 +2960,16 @@ export default function App() {
 						}
 					}}
 				/>
+					);
+					return isMobileShell ? (
+						<PushSlot
+							visible={!!state.activeRoomId}
+							onPop={() => dispatch({ type: "set_active_room", roomId: null })}
+						>
+							{chatPane}
+						</PushSlot>
+					) : chatPane;
+				})()
 				)}
 				</div>
 				<div className="contents" data-mobile-pane="aux">
@@ -3432,16 +3469,29 @@ export default function App() {
 				         backgroundSize: "cover",
 				     }}
 				>
-					{mobileSelectedSpaceId
-						? (() => {
+					{/* Underlayer — spaces list, always rendered so the
+					    PushSlot below has a proper underlayer for the
+					    parallax dim while SpaceHomeMobile slides in
+					    from the right.  `is-pushed` toggles via
+					    `mobileSelectedSpaceId`. */}
+					<div className={`flex-1 min-h-0 overflow-hidden mobile-push-underlayer${mobileSelectedSpaceId ? " is-pushed" : ""}`}>
+						<SpacesListMobile
+							spaces={state.spaces}
+							rooms={state.rooms}
+							onOpenSpace={(id) => setMobileSelectedSpaceId(id as SpaceId)}
+						/>
+					</div>
+					{/* Push slot — SpaceHomeMobile slides in over the
+					    list when a space is selected.  Swipe from the
+					    left edge or the chevron-back to dismiss. */}
+					<PushSlot
+						visible={!!mobileSelectedSpaceId}
+						onPop={() => setMobileSelectedSpaceId(null)}
+					>
+						{(() => {
+							if (!mobileSelectedSpaceId) return null;
 							const space = state.spaces.find(s => s.id === mobileSelectedSpaceId);
-							if (!space) {
-								// Space disappeared (left it, server pruned).
-								// Bail back to the list so the user has
-								// somewhere coherent to land.
-								setMobileSelectedSpaceId(null);
-								return null;
-							}
+							if (!space) return null;
 							const childRooms = state.rooms.filter(
 								r => r.parentSpaceIds.includes(mobileSelectedSpaceId),
 							);
@@ -3472,15 +3522,8 @@ export default function App() {
 									}}
 								/>
 							);
-						})()
-						: (
-							<SpacesListMobile
-								spaces={state.spaces}
-								rooms={state.rooms}
-								onOpenSpace={(id) => setMobileSelectedSpaceId(id as SpaceId)}
-							/>
-						)
-					}
+						})()}
+					</PushSlot>
 				</div>
 			)}
 			{/* Hide the tab bar in a chat — chats are "push" views

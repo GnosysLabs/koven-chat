@@ -24,7 +24,7 @@
 // `transport.getRoomMessages` (in-memory; no network call).
 
 import { useMemo, useState } from "react";
-import { MessageSquare, Lock, BellOff, PenSquare } from "lucide-react";
+import { MessageSquare, Lock, BellOff, PenSquare, ChevronRight } from "lucide-react";
 import type { Message, Room, RoomId, UserId } from "@koven/shared";
 import type { MatrixTransport } from "@/lib/matrix";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
@@ -44,6 +44,14 @@ interface ChatsListMobileProps {
 	transport: MatrixTransport | null;
 	currentUserId: UserId;
 	botMxids: Set<UserId>;
+	// True once initial sync has reached `syncing` or `ready` — at
+	// that point matrix-js-sdk has fanned the user's joined rooms
+	// into `state.rooms`.  While the sync is still in `preparing`,
+	// the rooms array is genuinely empty (but not because the user
+	// has none — just because they haven't arrived yet).  Without
+	// this gate, the EmptyState "No chats yet" flashes for the
+	// brief window between sign-in and the first room dispatch.
+	roomsLoaded: boolean;
 	onSelectRoom(id: RoomId): void;
 	onCreateRoom(): void;
 	onAcceptInvite(id: RoomId): Promise<void> | void;
@@ -51,7 +59,8 @@ interface ChatsListMobileProps {
 }
 
 export function ChatsListMobile({
-	rooms, transport, currentUserId, botMxids, onSelectRoom, onCreateRoom,
+	rooms, transport, currentUserId, botMxids, roomsLoaded,
+	onSelectRoom, onCreateRoom,
 	onAcceptInvite, onDeclineInvite,
 }: ChatsListMobileProps) {
 	const { invites, dms } = useMemo(() => {
@@ -83,7 +92,7 @@ export function ChatsListMobile({
 		// uses, instead of a flat bg-background.
 		<div className="flex-1 min-h-0 overflow-y-auto">
 			<div
-				className="px-4 pt-2"
+				className="pt-2"
 				style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 80px)" }}
 			>
 				{/* Large-title row.  Compose button lives at the
@@ -91,7 +100,7 @@ export function ChatsListMobile({
 				    compose pen.  Keeps the action one tap away
 				    without competing with the notification bell in
 				    the nav bar. */}
-				<div className="flex items-center justify-between py-3">
+				<div className="flex items-center justify-between py-3 px-4">
 					<h1 className="text-[34px] font-bold tracking-[-0.022em] leading-[1.1] text-foreground">
 						Chats
 					</h1>
@@ -114,10 +123,10 @@ export function ChatsListMobile({
 				    pills below the standard avatar+name layout. */}
 				{invites.length > 0 && (
 					<div className="mb-5">
-						<div className="px-1 pb-1.5 text-[13px] uppercase tracking-wider text-muted-foreground font-medium">
+						<div className="px-5 pb-1.5 text-[13px] uppercase tracking-wider text-muted-foreground font-medium">
 							{invites.length === 1 ? "Invite" : `Invites · ${invites.length}`}
 						</div>
-						<div className="rounded-2xl bg-card/60 backdrop-blur-xl border border-foreground/10 overflow-hidden">
+						<div>
 							{invites.map((room, idx) => {
 								const inviteSeed = room.dmUserId ?? room.inviter;
 								return (
@@ -135,10 +144,29 @@ export function ChatsListMobile({
 					</div>
 				)}
 
-				{dms.length === 0 && invites.length === 0 ? (
+				{!roomsLoaded ? (
+					// Pulsing favicon throbber until matrix-js-sdk's
+					// initial sync has fanned the user's rooms into
+					// state.rooms.  Replaces the brief "No chats yet"
+					// flash that used to happen between sign-in and
+					// the first room dispatch, when the rooms array
+					// was empty but not actually empty.
+					<div
+						className="flex items-center justify-center py-24"
+						aria-live="polite"
+						aria-label="Loading chats"
+					>
+						<img
+							src="/favicon.png"
+							alt=""
+							className="size-12 animate-pulse"
+							style={{ filter: "drop-shadow(0 0 24px rgba(0,0,0,0.5))" }}
+						/>
+					</div>
+				) : dms.length === 0 && invites.length === 0 ? (
 					<EmptyState onStart={startDm} />
 				) : dms.length > 0 ? (
-					<div className="rounded-2xl bg-card/60 backdrop-blur-xl border border-foreground/10 overflow-hidden">
+					<div>
 						{dms.map((room, idx) => (
 							<ChatRow
 								key={room.id}
@@ -253,6 +281,11 @@ function ChatRow({
 						{preview}
 					</div>
 				</div>
+				<ChevronRight
+					className="self-center shrink-0 size-[18px] text-muted-foreground/40 -mr-1"
+					strokeWidth={2.5}
+					aria-hidden
+				/>
 			</button>
 		</>
 	);

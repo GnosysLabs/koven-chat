@@ -2,7 +2,7 @@
 	"appId": "chat.koven.ios",
 	"appName": "Koven",
 	"webDir": "../../client/dist",
-	"backgroundColor": "#0a0c14",
+	"backgroundColor": "#0F0F15",
 	"server": {
 		"androidScheme": "https",
 		"iosScheme": "https",
@@ -14,14 +14,17 @@
 	},
 	"ios": {
 		"contentInset": "never",
-		"backgroundColor": "#0a0c14"
+		"backgroundColor": "#0F0F15"
 	},
 	"plugins": {
+		"Keyboard": {
+			"resize": "none"
+		},
 		"SplashScreen": {
 			"launchShowDuration": 2500,
 			"launchAutoHide": true,
 			"launchFadeOutDuration": 350,
-			"backgroundColor": "#0a0c14",
+			"backgroundColor": "#0F0F15",
 			"showSpinner": false,
 			"iosSpinnerStyle": "large",
 			"splashFullScreen": true,

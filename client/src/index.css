@@ -573,7 +573,19 @@
 	body::before {
 		content: "";
 		position: fixed;
-		inset: 0;
+		top: 0;
+		left: 0;
+		/* `100vw` + `100lvh` instead of `inset: 0` so the aura keeps
+		 * painting the FULL viewport even when the layout viewport
+		 * shrinks (which it now does, because the viewport meta sets
+		 * `interactive-widget=resizes-content`).  `lvh` is the LARGE
+		 * viewport height — static, equal to the max possible
+		 * viewport — so when the keyboard opens this pseudo-element
+		 * still extends behind the keyboard, letting the translucent
+		 * iOS 26 keys composite over our theme gradient instead of
+		 * the WebView's bare background color. */
+		width: 100vw;
+		height: 100lvh;
 		background-color: hsl(var(--background));
 		background-image: var(--bg-gradient, none);
 		background-repeat: no-repeat;
@@ -593,6 +605,46 @@
 	[data-theme="lilac"]:not(.dark),
 	[data-theme="seaglass"]:not(.dark) {
 		color-scheme: light;
+	}
+
+	/* iOS Capacitor + web fallback: bottom padding the mobile chat
+	 * composer reserves for the iPhone home-indicator strip.  Default
+	 * is `max(env(safe-area-inset-bottom), 0.5rem)` so the textarea
+	 * never sits flush against the home indicator.
+	 *
+	 * The override below (under html.kb-open) collapses this to 0 when
+	 * the on-screen keyboard is up.  iOS Capacitor's known quirk: the
+	 * env(safe-area-inset-bottom) value is computed from the LAYOUT
+	 * viewport and stays at ~34pt even with the keyboard covering the
+	 * home indicator, so without this override the composer reserves
+	 * 34pt of dead space between itself and the keyboard top — that's
+	 * the black band users see in the screenshot.  `nativeShell.ts`
+	 * toggles the `kb-open` class via @capacitor/keyboard's
+	 * keyboardWillShow / keyboardWillHide events.
+	 *
+	 * Exposed as a var (rather than baking the calc into ChatPane's
+	 * inline style) so anywhere else that needs "compose bar bottom
+	 * padding under iOS" can read the same value and inherit the
+	 * keyboard-aware override.
+	 */
+	:root {
+		--composer-pb: max(env(safe-area-inset-bottom), 0.5rem);
+	}
+	/* While the keyboard is up, drop the ~34pt home-indicator inset
+	 * (it's hidden behind the keyboard anyway) but KEEP the 0.5rem
+	 * floor as breathing room between the textarea and the keyboard
+	 * keys.  0 would jam them flush against each other and read as
+	 * broken; 8px is the same gap iMessage uses. */
+	html.kb-open {
+		--composer-pb: 0.5rem;
+	}
+	/* Backup signal: any time the mobile composer has focus inside it,
+	 * the soft keyboard is up — same 0.5rem floor as kb-open.  Catches
+	 * builds where the @capacitor/keyboard listeners haven't run yet
+	 * (cold launch race) AND non-Capacitor mobile browsers (Safari iOS
+	 * PWA, Chrome Android) where the keyboard plugin doesn't exist. */
+	.mobile-shell [data-composer-wrapper]:focus-within {
+		--composer-pb: 0.5rem;
 	}
 
 	/* ── Mobile shell hook ─────────────────────────────────────────
@@ -667,7 +719,24 @@
 	 */
 	.mobile-shell #root {
 		position: fixed;
-		inset: 0;
+		top: 0;
+		left: 0;
+		right: 0;
+		/* `dvh` = DYNAMIC viewport height.  Browsers compute this
+		 * against the CURRENT viewport (shrinks when the keyboard
+		 * opens, grows back when it hides) — but only when the
+		 * viewport meta tag opts in via `interactive-widget=resizes-
+		 * content`, which it now does in index.html.  This lets
+		 * `#root` track the keyboard automatically: no JS event
+		 * listeners, no per-device fallback heights, no hardcoded
+		 * keyboard sizes.  Pre-iOS 15.4 falls back to `100%` of body
+		 * via the base rule a few hundred lines up.
+		 *
+		 * `body::before` is intentionally NOT scaled by dvh — it
+		 * uses `lvh` (large viewport, static) so the theme gradient
+		 * keeps painting behind the keyboard even though `#root`
+		 * shrinks above it. */
+		height: 100dvh;
 		overflow: hidden;
 	}
 
@@ -771,11 +840,58 @@
 	.mobile-shell [data-mobile-pane="aux"] {
 		display: none;
 	}
+	/* In rooms view the main pane stays mounted but receives no
+	 * pointer events, so the list pane underneath stays interactive.
+	 * It used to be display:none here, but that yanked the chat
+	 * out of the DOM before PushSlot could play its exit animation
+	 * on a back-button tap (drag-pop already animates imperatively
+	 * before this rule kicks in, so it was fine; tap-to-back was
+	 * snapping out instantly).  PushSlot's visible=false returns
+	 * null when it actually unmounts, so the empty main pane is
+	 * invisible — pointer-events:none just keeps it from
+	 * intercepting list taps while empty. */
 	.mobile-shell [data-mobile-view="rooms"] [data-mobile-pane="main"] {
-		display: none;
+		pointer-events: none;
+	}
+	/* In chat view the list pane stays mounted as the iOS-style
+	 * push UNDERLAYER — parallax + dim so it reads as "the previous
+	 * screen sitting behind the new one."  Previously this rule
+	 * was `display: none`; that worked for the destination view
+	 * but meant the swipe-back gesture (and the slide-out exit)
+	 * had nothing behind the chat to reveal as it slid right.
+	 * Pairs with PushSlot wrapping ChatPane below and the absolute-
+	 * overlay positioning on the main pane in chat view further
+	 * down. */
+	.mobile-shell [data-mobile-pane="list"] {
+		transition:
+			transform 280ms cubic-bezier(0.32, 0.72, 0.18, 1),
+			filter 280ms cubic-bezier(0.32, 0.72, 0.18, 1);
+		transform-origin: center center;
+		will-change: transform, filter;
 	}
 	.mobile-shell [data-mobile-view="chat"] [data-mobile-pane="list"] {
-		display: none;
+		transform: translateX(-22%) scale(0.96);
+		filter: brightness(0.55);
+		pointer-events: none;
+	}
+	/* Data-mobile-view is the PushSlot anchor for the chat overlay
+	 * below — make it a positioning context. */
+	.mobile-shell [data-mobile-view] {
+		position: relative;
+	}
+	/* Main pane is always an absolute overlay on mobile — not just
+	 * in chat view — so PushSlot's exit animation (after a tap-to-
+	 * back) has a positioned host to slide out within, instead of
+	 * being yanked from the layout the instant `activeRoomId`
+	 * clears.  In rooms view the rule above sets pointer-events:none
+	 * so the list pane below stays interactive while the main pane
+	 * sits invisible (PushSlot inside is unmounted). */
+	.mobile-shell [data-mobile-pane="main"] {
+		position: absolute;
+		inset: 0;
+		z-index: 10;
+		flex: none;
+		width: 100%;
 	}
 	/* The visible pane fills the row.
 	 *

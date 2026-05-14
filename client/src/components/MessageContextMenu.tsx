@@ -1,14 +1,14 @@
 // Right-click context menu for message bubbles in the chat timeline.
 // Mirrors the hover-revealed MessageActions toolbar + adds extras
-// (Copy text, Copy message link, Quote) so the row's full action
-// surface is reachable without depending on hover — important for
-// touchpad users and for the desktop shell where right-click is the
-// canonical "give me a menu" gesture.
+// (Copy text, Copy message link) so the row's full action surface
+// is reachable without depending on hover — important for touchpad
+// users and for the desktop shell where right-click is the canonical
+// "give me a menu" gesture.
 
 import { useMemo } from "react";
 import { ContextMenu, type ContextMenuItem } from "@/components/ui/context-menu";
 import {
-	Copy, Flag, Link2, Quote, Reply, Smile, Trash2, UserX, MessageSquare,
+	Copy, Flag, Link2, Reply, Smile, Trash2, UserX, MessageSquare,
 } from "lucide-react";
 import type { Message } from "@koven/shared";
 
@@ -34,7 +34,6 @@ export interface MessageContextMenuProps {
 	// to a DM anyway).  When undefined the "Copy message link" item
 	// is suppressed from the menu entirely.
 	onCopyLink?(): void;
-	onQuote(): void;
 	onDelete?(): void;
 	onFlag?(): void;
 	onBlockSender?(): void;
@@ -44,7 +43,7 @@ export interface MessageContextMenuProps {
 
 export function MessageContextMenu({
 	x, y, message, isSelf, flaggable,
-	onReply, onReact, onCopyText, onCopyLink, onQuote,
+	onReply, onReact, onCopyText, onCopyLink,
 	onDelete, onFlag, onBlockSender, onSendDmToSender,
 	onClose,
 }: MessageContextMenuProps) {
@@ -72,11 +71,6 @@ export function MessageContextMenu({
 				label: "Copy text",
 				icon: <Copy className="h-4 w-4" />,
 				onClick: onCopyText,
-			});
-			out.push({
-				label: "Quote in reply",
-				icon: <Quote className="h-4 w-4" />,
-				onClick: onQuote,
 			});
 		}
 		if (onCopyLink) {
@@ -130,7 +124,7 @@ export function MessageContextMenu({
 		return out;
 	}, [
 		hasText, isSelf, flaggable,
-		onReply, onReact, onCopyText, onCopyLink, onQuote,
+		onReply, onReact, onCopyText, onCopyLink,
 		onDelete, onFlag, onBlockSender, onSendDmToSender,
 	]);
 
