@@ -4,8 +4,7 @@
 // renders in its own rounded bubble.  Self messages use the primary
 // bubble color; everyone else uses the muted card color.
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { EventId, FlagAggregate, FlagCategory, Member, Message, PollAggregate, ReactionAggregate, Room, RoomId, UserId } from "@koven/shared";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -279,78 +278,44 @@ export interface ChatPaneProps {
 // message.  Five minutes feels right for chat; longer than typical
 // rapid-fire bursts, shorter than separate sessions.
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
-const BOTTOM_STICKY_PX = 100;
-const JUMP_TO_NEWEST_PX = 200;
-const TOP_PAGINATION_PX = 1.25;
-const SEPARATOR_ESTIMATE_PX = 30;
 
-// Browser-native CSS scroll anchoring.  When supported, the engine
-// keeps the visible content visually stable across DOM mutations
-// (prepends from pagination, row-height changes from media decode
-// or reaction adds) synchronously with layout, inside the
-// compositor.  That's the only way to preserve scroll position on
-// iOS WKWebView without interrupting touch-momentum scrolling — a
-// JS-driven `scrollBy` kills the inertia animation and forces the
-// recomposite that reads visually as "bubbles disappear and reappear
-// at a different position."  Supported in iOS Safari 17+ (released
-// 2023), Chrome, and Firefox.  Cached at module load.
-const SUPPORTS_OVERFLOW_ANCHOR: boolean = (() => {
-	if (typeof CSS === "undefined" || typeof CSS.supports !== "function") return false;
-	try { return CSS.supports("overflow-anchor", "auto"); }
-	catch { return false; }
-})();
+// Stable empty array for the `reactions` prop on MessageRow.  Using
+// `reactionsByMessage.get(id) ?? []` inline creates a fresh [] every
+// render, which would defeat React.memo's reaction-array comparison on
+// every render for every message without reactions (i.e. most messages).
+const EMPTY_REACTIONS: ReactionAggregate[] = [];
+
+// Pagination triggers when the user scrolls within this many pixels
+// of the top of loaded history.  600px is roughly one viewport height
+// on mobile and well under the threshold for "user notices a slight
+// content shift" — pagination commits and `overflow-anchor: auto`
+// keeps their visible content stable.
+const TOP_PAGINATION_PX = 600;
+
+// "Near the bottom" threshold.  Within this many px of the actual
+// bottom, the user is considered to want stick-to-bottom behaviour:
+// new messages arriving at the end will scroll into view.  Outside
+// this threshold the user is "reading history" and we leave the
+// scroll position alone.
+const BOTTOM_STICKY_PX = 100;
+
+// "Scrolled meaningfully back from the bottom" — drives the
+// Jump-to-newest button visibility.  Higher than BOTTOM_STICKY_PX so
+// the button doesn't flicker in and out near the bottom edge.
+const JUMP_TO_NEWEST_PX = 200;
+
+// Estimated row height for `contain-intrinsic-size`.  This is the
+// browser's placeholder height for messages whose actual content
+// hasn't been rendered yet (via `content-visibility: auto`).  Set
+// generously high (close to a typical media row) so off-screen items
+// take up plausible space in the scrollbar — the rendered height
+// becomes correct as soon as the row scrolls into view.
+const ROW_INTRINSIC_HEIGHT_PX = 120;
 
 // Cap for the multi-attachment composer.  10 mirrors Discord's
 // per-message attachment limit and stops a "select all 250 files in
 // this folder" mistake from spamming the room with 250 events.
 const MAX_PENDING_ATTACHMENTS = 10;
-
-function estimateTimelineRowHeight(message: Message | undefined, previous: Message | undefined): number {
-	if (!message) return 72;
-
-	const sameGroup =
-		!!previous &&
-		previous.sender === message.sender &&
-		message.timestamp - previous.timestamp <= GROUP_WINDOW_MS &&
-		!message.replyTo;
-
-	let height = sameGroup ? 42 : 76;
-	if (hasTimelineSeparator(previous?.timestamp, message.timestamp)) {
-		height += SEPARATOR_ESTIMATE_PX;
-	}
-	if (message.replyTo) height += 36;
-
-	const caption = "caption" in message && typeof message.caption === "string" ? message.caption : "";
-	const body = message.text ?? caption;
-	if (body) {
-		const hardLines = body.split("\n").length;
-		const wrappedLines = Math.ceil(body.length / 72);
-		height += Math.max(0, hardLines + wrappedLines - 2) * 19;
-	}
-
-	switch (message.kind) {
-		case "image":
-			height += 260;
-			break;
-		case "video":
-			height += 290;
-			break;
-		case "audio":
-		case "file":
-			height += 72;
-			break;
-		case "poll":
-			height += 210;
-			break;
-		case "emote":
-			height = Math.max(height, 48);
-			break;
-		default:
-			break;
-	}
-
-	return Math.max(40, Math.min(height, 520));
-}
 
 export function ChatPane({
 	room, messages, memberAvatars, reactionsByMessage, flagsByMessage,
@@ -492,14 +457,39 @@ export function ChatPane({
 			: window.innerHeight * 0.5;
 		el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
 	}, [draft]);
+	// The actual native scroll container — a plain `<div>` with
+	// `overflow-y: auto`, `flex-direction: column-reverse`, and
+	// `overflow-anchor: auto`.  No virtualization library: the
+	// browser does off-screen culling via `content-visibility: auto`
+	// on each row (set in `renderTimelineRow`), and position
+	// preservation across prepends comes from `overflow-anchor`
+	// combined with column-reverse's natural "anchored to the
+	// bottom" scroll semantics.  See the comments on the JSX below
+	// for the full reasoning.
 	const scrollRef = useRef<HTMLDivElement | null>(null);
-	// Inner list wrapper.  Holds every message row directly (no
-	// virtualization).  Used as the walk-children root for the
-	// save/restore-scroll-state machinery below.
-	const listRef = useRef<HTMLDivElement | null>(null);
-	// Used by the scroll handler to detect a meaningful upward
-	// scroll gesture so we can dismiss the keyboard (Discord-style).
-	const lastScrollTopRef = useRef(0);
+	// Sentinel elements at the visual bottom and visual top of the
+	// scroll content.  We watch them with `IntersectionObserver`
+	// instead of reading `scrollTop` — `scrollTop` semantics under
+	// `flex-direction: column-reverse` differ between browsers (and
+	// the WebKit/iOS implementation in particular goes NEGATIVE), so
+	// arithmetic on it is a portability trap.  The observers give us
+	// a binary "is this element in the viewport (with margin)?"
+	// signal that works identically everywhere.
+	//
+	//   - `bottomSentinelRef` — placed as the FIRST child of the
+	//     scroll container, which `column-reverse` puts at the
+	//     visual BOTTOM.  Drives the at-bottom state (Jump-to-newest
+	//     button visibility) and the mobile keyboard-dismiss
+	//     behaviour, and is the scroll target for both the initial
+	//     room mount and the Jump-to-newest button (via
+	//     `scrollIntoView`).
+	//
+	//   - `topSentinelRef` — placed as the LAST child of the scroll
+	//     container, which `column-reverse` puts at the visual TOP.
+	//     When the user scrolls within `TOP_PAGINATION_PX` of it (via
+	//     `rootMargin`), pagination fires.
+	const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
+	const topSentinelRef = useRef<HTMLDivElement | null>(null);
 	const roomId = room?.id;
 	// Active-call gate.  Discord-style: voice and chat are SEPARATE
 	// views even when they share a room.  We only swap the message
@@ -523,234 +513,61 @@ export function ChatPane({
 	// every query change so arrow-down behaves intuitively.
 	const [mentionIndex, setMentionIndex] = useState(0);
 
-	// Whether the timeline should auto-scroll to bottom when content
-	// changes.  Starts true on every room enter; flipped false when
-	// the user manually scrolls up past the bottom-stick threshold so
-	// reading older history doesn't keep yanking them down to the
-	// latest message.  Re-armed when they scroll back to (or near)
-	// the bottom themselves.
-	const followBottomRef = useRef(true);
+	// ─── Scroll state ──────────────────────────────────────────────
+	// Everything in here drives a single native <div> with
+	// `flex-direction: column-reverse` + `overflow-anchor: auto`.
+	// The browser handles position preservation across prepends; we
+	// only need to track at-bottom for the Jump-to-newest affordance
+	// and fire pagination when the user scrolls near the (visual) top.
 	const prevRoomIdRef = useRef<string | undefined>(undefined);
-	// Mirror of !followBottomRef into React state so the floating
-	// "Jump to newest" affordance can render conditionally.  We
-	// keep the ref version too because the scroll handlers run
-	// outside the React render cycle and need synchronous reads.
-	const [scrolledUp, setScrolledUp] = useState(false);
 	const wasInCallViewRef = useRef(false);
+	// At-bottom tracking.  `wasAtBottomRef` is the synchronous read
+	// for handlers running outside the React commit cycle (currently
+	// just the room-change reset).  `scrolledUp` is the React-state
+	// mirror that drives the Jump-to-newest button — flipped from the
+	// scroll-event handler with a debounce against the JUMP_TO_NEWEST
+	// threshold so the button doesn't flicker around the edge.
+	const wasAtBottomRef = useRef(true);
+	const [scrolledUp, setScrolledUp] = useState(false);
 
 	// Pagination state.  `loadingMoreRef` is the synchronous gate
 	// (scroll handler reads it without waiting on React commit);
 	// `loadingMore` is the React mirror that drives the pulsing-
-	// favicon loader row at index 0.  `noMoreHistoryRef` caches
-	// rooms whose Synapse timeline we've walked to the start so we
-	// don't keep firing /messages for nothing.
+	// favicon loader.  `noMoreHistoryRef` caches rooms whose Synapse
+	// timeline we've walked to the start so we don't keep firing
+	// /messages for nothing.
 	const loadingMoreRef = useRef(false);
 	const noMoreHistoryRef = useRef<Set<string>>(new Set());
 	const [loadingMore, setLoadingMore] = useState(false);
+	// Mirror of `noMoreHistoryRef.has(activeRoomId)` into React state
+	// so the "Beginning of room" indicator below the timeline knows
+	// when to show.  Updated together with the ref whenever
+	// `loadOlderHistory` resolves with `gotMore = false`, and
+	// re-synced from the ref on room change.
+	const [atStartOfRoom, setAtStartOfRoom] = useState(false);
 
-	type ScrollState =
-		| { stuckAtBottom: true }
-		| { stuckAtBottom: false; trackedToken: string; offsetFromStart: number };
-	const scrollStateRef = useRef<ScrollState>({ stuckAtBottom: true });
+	// Reverse the messages array for the column-reverse render path.
+	// In `flex-direction: column-reverse`, the FIRST child in DOM is
+	// at the visual BOTTOM of the flex container — and the browser's
+	// scroll-anchoring keeps the scroll position pinned to the
+	// bottom when content is added at the start of the DOM (which is
+	// where new messages go).  Without column-reverse we'd have to
+	// imperatively scrollTop=scrollHeight on every new message and
+	// fight the user's gesture; with it the browser does the right
+	// thing for free.
+	//
+	// Memoised on the messages array reference so we don't burn the
+	// reverse() cost on every render — only when the messages prop
+	// genuinely changes.
+	const reversedMessages = useMemo(() => [...messages].reverse(), [messages]);
 
-	// On mobile (iOS WKWebView in particular) we hand scroll-position
-	// preservation back to the browser via CSS `overflow-anchor` when
-	// it's supported.  Programmatic `scrollBy` during a momentum
-	// scroll kills the native inertia and forces a recomposite of the
-	// scroll surface — visible to the user as bubbles vanishing and
-	// reappearing at a different position when older history loads in.
-	// Browser-native anchoring runs in the compositor synchronously
-	// with layout, so it doesn't fight momentum.  Desktop keeps the
-	// existing TanStack-Virtual + manual restoration path because the
-	// virtualizer's measurement system needs explicit scroll math.
-	const useBrowserAnchoring = isMobileShell && SUPPORTS_OVERFLOW_ANCHOR;
-
-	const getItemKey = useCallback(
-		(index: number) => messages[index]?.id ?? `missing-${index}`,
-		[messages],
-	);
-	const estimateSize = useCallback(
-		(index: number) => estimateTimelineRowHeight(messages[index], messages[index - 1]),
-		[messages],
-	);
-	const rowVirtualizer = useVirtualizer({
-		count: messages.length,
-		getScrollElement: () => scrollRef.current,
-		estimateSize,
-		getItemKey,
-		overscan: isMobileShell ? 10 : 14,
-		enabled: !isMobileShell,
-	});
-	rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
-		return followBottomRef.current || item.start < (instance.scrollOffset ?? 0);
-	};
-	const virtualRows = rowVirtualizer.getVirtualItems();
-	const virtualPaddingTop = virtualRows[0]?.start ?? 0;
-	const totalVirtualSize = rowVirtualizer.getTotalSize();
-
-	const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
-		if (messages.length === 0) return;
-		rowVirtualizer.scrollToIndex(messages.length - 1, { align: "end", behavior });
-	}, [messages.length, rowVirtualizer]);
-
-	// Scroll preservation.  Desktop uses TanStack's measured row
-	// positions; mobile uses DOM offsets so iOS momentum scroll does
-	// not fight late virtualizer measurements.  When browser-native
-	// anchoring is in use (mobile + supported), the per-row tracking
-	// is unnecessary — `overflow-anchor: auto` keeps the visible
-	// content stable for us — so we only track the at-bottom flag
-	// (still needed to gate the follow-bottom auto-scroll) and skip
-	// the O(n) DOM walk that previously ran on every scroll event.
-	const saveScrollState = useCallback(() => {
-		const el = scrollRef.current;
-		if (!el) return;
-		if (el.scrollHeight - (el.scrollTop + el.clientHeight) <= 1) {
-			scrollStateRef.current = { stuckAtBottom: true };
-			return;
-		}
-		if (useBrowserAnchoring) {
-			if (!scrollStateRef.current.stuckAtBottom) return;
-			scrollStateRef.current = {
-				stuckAtBottom: false,
-				trackedToken: "",
-				offsetFromStart: 0,
-			};
-			return;
-		}
-		const scrollTop = Math.max(0, el.scrollTop);
-		if (isMobileShell) {
-			const rows = listRef.current?.children;
-			if (!rows) return;
-			for (let i = 0; i < rows.length; i++) {
-				const row = rows[i] as HTMLElement;
-				const token = row.dataset.scrollTokens;
-				if (!token) continue;
-				if (row.offsetTop + row.offsetHeight >= scrollTop) {
-					scrollStateRef.current = {
-						stuckAtBottom: false,
-						trackedToken: token,
-						offsetFromStart: Math.max(0, scrollTop - row.offsetTop),
-					};
-					return;
-				}
-			}
-			return;
-		}
-		const tracked = rowVirtualizer
-			.getVirtualItems()
-			.find(item => item.end >= scrollTop) ?? rowVirtualizer.getVirtualItems()[0];
-		const message = tracked ? messages[tracked.index] : undefined;
-		if (!tracked || !message) return;
-		scrollStateRef.current = {
-			stuckAtBottom: false,
-			trackedToken: message.id,
-			offsetFromStart: Math.max(0, scrollTop - tracked.start),
-		};
-	}, [isMobileShell, useBrowserAnchoring, messages, rowVirtualizer]);
-
-	const restoreScrollState = useCallback(() => {
-		const el = scrollRef.current;
-		if (!el) return;
-		const state = scrollStateRef.current;
-		if (state.stuckAtBottom) {
-			// Direct scrollTop assignment instead of scrollBy: iOS
-			// WKWebView occasionally treats a large scrollBy delta as
-			// an animated scroll even with behavior:"auto", producing
-			// a visible flash through every message between top and
-			// bottom on first room mount.  Setting scrollTop directly
-			// is guaranteed-synchronous in every browser.
-			if (isMobileShell) el.scrollTop = el.scrollHeight;
-			else scrollToBottom();
-			return;
-		}
-		if (isMobileShell) {
-			if (useBrowserAnchoring) {
-				// `overflow-anchor: auto` on the scroll container preserves
-				// the user's visual position across DOM mutations
-				// synchronously in the compositor.  A programmatic scroll
-				// here would interrupt iOS WKWebView's touch-momentum
-				// animation and force a recomposite — the original cause
-				// of the "bubbles disappear and reappear" jank.
-				return;
-			}
-			const row = listRef.current?.querySelector(
-				`[data-scroll-tokens="${CSS.escape(state.trackedToken)}"]`,
-			);
-			if (!(row instanceof HTMLElement)) return;
-			const top = Math.max(0, row.offsetTop + state.offsetFromStart);
-			const diff = top - el.scrollTop;
-			if (Math.abs(diff) > 0.5) el.scrollBy({ top: diff, behavior: "auto" });
-			return;
-		}
-		const index = messages.findIndex(m => m.id === state.trackedToken);
-		if (index < 0) return;
-		const item = rowVirtualizer.measurementsCache[index];
-		if (!item) return;
-		rowVirtualizer.scrollToOffset(Math.max(0, item.start + state.offsetFromStart), {
-			align: "start",
-			behavior: "auto",
-		});
-	}, [isMobileShell, useBrowserAnchoring, messages, rowVirtualizer, scrollToBottom]);
-
-	// Re-arm stuckAtBottom on room change / call-view exit; ALSO when
-	// messages first populate on a fresh-mount room.  The
-	// useLayoutEffect just below runs restoreScrollState — which will
-	// snap to bottom because we set stuckAtBottom here.
-	useLayoutEffect(() => {
-		const isRoomChange = prevRoomIdRef.current !== room?.id;
-		const becameVisible = wasInCallViewRef.current && !isInActiveCallRoom;
-		prevRoomIdRef.current = room?.id;
-		wasInCallViewRef.current = isInActiveCallRoom;
-		if (isRoomChange || becameVisible) {
-			scrollStateRef.current = { stuckAtBottom: true };
-			followBottomRef.current = true;
-			setScrolledUp(false);
-		}
-	}, [room?.id, isInActiveCallRoom]);
-
-	const firstMessageId = messages[0]?.id ?? null;
-	const lastMessageId = messages[messages.length - 1]?.id ?? null;
-	useLayoutEffect(() => {
-		if (!messagesLoaded || isInActiveCallRoom) return;
-		restoreScrollState();
-	}, [
-		messagesLoaded,
-		isInActiveCallRoom,
-		messages.length,
-		firstMessageId,
-		lastMessageId,
-		restoreScrollState,
-	]);
-
-	// Mobile-only: keep the timeline pinned to the bottom while content
-	// is still settling.  The non-virtualized mobile path renders every
-	// row into native DOM flow, and several row types finalise their
-	// height async — URL preview cards stream OG image dimensions after
-	// the message commits, Matrix media blobs decode after the <img>
-	// mounts, lazy-loaded thumbnails reflow on first paint.  Without
-	// this, the initial scrollTop=scrollHeight lands at "bottom of the
-	// content as-of-first-paint", then late height growth pushes the
-	// real bottom further down and the user is left mid-thread.  On
-	// the newsley DM in particular (heavy on shared-link previews)
-	// this manifested as visibly flashing through every message before
-	// settling.  ResizeObserver fires whenever the list grows; while
-	// followBottomRef is true we re-pin scrollTop to the new bottom.
-	// Stops the moment the user scrolls up (the scroll handler clears
-	// followBottomRef), so it never fights a deliberate scroll.
-	const hasMessages = messages.length > 0;
-	useEffect(() => {
-		if (!isMobileShell) return;
-		if (!messagesLoaded || isInActiveCallRoom || !hasMessages) return;
-		const list = listRef.current;
-		const el = scrollRef.current;
-		if (!list || !el) return;
-		const ro = new ResizeObserver(() => {
-			if (!followBottomRef.current) return;
-			el.scrollTop = el.scrollHeight;
-		});
-		ro.observe(list);
-		return () => ro.disconnect();
-	}, [messagesLoaded, isInActiveCallRoom, hasMessages, roomId]);
+	const scrollToBottom = useCallback((behavior: "auto" | "smooth" = "auto") => {
+		// `scrollIntoView` on the bottom sentinel works regardless of
+		// `column-reverse`'s scrollTop semantics — the browser just
+		// brings the element into view, period.  Block "end" puts it
+		// flush at the bottom edge of the scroll viewport.
+		bottomSentinelRef.current?.scrollIntoView({ behavior, block: "end" });
+	}, []);
 
 	const loadOlderHistory = useCallback(() => {
 		const activeRoomId = room?.id as RoomId | undefined;
@@ -758,30 +575,116 @@ export function ChatPane({
 		if (loadingMoreRef.current) return false;
 		if (noMoreHistoryRef.current.has(activeRoomId)) return false;
 
-		saveScrollState();
 		loadingMoreRef.current = true;
 		setLoadingMore(true);
 		void onLoadMoreHistory(activeRoomId)
 			.then((gotMore) => {
-				if (!gotMore) noMoreHistoryRef.current.add(activeRoomId);
+				if (!gotMore) {
+					noMoreHistoryRef.current.add(activeRoomId);
+					if (activeRoomId === room?.id) setAtStartOfRoom(true);
+				}
 			})
 			.finally(() => {
 				loadingMoreRef.current = false;
 				setLoadingMore(false);
 			});
 		return true;
-	}, [onLoadMoreHistory, room?.id, saveScrollState]);
+	}, [onLoadMoreHistory, room?.id]);
+
+	// Reset scroll position on room change / call-view exit.  In
+	// column-reverse, scrollTop=0 puts us at the visual bottom
+	// (newest message).
+	useLayoutEffect(() => {
+		const isRoomChange = prevRoomIdRef.current !== room?.id;
+		const becameVisible = wasInCallViewRef.current && !isInActiveCallRoom;
+		prevRoomIdRef.current = room?.id;
+		wasInCallViewRef.current = isInActiveCallRoom;
+		if (isRoomChange || becameVisible) {
+			// Bring the bottom sentinel (= visual bottom = newest
+			// message) into view.  Avoids the column-reverse scrollTop
+			// portability question entirely.
+			bottomSentinelRef.current?.scrollIntoView({ block: "end" });
+			wasAtBottomRef.current = true;
+			setScrolledUp(false);
+			setAtStartOfRoom(noMoreHistoryRef.current.has(room?.id ?? ""));
+		}
+	}, [room?.id, isInActiveCallRoom]);
+
+	// Pagination — fires when the top sentinel comes within
+	// `TOP_PAGINATION_PX` of the viewport's top edge.  We extend the
+	// observer's viewport upward by that margin, so the sentinel
+	// intersects EARLY (preload before the user hits the actual
+	// top).  Using IntersectionObserver instead of arithmetic on
+	// `scrollTop` makes this work identically across browsers — the
+	// `column-reverse` `scrollTop`-goes-negative gotcha on WebKit
+	// would otherwise break us.
+	useEffect(() => {
+		if (!messagesLoaded || isInActiveCallRoom) return;
+		const root = scrollRef.current;
+		const target = topSentinelRef.current;
+		if (!root || !target) return;
+		const observer = new IntersectionObserver(
+			(entries) => {
+				for (const entry of entries) {
+					if (entry.isIntersecting && !loadingMoreRef.current) {
+						loadOlderHistory();
+					}
+				}
+			},
+			{ root, rootMargin: `${TOP_PAGINATION_PX}px 0px 0px 0px` },
+		);
+		observer.observe(target);
+		return () => observer.disconnect();
+	}, [messagesLoaded, isInActiveCallRoom, loadOlderHistory]);
+
+	// At-bottom tracking — observes the bottom sentinel for visibility
+	// in the viewport.  Drives the Jump-to-newest button (visible
+	// when sentinel is NOT in view) and triggers the mobile keyboard
+	// dismiss the first time the user leaves the bottom.  The
+	// `rootMargin: ${JUMP_TO_NEWEST_PX}px 0 0 0` extension on the
+	// bottom side means "still considered at bottom while within
+	// JUMP_TO_NEWEST_PX of it" — avoids the button flickering as the
+	// user scrolls a few pixels back from the absolute bottom.
+	useEffect(() => {
+		if (!messagesLoaded || isInActiveCallRoom) return;
+		const root = scrollRef.current;
+		const target = bottomSentinelRef.current;
+		if (!root || !target) return;
+		const observer = new IntersectionObserver(
+			(entries) => {
+				for (const entry of entries) {
+					const isAtBottom = entry.isIntersecting;
+					const wasAtBottom = wasAtBottomRef.current;
+					wasAtBottomRef.current = isAtBottom;
+					setScrolledUp(prev => (prev === !isAtBottom ? prev : !isAtBottom));
+					// Mobile keyboard dismiss the moment the user
+					// scrolls AWAY from the bottom — once you're
+					// reading history, the keyboard just gets in the
+					// way.  Fires once per "leaving the bottom"
+					// transition.
+					if (isMobileShell && wasAtBottom && !isAtBottom) {
+						composeInputRef.current?.blur();
+					}
+				}
+			},
+			{ root, rootMargin: `0px 0px ${JUMP_TO_NEWEST_PX}px 0px` },
+		);
+		observer.observe(target);
+		return () => observer.disconnect();
+	}, [messagesLoaded, isInActiveCallRoom, isMobileShell]);
 
 	// ─── Permalink scroll-to-event ─────────────────────────────────
 	// When the parent hands us a `scrollToEvent` target (typically
-	// from a /r/<roomId>/<eventId> share-link click), scroll the
-	// referenced row into view and pulse a 2-second highlight on the
-	// bubble so the user can see where they landed.  Two-phase:
+	// from a /r/<roomId>/<eventId> share-link click), find the row
+	// by `data-message-id` and call native `scrollIntoView` to bring
+	// it on-screen, then pulse a 2-second highlight so the user can
+	// see where they landed.  Two-phase:
 	//
 	//   1. If the event is already in the loaded `messages` list,
-	//      scroll + flash on the next animation frame (after React
-	//      has committed the layout).
-	//   2. If it's not loaded, fire onLoadMoreHistory to paginate
+	//      scrollIntoView with smooth behavior on the next animation
+	//      frame (after React has committed the layout — content-
+	//      visibility:auto means the row may not be painted yet).
+	//   2. If it's not loaded, fire loadOlderHistory to paginate
 	//      older events in.  The effect re-runs on the new messages
 	//      array; keeps walking back up to MAX_SCROLL_PAGINATIONS
 	//      times before giving up.
@@ -814,20 +717,12 @@ export function ChatPane({
 		if (idx >= 0) {
 			const id = scrollToEvent.eventId;
 			const raf = requestAnimationFrame(() => {
-				if (isMobileShell) {
-					const row = listRef.current?.querySelector(
-						`[data-scroll-tokens="${CSS.escape(id)}"]`,
-					);
-					if (row instanceof HTMLElement) row.scrollIntoView({ block: "center", behavior: "smooth" });
-				} else {
-					rowVirtualizer.scrollToIndex(idx, { align: "center", behavior: "smooth" });
+				const row = scrollRef.current?.querySelector(
+					`[data-message-id="${CSS.escape(id)}"]`,
+				);
+				if (row instanceof HTMLElement) {
+					row.scrollIntoView({ block: "center", behavior: "smooth" });
 				}
-				scrollStateRef.current = {
-					stuckAtBottom: false,
-					trackedToken: id,
-					offsetFromStart: 0,
-				};
-				followBottomRef.current = false;
 				setFlashingEventId(id);
 				if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
 				flashTimerRef.current = setTimeout(
@@ -841,8 +736,9 @@ export function ChatPane({
 
 		// Not loaded — try to paginate older history in.  Bail if
 		// we've already burned the budget, hit the start of the
-		// room, or another pagination is in flight (the loading-more
-		// effect will re-fire us when it commits).
+		// room, or another pagination is in flight (the scroll-
+		// handler pagination loop will re-fire us when more
+		// messages commit).
 		if (scrollAttemptsRef.current >= MAX_SCROLL_PAGINATIONS) {
 			console.warn("scrollToEvent: gave up after pagination cap", scrollToEvent);
 			onScrolledToEvent?.();
@@ -856,85 +752,10 @@ export function ChatPane({
 		if (loadingMoreRef.current || !onLoadMoreHistory) return;
 		scrollAttemptsRef.current += 1;
 		loadOlderHistory();
-	}, [isMobileShell, scrollToEvent, room, messages, onLoadMoreHistory, onScrolledToEvent, rowVirtualizer, loadOlderHistory]);
+	}, [scrollToEvent, room, messages, onLoadMoreHistory, onScrolledToEvent, loadOlderHistory]);
 	useEffect(() => () => {
 		if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
 	}, []);
-	useEffect(() => {
-		if (!messagesLoaded || isInActiveCallRoom) return;
-		const el = scrollRef.current;
-		if (!el) return;
-		const onScroll = () => {
-			// First: persist where we are so the next commit can
-			// restore us if the message list changes underneath.
-			saveScrollState();
-
-			const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-			const atBottom = distance < BOTTOM_STICKY_PX;
-			followBottomRef.current = atBottom;
-			// Surface a floating "Jump to newest" affordance when
-			// the user has scrolled meaningfully back from the
-			// bottom (≥ 200px feels like a deliberate scroll-up
-			// rather than a stray wheel tick).  Hidden again the
-			// moment they're back near the bottom.  We compare
-			// React state before setState so we don't churn re-
-			// renders on every scroll event.
-			const wantShow = distance >= JUMP_TO_NEWEST_PX;
-			setScrolledUp(prev => (prev === wantShow ? prev : wantShow));
-
-			if (el.scrollTop < el.clientHeight * TOP_PAGINATION_PX) {
-				loadOlderHistory();
-			}
-
-			// Mobile only: dismiss the on-screen keyboard when the
-			// user scrolls UP by a meaningful amount.  Discord does
-			// this — once you're reading history, the keyboard just
-			// gets in the way.  24px of upward delta is enough to
-			// disqualify rubber-band overscroll without being so
-			// large that a deliberate scroll-up doesn't trigger.
-			if (isMobileShell) {
-				const delta = el.scrollTop - lastScrollTopRef.current;
-				if (delta < -24 && distance > 100) {
-					composeInputRef.current?.blur();
-				}
-				lastScrollTopRef.current = el.scrollTop;
-			}
-		};
-		el.addEventListener("scroll", onScroll, { passive: true });
-		return () => el.removeEventListener("scroll", onScroll);
-	}, [isInActiveCallRoom, loadOlderHistory, messagesLoaded, saveScrollState]);
-
-	// Proactive pagination when the timeline doesn't overflow the
-	// scroll container.  matrix-js-sdk's initial /sync only loads
-	// ~30 events per room — for low-traffic rooms (or rooms whose
-	// recent N events are short text), that batch can fit inside the
-	// viewport entirely.  When that happens scrollTop is stuck at 0
-	// (no overflow = no scroll possible), so the scroll-handler
-	// pagination above never fires, and the user sees a partial
-	// timeline with no way to load more.  Symptom: reply quotes show
-	// "(message)" because the originals never paginated in, and the
-	// user perceives "scroll is broken in this room" — the room just
-	// has invisible older history that's never been requested.
-	//
-	// Fix: after every messages_loaded, if the inner content fits
-	// within the scroll container AND there's history available,
-	// fire one paginate to grow the timeline.  The scroll-handler
-	// takes over once the user actually has something to scroll.
-	useEffect(() => {
-		const el = scrollRef.current;
-		if (!el) return;
-		if (!messagesLoaded || isInActiveCallRoom) return;
-		if (!room || !onLoadMoreHistory) return;
-		// Wait until the room has SOMETHING — paginating an empty
-		// room before /sync has populated its timeline produces no
-		// results and we'd just spin.
-		if (messages.length === 0) return;
-		const contentHeight = isMobileShell
-			? (listRef.current?.clientHeight ?? 0)
-			: rowVirtualizer.getTotalSize();
-		if (contentHeight >= el.clientHeight - 16) return;
-		loadOlderHistory();
-	}, [isInActiveCallRoom, isMobileShell, messagesLoaded, room?.id, messages.length, onLoadMoreHistory, room, rowVirtualizer, loadOlderHistory]);
 
 	// Global hover tracking for the message-action toolbar.
 	//
@@ -1182,12 +1003,21 @@ export function ChatPane({
 		}
 	}
 
-	function renderTimelineRow(
-		m: Message,
-		index: number,
-		key: unknown,
-		measureElement?: (node: HTMLDivElement | null) => void,
-	) {
+	// Renders a single timeline row.  The outer wrapper carries the
+	// content-visibility + intrinsic-size hint that gives us native
+	// browser virtualization: off-screen rows skip rendering entirely
+	// (no paint, no layout cost), but still take up
+	// `ROW_INTRINSIC_HEIGHT_PX` so the scroll height stays correct.
+	// As a row scrolls into view it gets rendered for real; as it
+	// scrolls out it goes dormant again.  No JS measurement loop, no
+	// firstItemIndex math — the browser handles it.
+	//
+	// The outer wrapper also carries `data-message-id` for both the
+	// permalink scroll-to-event lookup (querySelector by message id)
+	// and as a backstop for the document-level mousemove hover
+	// hit-test (MessageRow sets it internally too, but a duplicate
+	// on the wrapper is harmless and helps when the row is dormant).
+	function renderTimelineRow(m: Message, index: number) {
 		const prev = index > 0 ? messages[index - 1] : undefined;
 		const sameGroup =
 			!!prev &&
@@ -1197,10 +1027,13 @@ export function ChatPane({
 		const separator = computeDateSeparator(prev?.timestamp, m.timestamp);
 		return (
 			<div
-				key={String(key)}
+				key={m.id}
 				data-index={index}
-				data-scroll-tokens={m.id}
-				ref={measureElement}
+				data-message-id={m.id}
+				style={{
+					contentVisibility: "auto",
+					containIntrinsicSize: `auto ${ROW_INTRINSIC_HEIGHT_PX}px`,
+				}}
 			>
 				{separator && <DateSeparator label={separator} />}
 				<MessageRow
@@ -1210,7 +1043,7 @@ export function ChatPane({
 					isFirst={index === 0}
 					flaggable={flaggable}
 					roomEncrypted={!!activeRoom.encrypted}
-					reactions={reactionsByMessage.get(m.id) ?? []}
+					reactions={reactionsByMessage.get(m.id) ?? EMPTY_REACTIONS}
 					flags={flagsByMessage.get(m.id)}
 					isDm={activeRoom.kind === "dm"}
 					receiptsVersion={receiptsVersion ?? 0}
@@ -1463,87 +1296,122 @@ export function ChatPane({
 				   so leaving the room mid-call doesn't drop the call. */
 				<InCallPane roomName={room.name} />
 			) : (<>
-			{/* Scroll-anchoring policy:
-			    - Desktop: `overflow-anchor: none` + TanStack-Virtual
-			      manual measurements.  The virtualizer's measurement
-			      system is the single source of truth; browser
-			      anchoring on top of it would double-correct during
-			      prepends and media decode.
-			    - Mobile (when supported): `overflow-anchor: auto`
-			      hands position preservation to the browser, which
-			      runs in the compositor synchronously with layout.
-			      That's the only way to maintain visual position on
-			      iOS WKWebView without a JS `scrollBy` killing
-			      touch-momentum scrolling.  Manual restoration is
-			      suppressed in `restoreScrollState` for this case so
-			      we don't double-correct. */}
 			<div className="relative flex-1 min-h-0 overflow-hidden">
-			{/* Desktop keeps the TanStack Virtual path that feels good
-			    in browser.  Mobile renders rows in native DOM flow so
-			    WKWebView momentum scroll does not get interrupted by
-			    late dynamic-row measurements. */}
-			{messagesLoaded && messages.length > 0 ? (<>
+			{/* Timeline.  A plain native scroll container with two
+			    CSS tricks doing the work that a virtualization
+			    library used to do:
+
+			    1. `flex-direction: column-reverse` puts the FIRST
+			       child in DOM at the visual BOTTOM of the container,
+			       and reverses the scroll-anchor semantics: scrollTop
+			       = 0 is the visual bottom (newest message).  When a
+			       new message arrives we render it as the first child
+			       (since `reversedMessages` reverses the array), and
+			       the browser's natural scroll-anchoring keeps the
+			       user at the bottom if they were already there —
+			       without any imperative scrollTo on our side.  When
+			       older messages prepend (pagination), they become
+			       the LAST children visually at the top, ABOVE the
+			       user's viewport — scrollTop unchanged.
+
+			    2. `content-visibility: auto` on each row (set in
+			       `renderTimelineRow`) gives us browser-native
+			       virtualization: off-screen rows skip rendering
+			       entirely (no paint, no layout cost) but still take
+			       `containIntrinsicSize` worth of space so scroll
+			       height is correct.  This is the iOS 18+ /
+			       Chromium-built-in equivalent of what react-virtuoso
+			       and TanStack Virtual were doing, with two big
+			       advantages: the browser's compositor never has to
+			       fight a JavaScript engine that's recomputing
+			       positions (so iOS momentum scroll is buttery), and
+			       there's no measurement-then-compensate loop that
+			       can yank the user against their gesture.
+
+			    Combined: scroll position preservation, sticky-bottom,
+			    and off-screen culling all come from the browser. */}
+			{messagesLoaded && messages.length > 0 ? (
 				<div
 					ref={scrollRef}
-					className="absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-contain px-4"
+					className="absolute inset-0 overflow-y-auto overflow-x-hidden px-4"
 					style={{
-						overflowAnchor: useBrowserAnchoring ? "auto" : "none",
+						display: "flex",
+						flexDirection: "column-reverse",
 						WebkitOverflowScrolling: "touch",
+						overflowAnchor: "auto",
 						touchAction: "pan-y",
 					}}
 				>
-					{isMobileShell ? (
-						<div ref={listRef}>
-							{messages.map((m, index) => renderTimelineRow(m, index, m.id))}
-						</div>
-					) : (
+					{/* Bottom sentinel — the FIRST child in DOM order,
+					    which `column-reverse` puts at the visual
+					    BOTTOM of the scroll content.  The
+					    IntersectionObserver in the at-bottom useEffect
+					    watches this element; its visibility tells us
+					    whether the user is at the newest message. */}
+					<div ref={bottomSentinelRef} aria-hidden style={{ height: 1, flexShrink: 0 }} />
+					{reversedMessages.map((m, reversedIndex) => {
+						// The data index for date-separator + group-
+						// continues math is the index in the ORIGINAL
+						// (oldest-first) array — O(1) from the
+						// reversed-array position.
+						const arrayIndex = messages.length - 1 - reversedIndex;
+						return renderTimelineRow(m, arrayIndex);
+					})}
+					{/* Discord-style top-of-history indicator.
+					    Lives IN-FLOW at the visual top (i.e. the last
+					    child in DOM order, which column-reverse puts
+					    at the top of the scroll content).  Three
+					    states:
+
+					    1. `loadingMore` — pulsing favicon throbber.
+					       Takes physical scroll space so the user
+					       genuinely cannot scroll past it until the
+					       fetch resolves; the result feels like a
+					       gentle "pause" at the top while older
+					       history streams in.  When the fetch
+					       commits with new events they prepend
+					       ABOVE the user's viewport (overflow-anchor
+					       keeps the visible content stable), and the
+					       throbber dismounts.
+
+					    2. `atStartOfRoom` (no more history) — a
+					       static "Beginning of #room" line, again at
+					       the visual top, so the user can see they've
+					       actually reached the start rather than
+					       wondering if something silently broke.
+
+					    3. Neither — nothing rendered; auto-pagination
+					       will fire as soon as the user gets near
+					       enough to the visual top (see TOP_PAGINATION_PX). */}
+					{loadingMore && (
 						<div
-							ref={listRef}
-							style={{
-								height: totalVirtualSize,
-								position: "relative",
-								width: "100%",
-							}}
+							className="flex items-center justify-center py-4"
+							aria-live="polite"
+							aria-label="Loading older messages"
 						>
-						<div
-							style={{
-								position: "absolute",
-								top: 0,
-								left: 0,
-								width: "100%",
-								transform: `translateY(${virtualPaddingTop}px)`,
-							}}
-						>
-							{virtualRows.map((virtualRow) => {
-								const m = messages[virtualRow.index];
-								return m
-									? renderTimelineRow(m, virtualRow.index, virtualRow.key, rowVirtualizer.measureElement)
-									: null;
-							})}
-						</div>
+							<img
+								src="/favicon.png"
+								alt=""
+								className="size-8 animate-pulse"
+								style={{ filter: "drop-shadow(0 0 16px rgba(0,0,0,0.4))" }}
+							/>
 						</div>
 					)}
+					{!loadingMore && atStartOfRoom && (
+						<div className="flex items-center justify-center py-4 text-xs text-muted-foreground">
+							Beginning of {room.kind === "dm" ? "conversation" : `#${room.name}`}
+						</div>
+					)}
+					{/* Top sentinel — the LAST child in DOM order,
+					    which `column-reverse` puts at the visual TOP
+					    of the scroll content (just past the throbber
+					    or beginning-of-room indicator).  The
+					    pagination IntersectionObserver watches this
+					    element; visibility within TOP_PAGINATION_PX of
+					    the viewport top fires `loadOlderHistory`. */}
+					<div ref={topSentinelRef} aria-hidden style={{ height: 1, flexShrink: 0 }} />
 				</div>
-				{/* Pulsing-favicon loader.  Absolutely positioned at
-				    the top of the chat surface, opacity-toggled by
-				    `loadingMore`.  Doesn't take up flow space, so
-				    its appearance / disappearance doesn't shift the
-				    user's scroll position. */}
-				{loadingMore && (
-					<div
-						className="absolute top-0 left-0 right-0 z-20 flex items-center justify-center py-3 pointer-events-none"
-						aria-live="polite"
-						aria-label="Loading older messages"
-					>
-						<img
-							src="/favicon.png"
-							alt=""
-							className="size-8 animate-pulse"
-							style={{ filter: "drop-shadow(0 0 16px rgba(0,0,0,0.4))" }}
-						/>
-					</div>
-				)}
-			</>) : !messagesLoaded ? null : (
+			) : !messagesLoaded ? null : (
 				isMobileShell ? (
 					<div className="flex flex-col items-center justify-center gap-3 py-16 px-6 text-center">
 						<div className="size-16 rounded-2xl bg-foreground/[0.06] flex items-center justify-center">
@@ -1559,23 +1427,15 @@ export function ChatPane({
 				)
 			)}
 			{/* "Jump to newest" floating button — Discord / Slack
-			    pattern.  Appears at the bottom-center of the
-			    scroll area when the user has scrolled meaningfully
-			    back from the bottom (200px+).  Click → snap to
-			    bottom + re-arm the follow-bottom lock.  Hidden
-			    again the moment the user is back near the bottom. */}
+			    pattern.  Appears at the bottom-center of the chat
+			    surface when Virtuoso reports the user is no longer
+			    at the bottom.  Click → smooth-scroll to the last
+			    item.  Hidden again as soon as atBottomStateChange
+			    fires with `true`. */}
 			{scrolledUp && (
 				<button
 					type="button"
-					onClick={() => {
-						const el = scrollRef.current;
-						if (!el) return;
-						followBottomRef.current = true;
-						setScrolledUp(false);
-						scrollStateRef.current = { stuckAtBottom: true };
-						if (isMobileShell) el.scrollBy({ top: el.scrollHeight, behavior: "smooth" });
-						else scrollToBottom("smooth");
-					}}
+					onClick={() => scrollToBottom("smooth")}
 					className={cn(
 						"absolute bottom-3 left-1/2 -translate-x-1/2",
 						"flex items-center gap-1.5 px-3 py-1.5 rounded-full",
@@ -2025,7 +1885,16 @@ export function ChatPane({
 	);
 }
 
-function MessageRow({
+// The actual MessageRow implementation.  Exported below as `MessageRow`
+// after being wrapped in React.memo with `messageRowPropsEqual` — the
+// wrap is what fixes the scroll-history jank on iOS.  Without it, every
+// prepended pagination batch (or any parent-state change that rebuilds
+// the `messages` array reference) re-renders EVERY MessageRow on
+// screen.  On mobile that's the entire loaded timeline because the
+// mobile path doesn't virtualize — see commit 7104465.  On iOS
+// WKWebView, those re-renders happen mid-touch-momentum and break
+// scrolling through history.
+function MessageRowComponent({
 	message, avatarMxc, continuesGroup, isFirst, flaggable, roomEncrypted,
 	reactions, flags, onReact, onReply, onFlag, onToggleReactionPill, isBot,
 	isOwnedBot, isHovered, isFlashing, onDelete, onAdminRedact,
@@ -2657,6 +2526,70 @@ function MessageRow({
 	);
 }
 
+const MessageRow = memo(MessageRowComponent, messageRowPropsEqual);
+
+// Custom equality check for MessageRow.  Compares only the props that
+// actually drive what's rendered; intentionally IGNORES the identity of
+// the callback props because `renderTimelineRow` in ChatPane creates
+// fresh inline arrows on every parent render (they close over the
+// per-row `m`).  Comparing those by identity would invalidate every
+// row on every parent re-render and defeat the memo entirely.
+//
+// The callbacks' captured `m` is contained in `message`, which we DO
+// compare by reference.  As long as `message` is reference-equal, the
+// stale closure does exactly what a fresh one would have done — the
+// transport/handler functions they delegate to (onOpenProfile,
+// onSendDm, etc.) are stable across the chat session.
+//
+// For optional callbacks, only PRESENCE matters here, because that's
+// what gates the conditional UI inside the row (trash icon, redact
+// icon, "DM" / "Block" context-menu items).
+function messageRowPropsEqual(
+	prev: Parameters<typeof MessageRowComponent>[0],
+	next: Parameters<typeof MessageRowComponent>[0],
+): boolean {
+	// Data props: any change re-renders.
+	if (prev.message !== next.message) return false;
+	if (prev.avatarMxc !== next.avatarMxc) return false;
+	if (prev.continuesGroup !== next.continuesGroup) return false;
+	if (prev.isFirst !== next.isFirst) return false;
+	if (prev.flaggable !== next.flaggable) return false;
+	if (prev.roomEncrypted !== next.roomEncrypted) return false;
+	if (prev.flags !== next.flags) return false;
+	if (prev.isBot !== next.isBot) return false;
+	if (prev.isOwnedBot !== next.isOwnedBot) return false;
+	if (prev.isHovered !== next.isHovered) return false;
+	if (prev.isFlashing !== next.isFlashing) return false;
+	if (prev.isDm !== next.isDm) return false;
+	if (prev.receiptsVersion !== next.receiptsVersion) return false;
+	if (prev.memberAvatars !== next.memberAvatars) return false;
+	if (prev.memberNames !== next.memberNames) return false;
+	if (prev.mentionsViewer !== next.mentionsViewer) return false;
+	if (prev.botMxids !== next.botMxids) return false;
+	if (prev.serviceMxids !== next.serviceMxids) return false;
+	if (prev.pollAggregate !== next.pollAggregate) return false;
+	if (prev.viewerUserId !== next.viewerUserId) return false;
+	if (prev.roomId !== next.roomId) return false;
+	// `reactions` empty-case is reference-stable (EMPTY_REACTIONS), but
+	// the non-empty path can still receive a freshly-built array from
+	// the parent.  Length + per-element identity captures the cases
+	// that matter (add/remove/swap an aggregate) without a deep walk.
+	if (prev.reactions.length !== next.reactions.length) return false;
+	for (let i = 0; i < prev.reactions.length; i++) {
+		if (prev.reactions[i] !== next.reactions[i]) return false;
+	}
+	// Optional callbacks: presence matters, identity does not.
+	if (!!prev.onDelete !== !!next.onDelete) return false;
+	if (!!prev.onAdminRedact !== !!next.onAdminRedact) return false;
+	if (!!prev.onSendDmToSender !== !!next.onSendDmToSender) return false;
+	if (!!prev.onBlockSender !== !!next.onBlockSender) return false;
+	if (!!prev.onQuote !== !!next.onQuote) return false;
+	if (!!prev.onOpenSenderProfile !== !!next.onOpenSenderProfile) return false;
+	if (!!prev.onPollVote !== !!next.onPollVote) return false;
+	if (!!prev.onPollEnd !== !!next.onPollEnd) return false;
+	return true;
+}
+
 function ReplyQuote({ replyTo }: { replyTo: NonNullable<Message["replyTo"]> }) {
 	return (
 		<div className="mb-1 flex items-start gap-2 max-w-[60ch] pl-3 border-l-2 border-primary/40 text-xs text-muted-foreground">
@@ -2997,9 +2930,43 @@ function useMediaContextMenu(url: string | null | undefined, filename: string) {
 function AttachmentImage({ message }: { message: Message }) {
 	const url = useMatrixAttachment(message);
 	const { onContextMenu, menu } = useMediaContextMenu(url, message.mediaName ?? "attachment");
+	// Reserve the exact final box from the sender-supplied dimensions
+	// in `info.w` / `info.h` (carried on the Message as
+	// `mediaWidth` / `mediaHeight`).  Without this, the <img> starts
+	// at 0×0 pre-load and expands to its natural size when the bytes
+	// arrive — which on a Virtuoso list triggers a re-measure on the
+	// row, shifting every neighbouring row up or down by the delta.
+	// During a fast scroll past several media messages, those
+	// re-measures compound into the layout thrashing visible in the
+	// "glitchychat" recording.  Browsers honour `width` + `height`
+	// attributes on <img> as an aspect-ratio AND a layout reservation:
+	// the box paints at the correct size from first commit, the image
+	// data fills in inside it without changing layout.
+	//
+	// Visual bounds match the previous `max-w-md max-h-80` (Tailwind
+	// = 448 / 320 px).  Senders that omit dimensions (legacy clients,
+	// bridge bots) fall back to the skeleton's footprint — strictly
+	// no-worse than the previous behaviour.
+	const { displayWidth, displayHeight } = useMemo(() => {
+		const naturalW = message.mediaWidth ?? 0;
+		const naturalH = message.mediaHeight ?? 0;
+		if (!naturalW || !naturalH) return { displayWidth: 256, displayHeight: 160 };
+		const MAX_W = 448, MAX_H = 320;
+		const aspect = naturalW / naturalH;
+		let w = Math.min(naturalW, MAX_W);
+		let h = w / aspect;
+		if (h > MAX_H) {
+			h = MAX_H;
+			w = h * aspect;
+		}
+		return { displayWidth: Math.round(w), displayHeight: Math.round(h) };
+	}, [message.mediaWidth, message.mediaHeight]);
 	if (!url) {
 		return (
-			<div className="w-64 h-40 rounded-lg bg-muted-foreground/10 animate-pulse" />
+			<div
+				className="rounded-lg bg-muted-foreground/10 animate-pulse"
+				style={{ width: displayWidth, height: displayHeight }}
+			/>
 		);
 	}
 	return (
@@ -3007,7 +2974,10 @@ function AttachmentImage({ message }: { message: Message }) {
 			<img
 				src={url}
 				alt={message.mediaName ?? "attachment"}
-				className="max-w-md max-h-80 rounded-lg block"
+				width={displayWidth}
+				height={displayHeight}
+				className="rounded-lg block"
+				style={{ width: displayWidth, height: displayHeight }}
 				onContextMenu={onContextMenu}
 			/>
 			{menu}
@@ -3026,6 +2996,27 @@ function AttachmentVideo({ message }: { message: Message }) {
 	const { onContextMenu, menu } = useMediaContextMenu(url, message.mediaName ?? "video");
 	const videoRef = useRef<HTMLVideoElement | null>(null);
 	const [playing, setPlaying] = useState(false);
+
+	// Reserve the exact final box from sender-supplied dimensions.
+	// Prefer the video's own w/h (info.w / info.h on m.video); fall
+	// back to the thumbnail's dimensions if the main media frame
+	// didn't include them (some bridges).  See AttachmentImage above
+	// for the full reasoning — without this, the row resizes when
+	// poster decodes and again when video metadata loads.
+	const { displayWidth, displayHeight } = useMemo(() => {
+		const naturalW = message.mediaWidth ?? message.mediaThumbWidth ?? 0;
+		const naturalH = message.mediaHeight ?? message.mediaThumbHeight ?? 0;
+		if (!naturalW || !naturalH) return { displayWidth: 288, displayHeight: 176 };
+		const MAX_W = 448, MAX_H = 320;
+		const aspect = naturalW / naturalH;
+		let w = Math.min(naturalW, MAX_W);
+		let h = w / aspect;
+		if (h > MAX_H) {
+			h = MAX_H;
+			w = h * aspect;
+		}
+		return { displayWidth: Math.round(w), displayHeight: Math.round(h) };
+	}, [message.mediaWidth, message.mediaHeight, message.mediaThumbWidth, message.mediaThumbHeight]);
 
 	function togglePlay() {
 		const v = videoRef.current;
@@ -3047,12 +3038,18 @@ function AttachmentVideo({ message }: { message: Message }) {
 				<img
 					src={poster}
 					alt={message.mediaName ?? "video"}
-					className="max-w-md max-h-80 rounded-lg block"
+					width={displayWidth}
+					height={displayHeight}
+					className="rounded-lg block"
+					style={{ width: displayWidth, height: displayHeight }}
 				/>
 			);
 		}
 		return (
-			<div className="w-72 h-44 rounded-lg bg-muted-foreground/10 animate-pulse" />
+			<div
+				className="rounded-lg bg-muted-foreground/10 animate-pulse"
+				style={{ width: displayWidth, height: displayHeight }}
+			/>
 		);
 	}
 	return (
@@ -3062,12 +3059,15 @@ function AttachmentVideo({ message }: { message: Message }) {
 				src={url}
 				poster={poster}
 				preload="metadata"
+				width={displayWidth}
+				height={displayHeight}
 				// Drop native controls entirely.  The glass play
 				// overlay below + click-to-toggle on the element
 				// itself is the whole UI; users who want scrubbing
 				// / time / volume can right-click → Open in new
 				// tab (or use the context menu's Save action).
-				className="max-w-md max-h-80 rounded-lg block cursor-pointer"
+				className="rounded-lg block cursor-pointer"
+				style={{ width: displayWidth, height: displayHeight }}
 				onClick={togglePlay}
 				onPlay={() => setPlaying(true)}
 				onPause={() => setPlaying(false)}
@@ -3917,15 +3917,6 @@ function TypingIndicator({
 // into a single centered label so the timeline still scans cleanly.
 
 const SEPARATOR_TIME_GAP_MS = 60 * 60_000; // 1 hour
-
-function hasTimelineSeparator(prevTs: number | undefined, currentTs: number): boolean {
-	if (!currentTs) return false;
-	if (prevTs === undefined) return true;
-	const current = new Date(currentTs);
-	const prev = new Date(prevTs);
-	return prev.toDateString() !== current.toDateString()
-		|| currentTs - prevTs > SEPARATOR_TIME_GAP_MS;
-}
 
 function computeDateSeparator(prevTs: number | undefined, currentTs: number): string | null {
 	if (!currentTs) return null;
