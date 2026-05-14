@@ -25,6 +25,9 @@ import { RoomList } from "@/components/RoomList";
 import { MobileTopBar } from "@/components/MobileTopBar";
 import { MobileTabBar, type MobileTab } from "@/components/MobileTabBar";
 import { MobileMeScreen } from "@/components/MobileMeScreen";
+import { MobileProfileScreen } from "@/components/MobileProfileScreen";
+import { MobileSettingsScreen } from "@/components/MobileSettingsScreen";
+import { PushSlot } from "@/components/mobile/Chrome";
 import { isMobileShell } from "@/lib/mobile";
 import { applyNativeShellTweaks } from "@/lib/nativeShell";
 import { wipeLocalCacheAndRestart } from "@/lib/recovery";
@@ -306,6 +309,20 @@ export default function App() {
 	// because it isn't really a chat surface; pressing any other
 	// tab clears it without disturbing the underlying activeSpace.
 	const [mobileMeOpen, setMobileMeOpen] = useState(false);
+	// Mobile-only navigation stack inside the Me tab.  The Me tab
+	// follows iOS push-view conventions: the root is the avatar +
+	// account list (`MobileMeScreen`), and tapping a row pushes
+	// Profile / Settings as full-screen views above it.  Reset to
+	// 'root' whenever the user switches tabs so a return-to-Me
+	// lands on the root, not whatever push was active last.
+	const [meStack, setMeStack] = useState<"root" | "profile" | "settings">("root");
+	// Belt-and-braces reset: whenever the Me tab closes for ANY
+	// reason (room opened, sign-out fired, other tab tapped via a
+	// code path that doesn't pass through MobileTabBar.onChange),
+	// flip the push stack back to root so re-entry is clean.
+	useEffect(() => {
+		if (!mobileMeOpen && meStack !== "root") setMeStack("root");
+	}, [mobileMeOpen, meStack]);
 	// Mobile-only "Spaces" tab — when true, the bottom-tab "Spaces"
 	// view covers the panels with the spaces list / drill-in.  Same
 	// pattern as `mobileMeOpen`.  When a space is drilled into,
@@ -2306,8 +2323,13 @@ export default function App() {
 			    Desktop relies on the multi-pane layout where "back"
 			    is implicit (click another room or close the panel).
 			    The bar itself is just brand chrome — per-view title
-			    + actions live in each panel's own header below. */}
-			{isMobileShell && (
+			    + actions live in each panel's own header below.
+
+			    Hidden whenever the Me tab is open: the Me tree
+			    (root + push views) renders its own iOS-style nav
+			    chrome, so the brand top bar would just stack on
+			    top of a second header. */}
+			{isMobileShell && !mobileMeOpen && (
 				<MobileTopBar
 					onBack={
 						state.activeRoomId
@@ -3282,9 +3304,15 @@ export default function App() {
 				// through behind the rows.  Repaint the body's gradient
 				// on top of bg-background so this overlay has the same
 				// coloured aura every other mobile screen has.
-				<div className="fixed inset-x-0 z-30 flex flex-col bg-background border-b border-foreground/10"
+				//
+				// Top:0 (no offset for MobileTopBar) — the Me tab hides
+				// the brand top bar and provides its own iOS-native nav
+				// chrome instead (large title at the root, nav bar with
+				// back chevron on push views).  Bottom stops above the
+				// tab bar so navigation stays visible during pushes.
+				<div className="fixed inset-x-0 z-30 flex flex-col bg-background overflow-hidden"
 				     style={{
-				         top: "calc(env(safe-area-inset-top) + 48px)",
+				         top: 0,
 				         bottom: "calc(env(safe-area-inset-bottom) + 49px)",
 				         backgroundImage: "var(--bg-gradient)",
 				         backgroundAttachment: "fixed",
@@ -3292,13 +3320,78 @@ export default function App() {
 				         backgroundSize: "cover",
 				     }}
 				>
-					<MobileMeScreen
-						userId={creds.user_id}
-						avatarMxc={myAvatarMxc}
-						onOpenProfile={() => setViewedUserId(creds.user_id as UserId)}
-						onOpenSettings={() => setSettingsOpen(true)}
-						onSignOut={handleSignOut}
-					/>
+					{/* Root Me view — always mounted underneath so the
+					    push views slide in over it (and the user sees
+					    the root revealed when they slide back).
+					    `pt-[env(safe-area-inset-top)]` lifts the root
+					    content below the status bar; push views handle
+					    that internally via their own NavBar.
+
+					    `mobile-push-underlayer` + `.is-pushed` give it
+					    the iOS parallax + dim treatment whenever
+					    something is pushed over it. */}
+					<div
+						className={`flex-1 flex flex-col min-h-0 mobile-push-underlayer${meStack !== "root" ? " is-pushed" : ""}`}
+						style={{ paddingTop: "env(safe-area-inset-top)" }}
+					>
+						<MobileMeScreen
+							userId={creds.user_id}
+							avatarMxc={myAvatarMxc}
+							onOpenProfile={() => setMeStack("profile")}
+							onOpenSettings={() => setMeStack("settings")}
+							onSignOut={handleSignOut}
+						/>
+					</div>
+
+					{/* Push views.  PushSlot defers unmount until the
+					    exit animation finishes, so popping back to the
+					    root plays a clean slide-out instead of an
+					    instant disappear.  `onPop` enables the
+					    swipe-from-left-edge gesture. */}
+					<PushSlot
+						visible={meStack === "profile"}
+						onPop={() => setMeStack("root")}
+					>
+						<MobileProfileScreen
+							transport={transport}
+							accessToken={creds.access_token ?? null}
+							userId={creds.user_id as UserId}
+							onBack={() => setMeStack("root")}
+							onSaved={(avatarMxc) => {
+								if (avatarMxc === undefined) return;
+								setMyAvatarMxc(avatarMxc ?? undefined);
+							}}
+						/>
+					</PushSlot>
+					<PushSlot
+						visible={meStack === "settings"}
+						onPop={() => setMeStack("root")}
+					>
+						<MobileSettingsScreen
+							settings={settings}
+							onSettingsChange={(next) => {
+								setSettings(next);
+								if (transport && next.showNsfw !== settings.showNsfw) {
+									transport.setNsfwPreference(!!next.showNsfw).catch(err => {
+										console.warn("App: setNsfwPreference failed", err);
+									});
+								}
+							}}
+							accessToken={creds.access_token ?? null}
+							transport={transport}
+							currentUserId={creds.user_id as UserId | null}
+							ignoredUsers={ignoredUsers}
+							onBack={() => setMeStack("root")}
+							onSignOut={() => {
+								setMeStack("root");
+								handleSignOut();
+							}}
+							onSignedOut={() => {
+								setMeStack("root");
+								handleSignOut();
+							}}
+						/>
+					</PushSlot>
 				</div>
 			)}
 			{/* Spaces tab overlay.  Mirrors the Me overlay: same
@@ -3392,6 +3485,12 @@ export default function App() {
 						// sees the tab's landing screen on first tap.
 						setMobileMeOpen(tab === "me");
 						setMobileSpacesOpen(tab === "spaces");
+						// Reset the Me-tab push stack so re-entry lands
+						// on the root (avatar list), not whatever push
+						// the user was in last.  iOS Settings/Mail
+						// behave the same — tabs are roots, not deep
+						// state.
+						if (tab !== "me") setMeStack("root");
 						if (tab !== "spaces") setMobileSelectedSpaceId(null);
 						if (tab === "me" || tab === "spaces") return;
 						dispatch({ type: "set_active_room", roomId: null });
