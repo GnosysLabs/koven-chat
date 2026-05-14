@@ -32,6 +32,7 @@ import type { RTKParticipant, RTKSelf } from "@cloudflare/realtimekit-react";
 import { useCall } from "@/lib/call-context";
 import { ParticipantTile } from "@/components/voice/ParticipantTile";
 import { cn } from "@/lib/utils";
+import { isMobileShell } from "@/lib/mobile";
 import { Mic, MicOff, PhoneOff, Maximize2, Video, VideoOff } from "lucide-react";
 import type { RoomId } from "@koven/shared";
 
@@ -280,23 +281,34 @@ function CallPipPanelInner({
 				isSpeaking={false}
 			/>
 
-			{/* Hover overlay with controls.  Critical: pointer-events
-			    must be NONE when the overlay is invisible, otherwise
-			    the hidden buttons silently receive clicks (because
-			    pointer-events-auto on inner rows overrides the
-			    parent's pointer-events-none).  That manifested as
-			    "click to drag instantly reopens the call view" —
-			    the maximize button was eating the pointer-down
-			    before the outer div's drag handler could see it.
-			    Gating both opacity AND pointer-events on hover
-			    means the panel is fully click-through-to-drag
-			    until you hover, then both fade in together. */}
+			{/* Controls overlay.  Critical: the OUTER overlay stays
+			    pointer-events-none always — the individual buttons
+			    flip pointer-events-auto on themselves.  That way
+			    empty space inside the panel still passes pointer-
+			    down events through to the outer drag handler, while
+			    button taps register on the buttons.  Earlier this
+			    used a full-overlay pointer-events-auto on hover,
+			    which made "click to drag" silently reopen the call
+			    view because the maximize button ate the pointer-
+			    down.
+			    Visibility: on hover-capable devices the overlay
+			    fades in on hover (chrome out of the way).  On touch
+			    devices there's no hover, so it stays visible — the
+			    user just navigated away from the call surface and
+			    needs the controls right there.  Backdrop is dropped
+			    on mobile too: a permanent dark wash would smother
+			    the video, and the per-button backgrounds give
+			    enough contrast on their own. */}
 			<div
 				className={cn(
-					"absolute inset-0 flex flex-col justify-between p-1.5",
-					"bg-black/40 opacity-0 pointer-events-none",
-					"group-hover:opacity-100 group-hover:pointer-events-auto",
-					"transition-opacity duration-150",
+					"absolute inset-0 flex flex-col justify-between p-1.5 pointer-events-none",
+					isMobileShell
+						? "opacity-100"
+						: cn(
+							"bg-black/40 opacity-0",
+							"group-hover:opacity-100",
+							"transition-opacity duration-150",
+						),
 				)}
 			>
 				<div className="flex items-center justify-between gap-1">
@@ -322,7 +334,7 @@ function CallPipPanelInner({
 						}}
 						label={`Open Live in ${activeCall.roomName}`}
 					>
-						<Maximize2 className="h-3 w-3" />
+						<Maximize2 className={cn(isMobileShell ? "h-4 w-4" : "h-3 w-3")} />
 					</PipButton>
 				</div>
 				<div className="flex items-center justify-end gap-1">
@@ -331,21 +343,21 @@ function CallPipPanelInner({
 						label={audioOn ? "Mute" : "Unmute"}
 						variant={audioOn ? "default" : "destructive"}
 					>
-						{audioOn ? <Mic className="h-3 w-3" /> : <MicOff className="h-3 w-3" />}
+						{audioOn ? <Mic className={cn(isMobileShell ? "h-4 w-4" : "h-3 w-3")} /> : <MicOff className={cn(isMobileShell ? "h-4 w-4" : "h-3 w-3")} />}
 					</PipButton>
 					<PipButton
 						onClick={toggleVideo}
 						label={videoOn ? "Stop video" : "Start video"}
 						variant={videoOn ? "default" : "destructive"}
 					>
-						{videoOn ? <Video className="h-3 w-3" /> : <VideoOff className="h-3 w-3" />}
+						{videoOn ? <Video className={cn(isMobileShell ? "h-4 w-4" : "h-3 w-3")} /> : <VideoOff className={cn(isMobileShell ? "h-4 w-4" : "h-3 w-3")} />}
 					</PipButton>
 					<PipButton
 						onClick={handleLeave}
 						label="Leave call"
 						variant="destructive"
 					>
-						<PhoneOff className="h-3 w-3" />
+						<PhoneOff className={cn(isMobileShell ? "h-4 w-4" : "h-3 w-3")} />
 					</PipButton>
 				</div>
 			</div>
@@ -353,9 +365,15 @@ function CallPipPanelInner({
 	);
 }
 
-/** Small overlay button used inside the PIP hover chrome.  All
+/** Small overlay button used inside the PIP control chrome.  All
  *  buttons stop pointer-event propagation so clicking them doesn't
- *  trigger the outer container's drag/click handlers. */
+ *  trigger the outer container's drag/click handlers.
+ *
+ *  `pointer-events-auto` is critical: the parent overlay is now
+ *  permanently `pointer-events-none` (so empty space passes drags
+ *  through to the panel body), and only the buttons themselves
+ *  need to catch taps.  Without this, the buttons would inherit
+ *  the parent's none and be dead. */
 function PipButton({
 	children, onClick, label, variant = "default",
 }: {
@@ -372,7 +390,11 @@ function PipButton({
 			aria-label={label}
 			title={label}
 			className={cn(
-				"h-6 w-6 rounded flex items-center justify-center",
+				"pointer-events-auto rounded flex items-center justify-center",
+				// Mobile gets a real touch target (Apple HIG ≥ 44pt).
+				// Desktop stays compact since the cursor is precise
+				// and the overlay only appears on hover anyway.
+				isMobileShell ? "h-9 w-9" : "h-6 w-6",
 				variant === "destructive"
 					? "bg-destructive/90 hover:bg-destructive text-destructive-foreground"
 					: "bg-black/60 hover:bg-black/80 text-white",

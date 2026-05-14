@@ -33,6 +33,7 @@ import { Button } from "@/components/ui/button";
 import { ParticipantTile } from "@/components/voice/ParticipantTile";
 import { useCall } from "@/lib/call-context";
 import { cn } from "@/lib/utils";
+import { isMobileShell } from "@/lib/mobile";
 import { ChevronLeft, ChevronRight, Mic, MicOff, MonitorUp, MonitorOff, PhoneOff, Video, VideoOff } from "lucide-react";
 
 export interface CallViewProps {
@@ -401,8 +402,18 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 					   strip stack inline so they never overlap.  No
 					   hover gate here: the strip is already eating
 					   visual real estate, so hiding the controls
-					   inconsistently would just confuse things. */
-					<div className="shrink-0 flex flex-col items-center gap-2 px-4 pb-3 pt-1">
+					   inconsistently would just confuse things.
+					   On mobile, pad the bottom through the iOS home
+					   indicator via env(safe-area-inset-bottom) so
+					   the strip doesn't sit under the indicator. */
+					<div
+						className="shrink-0 flex flex-col items-center gap-2 px-4 pb-3 pt-1"
+						style={
+							isMobileShell
+								? { paddingBottom: "max(env(safe-area-inset-bottom), 0.75rem)" }
+								: undefined
+						}
+					>
 						<ControlBar
 							floating={false}
 							audioOn={audioOn}
@@ -461,12 +472,30 @@ function ControlBar({
 				"bg-card/95 backdrop-blur-sm border border-border shadow-lg",
 				floating
 					? cn(
-						"absolute bottom-4 left-1/2 -translate-x-1/2",
-						"opacity-0 group-hover:opacity-100 focus-within:opacity-100",
-						"transition-opacity duration-150",
+						"absolute left-1/2 -translate-x-1/2",
+						// Mobile: bar stays visible always (no hover
+						// on touch devices) — the inline style on this
+						// element positions it above the iOS home
+						// indicator via env(safe-area-inset-bottom).
+						// Desktop: hover-gated so the chrome stays
+						// out of the way until the user reaches for
+						// it; bottom-4 (16px) is fine since desktop
+						// has no safe-area inset.
+						isMobileShell
+							? ""
+							: cn(
+								"bottom-4",
+								"opacity-0 group-hover:opacity-100 focus-within:opacity-100",
+								"transition-opacity duration-150",
+							),
 					)
 					: "",
 			)}
+			style={
+				floating && isMobileShell
+					? { bottom: "calc(env(safe-area-inset-bottom, 0px) + 1rem)" }
+					: undefined
+			}
 		>
 			<ControlButton
 				active={audioOn}
