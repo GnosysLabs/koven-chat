@@ -155,6 +155,17 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "apps/desktop/src-tauri -> target"
+          # `cache-bin: true` (the v2 default) caches ~/.cargo/bin —
+          # which the Pre step then RESTORES, overwriting whatever
+          # dtolnay just installed.  When the restored cache is
+          # poisoned (missing the `rustup` binary that dtolnay's
+          # `cargo`/`rustc` symlinks point to), the toolchain ends up
+          # dangling: `cargo` is a symlink → rustup, but rustup itself
+          # is gone.  Diagnostic from our re-validate step:
+          #   /Users/runner/.cargo/bin/cargo -> rustup
+          #   /Users/runner/.cargo/bin/cargo: No such file or directory
+          # Disable bin caching so dtolnay's fresh install stays put.
+          cache-bin: false
 
       - name: Linux deps
         if: matrix.platform == 'ubuntu-22.04'
