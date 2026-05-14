@@ -18,7 +18,6 @@
 import { useEffect, useState } from "react";
 import { ChevronRight, Check, Palette, Shield, Monitor, Wrench, LogOut, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { Switch } from "@/components/ui/switch";
 import type { Settings, Theme } from "@/state/settings";
 import { THEMES } from "@/state/settings";
 import { MobileBlockedUsersScreen } from "@/components/MobileBlockedUsersScreen";
@@ -130,17 +129,6 @@ export function MobileSettingsScreen({
 						label="Appearance"
 						value={activeTheme.label}
 						onClick={() => push("appearance")}
-					/>
-					<SwitchRow
-						icon={<Shield className="h-[20px] w-[20px]" strokeWidth={2.1} />}
-						iconBg="bg-orange-500"
-						label="Show NSFW Spaces"
-						subtitle="Adult-content spaces stay hidden in Explore until on."
-						checked={!!settings.showNsfw}
-						onCheckedChange={(v) => {
-							void hapticSelection();
-							onSettingsChange({ ...settings, showNsfw: v });
-						}}
 						last
 					/>
 				</GroupCard>
@@ -476,45 +464,6 @@ function DisclosureRow({
 			) : null}
 			<ChevronRight className="h-[18px] w-[18px] text-muted-foreground/50 shrink-0" strokeWidth={2.5} />
 		</button>
-	);
-}
-
-function SwitchRow({
-	icon,
-	iconBg,
-	label,
-	subtitle,
-	checked,
-	onCheckedChange,
-	last,
-}: {
-	icon: React.ReactNode;
-	iconBg: string;
-	label: string;
-	subtitle?: string;
-	checked: boolean;
-	onCheckedChange(v: boolean): void;
-	last?: boolean;
-}) {
-	return (
-		<div
-			className={cn(
-				"w-full flex items-center gap-3 pl-3 pr-3.5 py-2.5",
-				"min-h-[52px]",
-				!last && "border-b border-foreground/10",
-			)}
-		>
-			<IconBadge bg={iconBg}>{icon}</IconBadge>
-			<div className="flex-1 min-w-0">
-				<div className="text-[17px] text-foreground truncate">{label}</div>
-				{subtitle ? (
-					<div className="text-[12px] text-muted-foreground leading-snug mt-0.5">
-						{subtitle}
-					</div>
-				) : null}
-			</div>
-			<Switch checked={checked} onCheckedChange={onCheckedChange} />
-		</div>
 	);
 }
 
