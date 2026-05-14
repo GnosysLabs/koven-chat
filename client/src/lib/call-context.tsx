@@ -191,6 +191,19 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 			defaults: {
 				audio: activeCall.defaults?.audio ?? false,
 				video: activeCall.defaults?.video ?? false,
+				// RealtimeKit defaults screenshare to 5 FPS, which is
+				// optimised for slides and looks like a slideshow on
+				// motion content.  30 FPS is Cloudflare's recommended
+				// ceiling for group calls (higher rates can starve
+				// other peers' camera bandwidth on constrained uplinks).
+				// 1080p cap keeps bitrate sane on retina displays.
+				mediaConfiguration: {
+					screenshare: {
+						frameRate: { ideal: 30, max: 30 },
+						width: { max: 1920 },
+						height: { max: 1080 },
+					},
+				},
 			},
 		}).catch(err => {
 			// CRITICAL — keep activeCall + phase in place so the
