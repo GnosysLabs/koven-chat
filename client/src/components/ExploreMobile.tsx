@@ -151,7 +151,7 @@ export function ExploreMobile({
 	return (
 		<div className="flex-1 min-h-0 overflow-y-auto">
 			<div
-				className="px-4 pt-2"
+				className="px-4 pt-3"
 				style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 80px)" }}
 			>
 				<h1 className="text-[34px] font-bold tracking-[-0.022em] leading-[1.1] text-foreground py-3">

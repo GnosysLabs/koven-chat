@@ -55,8 +55,8 @@ export function MobileMeScreen({
 			{/* Large title.  Lives inside the scroll so it visually
 			    "collapses" as the user scrolls; the contextual nav-bar
 			    title in MobileTopBar takes over on scroll. */}
-			<div className="px-5 pt-3 pb-4">
-				<h1 className="text-[34px] font-bold tracking-[-0.022em] leading-none text-foreground">
+			<div className="px-4 pt-3">
+				<h1 className="text-[34px] font-bold tracking-[-0.022em] leading-[1.1] text-foreground py-3">
 					Me
 				</h1>
 			</div>
