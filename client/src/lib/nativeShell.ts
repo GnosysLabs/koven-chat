@@ -4,11 +4,9 @@
 //
 // Why dynamic-import the Capacitor plugins instead of static-import:
 // the koven-web client is the same bundle that gets shipped to the
-// web (where `@capacitor/*` doesn't resolve at runtime), to Tauri
-// desktop (where it's also not installed), and to Capacitor mobile
-// (where it IS).  Static imports would force every host to ship the
-// plugin code; dynamic imports keep the cost on the platform that
-// uses them.
+// web, to Tauri desktop, and to Capacitor mobile.  Vite still needs
+// these packages installed so it can analyze the imports, but dynamic
+// imports keep the native plugin code out of hosts that never call it.
 
 /** True when running inside a Capacitor WebView (iOS / Android shell). */
 export function isCapacitor(): boolean {
@@ -44,12 +42,6 @@ export function isNativeShell(): boolean {
 export async function applyNativeShellTweaks(): Promise<void> {
 	if (!isCapacitor()) return;
 	try {
-		// `@capacitor/keyboard` only lives in the koven-ios package's
-		// node_modules — the web client doesn't statically depend on
-		// it (and Vite leaves dynamic imports of unresolved modules as
-		// external).  Suppress the bundle-time type-check; at runtime
-		// the import resolves inside the iOS Capacitor WebView.
-		// @ts-expect-error: optional native-only dependency.
 		const { Keyboard } = await import("@capacitor/keyboard");
 		await Keyboard.setAccessoryBarVisible({ isVisible: false });
 	} catch {

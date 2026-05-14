@@ -1,8 +1,8 @@
 // Haptic feedback wrapper.  Mirrors `nativeShell.ts`: the same web
-// bundle ships to web (where `@capacitor/haptics` doesn't resolve),
-// Tauri desktop (where it also doesn't), and the iOS Capacitor
-// WebView (where it does).  Dynamic-import + try/catch keeps the
-// plugin out of every host that won't use it.
+// bundle ships to web, Tauri desktop, and the iOS Capacitor WebView.
+// Vite still needs the Capacitor plugin installed so it can analyze
+// the dynamic import; the runtime gate below keeps it out of hosts
+// that won't use it.
 //
 // Outside Capacitor every call is a silent async no-op.
 
@@ -32,8 +32,6 @@ interface HapticsModule {
 async function loadPlugin(): Promise<HapticsModule | null> {
 	if (!isCapacitor()) return null;
 	try {
-		// @ts-expect-error: optional native-only dependency, only
-		// resolves inside the iOS Capacitor WebView at runtime.
 		const mod = await import("@capacitor/haptics");
 		return mod as HapticsModule;
 	} catch {
