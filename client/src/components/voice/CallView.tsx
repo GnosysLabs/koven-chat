@@ -34,7 +34,24 @@ import { ParticipantTile } from "@/components/voice/ParticipantTile";
 import { useCall } from "@/lib/call-context";
 import { cn } from "@/lib/utils";
 import { isMobileShell } from "@/lib/mobile";
-import { ChevronLeft, ChevronRight, Mic, MicOff, MonitorUp, MonitorOff, PhoneOff, Video, VideoOff } from "lucide-react";
+import {
+	isCallWindow,
+	isDesktopShell,
+	toggleCallWindowFullscreen,
+} from "@/lib/native-window";
+import {
+	ChevronLeft,
+	ChevronRight,
+	Maximize,
+	Mic,
+	MicOff,
+	MonitorUp,
+	MonitorOff,
+	PhoneOff,
+	PictureInPicture2,
+	Video,
+	VideoOff,
+} from "lucide-react";
 
 export interface CallViewProps {
 	roomName: string;
@@ -214,7 +231,23 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 	// Click a thumbnail to pin; click the spotlight to unpin;
 	// ‹ › arrows cycle.  Auto-clears if the pinned participant
 	// leaves the room.
-	const { spotlitId: pinnedId, setSpotlight, activeCall } = useCall();
+	const { spotlitId: pinnedId, setSpotlight, activeCall, popOutToWindow } = useCall();
+
+	// FaceTime-style pop-out: only offered in the desktop shell's
+	// main window.  Hidden in plain browsers (no native pop-out path
+	// for v1) and hidden inside the call window itself (you can't
+	// pop out twice).  Same gating as the PIP panel's pop-out button
+	// so the two affordances stay in sync.
+	const onPopOut = isDesktopShell() && !isCallWindow()
+		? () => { void popOutToWindow(); }
+		: undefined;
+
+	// Fullscreen toggle is wired inside the call window only.  The
+	// main window has its own decorations / non-fullscreen behaviour
+	// and the call surface there is just a pane inside chat.
+	const onFullscreen = isCallWindow()
+		? () => { void toggleCallWindowFullscreen(); }
+		: undefined;
 	const togglePin = useCallback((id: string) => {
 		setSpotlight(pinnedId === id ? null : id);
 	}, [pinnedId, setSpotlight]);
@@ -393,6 +426,8 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 							toggleVideo={toggleVideo}
 							toggleScreen={toggleScreen}
 							onLeave={onLeave}
+							onPopOut={onPopOut}
+							onFullscreen={onFullscreen}
 						/>
 					)}
 				</div>
@@ -423,6 +458,8 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 							toggleVideo={toggleVideo}
 							toggleScreen={toggleScreen}
 							onLeave={onLeave}
+							onPopOut={onPopOut}
+							onFullscreen={onFullscreen}
 						/>
 						<ThumbnailStrip
 							tiles={allTiles}
@@ -455,6 +492,7 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 function ControlBar({
 	floating, audioOn, videoOn, screenOn,
 	toggleAudio, toggleVideo, toggleScreen, onLeave,
+	onPopOut, onFullscreen,
 }: {
 	floating: boolean;
 	audioOn: boolean;
@@ -464,6 +502,13 @@ function ControlBar({
 	toggleVideo(): void;
 	toggleScreen(): void;
 	onLeave(): void;
+	// Pop the call into a dedicated OS window (FaceTime-style).
+	// Undefined when the affordance isn't applicable to the current
+	// host (browser, mobile shell, or the call window itself).
+	onPopOut?: () => void;
+	// Toggle native fullscreen on the current OS window.  Only set
+	// inside the popped-out call window; undefined elsewhere.
+	onFullscreen?: () => void;
 }) {
 	return (
 		<div
@@ -518,6 +563,28 @@ function ControlBar({
 				iconOff={<MonitorOff className="h-5 w-5" />}
 				label={screenOn ? "Stop sharing" : "Share screen"}
 			/>
+			{onPopOut && (
+				<button
+					type="button"
+					onClick={onPopOut}
+					aria-label="Open call in its own window"
+					title="Open call in its own window"
+					className="h-11 w-11 rounded-full flex items-center justify-center bg-muted hover:bg-accent text-foreground transition-colors"
+				>
+					<PictureInPicture2 className="h-5 w-5" />
+				</button>
+			)}
+			{onFullscreen && (
+				<button
+					type="button"
+					onClick={onFullscreen}
+					aria-label="Toggle fullscreen"
+					title="Toggle fullscreen"
+					className="h-11 w-11 rounded-full flex items-center justify-center bg-muted hover:bg-accent text-foreground transition-colors"
+				>
+					<Maximize className="h-5 w-5" />
+				</button>
+			)}
 			<div className="w-1" />
 			<Button
 				variant="destructive"

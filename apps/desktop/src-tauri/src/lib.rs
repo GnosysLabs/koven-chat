@@ -387,15 +387,176 @@ const KOVEN_PLATFORM: &str = "unknown";
 
 /// Build the init script that runs before the SPA scripts on every
 /// page.  Prepends a small prelude that exposes `__KOVEN_DESKTOP__`
-/// (always true here) and `__KOVEN_PLATFORM__` (compile-time OS tag),
-/// which the SPA reads to branch on platform-specific UI.  Done at
-/// runtime so the platform string can be interpolated; LINK_INTERCEPTOR_JS
-/// stays a const &str.
-fn build_init_script() -> String {
+/// (always true here), `__KOVEN_PLATFORM__` (compile-time OS tag),
+/// and `__KOVEN_WINDOW_KIND__` (per-window: "main" for the app
+/// shell, "call" for the popped-out call window).  The SPA reads
+/// `__KOVEN_WINDOW_KIND__` at boot to mount the right top-level
+/// component (full app shell vs. call-only surface).  Done at
+/// runtime so the platform + kind strings can be interpolated;
+/// LINK_INTERCEPTOR_JS stays a const &str.
+fn build_init_script_for(kind: &str) -> String {
 	format!(
-		"window.__KOVEN_DESKTOP__=true;window.__KOVEN_PLATFORM__='{}';\n{}",
-		KOVEN_PLATFORM, LINK_INTERCEPTOR_JS,
+		"window.__KOVEN_DESKTOP__=true;window.__KOVEN_PLATFORM__='{}';window.__KOVEN_WINDOW_KIND__='{}';\n{}",
+		KOVEN_PLATFORM, kind, LINK_INTERCEPTOR_JS,
 	)
+}
+
+/// Per-call handoff slot used when popping a call out of the main
+/// window into its own freely-resizable window.  Main window:
+/// invokes `spawn_call_window` with a freshly-minted auth token →
+/// Rust stashes the params here → spawns the call window → call
+/// window calls `drain_pending_call` on boot and joins with the
+/// stashed params.
+///
+/// Why pass via state and not URL params: auth tokens in URLs leak
+/// into the WebView's history, devtools network tab, and any logs
+/// that record top-level navigations.  A `Mutex<Option<…>>` is a
+/// near-zero-cost handoff that keeps the URL clean (the call
+/// window's URL is just the same SPA root the main window loaded;
+/// the SPA decides what to render based on `__KOVEN_WINDOW_KIND__`).
+#[derive(Default)]
+struct CallHandoff(std::sync::Mutex<Option<PendingCall>>);
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingCall {
+	room_id: String,
+	room_name: String,
+	auth_token: String,
+	access_token: String,
+	is_dm: bool,
+	/// Mic state at the moment of pop-out.  Threaded through so the
+	/// new SDK session starts with the same mic state the user had
+	/// just configured; otherwise they'd land in the new window with
+	/// the mic off and have to re-toggle.
+	default_audio: bool,
+	/// Camera state at the moment of pop-out.  Same reasoning as
+	/// `default_audio`.
+	default_video: bool,
+}
+
+/// The pinned local port the bundled SPA is served from.  Stored in
+/// managed state so `spawn_call_window` (which runs much later than
+/// `run`, after the SPA hands us params) can build the same URL the
+/// main window was launched with.  Threading the port through every
+/// closure that might one day need it is uglier than a single
+/// managed value.
+struct LocalPort(u16);
+
+/// Open the freely-resizable call window with the params handed to
+/// us by the main window's pop-out flow.  Reuses a single window
+/// labeled "call": if one already exists (shouldn't happen in the
+/// normal flow, since the main window has no active call once a
+/// pop-out succeeds), close it first so a fresh one can take over.
+///
+/// Native chrome on this window is intentional: traffic lights /
+/// title bar / standard min-max-close, native fullscreen via the
+/// macOS green button or Win/Linux maximize.  Matches FaceTime's
+/// model and saves us from re-implementing the rounded-corner
+/// Cocoa dance for a second window.
+#[tauri::command]
+async fn spawn_call_window(
+	app: tauri::AppHandle,
+	handoff: tauri::State<'_, CallHandoff>,
+	port: tauri::State<'_, LocalPort>,
+	params: PendingCall,
+) -> Result<(), String> {
+	// Stash params first so the new window can drain them on boot.
+	// Mutex-poisoning recovery: if a prior holder panicked, recover
+	// the inner value and overwrite rather than propagating the
+	// poison (which would hang the pop-out flow forever).
+	let title = format!("Koven · {}", params.room_name);
+	match handoff.0.lock() {
+		Ok(mut g) => *g = Some(params),
+		Err(poisoned) => {
+			let mut g = poisoned.into_inner();
+			*g = Some(params);
+		}
+	}
+
+	// Defensive close if another call window is somehow still up.
+	// In the normal flow the main window has no active call when
+	// the user pops out (we leave the meeting first), so there's no
+	// route to a second pop-out without a fresh call+join in
+	// between.  Closing here keeps a manual reload + edge cases
+	// from leaving two call windows fighting over the same handoff.
+	if let Some(existing) = app.get_webview_window("call") {
+		let _ = existing.close();
+	}
+
+	let url_str = if cfg!(debug_assertions) {
+		"http://localhost:1421/".to_string()
+	} else {
+		format!("http://localhost:{}/index.html", port.0)
+	};
+	let parsed: Url = url_str.parse().map_err(|e: url::ParseError| e.to_string())?;
+
+	let mut builder = WebviewWindowBuilder::new(&app, "call", WebviewUrl::External(parsed))
+		.title(title)
+		.inner_size(720.0, 540.0)
+		.min_inner_size(320.0, 240.0)
+		.resizable(true)
+		.center()
+		.decorations(true)
+		.devtools(true)
+		.initialization_script(build_init_script_for("call"));
+
+	// Same UA spoof as the main window: RealtimeKit's device-support
+	// check refuses to initialise without a Safari-flavoured UA on
+	// macOS, and pinning a known-good UA on Windows + Linux keeps
+	// behaviour reproducible across WebView updates.  See the long
+	// comment on the main window's user_agent call for background.
+	#[cfg(target_os = "macos")]
+	{
+		builder = builder.user_agent(
+			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+		);
+	}
+	#[cfg(target_os = "windows")]
+	{
+		builder = builder.user_agent(
+			"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0"
+		);
+	}
+	#[cfg(target_os = "linux")]
+	{
+		builder = builder.user_agent(
+			"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+		);
+	}
+
+	let win = builder.build().map_err(|e| e.to_string())?;
+
+	// macOS WKWebView needs the UIDelegate gate flipped on each
+	// window separately: the main window's install doesn't carry
+	// over.  Without this, getUserMedia in the call window would
+	// silently reject with NotAllowedError even though the
+	// entitlements + Info.plist permissions are in place.
+	//
+	// We intentionally do NOT apply NSWindowCollectionBehaviorFullScreenNone
+	// here (which the main window uses to keep its rounded-corner
+	// chrome stable).  Native fullscreen on the call window is a
+	// primary feature; leaving the collection-behavior default in
+	// place lets the macOS green button do the right thing.
+	#[cfg(target_os = "macos")]
+	{
+		use cocoa::base::id;
+		if let Ok(ptr) = win.ns_window() {
+			plugins::mac_webrtc_permission::install(ptr as id);
+		}
+	}
+
+	Ok(())
+}
+
+/// The call window calls this once on boot to claim the params the
+/// main window stashed via `spawn_call_window`.  Returning `None`
+/// means the window was opened without a pending call (e.g.
+/// reloaded after the call ended), in which case the SPA shows an
+/// error state instead of attempting to start an empty call.
+#[tauri::command]
+fn drain_pending_call(handoff: tauri::State<'_, CallHandoff>) -> Option<PendingCall> {
+	handoff.0.lock().ok().and_then(|mut g| g.take())
 }
 
 pub fn run() {
@@ -432,6 +593,13 @@ pub fn run() {
 	};
 
 	tauri::Builder::default()
+		// Managed state used by the pop-out call window flow.  Both
+		// values are read by `spawn_call_window` / `drain_pending_call`
+		// commands; declaring them up here means the values exist
+		// before the first SPA boot.  CallHandoff::default() is an
+		// empty Mutex<Option<…>>.
+		.manage(CallHandoff::default())
+		.manage(LocalPort(local_port))
 		// Keep one window per machine — second `koven-desktop` launch
 		// (or a `koven://` deep-link click) focuses the existing one
 		// instead of spawning a duplicate.  Required before any other
@@ -512,11 +680,19 @@ pub fn run() {
 					reveal_app,
 					save_download,
 					wipe_local_cache_and_exit,
+					spawn_call_window,
+					drain_pending_call,
 				]
 			}
 			#[cfg(not(target_os = "macos"))]
 			{
-				tauri::generate_handler![reveal_app, save_download, wipe_local_cache_and_exit]
+				tauri::generate_handler![
+					reveal_app,
+					save_download,
+					wipe_local_cache_and_exit,
+					spawn_call_window,
+					drain_pending_call,
+				]
 			}
 		})
 		.setup(move |app| {
@@ -850,7 +1026,7 @@ pub fn run() {
 				// for top-level navigations, not pop-up requests.  This
 				// runs before any page script so it catches links from
 				// the very first paint.
-				.initialization_script(build_init_script())
+				.initialization_script(build_init_script_for("main"))
 				.on_navigation(move |url| {
 					if is_internal(url) {
 						return true;

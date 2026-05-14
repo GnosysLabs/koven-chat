@@ -33,7 +33,8 @@ import { useCall } from "@/lib/call-context";
 import { ParticipantTile } from "@/components/voice/ParticipantTile";
 import { cn } from "@/lib/utils";
 import { isMobileShell } from "@/lib/mobile";
-import { Mic, MicOff, PhoneOff, Maximize2, Video, VideoOff } from "lucide-react";
+import { isCallWindow, isDesktopShell } from "@/lib/native-window";
+import { Mic, MicOff, PhoneOff, Maximize2, PictureInPicture2, Video, VideoOff } from "lucide-react";
 import type { RoomId } from "@koven/shared";
 
 export interface CallPipPanelProps {
@@ -94,7 +95,14 @@ function CallPipPanelInner({
 	onLeave(): Promise<void>;
 }) {
 	const { meeting } = useRealtimeKitMeeting();
-	const { spotlitId } = useCall();
+	const { spotlitId, popOutToWindow } = useCall();
+
+	// Pop-out is only offered in the desktop shell's main window:
+	// the call window doesn't render the PIP at all, and plain
+	// browsers have no native multi-window path in v1.  Matches the
+	// gating in CallView so both pop-out affordances appear and
+	// disappear together.
+	const canPopOut = isDesktopShell() && !isCallWindow();
 
 	// Pick which participant to show in the panel.  Spotlit one
 	// when set, else self.  Listening to the joined-map mutations
@@ -315,27 +323,49 @@ function CallPipPanelInner({
 					<div className="text-[10px] uppercase tracking-wider text-white/90 px-1.5 py-0.5 rounded bg-black/40">
 						In Live
 					</div>
-					<PipButton
-						onClick={(e) => {
-							e.stopPropagation();
-							// Same flow as the body click: flip the
-							// view flag, and only navigate the room
-							// if we're not already there.  Without
-							// the setInCallView this button just
-							// took the user to the room's chat
-							// (which is where they often already
-							// are when the PIP is visible) — visual
-							// no-op.  The flag is what actually
-							// surfaces the call UI.
-							setInCallView(true);
-							if (currentRoomId !== activeCall.roomId) {
-								onJumpToCallRoom(activeCall.roomId);
-							}
-						}}
-						label={`Open Live in ${activeCall.roomName}`}
-					>
-						<Maximize2 className={cn(isMobileShell ? "h-4 w-4" : "h-3 w-3")} />
-					</PipButton>
+					<div className="flex items-center gap-1">
+						{canPopOut && (
+							<PipButton
+								onClick={(e) => {
+									e.stopPropagation();
+									// Hand the call off to a dedicated
+									// FaceTime-style window.  Mints a
+									// fresh token, tears down the main-
+									// window meeting, spawns the call
+									// window (see popOutToWindow in
+									// call-context.tsx).  The PIP itself
+									// disappears the moment the main-
+									// window call ends (phase = idle),
+									// so no manual hide needed here.
+									void popOutToWindow();
+								}}
+								label={`Open ${activeCall.roomName} in its own window`}
+							>
+								<PictureInPicture2 className={cn(isMobileShell ? "h-4 w-4" : "h-3 w-3")} />
+							</PipButton>
+						)}
+						<PipButton
+							onClick={(e) => {
+								e.stopPropagation();
+								// Same flow as the body click: flip the
+								// view flag, and only navigate the room
+								// if we're not already there.  Without
+								// the setInCallView this button just
+								// took the user to the room's chat
+								// (which is where they often already
+								// are when the PIP is visible) — visual
+								// no-op.  The flag is what actually
+								// surfaces the call UI.
+								setInCallView(true);
+								if (currentRoomId !== activeCall.roomId) {
+									onJumpToCallRoom(activeCall.roomId);
+								}
+							}}
+							label={`Open Live in ${activeCall.roomName}`}
+						>
+							<Maximize2 className={cn(isMobileShell ? "h-4 w-4" : "h-3 w-3")} />
+						</PipButton>
+					</div>
 				</div>
 				<div className="flex items-center justify-end gap-1">
 					<PipButton

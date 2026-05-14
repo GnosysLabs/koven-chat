@@ -36,7 +36,8 @@ import {
 	RealtimeKitProvider,
 	useRealtimeKitClient,
 } from "@cloudflare/realtimekit-react";
-import { pingCallPresenceJoined, pingCallPresenceLeft } from "@/lib/calls-api";
+import { joinCall, pingCallPresenceJoined, pingCallPresenceLeft } from "@/lib/calls-api";
+import { isDesktopShell, spawnCallWindow } from "@/lib/native-window";
 import { HOMESERVER_URL } from "@/lib/urls";
 import type { RoomId } from "@koven/shared";
 
@@ -83,6 +84,13 @@ export interface ActiveCall {
 	// in pre-join).  DMs may want defaults differently per the
 	// caller's intent, but for v1 we keep the same off-by-default.
 	defaults?: { audio?: boolean; video?: boolean };
+	// True when entering the call as a pop-out from the main
+	// window: the user was already in the meeting moments ago,
+	// so skip the PreJoinScreen step and join directly.  The
+	// connecting→prejoin transition honours this by calling
+	// `meeting.joinRoom()` itself instead of handing off to
+	// PreJoinScreen.  Used only by the call-window flow today.
+	skipPrejoin?: boolean;
 }
 
 interface CallContextValue {
@@ -111,6 +119,15 @@ interface CallContextValue {
 	startCall(opts: ActiveCall): void;
 	confirmJoin(): void;
 	endCall(): Promise<void>;
+	// Hand the current call off to a freely-resizable Tauri window
+	// (FaceTime-style).  Mints a fresh single-use auth token, tears
+	// down the current SDK session, then spawns the call window
+	// with the new token + the user's current mic/cam state so the
+	// pop-out lands directly in the joined state.  Brief
+	// "Reconnecting…" gap is unavoidable while the SDK re-handshakes
+	// (RealtimeKit's WebRTC session can't cross JS contexts).
+	// No-op outside the desktop shell.
+	popOutToWindow(): Promise<void>;
 }
 
 const CallContext = createContext<CallContextValue | null>(null);
@@ -180,12 +197,26 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 	}, [activeCall?.authToken]);
 
 	// Once the SDK resolves, advance to prejoin so the UI swaps
-	// from "Connecting…" to the camera preview + device pickers.
+	// from "Connecting…" to the camera preview + device pickers,
+	// UNLESS this is a pop-out flow, in which case the user was
+	// already in the meeting moments ago and re-prompting them with
+	// a device picker would be jarring.  For pop-outs we call
+	// `meeting.joinRoom()` directly and flip straight to "joined"
+	// so the new window lands in the call surface, no extra clicks.
 	useEffect(() => {
-		if (meeting && phase === "connecting") {
-			setPhase("prejoin");
+		if (!meeting || phase !== "connecting") return;
+		if (activeCall?.skipPrejoin) {
+			void meeting.joinRoom()
+				.then(() => setPhase("joined"))
+				.catch(err => {
+					console.error("CallProvider: auto-join (pop-out) failed", err);
+					const msg = err instanceof Error ? err.message : String(err);
+					setError(msg);
+				});
+			return;
 		}
-	}, [meeting, phase]);
+		setPhase("prejoin");
+	}, [meeting, phase, activeCall?.skipPrejoin]);
 
 	// Hold a ref to activeCall so the SDK event handlers (which
 	// only re-bind when meeting changes, not on every state edit)
@@ -339,9 +370,76 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 		}
 	}, [meeting]);
 
+	const popOutToWindow = useCallback(async (): Promise<void> => {
+		// Pop-out is a desktop-only affordance (we'd need a different
+		// strategy for browser-side: window.open + BroadcastChannel).
+		// Caller is expected to gate the affordance, but bail safely
+		// here too so an errant call in a browser context is a no-op.
+		if (!isDesktopShell()) return;
+		if (!activeCall) return;
+
+		// Capture the user's current mic + cam state BEFORE tearing
+		// down the meeting so we can hand them off to the new SDK
+		// session as defaults.  Without this, the new window would
+		// start with mic / cam off and the user would have to
+		// re-enable everything they had on a second ago.  meeting
+		// may be undefined if we're still in connecting/prejoin
+		// (in that case fall back to whatever activeCall.defaults
+		// said).
+		const audioOn = meeting?.self.audioEnabled ?? activeCall.defaults?.audio ?? false;
+		const videoOn = meeting?.self.videoEnabled ?? activeCall.defaults?.video ?? false;
+
+		// Mint a fresh single-use auth token.  RealtimeKit rejects
+		// reused tokens, so the new SDK session needs its own.
+		let freshAuthToken: string;
+		try {
+			const r = await joinCall({
+				accessToken: activeCall.accessToken,
+				roomId: activeCall.roomId,
+			});
+			freshAuthToken = r.authToken;
+		} catch (err) {
+			console.error("popOutToWindow: token mint failed", err);
+			setError(err instanceof Error ? err.message : String(err));
+			return;
+		}
+
+		const params = {
+			roomId: activeCall.roomId,
+			roomName: activeCall.roomName,
+			authToken: freshAuthToken,
+			accessToken: activeCall.accessToken,
+			isDm: !!activeCall.isDm,
+			defaultAudio: audioOn,
+			defaultVideo: videoOn,
+		};
+
+		// Tear down THIS window's meeting first.  RealtimeKit only
+		// allows one active SDK session per participant, so the new
+		// window can't join until we've fully left.  endCall waits
+		// for meeting.leaveRoom() to resolve (which fires roomLeft
+		// → state reset → cancel-ring path for unfinished DM rings).
+		try {
+			await endCall();
+		} catch (err) {
+			console.warn("popOutToWindow: endCall threw, continuing anyway", err);
+		}
+
+		// Spawn the new window with the fresh token + preserved
+		// device state.  Rust stashes params in a Mutex, the call
+		// window drains them on mount and starts the new SDK
+		// session itself (see CallWindowApp + drain_pending_call).
+		try {
+			await spawnCallWindow(params);
+		} catch (err) {
+			console.error("popOutToWindow: spawn failed", err);
+			setError(err instanceof Error ? err.message : String(err));
+		}
+	}, [activeCall, meeting, endCall]);
+
 	const value = useMemo<CallContextValue>(
-		() => ({ activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall }),
-		[activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall],
+		() => ({ activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall, popOutToWindow }),
+		[activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall, popOutToWindow],
 	);
 
 	// Always render the RealtimeKitProvider — even when meeting is

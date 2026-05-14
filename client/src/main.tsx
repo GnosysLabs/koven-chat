@@ -16,8 +16,10 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { DesktopTitleBar } from "./components/DesktopTitleBar";
+import { CallWindowApp } from "./components/voice/CallWindowApp";
 import { CallProvider } from "./lib/call-context";
 import { tryDeepLinkBounce } from "./lib/deepLinkBounce";
+import { isCallWindow } from "./lib/native-window";
 import "./index.css";
 
 // Deep-link bounce: if the browser loaded /invite/<id> or /r/<id>/<eid>
@@ -91,6 +93,15 @@ async function revealApp(): Promise<void> {
 	}
 }
 
+// Window-kind branching: the Tauri shell injects __KOVEN_WINDOW_KIND__
+// per webview ("main" for the app shell, "call" for the popped-out
+// call window).  On the call branch we mount a stripped-down shell
+// that only hosts the call surface; no sidebar, no chat, no
+// DesktopTitleBar (the call window uses native OS chrome so the user
+// gets traffic lights, fullscreen, free resize without any
+// reimplementation).  Plain browsers read the global as undefined
+// and take the main branch, matching today's inline-call flow.
+//
 // SPA fills the entire window.  No title-bar gutter at the top —
 // individual views are responsible for their own top inset on
 // macOS where the OS reserves the top 28px as a drag zone.  The
@@ -100,27 +111,41 @@ async function revealApp(): Promise<void> {
 // the drag zone.  DesktopTitleBar stays absolute-positioned at
 // the top so the traffic lights paint over whatever the SPA
 // renders below.
+const isCallWin = isCallWindow();
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
 	<React.StrictMode>
-		<CallProvider>
-			<div className="h-full relative">
-				<App />
-				<DesktopTitleBar />
-			</div>
-		</CallProvider>
+		{isCallWin ? (
+			<CallWindowApp />
+		) : (
+			<CallProvider>
+				<div className="h-full relative">
+					<App />
+					<DesktopTitleBar />
+				</div>
+			</CallProvider>
+		)}
 	</React.StrictMode>,
 );
 
-// Boot sequence:
+// Boot sequence (main window only):
 //   1. setupMacChrome — round the corners, hide native traffic lights
 //   2. wait one frame so React's first commit has actually painted
 //   3. revealApp — close splash window, show main window
 // All three are sequenced so the user only sees: floating favicon
 // over the desktop → fully styled main window.  No square flash,
 // no half-painted intermediate.
-void setupMacChrome()
-	.then(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
-	.then(revealApp);
+//
+// The call window uses native OS chrome (decorations=true) so it
+// has no rounded-corner setup to run and no splash to dismiss.
+// Skipping these calls there also avoids invoking
+// `hide_traffic_lights` on a window where they're intentionally
+// visible.
+if (!isCallWin) {
+	void setupMacChrome()
+		.then(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
+		.then(revealApp);
+}
 
 // Register the service worker that backs notifications + (later)
 // offline caching.  Done after the React tree mounts so the
