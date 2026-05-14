@@ -256,6 +256,50 @@ jobs:
       - name: Build web client
         run: bun run --cwd client build
 
+      # Belt-and-braces re-clean right before tauri-action.  The
+      # earlier "Clear stale Rust stubs" step removed
+      # /opt/homebrew/bin/{rustup,rustup-init}; dtolnay then installs
+      # a real cargo at $HOME/.cargo/bin and the Verify Rust toolchain
+      # step confirms `cargo --version` works.  Yet `tauri build` was
+      # still finding a `cargo` that's actually `rustup-init` —
+      # something between Verify and tauri-action was either
+      # re-introducing the stub or shifting PATH.  This step nukes any
+      # rust stubs that have come back, then re-prepends
+      # `$HOME/.cargo/bin` so the upcoming `npm run tauri build`
+      # spawn inherits a PATH where the real cargo wins.
+      #
+      # Critically: ONLY remove a stub if it's NOT a symlink back to
+      # our installed cargo — `rustup-managed-cargo` is itself a
+      # proxy at $HOME/.cargo/bin/cargo, and dtolnay can symlink it
+      # into common paths.  Removing those would leave a broken
+      # toolchain.
+      - name: Re-validate cargo before tauri-action (macOS)
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          echo "=== which -a cargo ==="
+          which -a cargo || true
+          echo "=== cargo --version ==="
+          cargo --version || true
+          for d in /usr/local/bin /opt/homebrew/bin /usr/bin; do
+            for b in cargo rustc rustup rustdoc rustup-init; do
+              target="$d/$b"
+              if [ -e "$target" ] || [ -L "$target" ]; then
+                real=$(readlink -f "$target" 2>/dev/null || echo "$target")
+                if [ "$real" != "$HOME/.cargo/bin/$b" ]; then
+                  echo "Removing rogue $target -> $real"
+                  sudo rm -f "$target"
+                else
+                  echo "Keeping $target (links to our cargo)"
+                fi
+              fi
+            done
+          done
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          echo "=== Final ==="
+          ls -la "$HOME/.cargo/bin/cargo"
+          "$HOME/.cargo/bin/cargo" --version
+
       # `tauri-action` runs `tauri build`, signs each updater artifact
       # with TAURI_SIGNING_PRIVATE_KEY, uploads the bundles + .sig
       # files as release assets to the draft release named below.
@@ -271,6 +315,15 @@ jobs:
           # gives the auto-issued GITHUB_TOKEN write access; the
           # env injection is what hands it to the action.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Force absolute paths to cargo/rustc on macOS — bypasses
+          # PATH lookup so even if something has poisoned PATH again
+          # between the Verify step and here (the failure mode this
+          # workflow keeps hitting), tauri's `cargo metadata` spawn
+          # invokes the real binary directly.  Most Rust tooling
+          # respects $CARGO + $RUSTC as the path-to-binary overrides;
+          # belt-and-braces with the GITHUB_PATH re-prepend above.
+          CARGO: ${{ matrix.platform == 'macos-latest' && '/Users/runner/.cargo/bin/cargo' || '' }}
+          RUSTC: ${{ matrix.platform == 'macos-latest' && '/Users/runner/.cargo/bin/rustc' || '' }}
           # Tauri updater signing.  Private key + (empty) password
           # come from repo secrets.  pubkey is committed in
           # tauri.conf.json — that's correct, minisign pubkeys are
