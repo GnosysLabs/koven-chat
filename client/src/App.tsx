@@ -3416,71 +3416,97 @@ export default function App() {
 			)}
 			{/* Spaces tab overlay.  Mirrors the Me overlay: same
 			    fixed-position envelope, same gradient repaint, same
-			    z-30.  Two-level inside: SpacesListMobile when no
-			    space is selected, SpaceHomeMobile after drill-in.
-			    Selecting a room from inside SpaceHome dispatches
-			    set_active_room, which clears the tab bar and lets
-			    the ChatPane below this overlay take over. */}
-			{isMobileShell && mobileSpacesOpen && !state.activeRoomId && (
-				<div className="fixed inset-x-0 z-30 flex flex-col bg-background border-b border-foreground/10"
+			    z-30.  Two-level push stack inside: SpacesListMobile
+			    is the always-mounted root, SpaceHomeMobile slides in
+			    from the right via PushSlot when the user drills into
+			    a space.  Stays mounted while a room is open too so
+			    the ChatPane (raised to z-40 on mobile) can slide in
+			    over it with the iOS parallax-dim depth cue intact —
+			    on pop the user sees SpaceHomeMobile slide back into
+			    place instead of an instant unmount. */}
+			{isMobileShell && mobileSpacesOpen && (
+				<div className="fixed inset-x-0 z-30 flex flex-col bg-background border-b border-foreground/10 overflow-hidden"
 				     style={{
 				         top: "calc(env(safe-area-inset-top) + 48px)",
-				         bottom: "calc(env(safe-area-inset-bottom) + 49px)",
+				         // Drop the 49pt tab-bar reserve when a room is
+				         // open — the tab bar is hidden in chat, and
+				         // without this the bottom strip would briefly
+				         // reveal the underlying list pane while the
+				         // ChatPane slides in over the overlay.
+				         bottom: state.activeRoomId
+				             ? "env(safe-area-inset-bottom)"
+				             : "calc(env(safe-area-inset-bottom) + 49px)",
 				         backgroundImage: "var(--bg-gradient)",
 				         backgroundAttachment: "fixed",
 				         backgroundRepeat: "no-repeat",
 				         backgroundSize: "cover",
 				     }}
 				>
-					{mobileSelectedSpaceId
-						? (() => {
-							const space = state.spaces.find(s => s.id === mobileSelectedSpaceId);
-							if (!space) {
-								// Space disappeared (left it, server pruned).
-								// Bail back to the list so the user has
-								// somewhere coherent to land.
-								setMobileSelectedSpaceId(null);
-								return null;
-							}
-							const childRooms = state.rooms.filter(
-								r => r.parentSpaceIds.includes(mobileSelectedSpaceId),
-							);
-							// Set activeSpace so existing handlers
-							// (openCreateRoomGated, InviteSheet, etc.)
-							// see "we're in this space" without us
-							// having to thread the id through each
-							// one.  Tracked by the useEffect just
-							// above this overlay block.
-							return (
-								<SpaceHomeMobile
-									space={space}
-									rooms={childRooms}
-									currentUserId={creds.user_id as UserId}
-									onSelectRoom={(roomId) => {
-										dispatch({ type: "set_active_space", space: { kind: "space", id: mobileSelectedSpaceId } });
-										dispatch({ type: "set_active_room", roomId });
-									}}
-									onAddRoom={() => {
-										dispatch({ type: "set_active_space", space: { kind: "space", id: mobileSelectedSpaceId } });
-										void openCreateRoomGated();
-									}}
-									onInvite={() => {
-										setInvitingRoomId(mobileSelectedSpaceId as unknown as RoomId);
-									}}
-									onOpenSettings={() => {
-										setEditingSpaceId(mobileSelectedSpaceId);
-									}}
-								/>
-							);
-						})()
-						: (
+					{/* Outer underlayer — parallax-dims the entire
+					    spaces overlay back when the ChatPane slides
+					    in over it (room enter from space home).
+					    Inner underlayer wraps just the SpacesListMobile
+					    so it parallaxes back when SpaceHomeMobile
+					    slides in over it (space drill-in).  Same
+					    nesting iOS uses for a 3-level push stack. */}
+					<div
+						className={`flex-1 flex flex-col min-h-0 mobile-push-underlayer${state.activeRoomId ? " is-pushed" : ""}`}
+					>
+						<div
+							className={`flex-1 flex flex-col min-h-0 mobile-push-underlayer${mobileSelectedSpaceId ? " is-pushed" : ""}`}
+						>
 							<SpacesListMobile
 								spaces={state.spaces}
 								rooms={state.rooms}
 								onOpenSpace={(id) => setMobileSelectedSpaceId(id as SpaceId)}
 							/>
-						)
-					}
+						</div>
+						<PushSlot
+							visible={!!mobileSelectedSpaceId}
+							onPop={() => setMobileSelectedSpaceId(null)}
+						>
+							{(() => {
+								if (!mobileSelectedSpaceId) return null;
+								const space = state.spaces.find(s => s.id === mobileSelectedSpaceId);
+								if (!space) {
+									// Space disappeared (left it, server
+									// pruned).  Bail back to the list.
+									setMobileSelectedSpaceId(null);
+									return null;
+								}
+								const childRooms = state.rooms.filter(
+									r => r.parentSpaceIds.includes(mobileSelectedSpaceId),
+								);
+								// Set activeSpace so existing handlers
+								// (openCreateRoomGated, InviteSheet, etc.)
+								// see "we're in this space" without us
+								// having to thread the id through each
+								// one.  Tracked by the useEffect just
+								// above this overlay block.
+								return (
+									<SpaceHomeMobile
+										space={space}
+										rooms={childRooms}
+										currentUserId={creds.user_id as UserId}
+										onSelectRoom={(roomId) => {
+											dispatch({ type: "set_active_space", space: { kind: "space", id: mobileSelectedSpaceId } });
+											dispatch({ type: "set_active_room", roomId });
+										}}
+										onAddRoom={() => {
+											dispatch({ type: "set_active_space", space: { kind: "space", id: mobileSelectedSpaceId } });
+											void openCreateRoomGated();
+										}}
+										onInvite={() => {
+											setInvitingRoomId(mobileSelectedSpaceId as unknown as RoomId);
+										}}
+										onOpenSettings={() => {
+											setEditingSpaceId(mobileSelectedSpaceId);
+										}}
+									/>
+								);
+							})()}
+						</PushSlot>
+					</div>
 				</div>
 			)}
 			{/* Hide the tab bar in a chat — chats are "push" views

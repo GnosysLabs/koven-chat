@@ -771,40 +771,49 @@
 	.mobile-shell [data-mobile-pane="aux"] {
 		display: none;
 	}
-	.mobile-shell [data-mobile-view="rooms"] [data-mobile-pane="main"] {
-		display: none;
+	/* iOS push slide between the list and chat panes.  Both panes
+	 * are mounted at all times and stacked absolutely so a
+	 * data-mobile-view flip can be animated rather than swapped via
+	 * display:none.  The new pane translates in from the right while
+	 * the old pane gets parallax-dimmed underneath — matches the
+	 * UINavigationController push curve used by PushSlot. */
+	.mobile-shell [data-mobile-view] {
+		position: relative;
+		overflow: hidden;
 	}
-	.mobile-shell [data-mobile-view="chat"] [data-mobile-pane="list"] {
-		display: none;
-	}
-	/* The visible pane fills the row.
-	 *
-	 * Wrapper rules:
-	 *   - `display: flex; flex-direction: column` — so the child
-	 *     panel (ChatPane / RoomList / ExplorePane / ...) can use
-	 *     `flex-1` to fill the wrapper's vertical axis.  Without
-	 *     this the wrapper falls back to `display: block`, the
-	 *     panel's `flex-1` references a non-flex parent (no
-	 *     effect), and the panel sprawls to its content height —
-	 *     pushing the MobileTopBar above and the composer below
-	 *     past the viewport.
-	 *   - `flex: 1 1 0` so the wrapper itself fills the parent
-	 *     flex-row's main axis.
-	 *   - `min-height: 0` so the wrapper can shrink (default
-	 *     `min-height: auto` would lock it to content height).
-	 *
-	 * Child rules — `!important` because panel components carry
-	 * Tailwind width classes (`w-72`, `w-60`, etc.) for desktop
-	 * that need overriding on mobile.  Targeting `> *` (direct
-	 * child) keeps the override surgical to the panel root.
-	 */
 	.mobile-shell [data-mobile-pane="list"],
 	.mobile-shell [data-mobile-pane="main"] {
+		position: absolute;
+		inset: 0;
 		display: flex;
 		flex-direction: column;
-		flex: 1 1 0;
 		min-width: 0;
 		min-height: 0;
+		transition:
+			transform 280ms cubic-bezier(0.32, 0.72, 0.18, 1),
+			filter   280ms cubic-bezier(0.32, 0.72, 0.18, 1);
+		will-change: transform, filter;
+	}
+	/* Main pane sits above the z-30 Me/Spaces overlays so that
+	 * entering a room from those tabs slides the ChatPane in OVER
+	 * the overlay (iOS depth cue).  When no room is open the pane
+	 * is parked at translateX(100%) off-screen, so the overlays
+	 * still read as the top layer. */
+	.mobile-shell [data-mobile-pane="main"] {
+		z-index: 40;
+	}
+	/* "rooms" view — list visible at translateX(0); main parked
+	 * off-screen right ready to slide in. */
+	.mobile-shell [data-mobile-view="rooms"] [data-mobile-pane="main"] {
+		transform: translateX(100%);
+	}
+	/* "chat" view — main covers the screen; list parallax-dims
+	 * underneath at the conventional 22% translate + 0.55
+	 * brightness, matching `.mobile-push-underlayer.is-pushed`. */
+	.mobile-shell [data-mobile-view="chat"] [data-mobile-pane="list"] {
+		transform: translateX(-22%) scale(0.96);
+		filter: brightness(0.55);
+		pointer-events: none;
 	}
 	.mobile-shell [data-mobile-pane="list"] > *,
 	.mobile-shell [data-mobile-pane="main"] > * {
@@ -1034,5 +1043,9 @@
 		transition: none;
 		transform: none;
 		filter: none;
+	}
+	.mobile-shell [data-mobile-pane="list"],
+	.mobile-shell [data-mobile-pane="main"] {
+		transition: none;
 	}
 }
