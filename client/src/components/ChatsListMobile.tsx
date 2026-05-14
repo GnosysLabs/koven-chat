@@ -43,6 +43,7 @@ interface ChatsListMobileProps {
 	rooms: Room[];
 	transport: MatrixTransport | null;
 	currentUserId: UserId;
+	botMxids: Set<UserId>;
 	onSelectRoom(id: RoomId): void;
 	onCreateRoom(): void;
 	onAcceptInvite(id: RoomId): Promise<void> | void;
@@ -50,7 +51,7 @@ interface ChatsListMobileProps {
 }
 
 export function ChatsListMobile({
-	rooms, transport, currentUserId, onSelectRoom, onCreateRoom,
+	rooms, transport, currentUserId, botMxids, onSelectRoom, onCreateRoom,
 	onAcceptInvite, onDeclineInvite,
 }: ChatsListMobileProps) {
 	const { invites, dms } = useMemo(() => {
@@ -117,15 +118,19 @@ export function ChatsListMobile({
 							{invites.length === 1 ? "Invite" : `Invites · ${invites.length}`}
 						</div>
 						<div className="rounded-2xl bg-card/60 backdrop-blur-xl border border-foreground/10 overflow-hidden">
-							{invites.map((room, idx) => (
-								<InviteRow
-									key={room.id}
-									room={room}
-									onAccept={onAcceptInvite}
-									onDecline={onDeclineInvite}
-									showDivider={idx > 0}
-								/>
-							))}
+							{invites.map((room, idx) => {
+								const inviteSeed = room.dmUserId ?? room.inviter;
+								return (
+									<InviteRow
+										key={room.id}
+										room={room}
+										isBot={!!inviteSeed && botMxids.has(inviteSeed as UserId)}
+										onAccept={onAcceptInvite}
+										onDecline={onDeclineInvite}
+										showDivider={idx > 0}
+									/>
+								);
+							})}
 						</div>
 					</div>
 				)}
@@ -140,6 +145,7 @@ export function ChatsListMobile({
 								room={room}
 								transport={transport}
 								currentUserId={currentUserId}
+								isBot={!!room.dmUserId && botMxids.has(room.dmUserId)}
 								onClick={() => selectRoom(room.id)}
 								showDivider={idx > 0}
 							/>
@@ -152,11 +158,12 @@ export function ChatsListMobile({
 }
 
 function ChatRow({
-	room, transport, currentUserId, onClick, showDivider,
+	room, transport, currentUserId, isBot, onClick, showDivider,
 }: {
 	room: Room;
 	transport: MatrixTransport | null;
 	currentUserId: UserId;
+	isBot: boolean;
 	onClick(): void;
 	showDivider: boolean;
 }) {
@@ -202,7 +209,7 @@ function ChatRow({
 					<MatrixAvatar
 						mxc={room.avatarUrl}
 						seed={room.dmUserId ?? room.id}
-						kind="user"
+						kind={isBot ? "bot" : "user"}
 						className="h-[52px] w-[52px] rounded-full"
 					/>
 					{room.dmPresence === "online" && (
@@ -252,9 +259,10 @@ function ChatRow({
 }
 
 function InviteRow({
-	room, onAccept, onDecline, showDivider,
+	room, isBot, onAccept, onDecline, showDivider,
 }: {
 	room: Room;
+	isBot: boolean;
 	onAccept(id: RoomId): Promise<void> | void;
 	onDecline(id: RoomId): Promise<void> | void;
 	showDivider: boolean;
@@ -285,7 +293,7 @@ function InviteRow({
 					<MatrixAvatar
 						mxc={room.avatarUrl}
 						seed={room.dmUserId ?? room.inviter ?? room.id}
-						kind="user"
+						kind={isBot ? "bot" : "user"}
 						className="h-[52px] w-[52px] rounded-full shrink-0"
 					/>
 					<div className="flex-1 min-w-0">

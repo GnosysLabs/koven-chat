@@ -2514,6 +2514,7 @@ export default function App() {
 						rooms={state.rooms}
 						transport={transport}
 						currentUserId={creds.user_id as UserId}
+						botMxids={botMxids}
 						onSelectRoom={navigateToRoom}
 						onCreateRoom={() => setStartDmOpen(true)}
 						onAcceptInvite={async (roomId) => {

@@ -611,7 +611,13 @@ export function ChatPane({
 		if (!el) return;
 		const state = scrollStateRef.current;
 		if (state.stuckAtBottom) {
-			if (isMobileShell) el.scrollBy({ top: el.scrollHeight, behavior: "auto" });
+			// Direct scrollTop assignment instead of scrollBy: iOS
+			// WKWebView occasionally treats a large scrollBy delta as
+			// an animated scroll even with behavior:"auto", producing
+			// a visible flash through every message between top and
+			// bottom on first room mount.  Setting scrollTop directly
+			// is guaranteed-synchronous in every browser.
+			if (isMobileShell) el.scrollTop = el.scrollHeight;
 			else scrollToBottom();
 			return;
 		}
@@ -664,6 +670,36 @@ export function ChatPane({
 		lastMessageId,
 		restoreScrollState,
 	]);
+
+	// Mobile-only: keep the timeline pinned to the bottom while content
+	// is still settling.  The non-virtualized mobile path renders every
+	// row into native DOM flow, and several row types finalise their
+	// height async — URL preview cards stream OG image dimensions after
+	// the message commits, Matrix media blobs decode after the <img>
+	// mounts, lazy-loaded thumbnails reflow on first paint.  Without
+	// this, the initial scrollTop=scrollHeight lands at "bottom of the
+	// content as-of-first-paint", then late height growth pushes the
+	// real bottom further down and the user is left mid-thread.  On
+	// the newsley DM in particular (heavy on shared-link previews)
+	// this manifested as visibly flashing through every message before
+	// settling.  ResizeObserver fires whenever the list grows; while
+	// followBottomRef is true we re-pin scrollTop to the new bottom.
+	// Stops the moment the user scrolls up (the scroll handler clears
+	// followBottomRef), so it never fights a deliberate scroll.
+	const hasMessages = messages.length > 0;
+	useEffect(() => {
+		if (!isMobileShell) return;
+		if (!messagesLoaded || isInActiveCallRoom || !hasMessages) return;
+		const list = listRef.current;
+		const el = scrollRef.current;
+		if (!list || !el) return;
+		const ro = new ResizeObserver(() => {
+			if (!followBottomRef.current) return;
+			el.scrollTop = el.scrollHeight;
+		});
+		ro.observe(list);
+		return () => ro.disconnect();
+	}, [messagesLoaded, isInActiveCallRoom, hasMessages, roomId]);
 
 	const loadOlderHistory = useCallback(() => {
 		const activeRoomId = room?.id as RoomId | undefined;
