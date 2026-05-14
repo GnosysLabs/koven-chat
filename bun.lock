@@ -15,8 +15,8 @@
         "@tauri-apps/cli": "^2",
       },
     },
-    "apps/ios": {
-      "name": "@koven/ios",
+    "apps/mobile": {
+      "name": "@koven/mobile",
       "version": "0.1.0",
       "dependencies": {
         "@capacitor/app": "^7.0.0",
@@ -295,7 +295,7 @@
 
     "@koven/engine": ["@koven/engine@workspace:engine"],
 
-    "@koven/ios": ["@koven/ios@workspace:apps/ios"],
+    "@koven/mobile": ["@koven/mobile@workspace:apps/mobile"],
 
     "@koven/shared": ["@koven/shared@workspace:shared"],
 

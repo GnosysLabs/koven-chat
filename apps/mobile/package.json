@@ -1,14 +1,17 @@
 {
-	"name": "@koven/ios",
+	"name": "@koven/mobile",
 	"version": "0.1.0",
 	"private": true,
-	"description": "Koven iOS shell — Capacitor WebView wrapping the client workspace on iPhone / iPad.",
+	"description": "Koven mobile shell — Capacitor WebView wrapping the client workspace on iOS + Android.",
 	"scripts": {
 		"web:build": "bun run --cwd ../../client build",
 		"web:dev": "bun run --cwd ../../client dev:tauri",
-		"sync": "bun run web:build && cap sync ios",
-		"open": "cap open ios",
-		"ios:run": "cap run ios"
+		"ios:sync": "bun run web:build && cap sync ios",
+		"ios:open": "cap open ios",
+		"ios:run": "cap run ios",
+		"android:sync": "bun run web:build && cap sync android",
+		"android:open": "cap open android",
+		"android:run": "cap run android"
 	},
 	"dependencies": {
 		"@capacitor/app": "^7.0.0",
