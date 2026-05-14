@@ -54,6 +54,16 @@ identifier = "allow-save-download"
 description = "Pop the native save-as dialog and write the supplied bytes to the picked path."
 commands.allow = ["save_download"]
 
+[[permission]]
+identifier = "allow-spawn-call-window"
+description = "Open the popped-out call window (FaceTime-style) with the params the main window hands over."
+commands.allow = ["spawn_call_window"]
+
+[[permission]]
+identifier = "allow-drain-pending-call"
+description = "Claim the call params the main window stashed for the call window; called once on call-window boot."
+commands.allow = ["drain_pending_call"]
+
 [default]
 description = "All locally-defined desktop-shell commands the SPA invokes."
 permissions = [
@@ -63,4 +73,6 @@ permissions = [
   "allow-hide-traffic-lights",
   "allow-reveal-app",
   "allow-save-download",
+  "allow-spawn-call-window",
+  "allow-drain-pending-call",
 ]

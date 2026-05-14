@@ -414,26 +414,36 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 			defaultVideo: videoOn,
 		};
 
-		// Tear down THIS window's meeting first.  RealtimeKit only
-		// allows one active SDK session per participant, so the new
-		// window can't join until we've fully left.  endCall waits
-		// for meeting.leaveRoom() to resolve (which fires roomLeft
-		// → state reset → cancel-ring path for unfinished DM rings).
-		try {
-			await endCall();
-		} catch (err) {
-			console.warn("popOutToWindow: endCall threw, continuing anyway", err);
-		}
-
-		// Spawn the new window with the fresh token + preserved
-		// device state.  Rust stashes params in a Mutex, the call
-		// window drains them on mount and starts the new SDK
-		// session itself (see CallWindowApp + drain_pending_call).
+		// Spawn the new window BEFORE leaving the current meeting.
+		// Two reasons:
+		//   1. If spawn fails (e.g. ACL-denied, OS refused window
+		//      creation), surface the error to the user and keep
+		//      them in the call rather than dropping them out
+		//      blind.  Earlier this was reversed and a silent spawn
+		//      rejection looked like "the call just ended for no
+		//      reason."
+		//   2. WebviewWindowBuilder::build returns as soon as the
+		//      OS window exists, well before the new SPA boots and
+		//      initialises RealtimeKit.  By the time the new window
+		//      is actually JOINING (~1-3s later), our subsequent
+		//      endCall has completed and the participant slot is
+		//      free.
 		try {
 			await spawnCallWindow(params);
 		} catch (err) {
 			console.error("popOutToWindow: spawn failed", err);
 			setError(err instanceof Error ? err.message : String(err));
+			return;
+		}
+
+		// Spawn succeeded; tear down THIS window's meeting so the
+		// new one can claim the participant slot.  endCall waits
+		// for meeting.leaveRoom() to resolve (which fires roomLeft
+		// → state reset → cancel-ring path for unfinished DM rings).
+		try {
+			await endCall();
+		} catch (err) {
+			console.warn("popOutToWindow: endCall threw after spawn", err);
 		}
 	}, [activeCall, meeting, endCall]);
 

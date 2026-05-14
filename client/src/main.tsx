@@ -19,7 +19,7 @@ import { DesktopTitleBar } from "./components/DesktopTitleBar";
 import { CallWindowApp } from "./components/voice/CallWindowApp";
 import { CallProvider } from "./lib/call-context";
 import { tryDeepLinkBounce } from "./lib/deepLinkBounce";
-import { isCallWindow } from "./lib/native-window";
+import { drainPendingCall, isCallWindow, type PendingCall } from "./lib/native-window";
 import "./index.css";
 
 // Deep-link bounce: if the browser loaded /invite/<id> or /r/<id>/<eid>
@@ -112,21 +112,49 @@ async function revealApp(): Promise<void> {
 // the top so the traffic lights paint over whatever the SPA
 // renders below.
 const isCallWin = isCallWindow();
+const root = ReactDOM.createRoot(document.getElementById("root")!);
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-	<React.StrictMode>
-		{isCallWin ? (
-			<CallWindowApp />
-		) : (
+function renderMain() {
+	root.render(
+		<React.StrictMode>
 			<CallProvider>
 				<div className="h-full relative">
 					<App />
 					<DesktopTitleBar />
 				</div>
 			</CallProvider>
-		)}
-	</React.StrictMode>,
-);
+		</React.StrictMode>,
+	);
+}
+
+function renderCallWindow(pendingCall: PendingCall | null) {
+	root.render(
+		<React.StrictMode>
+			<CallWindowApp pendingCall={pendingCall} />
+		</React.StrictMode>,
+	);
+}
+
+if (isCallWin) {
+	// Drain the call params from Rust BEFORE rendering React.  The
+	// drain is a take-once Mutex on the Rust side, so calling it
+	// twice yields null on the second call — which is exactly what
+	// React 18's Strict Mode double-mount does to component-driven
+	// drains in dev.  Doing it here, outside the React lifecycle,
+	// guarantees a single drain and lets us thread the result down
+	// as a prop.  Errors (IPC denied, no slot) come back as null
+	// and CallWindowApp renders its "no pending call" recovery UI.
+	void drainPendingCall()
+		.catch((err) => {
+			console.error("call-window: drain failed", err);
+			return null;
+		})
+		.then((pendingCall) => {
+			renderCallWindow(pendingCall);
+		});
+} else {
+	renderMain();
+}
 
 // Boot sequence (main window only):
 //   1. setupMacChrome — round the corners, hide native traffic lights
