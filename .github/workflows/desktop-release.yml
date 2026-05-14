@@ -104,10 +104,52 @@ jobs:
         with:
           bun-version: latest
 
+      # macos-latest runner images sometimes ship with a `cargo` /
+      # `rustc` / `rustup` binary in /usr/local/bin or /opt/homebrew/bin
+      # that's actually `rustup-init` (or a stub forwarding to it) with
+      # no default toolchain set.  `dtolnay/rust-toolchain` installs a
+      # real toolchain to $HOME/.cargo/bin and prepends that to PATH —
+      # but on subsequent steps (notably the npm-spawned tauri-build),
+      # the stale stub wins the PATH lookup and `cargo metadata` returns
+      # rustup-init's --help text, with `tauri build` failing with
+      # `failed to run 'cargo metadata' command: unexpected argument
+      # 'metadata' found / Usage: rustup-init[EXE] [OPTIONS]`.
+      #
+      # Strip those stubs before dtolnay runs so the fresh toolchain is
+      # the only one on PATH.  Belt-and-braces: also clear $HOME/.rustup
+      # and $HOME/.cargo so any half-configured state from the runner
+      # image (e.g. a stale rustup-toolchain.toml override) doesn't
+      # poison the new install.  Linux and Windows runners aren't
+      # affected — they ship clean — so the cleanup is macOS-only.
+      - name: Clear stale Rust stubs (macOS)
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          for d in /usr/local/bin /opt/homebrew/bin /usr/bin; do
+            for b in cargo rustc rustup rustdoc rustup-init; do
+              if [ -e "$d/$b" ] || [ -L "$d/$b" ]; then
+                echo "Removing $d/$b"
+                sudo rm -f "$d/$b"
+              fi
+            done
+          done
+          rm -rf "$HOME/.rustup" "$HOME/.cargo"
+
       - name: Install rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
+
+      # Diagnostic — confirms the install gave us a real cargo, not a
+      # rustup-init stub.  If this fails, the build below will fail
+      # anyway, but with a much harder-to-interpret error.
+      - name: Verify Rust toolchain
+        shell: bash
+        run: |
+          which cargo
+          cargo --version
+          which rustc
+          rustc --version
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
