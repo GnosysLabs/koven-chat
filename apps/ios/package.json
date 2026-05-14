@@ -1,0 +1,26 @@
+{
+	"name": "@koven/ios",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Koven iOS shell — Capacitor WebView wrapping the client workspace on iPhone / iPad.",
+	"scripts": {
+		"web:build": "bun run --cwd ../../client build",
+		"web:dev": "bun run --cwd ../../client dev:tauri",
+		"sync": "bun run web:build && cap sync ios",
+		"open": "cap open ios",
+		"ios:run": "cap run ios"
+	},
+	"dependencies": {
+		"@capacitor/app": "^7.0.0",
+		"@capacitor/core": "^7.0.0",
+		"@capacitor/haptics": "^7.0.0",
+		"@capacitor/ios": "^7.0.0",
+		"@capacitor/keyboard": "^7.0.0",
+		"@capacitor/push-notifications": "^7.0.0",
+		"@capacitor/share": "^7.0.0",
+		"@capacitor/splash-screen": "^7.0.0"
+	},
+	"devDependencies": {
+		"@capacitor/cli": "^7.0.0"
+	}
+}
