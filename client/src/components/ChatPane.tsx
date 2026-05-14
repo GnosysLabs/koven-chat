@@ -533,120 +533,39 @@ export function ChatPane({
 	const [loadingMore, setLoadingMore] = useState(false);
 
 	// ─── Virtualizer ─────────────────────────────────────────────
-	// TanStack Virtual replaces the previous manual scroll/resize/
-	// auto-snap machinery (~250 lines of multi-stage RAF + setTimeout
-	// + ResizeObserver re-snap that was producing the "seizure" jank
-	// users reported).
+	// Matches the TanStack Virtual "dynamic" docs example verbatim:
+	// minimal options (count + getScrollElement + estimateSize +
+	// getItemKey), default `useFlushSync: true`, no
+	// `shouldAdjustScrollPositionOnItemSizeChange` (every previous
+	// override was fighting iOS WKWebView's native momentum scroll
+	// or producing render-tearing).
 	//
-	// `count = messages.length + 1`: index 0 is a loader row whose
-	// estimated size flips between 0 (idle) and 64px (paginating).
-	// Keeping the loader inside the virtualizer's coordinate space
-	// means its appearance/disappearance plays nicely with item
-	// measurements and scrollToIndex math.
-	//
-	// `getItemKey` returns stable Matrix event ids so the measurement
-	// cache follows content across prepends — when a 20-event
-	// pagination commits, message previously at index 1 (now at
-	// index 21) keeps its cached height instead of forcing a remeasure.
-	//
-	// `shouldAdjustScrollPositionOnItemSizeChange` returns true for
-	// items above the viewport: when estimated sizes resolve to real
-	// sizes via measureElement, the virtualizer shifts scrollOffset
-	// to compensate, so the user's visible content doesn't jolt as
-	// images decode.
-	const LOADER_KEY = "__loader__";
-	const count = messages.length + 1;
-	const getItemKey = useCallback((index: number) => {
-		if (index === 0) return LOADER_KEY;
-		const m = messages[index - 1];
-		return m ? m.id : index;
-	}, [messages]);
-	const estimateSize = useCallback((index: number) => {
-		if (index === 0) return loadingMore ? 64 : 0;
-		return 80;
-	}, [loadingMore]);
+	// `getItemKey` MUST be a stable function reference — when it
+	// changes, the virtualizer invalidates its measurement cache,
+	// which forces every visible row to re-measure on every render
+	// and produces visible thrashing.  We stash `messages` in a ref
+	// and let `getItemKey` look up by current ref, so the function
+	// reference stays stable across the component's lifetime even
+	// though it returns up-to-date data.
+	const messagesRef = useRef(messages);
+	useLayoutEffect(() => { messagesRef.current = messages; }, [messages]);
+	const getItemKey = useCallback(
+		(index: number) => messagesRef.current[index]?.id ?? index,
+		[],
+	);
+	const estimateSize = useCallback(() => 80, []);
 	const virtualizer = useVirtualizer({
-		count,
+		count: messages.length,
 		getScrollElement: () => scrollRef.current,
 		estimateSize,
 		getItemKey,
-		// `useFlushSync: false` defers React renders to the batched
-		// scheduler instead of synchronously flushing during scroll
-		// events.  On iOS WKWebView this is the difference between
-		// silky-smooth momentum scroll and "horrible, unusable" jank,
-		// because the synchronous default blocks the compositor for
-		// the duration of every reconcile.
-		useFlushSync: false,
-		// Small overscan so each scroll tick mounts/unmounts a tiny
-		// number of (heavy, un-memoised) MessageRow components.
-		overscan: 4,
 	});
 
-	// `shouldAdjustScrollPositionOnItemSizeChange` is an instance
-	// property in the installed v3.x of @tanstack/virtual-core
-	// (not a constructor option).  Returning true for items above
-	// the viewport means: when an estimated size resolves to its
-	// real size, the virtualizer compensates scrollOffset so the
-	// user's visible content stays put.  This is the core piece
-	// that prevents the "everything jumps around as images decode"
-	// jank.  Assigned via useEffect (not every render) so we don't
-	// burn allocations on each commit.
-	useEffect(() => {
-		virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) =>
-			(instance.scrollOffset !== null) && item.start < instance.scrollOffset;
-	}, [virtualizer]);
-
-	// Re-measure when the loader row's size class changes.  Without
-	// this, the cached estimateSize for index 0 keeps stale and the
-	// virtualizer doesn't realise the loader expanded/collapsed.
-	useEffect(() => {
-		virtualizer.measure();
-	}, [loadingMore, virtualizer]);
-
-	// ─── Prepend-anchor preservation ─────────────────────────────
-	// When older messages prepend (Discord-style "hit the wall"
-	// pagination), the user's scrollTop in pixels still points at
-	// where they were — but the message they were reading just got
-	// shifted down by the total size of the prepended rows.  We
-	// detect the prepend by watching for `messages[0].id` to change
-	// while length grows, then add the totalSize delta to scrollTop
-	// in a useLayoutEffect (before paint).  Combined with
-	// `shouldAdjustScrollPositionOnItemSizeChange`, this keeps the
-	// reader visually anchored even as the prepended messages'
-	// estimated sizes resolve to real sizes.
-	const prevTotalSizeRef = useRef(0);
-	const prevFirstIdRef = useRef<string | null>(null);
-	const prevMessagesLenRef = useRef(0);
-	const prevRoomForAnchorRef = useRef<string | undefined>(undefined);
-	useLayoutEffect(() => {
-		const currentTotal = virtualizer.getTotalSize();
-		const currentLen = messages.length;
-		const currentFirstId = messages[0]?.id ?? null;
-		const isRoomChange = prevRoomForAnchorRef.current !== room?.id;
-		if (
-			!isRoomChange &&
-			prevFirstIdRef.current &&
-			currentFirstId &&
-			prevFirstIdRef.current !== currentFirstId &&
-			currentLen > prevMessagesLenRef.current
-		) {
-			const delta = currentTotal - prevTotalSizeRef.current;
-			if (delta > 0 && scrollRef.current) {
-				scrollRef.current.scrollTop += delta;
-			}
-		}
-		prevTotalSizeRef.current = currentTotal;
-		prevFirstIdRef.current = currentFirstId;
-		prevMessagesLenRef.current = currentLen;
-		prevRoomForAnchorRef.current = room?.id;
-	}, [messages, room?.id, virtualizer]);
-
-	// ─── Auto-snap to bottom on room change / call-view exit ────
-	// Single scrollToIndex call replaces the previous multi-stage
-	// snap()/RAF/setTimeout chain.  The virtualizer keeps the
-	// viewport pinned to the bottom as images decode (via
-	// shouldAdjustScrollPositionOnItemSizeChange), so we don't
-	// need staggered re-snaps.
+	// ─── Auto-snap to bottom ────────────────────────────────────
+	// Fires whenever `followBottomRef.current` is true (set by the
+	// scroll handler when the user is near the bottom, re-armed on
+	// every room change).  scrollToIndex with `align: 'end'` puts
+	// the last message's bottom edge at the viewport's bottom edge.
 	useEffect(() => {
 		const isRoomChange = prevRoomIdRef.current !== room?.id;
 		const becameVisible = wasInCallViewRef.current && !isInActiveCallRoom;
@@ -658,9 +577,7 @@ export function ChatPane({
 		}
 		if (!followBottomRef.current) return;
 		if (messages.length === 0) return;
-		// Index of the last real message in the virtualizer's
-		// coordinate space (offset by 1 for the loader row).
-		virtualizer.scrollToIndex(messages.length, { align: 'end' });
+		virtualizer.scrollToIndex(messages.length - 1, { align: 'end' });
 	}, [room?.id, messages.length, isInActiveCallRoom, virtualizer]);
 
 	// ─── Permalink scroll-to-event ─────────────────────────────────
@@ -708,7 +625,7 @@ export function ChatPane({
 			// target row (it may have just committed prepended
 			// events).  +1 because index 0 is the loader.
 			const raf = requestAnimationFrame(() => {
-				virtualizer.scrollToIndex(idx + 1, { align: 'center', behavior: 'smooth' });
+				virtualizer.scrollToIndex(idx, { align: 'center', behavior: 'smooth' });
 				setFlashingEventId(id);
 				if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
 				flashTimerRef.current = setTimeout(
@@ -775,12 +692,12 @@ export function ChatPane({
 			// (the virtualizer's coordinates are more reliable than
 			// the raw DOM measurements once items start measuring
 			// in dynamically).  Fire when the earliest virtual item
-			// is the loader or the first message.
+			// is the first message (index 0).
 			const items = virtualizer.getVirtualItems();
 			const firstItem = items[0];
 			if (
 				firstItem &&
-				firstItem.index <= 1 &&
+				firstItem.index <= 0 &&
 				!loadingMoreRef.current &&
 				room &&
 				onLoadMoreHistory &&
@@ -1329,34 +1246,20 @@ export function ChatPane({
 					/>
 				</div>
 			)}
-			{/* TanStack Virtual scroll container.  Owns the scrolling
-			    behaviour:
-			    - DOM windowing (only mount visible rows + overscan)
-			    - Dynamic measurement via ref={virtualizer.measureElement}
-			    - Scroll-position adjustment when items resize past
-			      their estimates (shouldAdjustScrollPositionOnItemSizeChange)
-			    - Block-translation layout — the entire item batch
-			      is translated as a unit so smooth-scroll math
-			      stays correct.
-			    See the useVirtualizer setup near the top of this
-			    component for the rest of the wiring. */}
-			{messagesLoaded && messages.length > 0 ? (
+			{/* TanStack Virtual scroll container — modelled directly on
+			    the dynamic-row docs example: `overflowY: auto`,
+			    `contain: strict`, `overflowAnchor: none`, plus the
+			    block-translation pattern (single absolute wrapper
+			    translated by items[0].start, items naturally flowing
+			    inside).  The loader is rendered as an OVERLAY above
+			    the spacer rather than as a virtualizer row so its
+			    visibility doesn't perturb item measurements. */}
+			{messagesLoaded && messages.length > 0 ? (<>
 				<div
 					ref={scrollRef}
 					className="absolute inset-0 overflow-y-auto overscroll-contain"
 					style={{
-						// `overflowAnchor: "none"` disables the browser's
-						// automatic scroll-anchoring — we drive scroll
-						// position adjustments ourselves via the
-						// useLayoutEffect that watches `messages[0].id`.
 						overflowAnchor: "none",
-						// `contain: strict` is recommended by the
-						// TanStack Virtual docs: tells the browser this
-						// element is its own layout / paint / size
-						// boundary, so the huge virtualizer spacer inside
-						// can't cause reflow of anything outside.
-						// Critical for keeping the page above stable as
-						// items measure in.
 						contain: "strict",
 					}}
 				>
@@ -1382,37 +1285,7 @@ export function ChatPane({
 									}}
 								>
 									{items.map((virtualRow: VirtualItem) => {
-										// Index 0 is the loader row.  When
-										// loadingMore is true it renders the
-										// pulsing favicon; otherwise it's a
-										// 0-height spacer (still rendered so
-										// the virtualizer's measurement of
-										// index 0 stays consistent).
-										if (virtualRow.index === 0) {
-											return (
-												<div
-													key={virtualRow.key}
-													data-index={virtualRow.index}
-													ref={virtualizer.measureElement}
-												>
-													{loadingMore ? (
-														<div
-															className="flex items-center justify-center py-6 select-none"
-															aria-live="polite"
-															aria-label="Loading older messages"
-														>
-															<img
-																src="/favicon.png"
-																alt=""
-																className="size-10 animate-pulse"
-																style={{ filter: "drop-shadow(0 0 16px rgba(0,0,0,0.4))" }}
-															/>
-														</div>
-													) : null}
-												</div>
-											);
-										}
-										const dataIndex = virtualRow.index - 1;
+										const dataIndex = virtualRow.index;
 										const m = messages[dataIndex];
 										if (!m) return null;
 										const prev = dataIndex > 0 ? messages[dataIndex - 1] : undefined;
@@ -1506,7 +1379,26 @@ export function ChatPane({
 						})()}
 					</div>
 				</div>
-			) : !messagesLoaded ? null : (
+				{/* Pulsing-favicon loader.  Rendered as an OVERLAY at
+				    the top of the chat surface — outside the
+				    virtualizer's spacer — so its appearance and
+				    disappearance don't shift item measurements.
+				    Visible only while a pagination fetch is in flight. */}
+				{loadingMore && (
+					<div
+						className="absolute top-0 left-0 right-0 z-20 flex items-center justify-center py-3 pointer-events-none"
+						aria-live="polite"
+						aria-label="Loading older messages"
+					>
+						<img
+							src="/favicon.png"
+							alt=""
+							className="size-8 animate-pulse"
+							style={{ filter: "drop-shadow(0 0 16px rgba(0,0,0,0.4))" }}
+						/>
+					</div>
+				)}
+			</>) : !messagesLoaded ? null : (
 				isMobileShell ? (
 					<div className="flex flex-col items-center justify-center gap-3 py-16 px-6 text-center">
 						<div className="size-16 rounded-2xl bg-foreground/[0.06] flex items-center justify-center">
@@ -1534,7 +1426,7 @@ export function ChatPane({
 						followBottomRef.current = true;
 						setScrolledUp(false);
 						if (messages.length > 0) {
-							virtualizer.scrollToIndex(messages.length, {
+							virtualizer.scrollToIndex(messages.length - 1, {
 								align: 'end',
 								behavior: 'smooth',
 							});
