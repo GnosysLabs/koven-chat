@@ -478,65 +478,13 @@ export function ChatPane({
 	}, [draft]);
 	const scrollRef = useRef<HTMLDivElement | null>(null);
 	// Inner list wrapper.  Holds every message row directly (no
-	// virtualization).  Used as a target for ResizeObserver
-	// (chatVisible) and as the walk-children root for the
+	// virtualization).  Used as the walk-children root for the
 	// save/restore-scroll-state machinery below.
 	const listRef = useRef<HTMLDivElement | null>(null);
 	// Used by the scroll handler to detect a meaningful upward
 	// scroll gesture so we can dismiss the keyboard (Discord-style).
 	const lastScrollTopRef = useRef(0);
-	// Mobile: hide the message timeline behind a pulsing-favicon
-	// overlay until messages + media have settled.  Eliminates the
-	// "thrashing" feel where bubbles pop in one-by-one and images
-	// reflow the layout as they decode.  Reset whenever the user
-	// switches rooms so the loader fires for every chat open.
-	const [chatVisible, setChatVisible] = useState(false);
 	const roomId = room?.id;
-	useEffect(() => {
-		setChatVisible(false);
-	}, [roomId]);
-	useEffect(() => {
-		if (!messagesLoaded || chatVisible) return;
-		// Wait for the content height to stabilize.  Querying
-		// <img> elements doesn't work for Matrix media (the src
-		// is set async after a /_matrix/media fetch + decryption,
-		// so my scan would miss images that haven't been wired
-		// up yet).  A ResizeObserver on the scroll content fires
-		// every time anything inside grows / decodes / changes
-		// size — when it stops firing for STABLE_MS, the timeline
-		// has settled and we can reveal.  Hard 4s cap so a slow
-		// network can't trap the loader forever.
-		const STABLE_MS = 500;
-		const HARD_TIMEOUT_MS = 4000;
-		const inner = listRef.current;
-		if (!inner) { setChatVisible(true); return; }
-		let cancelled = false;
-		let stableTimer: number | null = null;
-		const scheduleReveal = () => {
-			if (stableTimer !== null) window.clearTimeout(stableTimer);
-			stableTimer = window.setTimeout(() => {
-				if (!cancelled) setChatVisible(true);
-			}, STABLE_MS);
-		};
-		const ro = new ResizeObserver(() => {
-			// Any resize resets the "stable for N ms" clock.
-			scheduleReveal();
-		});
-		ro.observe(inner);
-		// Kick off the timer even if nothing resizes (e.g.
-		// empty rooms whose ResizeObserver fires only once
-		// with the initial measurement).
-		scheduleReveal();
-		const hardCap = window.setTimeout(() => {
-			if (!cancelled) setChatVisible(true);
-		}, HARD_TIMEOUT_MS);
-		return () => {
-			cancelled = true;
-			ro.disconnect();
-			if (stableTimer !== null) window.clearTimeout(stableTimer);
-			window.clearTimeout(hardCap);
-		};
-	}, [messagesLoaded, chatVisible, roomId]);
 	// Active-call gate.  Discord-style: voice and chat are SEPARATE
 	// views even when they share a room.  We only swap the message
 	// area for the call surface when the user has explicitly
@@ -1434,28 +1382,6 @@ export function ChatPane({
 			    creates double corrections during prepends and media
 			    decode. */}
 			<div className="relative flex-1 min-h-0 overflow-hidden">
-			{/* Pulsing-favicon loading overlay (mobile only).
-			    Sits above the message scroll area while messages +
-			    media are still settling.  pointer-events-none so
-			    taps fall through to the scroll container.  Fades
-			    out smoothly once `chatVisible` flips to true. */}
-			{isMobileShell && (
-				<div
-					className={cn(
-						"absolute inset-0 z-10 flex items-center justify-center pointer-events-none",
-						"transition-opacity duration-300",
-						chatVisible ? "opacity-0" : "opacity-100",
-					)}
-					aria-hidden={chatVisible}
-				>
-					<img
-						src="/favicon.png"
-						alt=""
-						className="size-16 animate-pulse"
-						style={{ filter: "drop-shadow(0 0 24px rgba(0,0,0,0.4))" }}
-					/>
-				</div>
-			)}
 			{/* Desktop keeps the TanStack Virtual path that feels good
 			    in browser.  Mobile renders rows in native DOM flow so
 			    WKWebView momentum scroll does not get interrupted by
