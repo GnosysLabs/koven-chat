@@ -326,15 +326,6 @@ jobs:
           # gives the auto-issued GITHUB_TOKEN write access; the
           # env injection is what hands it to the action.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Force absolute paths to cargo/rustc on macOS — bypasses
-          # PATH lookup so even if something has poisoned PATH again
-          # between the Verify step and here (the failure mode this
-          # workflow keeps hitting), tauri's `cargo metadata` spawn
-          # invokes the real binary directly.  Most Rust tooling
-          # respects $CARGO + $RUSTC as the path-to-binary overrides;
-          # belt-and-braces with the GITHUB_PATH re-prepend above.
-          CARGO: ${{ matrix.platform == 'macos-latest' && '/Users/runner/.cargo/bin/cargo' || '' }}
-          RUSTC: ${{ matrix.platform == 'macos-latest' && '/Users/runner/.cargo/bin/rustc' || '' }}
           # Tauri updater signing.  Private key + (empty) password
           # come from repo secrets.  pubkey is committed in
           # tauri.conf.json — that's correct, minisign pubkeys are
