@@ -274,6 +274,17 @@ export default function App() {
 		dispatch({ type: "set_active_room", roomId });
 	}, [call]);
 	const [bootError, setBootError] = useState<string | null>(null);
+	// Classifies bootError so the recovery UI can pick the right
+	// affordance.  "wipe-blocked" means the rust-crypto IDB wipe
+	// failed (a stuck OlmMachine handle or a WebKit storage-lock
+	// holdover from an unclean shutdown).  The two-button "sign out
+	// vs wipe" UI is the wrong shape for this case because sign-out
+	// itself tries to touch IDB and will hit the same lock; the only
+	// way out is the full cache wipe.  "other" preserves the
+	// existing two-button affordance for the rest of the boot
+	// failure surface (crypto init errors, network-level boot
+	// problems, etc.).
+	const [bootErrorKind, setBootErrorKind] = useState<"wipe-blocked" | "other" | null>(null);
 	const [createRoomOpen, setCreateRoomOpen] = useState(false);
 	const [createSpaceOpen, setCreateSpaceOpen] = useState(false);
 	// SpaceLanding's "Add existing room" affordance opens a picker
@@ -923,6 +934,7 @@ export default function App() {
 		}
 		setTransport(t);
 		setBootError(null);
+		setBootErrorKind(null);
 		// Probe (and request once if not already decided) the OS-
 		// notification permission.  Idempotent on subsequent calls;
 		// on browsers this surfaces the permission prompt the first
@@ -1045,7 +1057,13 @@ export default function App() {
 		}).catch(e => {
 			if (cancelled) return;
 			console.timeEnd("app.boot: transport.start → encState");
-			setBootError(e instanceof Error ? e.message : String(e));
+			const msg = e instanceof Error ? e.message : String(e);
+			setBootError(msg);
+			// Surface the wipe-blocked recovery affordance whenever the
+			// boot failure traces back to a stuck rust-crypto IDB wipe.
+			// Sign-out can't unblock it (sign-out itself touches IDB),
+			// so the only working recovery is the full local-cache wipe.
+			setBootErrorKind(/wipeRustCryptoIndexedDB/.test(msg) ? "wipe-blocked" : "other");
 		});
 		// Subscribe to ignore-list changes so block/unblock takes effect
 		// across the app without a refresh.  Initial pull happens once
@@ -2085,72 +2103,107 @@ export default function App() {
 	}
 
 	// If transport boot failed (most commonly: rust-crypto WASM
-	// failing to initialize, or — on Linux desktop — WebKitGTK
-	// IDB getting into a stuck-lock state from a prior crashed
+	// failing to initialize, or, on Linux desktop, WebKitGTK IDB
+	// getting into a stuck-lock state from a prior crashed
 	// instance), render a hard error instead of letting the user
 	// into a half-broken app.  Without this gate a crypto init
 	// failure silently produces an app that can't send DMs and
 	// won't surface the encryption setup sheet.
 	//
-	// Two recovery affordances:
-	//   - "Sign out and try again" runs handleSignOut, which goes
-	//     through the normal transport.stop() teardown.  Works for
-	//     the common case where IDB is functional but the session
-	//     itself is in a bad state (stale auth token, key-backup
-	//     mismatch, etc.).
-	//   - "Wipe local cache and restart" calls wipeLocalCacheAndRestart,
-	//     which on desktop invokes a Rust command to nuke the WebView
-	//     data dir on disk (bypassing IDB entirely) and exits the
-	//     process; on web it best-effort-wipes every IDB DB on the
-	//     origin plus localStorage / sessionStorage and reloads.
-	//     This is the path for the "can't open IDB at all" failure
-	//     mode — sign-out can't fix it because sign-out itself uses
-	//     IDB on its way out.  Strong confirm copy on the button
-	//     because the user loses their session unconditionally.
+	// Two recovery affordance modes, selected by `bootErrorKind`:
+	//
+	//   "wipe-blocked": the rust-crypto IDB wipe couldn't complete
+	//     even with the version-bump fallback.  Sign-out is useless
+	//     here because sign-out itself touches IDB and will hit the
+	//     same lock; we collapse to a single "Reset and restart"
+	//     primary action that runs wipeLocalCacheAndRestart.  Since
+	//     both Tauri and Capacitor are single-WebView shells, the
+	//     full local-cache wipe is unambiguously the right fix.
+	//
+	//   "other" (and the null fallback): legacy two-button UI for
+	//     every other boot failure (crypto init error, network-level
+	//     start failure, etc.) where the session might still be
+	//     recoverable via the normal sign-out path.
+	//       - "Sign out and try again" runs handleSignOut, which
+	//         goes through the normal transport.stop() teardown.
+	//       - "Wipe local cache and restart" calls
+	//         wipeLocalCacheAndRestart, which on desktop invokes a
+	//         Rust command to nuke the WebView data dir on disk
+	//         (bypassing IDB entirely) and exits the process; on
+	//         web it best-effort-wipes every IDB DB on the origin
+	//         plus localStorage / sessionStorage and reloads.
 	if (bootError) {
+		const isWipeBlocked = bootErrorKind === "wipe-blocked";
+		const handleWipe = async () => {
+			const confirmCopy = isWipeBlocked
+				? (isNativeShell
+					? "Reset Koven on this device?\n\n"
+						+ "Koven will close.  Reopen it after the reset finishes "
+						+ "(usually a second or two) and sign back in with your "
+						+ "email code.  Every cached message on this device will "
+						+ "be cleared."
+					: "Reset Koven on this device?\n\n"
+						+ "The page will reload after the reset finishes.  Sign "
+						+ "back in with your email code afterwards.  Every cached "
+						+ "message on this device will be cleared.")
+				: "Wipe all local Koven data on this device and restart?\n\n"
+					+ "Every account on this device will be signed out and "
+					+ "every cached message will be removed.  You'll need to "
+					+ "sign back in with your email code.\n\n"
+					+ "Use this when 'Sign out and try again' doesn't work.";
+			const confirmed = typeof window === "undefined" || window.confirm(confirmCopy);
+			if (!confirmed) return;
+			try {
+				await wipeLocalCacheAndRestart();
+			} catch (e) {
+				dispatch({
+					type: "error",
+					message: e instanceof Error
+						? `Wipe failed: ${e.message}`
+						: `Wipe failed: ${String(e)}`,
+				});
+			}
+		};
 		return (
 			<div className="h-full flex items-center justify-center p-8 bg-background">
 				<div className="max-w-md text-center space-y-4">
 					<div className="text-sm font-semibold">Couldn't start the client</div>
 					<div className="text-xs text-muted-foreground leading-relaxed border border-destructive/40 bg-destructive/10 rounded px-3 py-2 text-left">
-						{bootError}
+						{isWipeBlocked
+							? "Koven's encryption store is held open by a stale database connection from a previous session.  A quick reset clears it; you'll sign back in with your email code afterwards."
+							: bootError}
 					</div>
-					<div className="flex flex-col items-center gap-2 pt-2">
-						<button
-							type="button"
-							className="text-xs text-muted-foreground hover:text-foreground underline"
-							onClick={handleSignOut}
-						>
-							Sign out and try again
-						</button>
-						<button
-							type="button"
-							className="text-xs text-destructive/80 hover:text-destructive underline"
-							onClick={async () => {
-								const confirmed = typeof window === "undefined"
-									|| window.confirm(
-										"Wipe all local Koven data on this device and restart?\n\n"
-										+ "Every account on this device will be signed out and "
-										+ "every cached message will be removed.  You'll need to "
-										+ "sign back in with your email code.\n\n"
-										+ "Use this when 'Sign out and try again' doesn't work.",
-									);
-								if (!confirmed) return;
-								try {
-									await wipeLocalCacheAndRestart();
-								} catch (e) {
-									dispatch({
-										type: "error",
-										message: e instanceof Error
-											? `Wipe failed: ${e.message}`
-											: `Wipe failed: ${String(e)}`,
-									});
-								}
-							}}
-						>
-							Wipe local cache and restart
-						</button>
-					</div>
+					{isWipeBlocked ? (
+						<div className="flex flex-col items-center gap-3 pt-2">
+							<button
+								type="button"
+								className="text-sm px-4 py-2 rounded bg-destructive text-destructive-foreground hover:opacity-90 transition"
+								onClick={handleWipe}
+							>
+								Reset and restart
+							</button>
+							<div className="text-[11px] text-muted-foreground/70 max-w-xs leading-relaxed">
+								{bootError}
+							</div>
+						</div>
+					) : (
+						<div className="flex flex-col items-center gap-2 pt-2">
+							<button
+								type="button"
+								className="text-xs text-muted-foreground hover:text-foreground underline"
+								onClick={handleSignOut}
+							>
+								Sign out and try again
+							</button>
+							<button
+								type="button"
+								className="text-xs text-destructive/80 hover:text-destructive underline"
+								onClick={handleWipe}
+							>
+								Wipe local cache and restart
+							</button>
+						</div>
+					)}
 				</div>
 			</div>
 		);

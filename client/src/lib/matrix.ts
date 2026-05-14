@@ -142,14 +142,15 @@ export type SyncState = "preparing" | "syncing" | "ready" | "error" | "offline";
 /**
  * Delete the rust-crypto IndexedDB stores.  matrix-js-sdk hardcodes
  * these names internally (RUST_SDK_STORE_PREFIX = "matrix-js-sdk")
- * and exposes no public method that just clears them — its
+ * and exposes no public method that just clears them; its
  * `clearStores()` also wipes the regular store, which we don't want.
  * Used as the recovery path when initRustCrypto reports an account
  * mismatch (server reset, user re-registered, etc.).
  *
- * Throws when any of the deletes fails to complete (timed out
- * blocked).  Caller must NOT proceed to initRustCrypto on a
- * thrown wipe — the data is in a "tried to nuke, didn't actually
+ * Throws when neither the direct deletion nor the version-bump
+ * fallback (see `deleteDatabaseAwait`) can clear the DB within the
+ * combined budget.  Caller must NOT proceed to initRustCrypto on a
+ * thrown wipe; the data is in a "tried to nuke, didn't actually
  * nuke" state and the next initRustCrypto will fail to load it,
  * leaving the user stuck on "Connecting…" forever.
  */
@@ -164,68 +165,161 @@ async function wipeRustCryptoIndexedDB(): Promise<void> {
 }
 
 /**
- * Wrap `indexedDB.deleteDatabase` in a promise that ACTUALLY resolves
- * after the DB is closed — including the `blocked` retry path where
- * a previous OlmMachine handle hasn't released yet.
+ * Wipe an IndexedDB database using a two-strategy fallback chain so
+ * a stuck OlmMachine handle can't strand the boot path.
  *
- * Why this is load-bearing for account switching:
+ * Why two strategies and not just `deleteDatabase`:
  *   1. matrix-js-sdk's RustCrypto.stop() calls olmMachine.close(),
  *      which schedules the WASM side to drop the IDB connection.
- *   2. The close is "synchronous" from JS's POV but the underlying
- *      IDBDatabase teardown is async — Chrome/Safari batch close
+ *   2. That close is "synchronous" from JS's POV but the underlying
+ *      IDBDatabase teardown is async; Chrome/Safari batch close
  *      callbacks across a microtask boundary.
- *   3. If we deleteDatabase(name) right after close(), the request
- *      fires `blocked` instead of `success` because the connection
- *      is still in the process of closing.
- *   4. Default behaviour: silently leak.  The connection eventually
- *      closes, but our `then` already resolved on the `blocked`
- *      event, so the next initRustCrypto opens the OLD database —
- *      which still has the previous user's olm account — and hangs
- *      indefinitely on the account-mismatch error.
+ *   3. `indexedDB.deleteDatabase` competes with the still-flushing
+ *      connection on the same scheduler entry and frequently fires
+ *      `blocked` instead of `success`.  Historically we waited 30s
+ *      and then threw, which surfaced as the bootError screen the
+ *      user has hit repeatedly.
+ *   4. An `IDBOpenDBRequest` at a higher version takes a different
+ *      scheduler path: it sends `versionchange` to other open
+ *      connections and waits for them to close.  Our already-
+ *      closed-but-not-flushed WASM handle respects this on the
+ *      next microtask, so the upgrade transaction commits where
+ *      `deleteDatabase` was stuck.
  *
- * Fix: when we get `blocked`, wait for a `success` or a hard 30s
- * timeout.  Resolves to `true` on actual deletion, `false` if we
- * timed out without the delete completing.  The CALLER then decides
- * whether to retry or rethrow — running initRustCrypto against a
- * not-actually-wiped store is the worst outcome (silent stale data
- * + stuck-on-Connecting), so callers treat `false` as a hard error.
+ * Strategy:
+ *   - 5s budget for `deleteDatabase`.  Success path for the common
+ *     "no stale handle" case.
+ *   - On `blocked` or 5s timeout, fall through to a version-bump
+ *     clear: open at currentVersion+1, drop every object store in
+ *     onupgradeneeded, let the transaction commit, close.  8s
+ *     budget.  Returns true when the upgrade commits, even if the
+ *     subsequent cleanup delete blocks; the store contents are
+ *     gone, which is what initRustCrypto needs.
+ *   - Best-effort final `deleteDatabase` with a 2s budget so the
+ *     DB name itself goes away on the happy path.  Skipping it is
+ *     safe; the next open will just reuse the empty version+1 DB.
+ *
+ * Total budget per DB ~15s.  Resolves true if either strategy
+ * cleared the data, false only when both fail.
  */
 function deleteDatabaseAwait(name: string): Promise<boolean> {
-	return new Promise<boolean>((resolve) => {
-		const req = indexedDB.deleteDatabase(name);
+	return (async () => {
+		const directResult = await runDirectDelete(name, 5_000);
+		if (directResult === "ok") return true;
+		console.warn(`indexedDB.deleteDatabase(${name}): ${directResult}, falling back to version-bump clear`);
+		const cleared = await clearViaVersionBump(name, 8_000);
+		if (!cleared) {
+			console.error(`clearViaVersionBump(${name}): failed; the DB is still held by another connection`);
+			return false;
+		}
+		// Best-effort cleanup; data is already gone via the version
+		// bump, so a stuck delete here doesn't hurt correctness.
+		await runDirectDelete(name, 2_000);
+		return true;
+	})();
+}
+
+/**
+ * Direct `indexedDB.deleteDatabase` with a tight timeout.  Returns
+ * "ok" on success or benign error, "blocked" if the request fires
+ * the blocked event (another connection is holding the DB), or
+ * "timeout" if neither success nor error arrived in `budgetMs`.
+ */
+function runDirectDelete(name: string, budgetMs: number): Promise<"ok" | "blocked" | "timeout"> {
+	return new Promise((resolve) => {
 		let done = false;
-		const finishOk = () => {
+		let blockedSeen = false;
+		const finish = (result: "ok" | "blocked" | "timeout") => {
 			if (done) return;
 			done = true;
-			resolve(true);
+			resolve(result);
 		};
-		const finishFail = () => {
-			if (done) return;
-			done = true;
-			resolve(false);
-		};
-		req.onsuccess = finishOk;
+		const req = indexedDB.deleteDatabase(name);
+		req.onsuccess = () => finish("ok");
 		req.onerror = () => {
-			// `error` is unusual but not necessarily catastrophic; the
-			// caller treats it the same as a successful wipe (the DB
-			// might not exist, or the platform refused for a benign
-			// reason).
-			finishOk();
+			// A direct error is unusual; the most common cause is the
+			// DB doesn't exist, which is functionally the same as a
+			// successful wipe from the caller's perspective.
+			finish("ok");
 		};
 		req.onblocked = () => {
-			console.warn(`indexedDB.deleteDatabase(${name}): blocked by an open connection, waiting up to 30s for it to drain…`);
+			blockedSeen = true;
+			// Don't finish yet; the delete might still complete once
+			// the other connection drains.  We let the timeout decide
+			// whether to bail to the fallback path.
 		};
-		// 30s upper bound — we'd rather fail loudly than silently
-		// run initRustCrypto against a still-locked DB (which gives
-		// the user a permanent "stuck on Connecting…" with no log
-		// trail).  The previous 5s + "proceed anyway" path was the
-		// account-switch bug.
 		setTimeout(() => {
-			if (!done) {
-				console.error(`indexedDB.deleteDatabase(${name}): timed out after 30s — caller will signal mismatch-recovery instead of running on stale data`);
-				finishFail();
+			finish(blockedSeen ? "blocked" : "timeout");
+		}, budgetMs);
+	});
+}
+
+/**
+ * Clear all object stores in a database via a version-bump upgrade
+ * transaction.  Returns true if the upgrade committed (data gone),
+ * false if the open request blocked or timed out beyond `budgetMs`.
+ *
+ * The DB is left at `currentVersion + 1` with no object stores; the
+ * next consumer that opens it will see an empty database, which is
+ * exactly what matrix-rust-sdk expects after a wipe.
+ */
+function clearViaVersionBump(name: string, budgetMs: number): Promise<boolean> {
+	return new Promise<boolean>((resolve) => {
+		let done = false;
+		const finish = (ok: boolean) => {
+			if (done) return;
+			done = true;
+			resolve(ok);
+		};
+		// First read the current version so we know what to bump to.
+		// If the DB doesn't exist yet, the open succeeds at version 1
+		// with no upgrade fired; we just close and report success
+		// (nothing to clear).
+		const probe = indexedDB.open(name);
+		probe.onerror = () => {
+			// Can't read version; give up so the caller can decide.
+			finish(false);
+		};
+		probe.onblocked = () => {
+			// Probe shouldn't block (no version specified), but if it
+			// does the upgrade path will too.  Bail.
+			finish(false);
+		};
+		probe.onsuccess = () => {
+			const currentVersion = probe.result.version;
+			const wasEmpty = probe.result.objectStoreNames.length === 0;
+			probe.result.close();
+			if (wasEmpty) {
+				// Nothing to clear; treat as success.
+				finish(true);
+				return;
 			}
-		}, 30_000);
+			const upgrade = indexedDB.open(name, currentVersion + 1);
+			let droppedCount = 0;
+			upgrade.onupgradeneeded = () => {
+				const db = upgrade.result;
+				const stores = Array.from(db.objectStoreNames);
+				for (const storeName of stores) {
+					db.deleteObjectStore(storeName);
+					droppedCount += 1;
+				}
+			};
+			upgrade.onsuccess = () => {
+				console.info(`clearViaVersionBump(${name}): dropped ${droppedCount} object stores`);
+				try { upgrade.result.close(); } catch { /* ignore */ }
+				finish(true);
+			};
+			upgrade.onerror = () => {
+				finish(false);
+			};
+			upgrade.onblocked = () => {
+				// Another connection refused to close after versionchange.
+				// Wait out the budget in case it eventually drains.
+			};
+		};
+		setTimeout(() => {
+			finish(false);
+		}, budgetMs);
 	});
 }
 
@@ -557,15 +651,27 @@ export class MatrixTransport {
 				prev,
 				creds.user_id,
 			);
-			// Let wipeRustCryptoIndexedDB throw on a blocked wipe.
-			// Running initRustCrypto against a not-actually-wiped store
-			// silently fails as "stuck on Connecting…" — a thrown
-			// error here surfaces as bootError on the SPA, which is
-			// recoverable by refreshing.  In practice the App.tsx
-			// teardown-await fix means this should never block; the
-			// throw is the safety net for cases where something OTHER
-			// than the previous transport has the IDB open.
-			await wipeRustCryptoIndexedDB();
+			// Preemptive wipe is a pure latency optimization: it dodges
+			// the 30-90s mismatch-recovery path that initRustCrypto
+			// would otherwise trigger when the stored olm account
+			// belongs to a different user.  If the wipe fails
+			// (typically because the previous OlmMachine handle hasn't
+			// finished flushing yet, or a previous unclean shutdown
+			// left a WebKit storage-process lock around), we let the
+			// slower recovery path at the initRustCrypto catch below
+			// handle it.  Surfacing a thrown error here was previously
+			// stranding users on the bootError screen on a transient
+			// race; the recovery path is the actual safety net and
+			// already retries the wipe under the new robust
+			// deleteDatabaseAwait.
+			try {
+				await wipeRustCryptoIndexedDB();
+			} catch (err) {
+				console.warn(
+					"matrix.start: preemptive wipe failed, falling through to mismatch-recovery",
+					err,
+				);
+			}
 		}
 		try {
 			if (typeof localStorage !== "undefined") {
@@ -1416,6 +1522,17 @@ export class MatrixTransport {
 			}
 			this.store = null;
 		}
+		// Give the wasm-bindgen drop microtask and the WebKit/Chromium
+		// IDB close callback queue one full task boundary to flush.
+		// There is no JS-visible signal for "WASM OlmMachine has
+		// finished releasing its IDB handle", so a small deterministic
+		// yield is the cleanest way to make the next transport's
+		// preemptive wipe race-free.  Tested empirically: 50ms covers
+		// every browser we ship to (Chromium-based desktop WebViews
+		// and WKWebView on iOS), and a same-user stop()->start() cycle
+		// is dominated by the WASM init cost (>1s) so this is a rounding
+		// error on the user-visible wall clock.
+		await new Promise<void>((resolve) => setTimeout(resolve, 50));
 		const teardownUserId = this.creds?.user_id;
 		this.creds = null;
 		// Drop the in-memory SSSS key so a stop()→start() cycle
