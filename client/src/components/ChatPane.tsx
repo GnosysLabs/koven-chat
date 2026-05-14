@@ -561,6 +561,14 @@ export function ChatPane({
 	// genuinely changes.
 	const reversedMessages = useMemo(() => [...messages].reverse(), [messages]);
 
+	// Most-recent message id — drives the desktop-only sticky-bottom
+	// useLayoutEffect below.  Mobile's column-reverse layout gets
+	// sticky-bottom for free from the browser's scroll anchoring;
+	// desktop renders in normal column flow and has to scroll
+	// imperatively when a new message arrives AND the user was
+	// already at the bottom.
+	const lastMessageId = messages[messages.length - 1]?.id;
+
 	const scrollToBottom = useCallback((behavior: "auto" | "smooth" = "auto") => {
 		// `scrollIntoView` on the bottom sentinel works regardless of
 		// `column-reverse`'s scrollTop semantics — the browser just
@@ -601,14 +609,33 @@ export function ChatPane({
 		wasInCallViewRef.current = isInActiveCallRoom;
 		if (isRoomChange || becameVisible) {
 			// Bring the bottom sentinel (= visual bottom = newest
-			// message) into view.  Avoids the column-reverse scrollTop
-			// portability question entirely.
+			// message) into view.  Works for both mobile (column-
+			// reverse) and desktop (normal column) — scrollIntoView
+			// is layout-direction-agnostic.
 			bottomSentinelRef.current?.scrollIntoView({ block: "end" });
 			wasAtBottomRef.current = true;
 			setScrolledUp(false);
 			setAtStartOfRoom(noMoreHistoryRef.current.has(room?.id ?? ""));
 		}
 	}, [room?.id, isInActiveCallRoom]);
+
+	// Desktop-only sticky-bottom.  In normal column flow the browser
+	// does NOT auto-stick to the bottom when content appends — when
+	// a new message arrives we have to scroll there ourselves.  Only
+	// fires when the user was already at the bottom (tracked via
+	// `wasAtBottomRef`, updated by the at-bottom IntersectionObserver
+	// below); a desktop user reading history doesn't get yanked.
+	//
+	// Skipped on mobile: column-reverse's natural scroll-anchoring at
+	// the visual bottom (first child in DOM) already does this for
+	// free, and the user explicitly asked NOT to change the mobile
+	// path since it was working flawlessly.
+	useLayoutEffect(() => {
+		if (isMobileShell) return;
+		if (!wasAtBottomRef.current) return;
+		if (!messagesLoaded || isInActiveCallRoom) return;
+		bottomSentinelRef.current?.scrollIntoView({ block: "end" });
+	}, [lastMessageId, messagesLoaded, isInActiveCallRoom]);
 
 	// Pagination — fires when the top sentinel comes within
 	// `TOP_PAGINATION_PX` of the viewport's top edge.  We extend the
@@ -1331,86 +1358,94 @@ export function ChatPane({
 			    Combined: scroll position preservation, sticky-bottom,
 			    and off-screen culling all come from the browser. */}
 			{messagesLoaded && messages.length > 0 ? (
-				<div
-					ref={scrollRef}
-					className="absolute inset-0 overflow-y-auto overflow-x-hidden px-4"
-					style={{
-						display: "flex",
-						flexDirection: "column-reverse",
-						WebkitOverflowScrolling: "touch",
-						overflowAnchor: "auto",
-						touchAction: "pan-y",
-					}}
-				>
-					{/* Bottom sentinel — the FIRST child in DOM order,
-					    which `column-reverse` puts at the visual
-					    BOTTOM of the scroll content.  The
-					    IntersectionObserver in the at-bottom useEffect
-					    watches this element; its visibility tells us
-					    whether the user is at the newest message. */}
-					<div ref={bottomSentinelRef} aria-hidden style={{ height: 1, flexShrink: 0 }} />
-					{reversedMessages.map((m, reversedIndex) => {
-						// The data index for date-separator + group-
-						// continues math is the index in the ORIGINAL
-						// (oldest-first) array — O(1) from the
-						// reversed-array position.
-						const arrayIndex = messages.length - 1 - reversedIndex;
-						return renderTimelineRow(m, arrayIndex);
-					})}
-					{/* Discord-style top-of-history indicator.
-					    Lives IN-FLOW at the visual top (i.e. the last
-					    child in DOM order, which column-reverse puts
-					    at the top of the scroll content).  Three
-					    states:
-
-					    1. `loadingMore` — pulsing favicon throbber.
-					       Takes physical scroll space so the user
-					       genuinely cannot scroll past it until the
-					       fetch resolves; the result feels like a
-					       gentle "pause" at the top while older
-					       history streams in.  When the fetch
-					       commits with new events they prepend
-					       ABOVE the user's viewport (overflow-anchor
-					       keeps the visible content stable), and the
-					       throbber dismounts.
-
-					    2. `atStartOfRoom` (no more history) — a
-					       static "Beginning of #room" line, again at
-					       the visual top, so the user can see they've
-					       actually reached the start rather than
-					       wondering if something silently broke.
-
-					    3. Neither — nothing rendered; auto-pagination
-					       will fire as soon as the user gets near
-					       enough to the visual top (see TOP_PAGINATION_PX). */}
-					{loadingMore && (
-						<div
-							className="flex items-center justify-center py-4"
-							aria-live="polite"
-							aria-label="Loading older messages"
-						>
-							<img
-								src="/favicon.png"
-								alt=""
-								className="size-8 animate-pulse"
-								style={{ filter: "drop-shadow(0 0 16px rgba(0,0,0,0.4))" }}
-							/>
-						</div>
-					)}
-					{!loadingMore && atStartOfRoom && (
-						<div className="flex items-center justify-center py-4 text-xs text-muted-foreground">
-							Beginning of {room.kind === "dm" ? "conversation" : `#${room.name}`}
-						</div>
-					)}
-					{/* Top sentinel — the LAST child in DOM order,
-					    which `column-reverse` puts at the visual TOP
-					    of the scroll content (just past the throbber
-					    or beginning-of-room indicator).  The
-					    pagination IntersectionObserver watches this
-					    element; visibility within TOP_PAGINATION_PX of
-					    the viewport top fires `loadOlderHistory`. */}
-					<div ref={topSentinelRef} aria-hidden style={{ height: 1, flexShrink: 0 }} />
-				</div>
+				isMobileShell ? (
+					// ─── Mobile path: column-reverse ─────────────────────
+					// First child in DOM = visual bottom (newest).
+					// Browser's natural scroll-anchoring keeps the user
+					// at the bottom on new messages for free.
+					<div
+						ref={scrollRef}
+						className="absolute inset-0 overflow-y-auto overflow-x-hidden px-4"
+						style={{
+							display: "flex",
+							flexDirection: "column-reverse",
+							WebkitOverflowScrolling: "touch",
+							overflowAnchor: "auto",
+							touchAction: "pan-y",
+						}}
+					>
+						<div ref={bottomSentinelRef} aria-hidden style={{ height: 1, flexShrink: 0 }} />
+						{reversedMessages.map((m, reversedIndex) => {
+							const arrayIndex = messages.length - 1 - reversedIndex;
+							return renderTimelineRow(m, arrayIndex);
+						})}
+						{loadingMore && (
+							<div
+								className="flex items-center justify-center py-4"
+								aria-live="polite"
+								aria-label="Loading older messages"
+							>
+								<img
+									src="/favicon.png"
+									alt=""
+									className="size-8 animate-pulse"
+									style={{ filter: "drop-shadow(0 0 16px rgba(0,0,0,0.4))" }}
+								/>
+							</div>
+						)}
+						{!loadingMore && atStartOfRoom && (
+							<div className="flex items-center justify-center py-4 text-xs text-muted-foreground">
+								Beginning of {room.kind === "dm" ? "conversation" : `#${room.name}`}
+							</div>
+						)}
+						<div ref={topSentinelRef} aria-hidden style={{ height: 1, flexShrink: 0 }} />
+					</div>
+				) : (
+					// ─── Desktop path: normal column ─────────────────────
+					// Oldest at the top of DOM, newest at the bottom.
+					// Identical to the mobile path in every way except
+					// the layout direction — required because Chrome's
+					// wheel-event handling at the scrollable extremes
+					// in column-reverse manifested as "scrolling back
+					// toward newer messages from the start of history
+					// keeps yanking you back to the start."
+					//
+					// `overflow-anchor: auto` still preserves the user's
+					// visible position when older messages prepend, and
+					// the desktop sticky-bottom useLayoutEffect above
+					// handles the "new message arrived while at the
+					// bottom" case that column-reverse got for free.
+					<div
+						ref={scrollRef}
+						className="absolute inset-0 overflow-y-auto overflow-x-hidden px-4"
+						style={{
+							overflowAnchor: "auto",
+						}}
+					>
+						<div ref={topSentinelRef} aria-hidden style={{ height: 1 }} />
+						{loadingMore && (
+							<div
+								className="flex items-center justify-center py-4"
+								aria-live="polite"
+								aria-label="Loading older messages"
+							>
+								<img
+									src="/favicon.png"
+									alt=""
+									className="size-8 animate-pulse"
+									style={{ filter: "drop-shadow(0 0 16px rgba(0,0,0,0.4))" }}
+								/>
+							</div>
+						)}
+						{!loadingMore && atStartOfRoom && (
+							<div className="flex items-center justify-center py-4 text-xs text-muted-foreground">
+								Beginning of {room.kind === "dm" ? "conversation" : `#${room.name}`}
+							</div>
+						)}
+						{messages.map((m, index) => renderTimelineRow(m, index))}
+						<div ref={bottomSentinelRef} aria-hidden style={{ height: 1 }} />
+					</div>
+				)
 			) : !messagesLoaded ? null : (
 				isMobileShell ? (
 					<div className="flex flex-col items-center justify-center gap-3 py-16 px-6 text-center">
