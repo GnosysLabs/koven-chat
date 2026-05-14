@@ -2369,6 +2369,7 @@ export default function App() {
 			<div
 				className="flex-1 flex min-h-0"
 				data-mobile-view={state.activeRoomId ? "chat" : "rooms"}
+				data-push-host
 			>
 				<div className="contents" data-mobile-pane="sidebar">
 				<SpaceBar
@@ -3348,6 +3349,7 @@ export default function App() {
 				// back chevron on push views).  Bottom stops above the
 				// tab bar so navigation stays visible during pushes.
 				<div className="fixed inset-x-0 z-30 flex flex-col bg-background overflow-hidden"
+				     data-push-host
 				     style={{
 				         top: 0,
 				         bottom: "calc(env(safe-area-inset-bottom) + 49px)",
@@ -3457,9 +3459,15 @@ export default function App() {
 			    space is selected, SpaceHomeMobile after drill-in.
 			    Selecting a room from inside SpaceHome dispatches
 			    set_active_room, which clears the tab bar and lets
-			    the ChatPane below this overlay take over. */}
-			{isMobileShell && mobileSpacesOpen && !state.activeRoomId && (
+			    the ChatPane (z=40 in main pane CSS) slide in over
+			    the top of THIS overlay — we stay mounted so that
+			    when the user pops the chat back, it slides off to
+			    reveal SpaceHomeMobile underneath rather than
+			    re-mounting the overlay on top of the chat's exit
+			    animation. */}
+			{isMobileShell && mobileSpacesOpen && (
 				<div className="fixed inset-x-0 z-30 flex flex-col bg-background border-b border-foreground/10"
+				     data-push-host
 				     style={{
 				         top: "calc(env(safe-area-inset-top) + 48px)",
 				         bottom: "calc(env(safe-area-inset-bottom) + 49px)",
@@ -3467,6 +3475,14 @@ export default function App() {
 				         backgroundAttachment: "fixed",
 				         backgroundRepeat: "no-repeat",
 				         backgroundSize: "cover",
+				         // Non-interactive while a chat is on top of
+				         // this overlay (chat sits at z=40, we're at
+				         // z=30).  Explicit pointer-events:none is
+				         // belt-and-braces — z-stacking should already
+				         // route events to the chat, but this prevents
+				         // any margin/inset gap from leaking a tap
+				         // through to a now-non-visible spaces row.
+				         pointerEvents: state.activeRoomId ? "none" : undefined,
 				     }}
 				>
 					{/* Underlayer — spaces list, always rendered so the

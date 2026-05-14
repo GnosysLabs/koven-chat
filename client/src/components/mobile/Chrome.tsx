@@ -15,6 +15,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useDrag } from "@use-gesture/react";
+import { useSpring, animated } from "@react-spring/web";
 import { ChevronLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -148,32 +149,46 @@ export function ErrorBanner({ message }: { message: string }) {
 /**
  * PushSlot — wraps a push-view child so it slides in from the right
  * on mount and slides out to the right on the next render where
- * `visible` flips false.  Defers unmount until the exit animation
- * finishes so the parent doesn't need to manage timers itself.
+ * `visible` flips false.  Defers unmount until the exit spring
+ * lands so the parent doesn't need to manage timers itself.
  *
  * Optionally accepts `onPop` to enable the iOS swipe-from-left-edge
- * back gesture: pointerdown within 20px of the left edge starts the
+ * back gesture: pointerdown within 24px of the left edge starts the
  * drag, the view follows the pointer in real time, and release past
  * a threshold (40% of width or fast horizontal velocity) commits
  * the pop by calling `onPop` (which should flip `visible` false).
+ *
+ * Animation is driven by @react-spring/web — interruptions tween
+ * smoothly from the current frame, so rapid back-and-forth taps
+ * never produce the "backwards snap" the previous CSS-keyframe
+ * version did.  Drag velocity carries into the release spring, so
+ * a fast flick completes off-screen with momentum.
+ *
+ * The spring also writes a `--push-progress` CSS variable
+ * (0 = docked at centre, 1 = off-screen right) onto the nearest
+ * `[data-push-host]` ancestor.  Sibling underlayer elements use
+ * that variable to parallax/dim in lockstep with the drag, instead
+ * of the previous "frozen during the swipe, snap at the end"
+ * behaviour.
  *
  * Usage:
  *   <PushSlot visible={meStack === "profile"} onPop={() => setMeStack("root")}>
  *     <MobileProfileScreen ... />
  *   </PushSlot>
- *
- * The wrapper paints a solid background so the layer below
- * (the screen this push slid in over) isn't visible through the
- * sliding child.  z-index sits one above the root content so
- * the push always covers it during the animation.
  */
-const EXIT_DURATION_MS = 240;
-const SNAP_DURATION_MS = 220;
 const EDGE_ZONE_PX = 24;
 const POP_DISTANCE_THRESHOLD = 0.4; // 40% of width
 const POP_VELOCITY_THRESHOLD = 0.5; // px/ms
-const EXIT_EASE = "cubic-bezier(0.4, 0, 0.7, 0.28)";
-const SNAP_EASE = "cubic-bezier(0.32, 0.72, 0.18, 1)";
+// UIKit's push transition lands near 280ms with an ease-out curve.
+// tension 320 / friction 32 gives a perceptually-equivalent spring
+// that interrupts cleanly mid-flight (the main reason we're on a
+// spring at all instead of a CSS transition).
+const SPRING_CONFIG = { tension: 320, friction: 32, clamp: false };
+
+function prefersReducedMotion(): boolean {
+	if (typeof window === "undefined") return false;
+	return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
 
 export function PushSlot({
 	visible,
@@ -185,87 +200,126 @@ export function PushSlot({
 	children: ReactNode;
 }) {
 	const [mounted, setMounted] = useState(visible);
-	const [exiting, setExiting] = useState(false);
-	const exitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const slotRef = useRef<HTMLDivElement | null>(null);
-	// Latch the child while exiting so it stays visible during the
-	// slide-out even after the parent has cleared the new-child
-	// slot.  Important for the App.tsx wiring where the parent
-	// passes `visible={meStack === "profile"}` and rerenders the
-	// whole tree on stack changes.
+	const activeRef = useRef(false);
+	// Latch the child for the exit slide so the parent can clear the
+	// new-child slot the moment it pops the stack — the latched
+	// ReactNode keeps rendering until the spring lands.
 	const latchedChild = useRef<ReactNode>(children);
 	if (visible) latchedChild.current = children;
+	// Captured at the start of every drag-commit so the spring can
+	// inherit the user's flick velocity (fast flick → fast exit;
+	// slow drag past threshold → measured exit).  Cleared once the
+	// exit effect consumes it so a subsequent tap-back doesn't get
+	// a stale push.
+	const releaseVelocityRef = useRef(0);
+	// `visible` from the latest render, read inside spring `onRest`
+	// callbacks where the closure-captured `visible` is stale.  Used
+	// to guard against unmounting after a cancelled exit (visible
+	// flipped back true while we were mid-slide-out).
+	const visibleRef = useRef(visible);
+	visibleRef.current = visible;
 
-	// Two refs replace the dragX state from the previous hand-rolled
-	// pointer-event version: `activeRef` tracks whether the current
-	// gesture is one we accepted (started within the edge zone), and
-	// `dragPoppedRef` tells the mount/exit useEffect below to skip
-	// the CSS-keyframe exit animation when the gesture already drove
-	// the slot off-screen imperatively.  Skipping is critical — the
-	// CSS keyframe starts from translateX(0) and would visibly snap
-	// the slot back before re-running the slide-out.
-	const activeRef = useRef(false);
-	const dragPoppedRef = useRef(false);
+	const getWidth = () => {
+		return slotRef.current?.offsetWidth || window.innerWidth || 1;
+	};
 
+	const [{ x }, api] = useSpring(() => ({
+		x: visible ? 0 : getWidth(),
+		config: SPRING_CONFIG,
+	}));
+
+	// Drive enter / exit from the `visible` prop.  Spring continues
+	// from its current frame on every api.start — no `from`, no
+	// snap.  Mid-flight interruptions (tap-back during enter, tap-
+	// open during exit) reverse direction smoothly from wherever the
+	// element happens to be.
 	useEffect(() => {
 		if (visible) {
-			if (exitTimer.current) {
-				clearTimeout(exitTimer.current);
-				exitTimer.current = null;
-			}
-			setExiting(false);
 			setMounted(true);
-			// Re-entering — drop any leftover inline transform from a
-			// prior drag-snap-back so the CSS enter keyframe runs
-			// cleanly from translateX(100%).
-			const slot = slotRef.current;
-			if (slot) {
-				slot.style.transform = "";
-				slot.style.transition = "";
-			}
+			api.start({
+				x: 0,
+				config: SPRING_CONFIG,
+				immediate: prefersReducedMotion(),
+			});
 			return;
 		}
 		if (!mounted) return;
-		if (dragPoppedRef.current) {
-			// The drag committed the pop; the slot is already at
-			// translateX(100%) via the imperative animation.  Just
-			// unmount on the next tick — no CSS keyframe needed.
-			dragPoppedRef.current = false;
-			setMounted(false);
-			return;
-		}
-		setExiting(true);
-		exitTimer.current = setTimeout(() => {
-			setMounted(false);
-			setExiting(false);
-			exitTimer.current = null;
-		}, EXIT_DURATION_MS);
-		return () => {
-			if (exitTimer.current) {
-				clearTimeout(exitTimer.current);
-				exitTimer.current = null;
-			}
-		};
-	}, [visible, mounted]);
+		const v = releaseVelocityRef.current;
+		releaseVelocityRef.current = 0;
+		api.start({
+			x: getWidth(),
+			config: { ...SPRING_CONFIG, velocity: v },
+			immediate: prefersReducedMotion(),
+			onRest: (result) => {
+				// Only unmount if the exit actually completed AND
+				// we're still meant to be hidden.  If `visible`
+				// flipped back true mid-exit, a new spring is
+				// already pulling x toward 0 and we must not yank
+				// the DOM out from under it.
+				if (result.finished && !visibleRef.current) {
+					setMounted(false);
+				}
+			},
+		});
+	// `mounted` intentionally omitted: we set it inside this effect,
+	// and re-running on its change would loop.  `api` is stable.
+	// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [visible]);
 
-	// useDrag from @use-gesture/react.  Replaces the hand-rolled
-	// pointer-event handlers that drove a dragX setState on every
-	// move — every move triggered a React re-render, which compounded
-	// jank on lower-end iPhones.  Now the transform is mutated
-	// directly on the DOM node during the drag, then a CSS transition
-	// carries the final snap-back / pop animation.
+	// Write the live drag progress (0 = docked, 1 = off-screen) onto
+	// the nearest [data-push-host] ancestor as a CSS custom property.
+	// Sibling underlayers read it to parallax in lockstep with the
+	// foreground, including during the swipe-back gesture.  Scoped
+	// to the host (not document root) so multiple PushSlot stacks
+	// in different overlays don't fight over the same variable.
 	//
-	// Edge-zone check happens on `first`: drags starting outside the
-	// left 24px are cancelled so vertical scrolls / content taps
-	// inside the view pass through untouched.  `axis: "x"` keeps
-	// vertical pans from triggering this gesture even when they
-	// start in the edge zone, so the user can scroll the push view
-	// itself without accidentally swiping back.
-	const dragBind = useDrag(({ first, last, active, movement: [mx], velocity: [vx], xy, cancel }) => {
+	// We use rAF polling rather than a SpringValue subscription
+	// because react-spring's public API doesn't expose a per-frame
+	// listener for an animated value off-DOM; piping the value into
+	// an <animated.*> style only sets it on that one element, but
+	// the underlayer is a sibling — it needs the var on a shared
+	// ancestor.  The rAF tick runs at the same cadence as the
+	// spring (and skips writes when the value hasn't changed), so
+	// the cost is one comparison + at most one style write per
+	// frame, only while a slot is mounted.
+	useEffect(() => {
+		if (!mounted) return;
+		const slot = slotRef.current;
+		if (!slot) return;
+		const host =
+			(slot.closest("[data-push-host]") as HTMLElement | null) ??
+			(slot.closest("[data-mobile-view]") as HTMLElement | null) ??
+			slot.parentElement ??
+			document.documentElement;
+		let raf = 0;
+		let last = -1;
+		const tick = () => {
+			const w = getWidth();
+			const v = x.get();
+			const p = Math.min(1, Math.max(0, v / w));
+			if (p !== last) {
+				host.style.setProperty("--push-progress", String(p));
+				last = p;
+			}
+			raf = requestAnimationFrame(tick);
+		};
+		raf = requestAnimationFrame(tick);
+		return () => {
+			cancelAnimationFrame(raf);
+			// Reset to "no push" so the underlayer returns to
+			// identity when this slot unmounts.
+			host.style.setProperty("--push-progress", "1");
+		};
+	}, [x, mounted]);
+
+	const dragBind = useDrag(({
+		first, last, active, movement: [mx], velocity: [vx], xy, cancel,
+	}) => {
 		const slot = slotRef.current;
 		if (!slot) return;
 		if (first) {
-			if (!onPop || !visible || exiting) {
+			if (!onPop || !visible) {
 				cancel();
 				return;
 			}
@@ -279,50 +333,34 @@ export function PushSlot({
 		}
 		if (!activeRef.current) return;
 
+		const dx = Math.max(0, mx);
+
 		if (active) {
-			// Track only rightward drag.  Clamp at 0 so the view
-			// can't slide off-screen-left.  No transition — the
-			// transform follows the finger 1:1.
-			const dx = Math.max(0, mx);
-			slot.style.transition = "none";
-			slot.style.transform = `translateX(${dx}px)`;
+			// Finger 1:1.  immediate=true bypasses spring physics so
+			// the slot tracks touch exactly; physics re-engages on
+			// release below.
+			api.start({ x: dx, immediate: true });
 			return;
 		}
 		if (last) {
 			activeRef.current = false;
-			const dx = Math.max(0, mx);
-			const width = slot.offsetWidth || window.innerWidth || 1;
+			const width = getWidth();
 			const past = dx > width * POP_DISTANCE_THRESHOLD;
 			const flick = vx > POP_VELOCITY_THRESHOLD && dx > 24;
 
 			if ((past || flick) && onPop) {
-				// Commit the pop.  Continue the animation from the
-				// current drag offset off the right edge — duration
-				// scales with the remaining distance so a fast
-				// flick completes quickly while a slow drag near
-				// the threshold takes the full exit duration.
-				dragPoppedRef.current = true;
-				const remainingFraction = Math.max(0, (width - dx) / width);
-				const duration = Math.max(
-					120,
-					Math.round(EXIT_DURATION_MS * remainingFraction),
-				);
-				slot.style.transition = `transform ${duration}ms ${EXIT_EASE}`;
-				slot.style.transform = "translateX(100%)";
-				window.setTimeout(() => onPop(), duration);
+				// Stash velocity so the visible→false effect's exit
+				// spring inherits the flick energy, then let the
+				// parent flip visible — that triggers the unified
+				// exit path (no duplicated api.start here).
+				releaseVelocityRef.current = vx;
+				onPop();
 			} else {
-				// Snap back to docked position.  After the snap
-				// completes, clear the inline transform so future
-				// state changes (re-pop via the back button, etc.)
-				// fall through to the CSS keyframes.
-				slot.style.transition = `transform ${SNAP_DURATION_MS}ms ${SNAP_EASE}`;
-				slot.style.transform = "translateX(0)";
-				window.setTimeout(() => {
-					const s = slotRef.current;
-					if (!s || activeRef.current) return;
-					s.style.transition = "";
-					s.style.transform = "";
-				}, SNAP_DURATION_MS + 20);
+				api.start({
+					x: 0,
+					config: SPRING_CONFIG,
+					immediate: prefersReducedMotion(),
+				});
 			}
 		}
 	}, {
@@ -333,9 +371,10 @@ export function PushSlot({
 	if (!mounted) return null;
 
 	return (
-		<div
+		<animated.div
 			ref={slotRef}
 			{...dragBind()}
+			style={{ x }}
 			className={cn(
 				"absolute inset-0 z-10",
 				// `flex flex-col` so children that size themselves
@@ -357,14 +396,8 @@ export function PushSlot({
 				// through.  The opaque layer is painted by the nested
 				// `<div>` below instead — a grandchild of the pane,
 				// so the !important rule doesn't reach it.
-				// CSS keyframes drive enter + non-drag exit.  During
-				// a drag, the inline transform overrides whatever
-				// would be coming from the keyframe.  If the drag
-				// commits a pop, dragPoppedRef suppresses the exit
-				// keyframe entirely — the imperative animation
-				// already drove the slot off-screen.
-				!dragPoppedRef.current && (exiting ? "mobile-push-exit" : "mobile-push-enter"),
 				"touch-pan-y",
+				"will-change-transform",
 			)}
 		>
 			{/* Opaque bg layer.  Nested one level deeper than the
@@ -384,6 +417,6 @@ export function PushSlot({
 				}}
 			/>
 			{latchedChild.current}
-		</div>
+		</animated.div>
 	);
 }

@@ -863,15 +863,23 @@
 	 * overlay positioning on the main pane in chat view further
 	 * down. */
 	.mobile-shell [data-mobile-pane="list"] {
-		transition:
-			transform 280ms cubic-bezier(0.32, 0.72, 0.18, 1),
-			filter 280ms cubic-bezier(0.32, 0.72, 0.18, 1);
 		transform-origin: center center;
 		will-change: transform, filter;
 	}
+	/* In chat view the list pane reads PushSlot's --push-progress
+	 * (set on the [data-mobile-view] ancestor by the spring driving
+	 * the ChatPane slide-in) and interpolates its parallax from
+	 * that.  --p=0 = chat fully docked → list at translateX(-22%)
+	 * scale(0.96) brightness(0.55).  --p=1 = chat off-screen → list
+	 * at identity.  No CSS transition needed — the spring updates
+	 * the variable every animation frame, so the underlayer follows
+	 * the foreground 1:1 (including during a swipe-back). */
 	.mobile-shell [data-mobile-view="chat"] [data-mobile-pane="list"] {
-		transform: translateX(-22%) scale(0.96);
-		filter: brightness(0.55);
+		--p: var(--push-progress, 1);
+		transform:
+			translateX(calc(-22% * (1 - var(--p))))
+			scale(calc(1 - 0.04 * (1 - var(--p))));
+		filter: brightness(calc(1 - 0.45 * (1 - var(--p))));
 		pointer-events: none;
 	}
 	/* Data-mobile-view is the PushSlot anchor for the chat overlay
@@ -886,10 +894,18 @@
 	 * clears.  In rooms view the rule above sets pointer-events:none
 	 * so the list pane below stays interactive while the main pane
 	 * sits invisible (PushSlot inside is unmounted). */
+	/* z-index 40 so the chat overlay sits ABOVE the Me/Spaces tab
+	 * overlays (z=30 fixed).  Without this, when a user backs out of
+	 * a chat opened from inside a Spaces drill-down, the Spaces
+	 * overlay re-mounts on top of the chat and hides its slide-out
+	 * animation — reads as a "backwards snap to space" instead of
+	 * the chat sliding off to reveal the space underneath.  Both
+	 * overlays now stay mounted while a chat is open and act as the
+	 * underlayer the chat reveals on pop. */
 	.mobile-shell [data-mobile-pane="main"] {
 		position: absolute;
 		inset: 0;
-		z-index: 10;
+		z-index: 40;
 		flex: none;
 		width: 100%;
 	}
@@ -1111,66 +1127,40 @@
 	}
 }
 
-/* iOS-style push-view slide.  Used by the Me tab's push stack
-   (Profile / Settings / Blocked / Sessions / Delete sub-views).
-   `mobile-push-enter` slides in from the right; `mobile-push-exit`
-   slides out to the right.  Both use ease-out / cubic-bezier
-   approximations of UIKit's default push animation curve. */
-.mobile-push-enter {
-	animation: mobile-push-in 280ms cubic-bezier(0.32, 0.72, 0.18, 1) both;
-}
-.mobile-push-exit {
-	animation: mobile-push-out 240ms cubic-bezier(0.4, 0.0, 0.7, 0.28) both;
-}
-/* Snap-back used after an aborted swipe-back gesture.  Plain
-   `transition` (not `animation`) so it follows the inline
-   `transform` style that PushSlot clears on release back to
-   the CSS-anchored translateX(0). */
-.mobile-push-snap {
-	transition: transform 220ms cubic-bezier(0.32, 0.72, 0.18, 1);
-}
-@keyframes mobile-push-in {
-	from { transform: translateX(100%); }
-	to   { transform: translateX(0);    }
-}
-@keyframes mobile-push-out {
-	from { transform: translateX(0);    }
-	to   { transform: translateX(100%); }
-}
+/* Parallax + dim for the layer beneath an active push view.
+   PushSlot writes a `--push-progress` CSS variable (0 = push docked
+   at centre, 1 = push fully off-screen right) onto the nearest
+   `[data-push-host]` ancestor while its spring is animating.  This
+   block reads that variable and interpolates the parallax in
+   lockstep with the foreground — including during a swipe-back,
+   where the foreground follows the finger and the underlayer
+   eases back proportionally instead of being frozen until the
+   gesture commits.
 
-/* Parallax + dim for the layer beneath an active push view.  iOS
-   pushes the previous screen back ~30% of width and darkens it
-   slightly while the new screen slides in over the top.  The
-   parent wraps its "underneath" content with `.mobile-push-underlayer`
-   and toggles `.is-pushed` when a child PushSlot becomes visible.
+   No `transition` here: the spring updates the variable every
+   animation frame, so the underlayer's computed transform updates
+   per-frame natively.  Adding a CSS transition would double-up
+   the easing and make the underlayer lag the foreground.
 
-   `transition` covers both the push-in (is-pushed goes on as the
-   slot mounts + animates) and the pop (is-pushed comes off as the
-   slot starts its exit), so the underlayer follows the same
-   timing curve as the push view itself. */
+   `.is-pushed` is kept for pointer-events handling only (the
+   underlayer must not intercept taps while a push is over it);
+   transform/filter are driven entirely by --push-progress. */
 .mobile-push-underlayer {
-	transition:
-		transform 280ms cubic-bezier(0.32, 0.72, 0.18, 1),
-		filter   280ms cubic-bezier(0.32, 0.72, 0.18, 1);
+	--p: var(--push-progress, 1);
+	transform:
+		translateX(calc(-22% * (1 - var(--p))))
+		scale(calc(1 - 0.04 * (1 - var(--p))));
+	filter: brightness(calc(1 - 0.45 * (1 - var(--p))));
 	transform-origin: center center;
 	will-change: transform, filter;
 }
 .mobile-push-underlayer.is-pushed {
-	transform: translateX(-22%) scale(0.96);
-	filter: brightness(0.55);
 	pointer-events: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
-	.mobile-push-enter,
-	.mobile-push-exit,
-	.mobile-push-snap {
-		animation: none;
-		transition: none;
-	}
-	.mobile-push-underlayer,
-	.mobile-push-underlayer.is-pushed {
-		transition: none;
+	.mobile-shell [data-mobile-view="chat"] [data-mobile-pane="list"],
+	.mobile-push-underlayer {
 		transform: none;
 		filter: none;
 	}
