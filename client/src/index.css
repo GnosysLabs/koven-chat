@@ -789,6 +789,15 @@
 		flex-direction: column;
 		min-width: 0;
 		min-height: 0;
+		/* Opaque background so neither pane shows through to the
+		 * other underneath.  Both panes are mounted simultaneously
+		 * (one slides over the other during a view flip), so any
+		 * transparency in the active pane's tree — e.g. the chat
+		 * timeline's gap between message bubbles — would reveal the
+		 * dimmed underlayer through it.  The screenshot before this
+		 * fix was the spaces list parallax-dimmed under a chat with
+		 * a see-through timeline. */
+		background: hsl(var(--background));
 		transition:
 			transform 280ms cubic-bezier(0.32, 0.72, 0.18, 1),
 			filter   280ms cubic-bezier(0.32, 0.72, 0.18, 1);
