@@ -603,6 +603,7 @@ export function ChatPane({
 		estimateSize,
 		getItemKey,
 		overscan: isMobileShell ? 10 : 14,
+		enabled: !isMobileShell,
 	});
 	rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
 		return followBottomRef.current || item.start < (instance.scrollOffset ?? 0);
@@ -616,9 +617,9 @@ export function ChatPane({
 		rowVirtualizer.scrollToIndex(messages.length - 1, { align: "end", behavior });
 	}, [messages.length, rowVirtualizer]);
 
-	// Virtualized scroll preservation.  Track one visible message and
-	// its offset from the viewport top; when older history prepends,
-	// we restore that same message to the same visual position.
+	// Scroll preservation.  Desktop uses TanStack's measured row
+	// positions; mobile uses DOM offsets so iOS momentum scroll does
+	// not fight late virtualizer measurements.
 	const saveScrollState = useCallback(() => {
 		const el = scrollRef.current;
 		if (!el) return;
@@ -627,6 +628,24 @@ export function ChatPane({
 			return;
 		}
 		const scrollTop = Math.max(0, el.scrollTop);
+		if (isMobileShell) {
+			const rows = listRef.current?.children;
+			if (!rows) return;
+			for (let i = 0; i < rows.length; i++) {
+				const row = rows[i] as HTMLElement;
+				const token = row.dataset.scrollTokens;
+				if (!token) continue;
+				if (row.offsetTop + row.offsetHeight >= scrollTop) {
+					scrollStateRef.current = {
+						stuckAtBottom: false,
+						trackedToken: token,
+						offsetFromStart: Math.max(0, scrollTop - row.offsetTop),
+					};
+					return;
+				}
+			}
+			return;
+		}
 		const tracked = rowVirtualizer
 			.getVirtualItems()
 			.find(item => item.end >= scrollTop) ?? rowVirtualizer.getVirtualItems()[0];
@@ -637,14 +656,25 @@ export function ChatPane({
 			trackedToken: message.id,
 			offsetFromStart: Math.max(0, scrollTop - tracked.start),
 		};
-	}, [messages, rowVirtualizer]);
+	}, [isMobileShell, messages, rowVirtualizer]);
 
 	const restoreScrollState = useCallback(() => {
 		const el = scrollRef.current;
 		if (!el) return;
 		const state = scrollStateRef.current;
 		if (state.stuckAtBottom) {
-			scrollToBottom();
+			if (isMobileShell) el.scrollBy({ top: el.scrollHeight, behavior: "auto" });
+			else scrollToBottom();
+			return;
+		}
+		if (isMobileShell) {
+			const row = listRef.current?.querySelector(
+				`[data-scroll-tokens="${CSS.escape(state.trackedToken)}"]`,
+			);
+			if (!(row instanceof HTMLElement)) return;
+			const top = Math.max(0, row.offsetTop + state.offsetFromStart);
+			const diff = top - el.scrollTop;
+			if (Math.abs(diff) > 0.5) el.scrollBy({ top: diff, behavior: "auto" });
 			return;
 		}
 		const index = messages.findIndex(m => m.id === state.trackedToken);
@@ -655,7 +685,7 @@ export function ChatPane({
 			align: "start",
 			behavior: "auto",
 		});
-	}, [messages, rowVirtualizer, scrollToBottom]);
+	}, [isMobileShell, messages, rowVirtualizer, scrollToBottom]);
 
 	// Re-arm stuckAtBottom on room change / call-view exit; ALSO when
 	// messages first populate on a fresh-mount room.  The
@@ -749,7 +779,14 @@ export function ChatPane({
 		if (idx >= 0) {
 			const id = scrollToEvent.eventId;
 			const raf = requestAnimationFrame(() => {
-				rowVirtualizer.scrollToIndex(idx, { align: "center", behavior: "smooth" });
+				if (isMobileShell) {
+					const row = listRef.current?.querySelector(
+						`[data-scroll-tokens="${CSS.escape(id)}"]`,
+					);
+					if (row instanceof HTMLElement) row.scrollIntoView({ block: "center", behavior: "smooth" });
+				} else {
+					rowVirtualizer.scrollToIndex(idx, { align: "center", behavior: "smooth" });
+				}
 				scrollStateRef.current = {
 					stuckAtBottom: false,
 					trackedToken: id,
@@ -784,7 +821,7 @@ export function ChatPane({
 		if (loadingMoreRef.current || !onLoadMoreHistory) return;
 		scrollAttemptsRef.current += 1;
 		loadOlderHistory();
-	}, [scrollToEvent, room, messages, onLoadMoreHistory, onScrolledToEvent, rowVirtualizer, loadOlderHistory]);
+	}, [isMobileShell, scrollToEvent, room, messages, onLoadMoreHistory, onScrolledToEvent, rowVirtualizer, loadOlderHistory]);
 	useEffect(() => () => {
 		if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
 	}, []);
@@ -857,9 +894,12 @@ export function ChatPane({
 		// room before /sync has populated its timeline produces no
 		// results and we'd just spin.
 		if (messages.length === 0) return;
-		if (rowVirtualizer.getTotalSize() >= el.clientHeight - 16) return;
+		const contentHeight = isMobileShell
+			? (listRef.current?.clientHeight ?? 0)
+			: rowVirtualizer.getTotalSize();
+		if (contentHeight >= el.clientHeight - 16) return;
 		loadOlderHistory();
-	}, [isInActiveCallRoom, messagesLoaded, room?.id, messages.length, onLoadMoreHistory, room, rowVirtualizer, loadOlderHistory]);
+	}, [isInActiveCallRoom, isMobileShell, messagesLoaded, room?.id, messages.length, onLoadMoreHistory, room, rowVirtualizer, loadOlderHistory]);
 
 	// Global hover tracking for the message-action toolbar.
 	//
@@ -923,6 +963,7 @@ export function ChatPane({
 			</div>
 		);
 	}
+	const activeRoom = room;
 
 	// ─── @-mention autocomplete ────────────────────────────────────
 	// Look at the cursor position inside the draft.  If we're sitting
@@ -1104,6 +1145,100 @@ export function ChatPane({
 		} else {
 			onReact(message.id, key);
 		}
+	}
+
+	function renderTimelineRow(
+		m: Message,
+		index: number,
+		key: unknown,
+		measureElement?: (node: HTMLDivElement | null) => void,
+	) {
+		const prev = index > 0 ? messages[index - 1] : undefined;
+		const sameGroup =
+			!!prev &&
+			prev.sender === m.sender &&
+			m.timestamp - prev.timestamp <= GROUP_WINDOW_MS &&
+			!m.replyTo;
+		const separator = computeDateSeparator(prev?.timestamp, m.timestamp);
+		return (
+			<div
+				key={String(key)}
+				data-index={index}
+				data-scroll-tokens={m.id}
+				ref={measureElement}
+			>
+				{separator && <DateSeparator label={separator} />}
+				<MessageRow
+					message={m}
+					avatarMxc={memberAvatars.get(m.sender)}
+					continuesGroup={sameGroup}
+					isFirst={index === 0}
+					flaggable={flaggable}
+					roomEncrypted={!!activeRoom.encrypted}
+					reactions={reactionsByMessage.get(m.id) ?? []}
+					flags={flagsByMessage.get(m.id)}
+					isDm={activeRoom.kind === "dm"}
+					receiptsVersion={receiptsVersion ?? 0}
+					memberAvatars={memberAvatars}
+					memberNames={memberNamesByUserId}
+					mentionsViewer={
+						!m.isSelf && !!viewerUserId && messageMentionsUser(m, viewerUserId)
+					}
+					onMentionClick={(userId) => onOpenProfile?.(userId)}
+					onOpenSenderProfile={(userId) => onOpenProfile?.(userId)}
+					botMxids={botMxids}
+					serviceMxids={serviceMxids}
+					pollAggregate={pollsByMessage?.get(m.id)}
+					viewerUserId={viewerUserId}
+					onPollVote={onVoteOnPoll}
+					onPollEnd={onEndPoll}
+					onReact={(emoji) => toggleReaction(m, emoji)}
+					onReply={() => setReplyTarget(m)}
+					roomId={activeRoom.id}
+					onQuote={(text) => {
+						const quoted = text.split("\n").map(l => `> ${l}`).join("\n");
+						setDraft(prev => prev ? `${quoted}\n\n${prev}` : `${quoted}\n\n`);
+						setReplyTarget(m);
+						requestAnimationFrame(() => {
+							composeInputRef.current?.focus();
+						});
+					}}
+					onSendDmToSender={onSendDm
+						? () => { void onSendDm(m.sender as UserId); }
+						: undefined}
+					onBlockSender={onBlockSender
+						? () => { void onBlockSender(m.sender as UserId); }
+						: undefined}
+					onFlag={(category, rationale) => onFlag(m.id, category, rationale)}
+					isBot={!!botMxids?.has(m.sender)}
+					isOwnedBot={!!myOwnedBotMxids?.has(m.sender)}
+					isHovered={hoveredMessageId === m.id}
+					isFlashing={flashingEventId === m.id}
+					onToggleReactionPill={(reaction) => {
+						if (reaction.myReactionId) onUnreact(reaction);
+						else onReact(m.id, reaction.key);
+					}}
+					onDelete={
+						onDeleteMessage && (
+							m.isSelf || !!myOwnedBotMxids?.has(m.sender)
+						)
+							&& !m.pending
+							? () => onDeleteMessage(m.id)
+							: undefined
+					}
+					onAdminRedact={
+						onAdminRedactMessage
+							&& canModerateRoom
+							&& activeRoom.kind !== "dm"
+							&& !m.isSelf
+							&& !myOwnedBotMxids?.has(m.sender)
+							&& !m.pending
+								? () => onAdminRedactMessage(m.id)
+								: undefined
+					}
+				/>
+			</div>
+		);
 	}
 
 	return (
@@ -1293,11 +1428,11 @@ export function ChatPane({
 				   so leaving the room mid-call doesn't drop the call. */
 				<InCallPane roomName={room.name} />
 			) : (<>
-			{/* Browser scroll anchoring is disabled on the virtual
-			    surface.  TanStack Virtual and the tracked-message
-			    anchor above are the single source of truth; letting
-			    the browser also adjust scrollTop creates double
-			    corrections during prepends and image decode. */}
+			{/* Browser scroll anchoring is disabled on the chat surface.
+			    The tracked-message anchor above is the single source
+			    of truth; letting the browser also adjust scrollTop
+			    creates double corrections during prepends and media
+			    decode. */}
 			<div className="relative flex-1 min-h-0 overflow-hidden">
 			{/* Pulsing-favicon loading overlay (mobile only).
 			    Sits above the message scroll area while messages +
@@ -1321,25 +1456,33 @@ export function ChatPane({
 					/>
 				</div>
 			)}
-			{/* TanStack Virtual owns the hot path here.  The spacer
-			    represents the full measured timeline, while the
-			    translated block renders only the contiguous visible
-			    range in normal flow.  Block translation keeps smooth
-			    `scrollToIndex` stable when dynamic rows measure late. */}
+			{/* Desktop keeps the TanStack Virtual path that feels good
+			    in browser.  Mobile renders rows in native DOM flow so
+			    WKWebView momentum scroll does not get interrupted by
+			    late dynamic-row measurements. */}
 			{messagesLoaded && messages.length > 0 ? (<>
 				<div
 					ref={scrollRef}
 					className="absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-contain px-4"
-					style={{ overflowAnchor: "none" }}
+					style={{
+						overflowAnchor: "none",
+						WebkitOverflowScrolling: "touch",
+						touchAction: "pan-y",
+					}}
 				>
-					<div
-						ref={listRef}
-						style={{
-							height: totalVirtualSize,
-							position: "relative",
-							width: "100%",
-						}}
-					>
+					{isMobileShell ? (
+						<div ref={listRef}>
+							{messages.map((m, index) => renderTimelineRow(m, index, m.id))}
+						</div>
+					) : (
+						<div
+							ref={listRef}
+							style={{
+								height: totalVirtualSize,
+								position: "relative",
+								width: "100%",
+							}}
+						>
 						<div
 							style={{
 								position: "absolute",
@@ -1351,96 +1494,13 @@ export function ChatPane({
 						>
 							{virtualRows.map((virtualRow) => {
 								const m = messages[virtualRow.index];
-								if (!m) return null;
-								const prev = virtualRow.index > 0 ? messages[virtualRow.index - 1] : undefined;
-								const sameGroup =
-									!!prev &&
-									prev.sender === m.sender &&
-									m.timestamp - prev.timestamp <= GROUP_WINDOW_MS &&
-									!m.replyTo;
-								const separator = computeDateSeparator(prev?.timestamp, m.timestamp);
-								return (
-									<div
-										key={virtualRow.key}
-										data-index={virtualRow.index}
-										data-scroll-tokens={m.id}
-										ref={rowVirtualizer.measureElement}
-									>
-										{separator && <DateSeparator label={separator} />}
-										<MessageRow
-											message={m}
-											avatarMxc={memberAvatars.get(m.sender)}
-											continuesGroup={sameGroup}
-											isFirst={virtualRow.index === 0}
-											flaggable={flaggable}
-											roomEncrypted={!!room.encrypted}
-											reactions={reactionsByMessage.get(m.id) ?? []}
-											flags={flagsByMessage.get(m.id)}
-											isDm={room.kind === "dm"}
-											receiptsVersion={receiptsVersion ?? 0}
-											memberAvatars={memberAvatars}
-											memberNames={memberNamesByUserId}
-											mentionsViewer={
-												!m.isSelf && !!viewerUserId && messageMentionsUser(m, viewerUserId)
-											}
-											onMentionClick={(userId) => onOpenProfile?.(userId)}
-											onOpenSenderProfile={(userId) => onOpenProfile?.(userId)}
-											botMxids={botMxids}
-											serviceMxids={serviceMxids}
-											pollAggregate={pollsByMessage?.get(m.id)}
-											viewerUserId={viewerUserId}
-											onPollVote={onVoteOnPoll}
-											onPollEnd={onEndPoll}
-											onReact={(emoji) => toggleReaction(m, emoji)}
-											onReply={() => setReplyTarget(m)}
-											roomId={room.id}
-											onQuote={(text) => {
-												const quoted = text.split("\n").map(l => `> ${l}`).join("\n");
-												setDraft(prev => prev ? `${quoted}\n\n${prev}` : `${quoted}\n\n`);
-												setReplyTarget(m);
-												requestAnimationFrame(() => {
-													composeInputRef.current?.focus();
-												});
-											}}
-											onSendDmToSender={onSendDm
-												? () => { void onSendDm(m.sender as UserId); }
-												: undefined}
-											onBlockSender={onBlockSender
-												? () => { void onBlockSender(m.sender as UserId); }
-												: undefined}
-											onFlag={(category, rationale) => onFlag(m.id, category, rationale)}
-											isBot={!!botMxids?.has(m.sender)}
-											isOwnedBot={!!myOwnedBotMxids?.has(m.sender)}
-											isHovered={hoveredMessageId === m.id}
-											isFlashing={flashingEventId === m.id}
-											onToggleReactionPill={(reaction) => {
-												if (reaction.myReactionId) onUnreact(reaction);
-												else onReact(m.id, reaction.key);
-											}}
-											onDelete={
-												onDeleteMessage && (
-													m.isSelf || !!myOwnedBotMxids?.has(m.sender)
-												)
-													&& !m.pending
-													? () => onDeleteMessage(m.id)
-													: undefined
-											}
-											onAdminRedact={
-												onAdminRedactMessage
-													&& canModerateRoom
-													&& room.kind !== "dm"
-													&& !m.isSelf
-													&& !myOwnedBotMxids?.has(m.sender)
-													&& !m.pending
-														? () => onAdminRedactMessage(m.id)
-														: undefined
-											}
-										/>
-									</div>
-								);
+								return m
+									? renderTimelineRow(m, virtualRow.index, virtualRow.key, rowVirtualizer.measureElement)
+									: null;
 							})}
 						</div>
-					</div>
+						</div>
+					)}
 				</div>
 				{/* Pulsing-favicon loader.  Absolutely positioned at
 				    the top of the chat surface, opacity-toggled by
@@ -1491,7 +1551,8 @@ export function ChatPane({
 						followBottomRef.current = true;
 						setScrolledUp(false);
 						scrollStateRef.current = { stuckAtBottom: true };
-						scrollToBottom("smooth");
+						if (isMobileShell) el.scrollBy({ top: el.scrollHeight, behavior: "smooth" });
+						else scrollToBottom("smooth");
 					}}
 					className={cn(
 						"absolute bottom-3 left-1/2 -translate-x-1/2",
