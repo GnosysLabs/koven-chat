@@ -1065,6 +1065,11 @@ export function ChatPane({
 					reactions={reactionsByMessage.get(m.id) ?? EMPTY_REACTIONS}
 					flags={flagsByMessage.get(m.id)}
 					isDm={activeRoom.kind === "dm"}
+					isBotDm={
+						activeRoom.kind === "dm"
+							&& !!activeRoom.dmUserId
+							&& !!botMxids?.has(activeRoom.dmUserId)
+					}
 					receiptsVersion={receiptsVersion ?? 0}
 					memberAvatars={memberAvatars}
 					memberNames={memberNamesByUserId}
@@ -1886,7 +1891,7 @@ function MessageRowComponent({
 	message, avatarMxc, continuesGroup, isFirst, flaggable, roomEncrypted,
 	reactions, flags, onReact, onReply, onFlag, onToggleReactionPill, isBot,
 	isOwnedBot, isFlashing, onDelete, onAdminRedact,
-	isDm, receiptsVersion, memberAvatars, memberNames, mentionsViewer, onMentionClick, botMxids, serviceMxids,
+	isDm, isBotDm, receiptsVersion, memberAvatars, memberNames, mentionsViewer, onMentionClick, botMxids, serviceMxids,
 	pollAggregate, viewerUserId, onPollVote, onPollEnd,
 	roomId, onSendDmToSender, onBlockSender,
 	onOpenSenderProfile,
@@ -1953,6 +1958,12 @@ function MessageRowComponent({
 	// memberNames feed the avatar stack.  Only meaningful on
 	// `isSelf` rows; the indicator no-ops for others' messages.
 	isDm: boolean;
+	// True when this is a 1:1 DM whose other party is a registered bot.
+	// Bots never emit read receipts, so the WhatsApp-style "delivered /
+	// read" check on sent rows would sit stuck on the single grey check
+	// forever and read as "the bot is ignoring you."  Used to suppress
+	// the SeenIndicator entirely on these rows.
+	isBotDm: boolean;
 	receiptsVersion: number;
 	memberAvatars: Map<string, string | undefined>;
 	memberNames: Map<string, string>;
@@ -2427,7 +2438,7 @@ function MessageRowComponent({
 						    Suppressed on mobile to reduce clutter —
 						    expected to surface via long-press menu
 						    once that's wired. */}
-						{message.isSelf && !message.pending && !isMobileShell && (
+						{message.isSelf && !message.pending && !isMobileShell && !isBotDm && (
 							<SeenIndicator
 								roomId={message.roomId}
 								eventId={message.id}
@@ -2586,6 +2597,7 @@ function messageRowPropsEqual(
 	if (prev.isOwnedBot !== next.isOwnedBot) return false;
 	if (prev.isFlashing !== next.isFlashing) return false;
 	if (prev.isDm !== next.isDm) return false;
+	if (prev.isBotDm !== next.isBotDm) return false;
 	if (prev.receiptsVersion !== next.receiptsVersion) return false;
 	if (prev.memberAvatars !== next.memberAvatars) return false;
 	if (prev.memberNames !== next.memberNames) return false;

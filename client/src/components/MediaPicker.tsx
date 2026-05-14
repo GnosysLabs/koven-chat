@@ -214,16 +214,6 @@ export function MediaPicker({ accessToken, disabled, onPick, children }: MediaPi
 										pickingId !== null && pickingId !== r.id && "opacity-40 pointer-events-none",
 									)}
 									title={r.title}
-									style={
-										// Use Klipy's inline blur as a background
-										// while the real preview decodes; avoids
-										// a flash of empty muted box on a
-										// 24-tile grid that's all decoding
-										// in parallel.
-										r.preview_blur
-											? { backgroundImage: `url(${r.preview_blur})`, backgroundSize: "cover" }
-											: undefined
-									}
 								>
 									<img
 										src={r.preview_url}

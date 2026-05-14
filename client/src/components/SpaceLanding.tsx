@@ -13,7 +13,7 @@
 import type { Room, RoomId, Space } from "@koven/shared";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { cn } from "@/lib/utils";
-import { Folder, Hash, Lock, Plus, Settings, User, UserPlus } from "lucide-react";
+import { EyeOff, Folder, Hash, Lock, Plus, Settings, User, UserPlus } from "lucide-react";
 
 // Which kind of "space" this landing is rendering for.  DMs and Rooms
 // are virtual (no real Matrix space behind them) and want different
@@ -74,6 +74,12 @@ export function SpaceLanding({
 						<div className="mt-2 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-500/5 text-emerald-500/90 text-[11px] font-medium">
 							<Lock className="h-3 w-3" />
 							End-to-end encrypted
+						</div>
+					)}
+					{variant === "real" && space.kind === "private" && (
+						<div className="mt-2 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-border bg-muted/40 text-muted-foreground text-[11px] font-medium">
+							<EyeOff className="h-3 w-3" />
+							Private
 						</div>
 					)}
 					{(showAddRoom || showInvite || showSettings || showStartDm) && (

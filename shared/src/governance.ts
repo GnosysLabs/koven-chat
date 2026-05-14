@@ -32,9 +32,8 @@ export const FLAG_CATEGORY_SEVERITY: Record<FlagCategory, number> = {
 // Flags target either a single message OR an entire room.  Room flags
 // were added to handle the "abusive room name" attack — a creator
 // puts a slur or threat in the room name, where the per-message flag
-// pipeline can't reach.  Both kinds flow through the same consensus
-// pipeline (count distinct flaggers, sum reputation-weighted score,
-// trip the threshold) and the same floor-violation fast-track for
+// pipeline can't reach.  Both kinds flow through the same admin
+// review queue and the same floor-violation fast-track for
 // CSAM/threat/doxx categories.
 //
 // Wire format: when `target_kind` is missing, the flag is treated as

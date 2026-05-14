@@ -2,10 +2,10 @@
 // kicks off the recurring housekeeping tick, and brings the HTTP
 // server up.
 //
-// The consensus-moderation pipeline (reputation weights + auto-
-// collapse evaluation) used to run from this tick; both are gone
-// now.  Koven moderation is admin-driven via standard Matrix
-// kick/ban/redact, with flags surfacing to an admin review queue.
+// The old consensus-moderation pipeline (auto-collapse evaluation)
+// used to run from this tick; it's gone now.  Koven moderation is
+// admin-driven via standard Matrix kick/ban/redact, with flags
+// surfacing to an admin review queue.
 
 import { config } from "./config";
 import "./db";

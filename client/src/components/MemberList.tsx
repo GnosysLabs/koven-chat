@@ -15,7 +15,7 @@ import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { BotBadge } from "@/components/BotBadge";
-import { Ban, Copy, MessageSquare, Shield, ShieldOff, Star, User, UserX } from "lucide-react";
+import { Ban, Copy, Crown, MessageSquare, Shield, ShieldOff, User, UserX } from "lucide-react";
 import type { Member } from "@koven/shared";
 
 export interface MemberListProps {
@@ -610,7 +610,7 @@ function MemberContextMenu({
 					)}
 					{canPromoteToAdmin && (
 						<MenuItem
-							icon={<Star className="h-4 w-4" />}
+							icon={<Crown className="h-4 w-4" />}
 							label={busyAction === "promote_admin" ? "Promoting…" : "Promote to Admin"}
 							onClick={() => onAction("promote_admin")}
 							disabled={!!busyAction}
@@ -750,7 +750,7 @@ function MemberRow({
 						// versions, so a `title` attribute on a wrapper is
 						// the portable hover-text surface.
 						<span title={`Admin · PL ${member.powerLevel}`} aria-label="Admin" className="inline-flex shrink-0">
-							<Star className="h-3.5 w-3.5 text-amber-400 fill-amber-400/80" />
+							<Crown className="h-3.5 w-3.5 text-amber-400 fill-amber-400/80" />
 						</span>
 					)}
 					{role === "mod" && (
