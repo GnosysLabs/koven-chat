@@ -458,36 +458,29 @@ export function ChatPane({
 		el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
 	}, [draft]);
 	// The actual native scroll container — a plain `<div>` with
-	// `overflow-y: auto`, `flex-direction: column-reverse`, and
-	// `overflow-anchor: auto`.  No virtualization library: the
-	// browser does off-screen culling via `content-visibility: auto`
-	// on each row (set in `renderTimelineRow`), and position
-	// preservation across prepends comes from `overflow-anchor`
-	// combined with column-reverse's natural "anchored to the
-	// bottom" scroll semantics.  See the comments on the JSX below
-	// for the full reasoning.
+	// `overflow-y: auto` + `overflow-anchor: auto`.  No
+	// virtualization library: the browser does off-screen culling
+	// via `content-visibility: auto` on each row (set in
+	// `renderTimelineRow`), and position preservation when older
+	// messages prepend comes from `overflow-anchor: auto`.
 	const scrollRef = useRef<HTMLDivElement | null>(null);
-	// Sentinel elements at the visual bottom and visual top of the
+	// Sentinel elements at the visual top and visual bottom of the
 	// scroll content.  We watch them with `IntersectionObserver`
-	// instead of reading `scrollTop` — `scrollTop` semantics under
-	// `flex-direction: column-reverse` differ between browsers (and
-	// the WebKit/iOS implementation in particular goes NEGATIVE), so
-	// arithmetic on it is a portability trap.  The observers give us
-	// a binary "is this element in the viewport (with margin)?"
-	// signal that works identically everywhere.
+	// instead of reading `scrollTop` — IO gives us a binary "is
+	// this element in the viewport (with margin)?" signal that
+	// avoids the entire class of scrollTop portability traps.
 	//
-	//   - `bottomSentinelRef` — placed as the FIRST child of the
-	//     scroll container, which `column-reverse` puts at the
-	//     visual BOTTOM.  Drives the at-bottom state (Jump-to-newest
-	//     button visibility) and the mobile keyboard-dismiss
-	//     behaviour, and is the scroll target for both the initial
-	//     room mount and the Jump-to-newest button (via
-	//     `scrollIntoView`).
+	//   - `topSentinelRef` — first child of the scroll container.
+	//     The pagination IntersectionObserver watches this and
+	//     fires `loadOlderHistory` when within `TOP_PAGINATION_PX`
+	//     of the viewport top.
 	//
-	//   - `topSentinelRef` — placed as the LAST child of the scroll
-	//     container, which `column-reverse` puts at the visual TOP.
-	//     When the user scrolls within `TOP_PAGINATION_PX` of it (via
-	//     `rootMargin`), pagination fires.
+	//   - `bottomSentinelRef` — last child of the scroll container,
+	//     i.e. the visual bottom (newest message).  Drives the
+	//     at-bottom state (Jump-to-newest button + sticky-bottom
+	//     useLayoutEffect), the mobile keyboard-dismiss behaviour,
+	//     and is the scroll target for both the initial room mount
+	//     and the Jump-to-newest button (via `scrollIntoView`).
 	const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
 	const topSentinelRef = useRef<HTMLDivElement | null>(null);
 	const roomId = room?.id;
@@ -515,10 +508,12 @@ export function ChatPane({
 
 	// ─── Scroll state ──────────────────────────────────────────────
 	// Everything in here drives a single native <div> with
-	// `flex-direction: column-reverse` + `overflow-anchor: auto`.
-	// The browser handles position preservation across prepends; we
-	// only need to track at-bottom for the Jump-to-newest affordance
-	// and fire pagination when the user scrolls near the (visual) top.
+	// `overflow-y: auto` + `overflow-anchor: auto`, in normal
+	// column flow (oldest at top of DOM, newest at the bottom).
+	// `overflow-anchor` handles position preservation when older
+	// messages prepend; we track at-bottom for the Jump-to-newest
+	// affordance + sticky-bottom-on-new-messages, and fire
+	// pagination when the user scrolls near the top.
 	const prevRoomIdRef = useRef<string | undefined>(undefined);
 	const wasInCallViewRef = useRef(false);
 	// At-bottom tracking.  `wasAtBottomRef` is the synchronous read
@@ -546,26 +541,20 @@ export function ChatPane({
 	// re-synced from the ref on room change.
 	const [atStartOfRoom, setAtStartOfRoom] = useState(false);
 
-	// Reverse the messages array for the column-reverse render path.
-	// In `flex-direction: column-reverse`, the FIRST child in DOM is
-	// at the visual BOTTOM of the flex container — and the browser's
-	// scroll-anchoring keeps the scroll position pinned to the
-	// bottom when content is added at the start of the DOM (which is
-	// where new messages go).  Without column-reverse we'd have to
-	// imperatively scrollTop=scrollHeight on every new message and
-	// fight the user's gesture; with it the browser does the right
-	// thing for free.
-	//
-	// Memoised on the messages array reference so we don't burn the
-	// reverse() cost on every render — only when the messages prop
-	// genuinely changes.
-	const reversedMessages = useMemo(() => [...messages].reverse(), [messages]);
+	// Most-recent message id — drives the sticky-bottom layout
+	// effect below.  When this changes AND the user was already at
+	// the bottom, we scroll the new last message into view.  In a
+	// normal-column layout the browser doesn't auto-stick like it
+	// does in column-reverse, so we have to do this ourselves; the
+	// trade is worth it because column-reverse has cross-browser
+	// scroll-direction quirks (Chrome inverts mouse wheel at the
+	// scrollable extremes — what was previously the "auto-scrolling
+	// you back to the beginning" symptom on desktop).
+	const lastMessageId = messages[messages.length - 1]?.id;
 
 	const scrollToBottom = useCallback((behavior: "auto" | "smooth" = "auto") => {
-		// `scrollIntoView` on the bottom sentinel works regardless of
-		// `column-reverse`'s scrollTop semantics — the browser just
-		// brings the element into view, period.  Block "end" puts it
-		// flush at the bottom edge of the scroll viewport.
+		// Brings the bottom sentinel (last child = visual bottom =
+		// newest message) into view at the end of the scroll viewport.
 		bottomSentinelRef.current?.scrollIntoView({ behavior, block: "end" });
 	}, []);
 
@@ -601,8 +590,8 @@ export function ChatPane({
 		wasInCallViewRef.current = isInActiveCallRoom;
 		if (isRoomChange || becameVisible) {
 			// Bring the bottom sentinel (= visual bottom = newest
-			// message) into view.  Avoids the column-reverse scrollTop
-			// portability question entirely.
+			// message) into view.  Works the same way in normal column
+			// layout — scrollIntoView is layout-direction-agnostic.
 			bottomSentinelRef.current?.scrollIntoView({ block: "end" });
 			wasAtBottomRef.current = true;
 			setScrolledUp(false);
@@ -610,14 +599,31 @@ export function ChatPane({
 		}
 	}, [room?.id, isInActiveCallRoom]);
 
+	// Sticky-bottom on new messages.  In normal column layout (oldest
+	// at top of DOM, newest at the bottom) the browser does NOT
+	// auto-stick to the bottom when content is appended — we have to
+	// scroll there ourselves.  Only fires when the user was already
+	// at the bottom (tracked via wasAtBottomRef, updated by the
+	// at-bottom IntersectionObserver below); a user reading history
+	// won't be yanked away from where they're looking.
+	//
+	// useLayoutEffect (not useEffect) so the scroll happens in the
+	// same paint frame as the new row's mount — avoids a one-frame
+	// visual flash where the user is briefly NOT at the new bottom.
+	useLayoutEffect(() => {
+		if (!wasAtBottomRef.current) return;
+		if (!messagesLoaded || isInActiveCallRoom) return;
+		bottomSentinelRef.current?.scrollIntoView({ block: "end" });
+	}, [lastMessageId, messagesLoaded, isInActiveCallRoom]);
+
 	// Pagination — fires when the top sentinel comes within
 	// `TOP_PAGINATION_PX` of the viewport's top edge.  We extend the
 	// observer's viewport upward by that margin, so the sentinel
 	// intersects EARLY (preload before the user hits the actual
 	// top).  Using IntersectionObserver instead of arithmetic on
-	// `scrollTop` makes this work identically across browsers — the
-	// `column-reverse` `scrollTop`-goes-negative gotcha on WebKit
-	// would otherwise break us.
+	// `scrollTop` keeps the pagination logic decoupled from layout
+	// direction — the same code works regardless of which way the
+	// flex flow goes.
 	useEffect(() => {
 		if (!messagesLoaded || isInActiveCallRoom) return;
 		const root = scrollRef.current;
@@ -1297,92 +1303,79 @@ export function ChatPane({
 				<InCallPane roomName={room.name} />
 			) : (<>
 			<div className="relative flex-1 min-h-0 overflow-hidden">
-			{/* Timeline.  A plain native scroll container with two
-			    CSS tricks doing the work that a virtualization
-			    library used to do:
+			{/* Timeline.  A plain native scroll container — no
+			    virtualization library, normal-column layout (oldest
+			    at top of DOM, newest at the bottom).  Three browser
+			    primitives do the work:
 
-			    1. `flex-direction: column-reverse` puts the FIRST
-			       child in DOM at the visual BOTTOM of the container,
-			       and reverses the scroll-anchor semantics: scrollTop
-			       = 0 is the visual bottom (newest message).  When a
-			       new message arrives we render it as the first child
-			       (since `reversedMessages` reverses the array), and
-			       the browser's natural scroll-anchoring keeps the
-			       user at the bottom if they were already there —
-			       without any imperative scrollTo on our side.  When
-			       older messages prepend (pagination), they become
-			       the LAST children visually at the top, ABOVE the
-			       user's viewport — scrollTop unchanged.
+			    1. `overflow-anchor: auto` — when older messages
+			       prepend (pagination), they're added at the START
+			       of the DOM array.  Without intervention this would
+			       push the user's visible content down by the height
+			       of the new messages; overflow-anchor reverses that
+			       by adjusting scrollTop synchronously with layout,
+			       in the compositor, so the user's visible content
+			       stays put.
 
 			    2. `content-visibility: auto` on each row (set in
 			       `renderTimelineRow`) gives us browser-native
 			       virtualization: off-screen rows skip rendering
 			       entirely (no paint, no layout cost) but still take
-			       `containIntrinsicSize` worth of space so scroll
-			       height is correct.  This is the iOS 18+ /
-			       Chromium-built-in equivalent of what react-virtuoso
-			       and TanStack Virtual were doing, with two big
-			       advantages: the browser's compositor never has to
-			       fight a JavaScript engine that's recomputing
-			       positions (so iOS momentum scroll is buttery), and
-			       there's no measurement-then-compensate loop that
-			       can yank the user against their gesture.
+			       their `containIntrinsicSize` of space so scroll
+			       height stays correct.
 
-			    Combined: scroll position preservation, sticky-bottom,
-			    and off-screen culling all come from the browser. */}
+			    3. Two `IntersectionObserver`s on sentinel divs at
+			       the top and bottom drive pagination (top sentinel)
+			       and at-bottom state (bottom sentinel) without any
+			       scrollTop arithmetic.
+
+			    Sticky-bottom on new messages is the one piece NOT
+			    free from the browser in normal column — see the
+			    useLayoutEffect on `lastMessageId` above for the
+			    explicit scrollIntoView.
+
+			    We tried `flex-direction: column-reverse` previously
+			    to get sticky-bottom for free, but Chrome on desktop
+			    has a wheel-event quirk at the scrollable extremes
+			    that manifested as "auto-scrolling back to the
+			    beginning when trying to scroll forward from the
+			    oldest message" — not worth the elegance. */}
 			{messagesLoaded && messages.length > 0 ? (
 				<div
 					ref={scrollRef}
 					className="absolute inset-0 overflow-y-auto overflow-x-hidden px-4"
 					style={{
-						display: "flex",
-						flexDirection: "column-reverse",
 						WebkitOverflowScrolling: "touch",
 						overflowAnchor: "auto",
 						touchAction: "pan-y",
 					}}
 				>
-					{/* Bottom sentinel — the FIRST child in DOM order,
-					    which `column-reverse` puts at the visual
-					    BOTTOM of the scroll content.  The
-					    IntersectionObserver in the at-bottom useEffect
-					    watches this element; its visibility tells us
-					    whether the user is at the newest message. */}
-					<div ref={bottomSentinelRef} aria-hidden style={{ height: 1, flexShrink: 0 }} />
-					{reversedMessages.map((m, reversedIndex) => {
-						// The data index for date-separator + group-
-						// continues math is the index in the ORIGINAL
-						// (oldest-first) array — O(1) from the
-						// reversed-array position.
-						const arrayIndex = messages.length - 1 - reversedIndex;
-						return renderTimelineRow(m, arrayIndex);
-					})}
+					{/* Top sentinel — first child = visual top of the
+					    scroll content.  The pagination
+					    IntersectionObserver watches this element;
+					    visibility within TOP_PAGINATION_PX of the
+					    viewport top fires `loadOlderHistory`. */}
+					<div ref={topSentinelRef} aria-hidden style={{ height: 1 }} />
 					{/* Discord-style top-of-history indicator.
-					    Lives IN-FLOW at the visual top (i.e. the last
-					    child in DOM order, which column-reverse puts
-					    at the top of the scroll content).  Three
-					    states:
+					    Lives in-flow at the visual top, just below
+					    the top sentinel.  Three states:
 
 					    1. `loadingMore` — pulsing favicon throbber.
 					       Takes physical scroll space so the user
-					       genuinely cannot scroll past it until the
-					       fetch resolves; the result feels like a
-					       gentle "pause" at the top while older
-					       history streams in.  When the fetch
-					       commits with new events they prepend
-					       ABOVE the user's viewport (overflow-anchor
-					       keeps the visible content stable), and the
-					       throbber dismounts.
+					       can see the pagination is in flight;
+					       prepended messages slide in above when
+					       the fetch commits (overflow-anchor keeps
+					       visible content stable), and the throbber
+					       dismounts.
 
-					    2. `atStartOfRoom` (no more history) — a
-					       static "Beginning of #room" line, again at
-					       the visual top, so the user can see they've
-					       actually reached the start rather than
-					       wondering if something silently broke.
+					    2. `atStartOfRoom` — static "Beginning of
+					       #room" line, so the user can see they've
+					       actually reached the start.
 
-					    3. Neither — nothing rendered; auto-pagination
-					       will fire as soon as the user gets near
-					       enough to the visual top (see TOP_PAGINATION_PX). */}
+					    3. Neither — nothing rendered; auto-
+					       pagination will fire as soon as the
+					       top sentinel comes within
+					       TOP_PAGINATION_PX of the viewport top. */}
 					{loadingMore && (
 						<div
 							className="flex items-center justify-center py-4"
@@ -1402,14 +1395,15 @@ export function ChatPane({
 							Beginning of {room.kind === "dm" ? "conversation" : `#${room.name}`}
 						</div>
 					)}
-					{/* Top sentinel — the LAST child in DOM order,
-					    which `column-reverse` puts at the visual TOP
-					    of the scroll content (just past the throbber
-					    or beginning-of-room indicator).  The
-					    pagination IntersectionObserver watches this
-					    element; visibility within TOP_PAGINATION_PX of
-					    the viewport top fires `loadOlderHistory`. */}
-					<div ref={topSentinelRef} aria-hidden style={{ height: 1, flexShrink: 0 }} />
+					{messages.map((m, index) => renderTimelineRow(m, index))}
+					{/* Bottom sentinel — last child = visual bottom
+					    of the scroll content (= newest message).
+					    The at-bottom IntersectionObserver watches
+					    this for stick-to-bottom + Jump-to-newest
+					    visibility, and the room-change /
+					    new-message effects both call
+					    scrollIntoView on it. */}
+					<div ref={bottomSentinelRef} aria-hidden style={{ height: 1 }} />
 				</div>
 			) : !messagesLoaded ? null : (
 				isMobileShell ? (
