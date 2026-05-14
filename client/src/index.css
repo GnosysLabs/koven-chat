@@ -1010,6 +1010,29 @@
  */
 
 /* ───────────────────────────────────────────────────────────────────
+   Per-message hover toolbar visibility.  The toolbar is always
+   mounted (so React doesn't commit on hover and stall scroll on
+   Tauri WebViews — see the comment near the document-level
+   mousemove listener in ChatPane.tsx for the full rationale).  By
+   default it's invisible and click-through; we reveal it when the
+   row carries either:
+     - `data-row-hovered` — set imperatively on the hovered row's
+       `[data-message-id]` wrapper by ChatPane's mousemove handler,
+     - `data-actions-locked="true"` — set from React when an inline
+       dialog or popover (react picker, delete confirm, admin
+       redact) is open on that row, so the toolbar stays visible
+       after the cursor leaves to interact with the dialog.
+   The selector is a descendant match so it applies to whichever
+   `.actions-slot` wrapper this row uses (emote-inline or normal-
+   bubble slot).
+   ─────────────────────────────────────────────────────────────────── */
+[data-row-hovered] .actions-slot,
+[data-actions-locked="true"] .actions-slot {
+	opacity: 1;
+	pointer-events: auto;
+}
+
+/* ───────────────────────────────────────────────────────────────────
    Holographic Founder badge — see components/FounderBadge.tsx.
    Iridescent gradient that pans across the chip via a CSS keyframe
    animation, giving a slow holographic shimmer.  Pure CSS, no

@@ -306,14 +306,6 @@ const BOTTOM_STICKY_PX = 100;
 // the button doesn't flicker in and out near the bottom edge.
 const JUMP_TO_NEWEST_PX = 200;
 
-// Estimated row height for `contain-intrinsic-size`.  This is the
-// browser's placeholder height for messages whose actual content
-// hasn't been rendered yet (via `content-visibility: auto`).  Set
-// generously high (close to a typical media row) so off-screen items
-// take up plausible space in the scrollbar — the rendered height
-// becomes correct as soon as the row scrolls into view.
-const ROW_INTRINSIC_HEIGHT_PX = 120;
-
 // Cap for the multi-attachment composer.  10 mirrors Discord's
 // per-message attachment limit and stops a "select all 250 files in
 // this folder" mistake from spamming the room with 250 events.
@@ -563,14 +555,6 @@ export function ChatPane({
 	// genuinely changes.
 	const reversedMessages = useMemo(() => [...messages].reverse(), [messages]);
 
-	// Most-recent message id — drives the desktop-only sticky-bottom
-	// useLayoutEffect below.  Mobile's column-reverse layout gets
-	// sticky-bottom for free from the browser's scroll anchoring;
-	// desktop renders in normal column flow and has to scroll
-	// imperatively when a new message arrives AND the user was
-	// already at the bottom.
-	const lastMessageId = messages[messages.length - 1]?.id;
-
 	const scrollToBottom = useCallback((behavior: "auto" | "smooth" = "auto") => {
 		// `scrollIntoView` on the bottom sentinel works regardless of
 		// `column-reverse`'s scrollTop semantics — the browser just
@@ -601,43 +585,24 @@ export function ChatPane({
 		return true;
 	}, [onLoadMoreHistory, room?.id]);
 
-	// Reset scroll position on room change / call-view exit.  In
-	// column-reverse, scrollTop=0 puts us at the visual bottom
-	// (newest message).
+	// Reset at-bottom tracking on room change / call-view exit.  In
+	// column-reverse layout `scrollTop=0` IS the visual bottom — the
+	// freshly-mounted scroll container starts at the bottom by
+	// default, so we don't have to imperatively scroll there.  We
+	// just have to make sure the at-bottom state (wasAtBottomRef,
+	// scrolledUp, atStartOfRoom) reflects that until the
+	// IntersectionObserver below has had a chance to fire.
 	useLayoutEffect(() => {
 		const isRoomChange = prevRoomIdRef.current !== room?.id;
 		const becameVisible = wasInCallViewRef.current && !isInActiveCallRoom;
 		prevRoomIdRef.current = room?.id;
 		wasInCallViewRef.current = isInActiveCallRoom;
 		if (isRoomChange || becameVisible) {
-			// Bring the bottom sentinel (= visual bottom = newest
-			// message) into view.  Works for both mobile (column-
-			// reverse) and desktop (normal column) — scrollIntoView
-			// is layout-direction-agnostic.
-			bottomSentinelRef.current?.scrollIntoView({ block: "end" });
 			wasAtBottomRef.current = true;
 			setScrolledUp(false);
 			setAtStartOfRoom(noMoreHistoryRef.current.has(room?.id ?? ""));
 		}
 	}, [room?.id, isInActiveCallRoom]);
-
-	// Desktop-only sticky-bottom.  In normal column flow the browser
-	// does NOT auto-stick to the bottom when content appends — when
-	// a new message arrives we have to scroll there ourselves.  Only
-	// fires when the user was already at the bottom (tracked via
-	// `wasAtBottomRef`, updated by the at-bottom IntersectionObserver
-	// below); a desktop user reading history doesn't get yanked.
-	//
-	// Skipped on mobile: column-reverse's natural scroll-anchoring at
-	// the visual bottom (first child in DOM) already does this for
-	// free, and the user explicitly asked NOT to change the mobile
-	// path since it was working flawlessly.
-	useLayoutEffect(() => {
-		if (isMobileShell) return;
-		if (!wasAtBottomRef.current) return;
-		if (!messagesLoaded || isInActiveCallRoom) return;
-		bottomSentinelRef.current?.scrollIntoView({ block: "end" });
-	}, [lastMessageId, messagesLoaded, isInActiveCallRoom]);
 
 	// Pagination — fires when the top sentinel comes within
 	// `TOP_PAGINATION_PX` of the viewport's top edge.  We extend the
@@ -788,6 +753,19 @@ export function ChatPane({
 
 	// Global hover tracking for the message-action toolbar.
 	//
+	// Why not React state: every desktop mousemove inside the chat
+	// pane would call `setState` → React commit → re-render every
+	// visible MessageRow that carries an `isHovered` prop.  On Tauri
+	// (WKWebView / WebView2 / WebKitGTK), scroll and JS share the
+	// main thread, so a state update during a scroll frame stalls
+	// the scroll.  On iOS Capacitor the listener never fires (touch
+	// has no hover), but desktop users were paying the full re-render
+	// cost on every cursor-pixel of trackpad / mousewheel scrolling.
+	// Result: scroll felt janky on desktop, smooth on mobile, same
+	// SPA.  We now write hover state directly to the DOM via a
+	// `data-row-hovered` attribute on the hovered row's wrapper, and
+	// drive visibility from CSS.  React never re-renders for hover.
+	//
 	// Failed approaches and why:
 	//   - CSS `:hover` (Tailwind group-hover): unreliable in WKWebView
 	//     when a Radix Popover opens/closes inside the row — the
@@ -803,33 +781,43 @@ export function ChatPane({
 	//   - Native pointermove on the scroll container: still missed
 	//     events when cursor crossed out of the container quickly.
 	//
-	// What works: native `mousemove` listener on `document`.  Document-
-	// level events fire most reliably in every WKWebView build because
-	// they're the lowest-level mouse handler the browser exposes — the
-	// quirks above are about per-element bubbling/capture, not about
-	// document seeing mousemove at all.  On every move we hit-test
-	// `e.target` for the nearest `[data-message-id]` ancestor; if
-	// none, the cursor is outside any message and we clear the state.
-	// `mouseleave` on the document handles the "cursor left the window
-	// entirely" case (e.g. moved to the macOS title bar).
+	// What works: native `mousemove` listener on `document` plus
+	// imperative DOM attribute toggling.  Document-level events fire
+	// most reliably in every WKWebView build (the quirks above are
+	// about per-element bubbling/capture, not about document seeing
+	// mousemove at all).  `mouseleave` on the document handles the
+	// "cursor left the window entirely" case (e.g. moved to the
+	// macOS title bar).
 	//
 	// `mousemove` instead of `pointermove`: mouse events are the OG
 	// and are more universally implemented in older WebKit branches
 	// than pointer events.
-	const [hoveredMessageId, setHoveredMessageId] = useState<EventId | null>(null);
+	const hoveredRowElRef = useRef<HTMLElement | null>(null);
 	useEffect(() => {
+		const setHovered = (el: HTMLElement | null) => {
+			const prev = hoveredRowElRef.current;
+			if (prev === el) return;
+			if (prev) prev.removeAttribute("data-row-hovered");
+			if (el) el.setAttribute("data-row-hovered", "true");
+			hoveredRowElRef.current = el;
+		};
 		const onMove = (e: MouseEvent) => {
 			const t = e.target as HTMLElement | null;
-			const msgEl = t?.closest("[data-message-id]");
-			const id = (msgEl?.getAttribute("data-message-id") ?? null) as EventId | null;
-			setHoveredMessageId(prev => (prev === id ? prev : id));
+			const msgEl = (t?.closest("[data-message-id]") ?? null) as HTMLElement | null;
+			setHovered(msgEl);
 		};
-		const onLeave = () => setHoveredMessageId(null);
-		document.addEventListener("mousemove", onMove);
-		document.addEventListener("mouseleave", onLeave);
+		const onLeave = () => setHovered(null);
+		document.addEventListener("mousemove", onMove, { passive: true });
+		document.addEventListener("mouseleave", onLeave, { passive: true });
 		return () => {
 			document.removeEventListener("mousemove", onMove);
 			document.removeEventListener("mouseleave", onLeave);
+			// Clear any lingering attribute on unmount so an orphan
+			// `[data-row-hovered]` doesn't leak into the next mount.
+			if (hoveredRowElRef.current) {
+				hoveredRowElRef.current.removeAttribute("data-row-hovered");
+				hoveredRowElRef.current = null;
+			}
 		};
 	}, []);
 
@@ -1032,20 +1020,25 @@ export function ChatPane({
 		}
 	}
 
-	// Renders a single timeline row.  The outer wrapper carries the
-	// content-visibility + intrinsic-size hint that gives us native
-	// browser virtualization: off-screen rows skip rendering entirely
-	// (no paint, no layout cost), but still take up
-	// `ROW_INTRINSIC_HEIGHT_PX` so the scroll height stays correct.
-	// As a row scrolls into view it gets rendered for real; as it
-	// scrolls out it goes dormant again.  No JS measurement loop, no
-	// firstItemIndex math — the browser handles it.
+	// Renders a single timeline row.
 	//
-	// The outer wrapper also carries `data-message-id` for both the
+	// We deliberately do NOT use `content-visibility: auto` here.
+	// Matrix initial-sync brings ~30-200 events and pagination is
+	// bounded, so all rows are laid out by default; the browser
+	// handles native scroll without measurement loops.  An earlier
+	// version DID set `content-visibility: auto` + a 120px intrinsic-
+	// size placeholder for soft virtualization, but on macOS WKWebView
+	// (Tauri desktop) that caused visible repaint ghosts mid-scroll —
+	// the placeholder height differs from the actual row height, so
+	// every freshly-revealed row briefly painted twice (estimate then
+	// real).  Leaving rows always-laid-out trades a small upfront
+	// layout cost for consistent, ghost-free scrolling.
+	//
+	// The outer wrapper carries `data-message-id` for both the
 	// permalink scroll-to-event lookup (querySelector by message id)
 	// and as a backstop for the document-level mousemove hover
 	// hit-test (MessageRow sets it internally too, but a duplicate
-	// on the wrapper is harmless and helps when the row is dormant).
+	// on the wrapper is harmless).
 	function renderTimelineRow(m: Message, index: number) {
 		const prev = index > 0 ? messages[index - 1] : undefined;
 		const sameGroup =
@@ -1060,10 +1053,6 @@ export function ChatPane({
 				data-index={index}
 				data-message-id={m.id}
 				className="-mx-4 px-4"
-				style={{
-					contentVisibility: "auto",
-					containIntrinsicSize: `auto ${ROW_INTRINSIC_HEIGHT_PX}px`,
-				}}
 			>
 				{separator && <DateSeparator label={separator} />}
 				<MessageRow
@@ -1102,7 +1091,6 @@ export function ChatPane({
 					onFlag={(category, rationale) => onFlag(m.id, category, rationale)}
 					isBot={!!botMxids?.has(m.sender)}
 					isOwnedBot={!!myOwnedBotMxids?.has(m.sender)}
-					isHovered={hoveredMessageId === m.id}
 					isFlashing={flashingEventId === m.id}
 					onToggleReactionPill={(reaction) => {
 						if (reaction.myReactionId) onUnreact(reaction);
@@ -1311,128 +1299,73 @@ export function ChatPane({
 				<InCallPane roomName={room.name} />
 			) : (<>
 			<div className="relative flex-1 min-h-0 overflow-hidden">
-			{/* Timeline.  A plain native scroll container with two
-			    CSS tricks doing the work that a virtualization
-			    library used to do:
-
-			    1. `flex-direction: column-reverse` puts the FIRST
-			       child in DOM at the visual BOTTOM of the container,
-			       and reverses the scroll-anchor semantics: scrollTop
-			       = 0 is the visual bottom (newest message).  When a
-			       new message arrives we render it as the first child
-			       (since `reversedMessages` reverses the array), and
-			       the browser's natural scroll-anchoring keeps the
-			       user at the bottom if they were already there —
-			       without any imperative scrollTo on our side.  When
-			       older messages prepend (pagination), they become
-			       the LAST children visually at the top, ABOVE the
-			       user's viewport — scrollTop unchanged.
-
-			    2. `content-visibility: auto` on each row (set in
-			       `renderTimelineRow`) gives us browser-native
-			       virtualization: off-screen rows skip rendering
-			       entirely (no paint, no layout cost) but still take
-			       `containIntrinsicSize` worth of space so scroll
-			       height is correct.  This is the iOS 18+ /
-			       Chromium-built-in equivalent of what react-virtuoso
-			       and TanStack Virtual were doing, with two big
-			       advantages: the browser's compositor never has to
-			       fight a JavaScript engine that's recomputing
-			       positions (so iOS momentum scroll is buttery), and
-			       there's no measurement-then-compensate loop that
-			       can yank the user against their gesture.
-
-			    Combined: scroll position preservation, sticky-bottom,
-			    and off-screen culling all come from the browser. */}
+			{/* Timeline.  A plain native scroll container relying on
+			    one CSS trick: `flex-direction: column-reverse`
+			    puts the FIRST child in DOM at the visual BOTTOM of
+			    the container, and reverses the scroll-anchor
+			    semantics so scrollTop=0 is the visual bottom
+			    (newest message).  When a new message arrives we
+			    render it as the first child (since
+			    `reversedMessages` reverses the array) and the
+			    browser's natural scroll-anchoring keeps the user
+			    at the bottom if they were already there — no
+			    imperative scrollTo on our side.  When older
+			    messages prepend (pagination), they become the LAST
+			    children visually at the top, ABOVE the user's
+			    viewport — scrollTop unchanged. */}
 			{messagesLoaded && messages.length > 0 ? (
-				isMobileShell ? (
-					// ─── Mobile path: column-reverse ─────────────────────
-					// First child in DOM = visual bottom (newest).
-					// Browser's natural scroll-anchoring keeps the user
-					// at the bottom on new messages for free.
-					<div
-						ref={scrollRef}
-						className="absolute inset-0 overflow-y-auto overflow-x-hidden px-4 pb-3"
-						style={{
-							display: "flex",
-							flexDirection: "column-reverse",
-							WebkitOverflowScrolling: "touch",
-							overflowAnchor: "auto",
-							touchAction: "pan-y",
-						}}
-					>
-						<div ref={bottomSentinelRef} aria-hidden style={{ height: 1, flexShrink: 0 }} />
-						{reversedMessages.map((m, reversedIndex) => {
-							const arrayIndex = messages.length - 1 - reversedIndex;
-							return renderTimelineRow(m, arrayIndex);
-						})}
-						{loadingMore && (
-							<div
-								className="flex items-center justify-center py-4"
-								aria-live="polite"
-								aria-label="Loading older messages"
-							>
-								<img
-									src="/favicon.png"
-									alt=""
-									className="size-8 animate-pulse"
-									style={{ filter: "drop-shadow(0 0 16px rgba(0,0,0,0.4))" }}
-								/>
-							</div>
-						)}
-						{!loadingMore && atStartOfRoom && (
-							<div className="flex items-center justify-center py-4 text-xs text-muted-foreground">
-								Beginning of {room.kind === "dm" ? "conversation" : `#${room.name}`}
-							</div>
-						)}
-						<div ref={topSentinelRef} aria-hidden style={{ height: 1, flexShrink: 0 }} />
-					</div>
-				) : (
-					// ─── Desktop path: normal column ─────────────────────
-					// Oldest at the top of DOM, newest at the bottom.
-					// Identical to the mobile path in every way except
-					// the layout direction — required because Chrome's
-					// wheel-event handling at the scrollable extremes
-					// in column-reverse manifested as "scrolling back
-					// toward newer messages from the start of history
-					// keeps yanking you back to the start."
-					//
-					// `overflow-anchor: auto` still preserves the user's
-					// visible position when older messages prepend, and
-					// the desktop sticky-bottom useLayoutEffect above
-					// handles the "new message arrived while at the
-					// bottom" case that column-reverse got for free.
-					<div
-						ref={scrollRef}
-						className="absolute inset-0 overflow-y-auto overflow-x-hidden px-4 pb-3"
-						style={{
-							overflowAnchor: "auto",
-						}}
-					>
-						<div ref={topSentinelRef} aria-hidden style={{ height: 1 }} />
-						{loadingMore && (
-							<div
-								className="flex items-center justify-center py-4"
-								aria-live="polite"
-								aria-label="Loading older messages"
-							>
-								<img
-									src="/favicon.png"
-									alt=""
-									className="size-8 animate-pulse"
-									style={{ filter: "drop-shadow(0 0 16px rgba(0,0,0,0.4))" }}
-								/>
-							</div>
-						)}
-						{!loadingMore && atStartOfRoom && (
-							<div className="flex items-center justify-center py-4 text-xs text-muted-foreground">
-								Beginning of {room.kind === "dm" ? "conversation" : `#${room.name}`}
-							</div>
-						)}
-						{messages.map((m, index) => renderTimelineRow(m, index))}
-						<div ref={bottomSentinelRef} aria-hidden style={{ height: 1 }} />
-					</div>
-				)
+				// ─── Unified column-reverse path (mobile + desktop) ───────
+				// `flex-direction: column-reverse` puts the FIRST child in
+				// DOM at the visual BOTTOM, and the browser's
+				// `overflow-anchor: auto` keeps the user pinned to the
+				// bottom when new messages prepend.  No imperative
+				// scrollIntoView, no "stick to bottom" logic, no initial-
+				// scroll trick — the browser does all three for free.
+				//
+				// Tradeoff: there have been reports of Chromium-family
+				// wheel-event quirks at the scrollable extremes in
+				// column-reverse containers.  If users on Windows
+				// WebView2 hit one, branch this path back to a normal-
+				// column variant for `__KOVEN_PLATFORM__ === "windows"`
+				// specifically; macOS WKWebView, Linux WebKitGTK, and
+				// iOS WKWebView all handle this layout cleanly.
+				<div
+					ref={scrollRef}
+					className="absolute inset-0 overflow-y-auto overflow-x-hidden px-4 pb-3"
+					style={{
+						display: "flex",
+						flexDirection: "column-reverse",
+						WebkitOverflowScrolling: "touch",
+						overflowAnchor: "auto",
+						touchAction: "pan-y",
+					}}
+				>
+					<div ref={bottomSentinelRef} aria-hidden style={{ height: 1, flexShrink: 0 }} />
+					{reversedMessages.map((m, reversedIndex) => {
+						const arrayIndex = messages.length - 1 - reversedIndex;
+						return renderTimelineRow(m, arrayIndex);
+					})}
+					{loadingMore && (
+						<div
+							className="flex items-center justify-center py-4"
+							aria-live="polite"
+							aria-label="Loading older messages"
+						>
+							<img
+								src="/favicon.png"
+								alt=""
+								className="size-8 animate-pulse"
+								style={{ filter: "drop-shadow(0 0 16px rgba(0,0,0,0.4))" }}
+							/>
+						</div>
+					)}
+					{!loadingMore && atStartOfRoom && (
+						<div className="flex items-center justify-center py-4 text-xs text-muted-foreground">
+							Beginning of {room.kind === "dm" ? "conversation" : `#${room.name}`}
+						</div>
+					)}
+					<div ref={topSentinelRef} aria-hidden style={{ height: 1, flexShrink: 0 }} />
+				</div>
 			) : !messagesLoaded ? (
 				// Initial timeline still landing — show the same pulsing
 				// favicon throbber the pagination loader uses, sized up
@@ -1952,7 +1885,7 @@ export function ChatPane({
 function MessageRowComponent({
 	message, avatarMxc, continuesGroup, isFirst, flaggable, roomEncrypted,
 	reactions, flags, onReact, onReply, onFlag, onToggleReactionPill, isBot,
-	isOwnedBot, isHovered, isFlashing, onDelete, onAdminRedact,
+	isOwnedBot, isFlashing, onDelete, onAdminRedact,
 	isDm, receiptsVersion, memberAvatars, memberNames, mentionsViewer, onMentionClick, botMxids, serviceMxids,
 	pollAggregate, viewerUserId, onPollVote, onPollEnd,
 	roomId, onSendDmToSender, onBlockSender,
@@ -1990,11 +1923,6 @@ function MessageRowComponent({
 	onReply(): void;
 	onFlag(category: FlagCategory, rationale?: string): void | Promise<void>;
 	onToggleReactionPill(reaction: ReactionAggregate): void;
-	// Authoritative "is the cursor currently over this row?" signal,
-	// computed in ChatPane via a single native pointermove listener
-	// on the scroll container.  See the comment there for why this
-	// has to live above the row instead of using per-row React events.
-	isHovered: boolean;
 	// True while the permalink-scroll highlight pulse is active on
 	// this specific row.  Drives a 2-second tinted background +
 	// left-accent border so the user sees where they landed after
@@ -2145,34 +2073,40 @@ function MessageRowComponent({
 		pointer: { touch: true },
 	});
 	// Popover state stays local to the row — only relevant for THIS
-	// row's React picker.  Combined with the parent-supplied
-	// `isHovered` to keep the toolbar visible while the user picks
-	// an emoji (otherwise the toolbar would fade out the moment they
-	// move the cursor up to the popover content).
+	// row's React picker.  Exposed via `actionsLocked` below so the
+	// toolbar stays visible after the cursor leaves the row to click
+	// inside the popover.
 	const [reactOpen, setReactOpen] = useState(false);
 	// Same pattern for the delete-confirmation dialog: the trash
-	// button lives inside the hover-gated toolbar, but the dialog
+	// button lives inside the hover-revealed toolbar, but the dialog
 	// itself MUST stay mounted while open even though the user's
 	// cursor has moved off the message row to interact with it.
 	// First attempt put the Dialog inside MessageActions, which
 	// unmounted the moment the row un-hovered (making the dialog
 	// "pop up then disappear after a second"); lifting the open
-	// state to the row level + including it in `showActions` keeps
-	// both the toolbar and the dialog rendered until the user
+	// state to the row level + folding it into `actionsLocked` keeps
+	// both the toolbar AND the dialog rendered until the user
 	// commits or cancels.
 	const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 	// Admin-redact dialog state lives at the row level for the same
-	// reason as deleteDialogOpen: MessageActions is hover-gated, so a
-	// confirmation Dialog mounted inside it would unmount the moment
-	// the user moved their cursor off the row.  Lifting it to the row
-	// + including it in `showActions` keeps the toolbar AND the
-	// dialog visible until the operator commits or cancels.
+	// reason as deleteDialogOpen: the toolbar fades on hover-out, so
+	// a confirmation Dialog mounted inside it would unmount the moment
+	// the user moved their cursor off the row.  Lifting it here + into
+	// `actionsLocked` keeps the toolbar AND the dialog visible until
+	// the operator commits or cancels.
 	const [adminRedactDialogOpen, setAdminRedactDialogOpen] = useState(false);
 	// Hover toolbar is desktop-only — on touch, :hover sticks after
 	// any tap and the toolbar floats permanently, looking broken.
 	// Mobile users get the same actions via long-press (handled by
 	// the touch handlers below) which opens MessageContextMenu.
-	const showActions = !isMobileShell && (isHovered || reactOpen || deleteDialogOpen || adminRedactDialogOpen);
+	//
+	// `actionsLocked` keeps the toolbar visible regardless of hover
+	// when an inline dialog or popover is open.  Hover itself drives
+	// visibility via a CSS rule keyed on `[data-row-hovered]` set on
+	// this row's outer wrapper by the document-level mousemove
+	// listener in ChatPane (no React state involved, so scrolling
+	// over rows on desktop doesn't trigger re-renders).
+	const actionsLocked = !isMobileShell && (reactOpen || deleteDialogOpen || adminRedactDialogOpen);
 	const handleDelete = onDelete ? () => setDeleteDialogOpen(true) : undefined;
 	const handleAdminRedact = onAdminRedact
 		? () => setAdminRedactDialogOpen(true)
@@ -2246,6 +2180,7 @@ function MessageRowComponent({
 		return (
 			<div
 				data-message-id={message.id}
+				data-actions-locked={actionsLocked ? "true" : undefined}
 				className={cn("flex gap-3 items-start", rowPadding, mentionHighlight, flashHighlight)}
 			>
 				<AvatarSlot
@@ -2257,17 +2192,25 @@ function MessageRowComponent({
 			/>
 				<div className="flex-1 min-w-0 pt-1 text-sm italic text-muted-foreground flex items-center gap-2">
 					<span>* <span className="text-foreground/80">{message.senderDisplayName}</span> {message.text}</span>
-					{showActions && (
-						<MessageActions
-							onReact={onReact}
-							onReply={onReply}
-							onFlagClick={() => setFlagDialogOpen(true)}
-							showFlag={canFlag}
-							onDelete={handleDelete}
-							onAdminRedact={handleAdminRedact}
-							reactOpen={reactOpen}
-							onReactOpenChange={setReactOpen}
-						/>
+					{/* Always-mounted to avoid React commits on hover —
+					    visibility is driven by the row's data-row-hovered
+					    attribute via CSS (see .actions-slot rule in
+					    index.css).  See the comment near the document-
+					    level mousemove listener in ChatPane for why hover
+					    state lives in the DOM, not React. */}
+					{!isMobileShell && (
+						<div className="actions-slot opacity-0 pointer-events-none">
+							<MessageActions
+								onReact={onReact}
+								onReply={onReply}
+								onFlagClick={() => setFlagDialogOpen(true)}
+								showFlag={canFlag}
+								onDelete={handleDelete}
+								onAdminRedact={handleAdminRedact}
+								reactOpen={reactOpen}
+								onReactOpenChange={setReactOpen}
+							/>
+						</div>
 					)}
 				</div>
 				{canFlag && (
@@ -2298,6 +2241,7 @@ function MessageRowComponent({
 	return (
 		<div
 			data-message-id={message.id}
+			data-actions-locked={actionsLocked ? "true" : undefined}
 			className={cn(
 				"flex gap-3 items-start",
 				rowPadding,
@@ -2495,38 +2439,37 @@ function MessageRowComponent({
 								serviceMxids={serviceMxids}
 							/>
 						)}
-						{/* Reserved slot for the action toolbar.  Always
-						    present (even when not hovered) so the row's
-						    height stays constant and hovering doesn't
-						    push the message below down — gives the
-						    timeline a steady gutter between bubbles
-						    that absorbs the toolbar's vertical space.
-						    h-8 matches MessageActions' button row height
-						    (h-7 + padding); when showActions is false
-						    the slot stays mounted but empty.  Width is
-						    deliberately fluid so popovers from the
-						    react-picker / delete-confirm don't get
-						    constrained on first paint. */}
-						{/* On desktop the slot reserves h-8 so hovering
-						    doesn't shift layout.  On mobile the
-						    toolbar never renders (long-press menu
-						    instead), so the empty slot would just
-						    bloat every row by 32px — drop it. */}
+						{/* Action toolbar slot.  Always mounted (even when
+						    not hovered) so the row's height stays
+						    constant and React never re-renders the row
+						    on hover.  Visibility is driven by the row's
+						    `data-row-hovered` attribute (set by the
+						    document-level mousemove listener in
+						    ChatPane) plus `data-actions-locked` (set by
+						    actionsLocked above) via the .actions-slot
+						    CSS rule in index.css.  Default state is
+						    opacity-0 + pointer-events-none so the
+						    invisible toolbar can't intercept clicks.
+						    h-8 matches MessageActions' button row
+						    height (h-7 + padding) so the reserved
+						    gutter between bubbles stays consistent
+						    whether the toolbar is visible or not.
+						    Mobile gets the actions via long-press
+						    menu instead — the slot would bloat every
+						    mobile row by 32px so we skip it. */}
 						{!isMobileShell && (
-							<div className="min-h-8 flex items-start">
-								{showActions && (
-									<MessageActions
-										onReact={onReact}
-										onReply={onReply}
-										onFlagClick={() => setFlagDialogOpen(true)}
-										showFlag={canFlag}
-										onDelete={handleDelete}
-										onAdminRedact={handleAdminRedact}
-										reactOpen={reactOpen}
-										onReactOpenChange={setReactOpen}
-										className="shrink-0"
-									/>
-								)}
+							<div className="actions-slot min-h-8 flex items-start opacity-0 pointer-events-none">
+								<MessageActions
+									onReact={onReact}
+									onReply={onReply}
+									onFlagClick={() => setFlagDialogOpen(true)}
+									showFlag={canFlag}
+									onDelete={handleDelete}
+									onAdminRedact={handleAdminRedact}
+									reactOpen={reactOpen}
+									onReactOpenChange={setReactOpen}
+									className="shrink-0"
+								/>
 							</div>
 						)}
 					</div>
@@ -2641,7 +2584,6 @@ function messageRowPropsEqual(
 	if (prev.flags !== next.flags) return false;
 	if (prev.isBot !== next.isBot) return false;
 	if (prev.isOwnedBot !== next.isOwnedBot) return false;
-	if (prev.isHovered !== next.isHovered) return false;
 	if (prev.isFlashing !== next.isFlashing) return false;
 	if (prev.isDm !== next.isDm) return false;
 	if (prev.receiptsVersion !== next.receiptsVersion) return false;
