@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
 	MatrixTransport,
+	withTimeout,
 	type MatrixCredentials,
 	type SyncState,
 } from "@/lib/matrix";
@@ -965,9 +966,14 @@ export default function App() {
 		const startWithTeardownAwait = async () => {
 			if (previousTeardownRef.current) {
 				try {
-					await previousTeardownRef.current;
+					// Cap the wait on the previous transport's teardown.  A
+					// jammed stop() (stuck IDB handle, another tab) must
+					// not block the new login indefinitely — the new
+					// transport's own device-ownership wipe is the real
+					// safety net, so on timeout we log and proceed.
+					await withTimeout(previousTeardownRef.current, 10_000, "previousTeardown");
 				} catch (err) {
-					console.warn("app.boot: previous teardown rejected", err);
+					console.warn("app.boot: previous teardown await failed", err);
 				}
 				previousTeardownRef.current = null;
 			}
@@ -1031,6 +1037,15 @@ export default function App() {
 				if (!cancelled) setEncState(status);
 			} catch (err) {
 				if (cancelled) return;
+				const msg = err instanceof Error ? err.message : String(err);
+				// A timeout means a crypto / account-data call hung
+				// rather than failed fast.  Degrading to the unlock
+				// sheet would just drop the user into a flow that
+				// hits the same stuck call — re-throw so the outer
+				// .catch surfaces the bootError recovery UI instead.
+				if (/timed out after/.test(msg)) {
+					throw err;
+				}
 				console.warn("encryptionStatus probe failed", err);
 				setEncState("needs-unlock");
 			} finally {
@@ -1059,11 +1074,15 @@ export default function App() {
 			console.timeEnd("app.boot: transport.start → encState");
 			const msg = e instanceof Error ? e.message : String(e);
 			setBootError(msg);
-			// Surface the wipe-blocked recovery affordance whenever the
-			// boot failure traces back to a stuck rust-crypto IDB wipe.
-			// Sign-out can't unblock it (sign-out itself touches IDB),
-			// so the only working recovery is the full local-cache wipe.
-			setBootErrorKind(/wipeRustCryptoIndexedDB/.test(msg) ? "wipe-blocked" : "other");
+			// Route to the wipe-blocked recovery UI (single "Reset and
+			// restart" button) whenever the boot failure traces back to
+			// a stuck rust-crypto IDB wipe OR any boot-path timeout —
+			// both mean a stale or locked local store that only a full
+			// local-cache wipe can clear.  Sign-out can't unblock
+			// either (sign-out itself touches IDB), so the two-button
+			// "sign out / wipe" UI would just offer a dead option.
+			const isStorageStuck = /wipeRustCryptoIndexedDB|timed out after/.test(msg);
+			setBootErrorKind(isStorageStuck ? "wipe-blocked" : "other");
 		});
 		// Subscribe to ignore-list changes so block/unblock takes effect
 		// across the app without a refresh.  Initial pull happens once
@@ -3399,7 +3418,7 @@ export default function App() {
 				// chrome instead (large title at the root, nav bar with
 				// back chevron on push views).  Bottom stops above the
 				// tab bar so navigation stays visible during pushes.
-				<div className="fixed inset-x-0 z-30 flex flex-col bg-background overflow-hidden"
+				<div className="fixed inset-x-0 z-30 flex flex-col bg-background border-b border-foreground/10 overflow-hidden"
 				     data-push-host
 				     style={{
 				         top: 0,

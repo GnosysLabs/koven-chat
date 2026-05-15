@@ -324,6 +324,79 @@ function clearViaVersionBump(name: string, budgetMs: number): Promise<boolean> {
 }
 
 /**
+ * Race a promise against a hard deadline.  The sign-in boot path has
+ * several awaits — the rust-crypto IDB wipe, initRustCrypto, the SSSS
+ * probe — that can hang indefinitely on a wedged browser storage or
+ * crypto state.  A single stuck await with no deadline strands the
+ * user on "Connecting…" forever (the recurring bug this guards).  On
+ * timeout the returned promise rejects with a labelled Error so the
+ * caller can route it to the bootError recovery UI.
+ */
+export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => {
+			reject(new Error(`${label}: timed out after ${ms}ms`));
+		}, ms);
+		p.then(
+			value => { clearTimeout(timer); resolve(value); },
+			err => { clearTimeout(timer); reject(err); },
+		);
+	});
+}
+
+/**
+ * The (user_id, device_id) the rust-crypto IndexedDB was last
+ * successfully initialised for.  matrix-rust-sdk keys its store by a
+ * single hardcoded DB name per origin, so the store can only ever
+ * belong to one device at a time.  Persisting the owner lets the
+ * next start() distinguish a resume of that same device (keep the
+ * store — it has the megolm sessions + cross-signing keys) from a
+ * fresh login or account switch (wipe it — the stored account is
+ * dead and would otherwise throw a mismatch and hang the boot).
+ */
+interface CryptoStoreOwner {
+	userId: string;
+	deviceId: string;
+}
+
+const CRYPTO_STORE_OWNER_KEY = "koven.cryptoStoreOwner";
+
+/**
+ * Read the persisted crypto-store owner, or null when absent,
+ * unreadable, or malformed.  null forces start() to wipe + re-init,
+ * which is always safe; reusing a store we can't verify is not.
+ */
+function readCryptoStoreOwner(): CryptoStoreOwner | null {
+	if (typeof localStorage === "undefined") return null;
+	try {
+		const raw = localStorage.getItem(CRYPTO_STORE_OWNER_KEY);
+		if (!raw) return null;
+		const parsed = JSON.parse(raw) as Partial<CryptoStoreOwner>;
+		if (typeof parsed.userId === "string" && typeof parsed.deviceId === "string") {
+			return { userId: parsed.userId, deviceId: parsed.deviceId };
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Record which (user_id, device_id) owns the crypto store.  Called
+ * after a successful initRustCrypto.  Best-effort: a write failure
+ * (private mode, quota) just means the next start() reads null and
+ * re-wipes — a wasted wipe, never a correctness problem.
+ */
+function writeCryptoStoreOwner(owner: CryptoStoreOwner): void {
+	if (typeof localStorage === "undefined") return;
+	try {
+		localStorage.setItem(CRYPTO_STORE_OWNER_KEY, JSON.stringify(owner));
+	} catch (err) {
+		console.warn("matrix: cryptoStoreOwner write failed", err);
+	}
+}
+
+/**
  * Wipe ALL matrix-js-sdk IndexedDB state for this origin — both the
  * rust-crypto stores and the regular SDK store (rooms, events, sync
  * tokens).  Called from sign-out so the NEXT login (which may be as
@@ -506,6 +579,10 @@ export class MatrixTransport {
 	private handlers: MatrixHandlers;
 	private creds: MatrixCredentials | null = null;
 	private syncState: SyncState = "preparing";
+	// Flipped true by the first ClientEvent.Sync emission.  beginSync's
+	// 60s watchdog reads it to tell "startClient produced a sync" from
+	// "startClient silently did nothing" (a wedged sync loop).
+	private firstSyncSeen = false;
 
 	// Cache of blob URLs we've fetched for mxc:// URLs.  Modern Synapse
 	// (1.100+) requires authenticated media downloads, which means we
@@ -624,63 +701,47 @@ export class MatrixTransport {
 	async start(creds: MatrixCredentials): Promise<void> {
 		this.stopped = false;
 		this.creds = creds;
-		// Preemptive store-mismatch check.  Compare the user_id we're
-		// about to log in as against the one we last logged in as
-		// (stored in localStorage by this same code path).  If they
-		// differ, the rust-crypto IndexedDB still has the previous
-		// user's olm account — initRustCrypto will throw, we'd catch,
-		// wipe, and retry, but the catch + wipe + fresh init takes
-		// 30-90s on slow devices because rust-crypto regenerates the
-		// olm keypairs from scratch.  Wiping BEFORE initRustCrypto
-		// is much faster: indexedDB.deleteDatabase doesn't have to
-		// fight the half-loaded WASM-side handle, and initRustCrypto
-		// runs once instead of twice.
+		// Device-ownership check for the rust-crypto store.  The
+		// rust-crypto IndexedDB holds the olm account, megolm sessions
+		// and cross-signing keys for exactly ONE (user_id, device_id)
+		// pair.  Reusing it across a start() is only correct when we
+		// are resuming that exact device.  For any other device — a
+		// fresh login (Synapse mints a new device_id every time), an
+		// account switch, or a re-login after the old device was
+		// deleted server-side — the stored account is dead weight:
+		// initRustCrypto throws a mismatch, and the historical
+		// catch-and-recover path then ran a wipe that could itself
+		// hang on the half-loaded WASM handle, stranding the user on
+		// "Connecting…" forever.
 		//
-		// Only triggers when the user actually changed.  The hot path
-		// (same user logging in fresh, or restoring an existing
-		// session) hits the localStorage read and compare and is
-		// done — no IndexedDB churn, no extra latency.
-		const LAST_USER_KEY = "koven.lastLoggedInUserId";
-		const prev = typeof localStorage !== "undefined"
-			? localStorage.getItem(LAST_USER_KEY)
-			: null;
-		const isUserSwitch = !!(prev && prev !== creds.user_id);
-		if (isUserSwitch) {
+		// So: read the marker recording which device built the
+		// current store; if it does not match the device we are
+		// logging in as, wipe the crypto IDB BEFORE initRustCrypto.
+		// This does not depend on a clean sign-out (most users just
+		// close the tab) and it keys on device_id, not user_id — the
+		// same-user / new-device case is exactly the hole the
+		// recurring hang fell through.  On a true first launch the
+		// marker is absent, the "wipe" is a no-op delete of a
+		// non-existent DB, and we fall straight into a clean init.
+		const cryptoStoreOwner = readCryptoStoreOwner();
+		const ownsCryptoStore = !!cryptoStoreOwner
+			&& cryptoStoreOwner.userId === creds.user_id
+			&& cryptoStoreOwner.deviceId === creds.device_id;
+		if (!ownsCryptoStore) {
 			console.info(
-				"matrix.start: detected user switch (%s → %s), wiping crypto store preemptively",
-				prev,
+				"matrix.start: crypto store owner (%o) != login (%s / %s) — wiping crypto store before init",
+				cryptoStoreOwner,
 				creds.user_id,
+				creds.device_id,
 			);
-			// Preemptive wipe is a pure latency optimization: it dodges
-			// the 30-90s mismatch-recovery path that initRustCrypto
-			// would otherwise trigger when the stored olm account
-			// belongs to a different user.  If the wipe fails
-			// (typically because the previous OlmMachine handle hasn't
-			// finished flushing yet, or a previous unclean shutdown
-			// left a WebKit storage-process lock around), we let the
-			// slower recovery path at the initRustCrypto catch below
-			// handle it.  Surfacing a thrown error here was previously
-			// stranding users on the bootError screen on a transient
-			// race; the recovery path is the actual safety net and
-			// already retries the wipe under the new robust
-			// deleteDatabaseAwait.
-			try {
-				await wipeRustCryptoIndexedDB();
-			} catch (err) {
-				console.warn(
-					"matrix.start: preemptive wipe failed, falling through to mismatch-recovery",
-					err,
-				);
-			}
-		}
-		try {
-			if (typeof localStorage !== "undefined") {
-				localStorage.setItem(LAST_USER_KEY, creds.user_id);
-			}
-		} catch (err) {
-			// localStorage might be unavailable in private modes.
-			// Non-fatal — start() continues without the cached marker.
-			console.warn("matrix.start: lastLoggedInUserId write failed", err);
+			// The wipe is now the primary correctness mechanism, not a
+			// latency optimization, so a failure here is NOT swallowed:
+			// proceeding to initRustCrypto against a store we know is
+			// stale just reproduces the mismatch hang.  withTimeout
+			// guarantees the wipe can't hang the boot past 20s; on
+			// timeout or failure it rejects, start() rejects, and
+			// App.tsx surfaces the bootError recovery UI.
+			await withTimeout(wipeRustCryptoIndexedDB(), 20_000, "wipeRustCryptoIndexedDB");
 		}
 		// IndexedDBStore for the matrix-js-sdk room/timeline cache.
 		// Sandboxed per user_id so multi-account never crosses streams,
@@ -777,12 +838,18 @@ export class MatrixTransport {
 		// the bottleneck in DevTools without us guessing.
 		console.time("matrix.start: initRustCrypto");
 		try {
-			await this.client.initRustCrypto();
+			await withTimeout(this.client.initRustCrypto(), 30_000, "initRustCrypto");
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			if (/account in the (store|constructor)|doesn'?t match/i.test(msg)) {
+				// Belt-and-braces: the device-ownership wipe near the
+				// top of start() should already have cleared a stale
+				// store, so this path effectively never runs now.  Kept
+				// for the edge case where the cryptoStoreOwner marker
+				// was lost (cleared localStorage, private mode) while
+				// the crypto IDB itself survived.
 				console.warn("rust-crypto store mismatch — wiping and retrying", msg);
-				await wipeRustCryptoIndexedDB();
+				await withTimeout(wipeRustCryptoIndexedDB(), 20_000, "wipeRustCryptoIndexedDB");
 				if (this.stopped) {
 					console.timeEnd("matrix.start: initRustCrypto");
 					return;
@@ -790,13 +857,20 @@ export class MatrixTransport {
 				// initRustCrypto leaves the client in a half-init state on
 				// failure; recreate from scratch before retrying.
 				this.client = buildClient();
-				await this.client.initRustCrypto();
+				await withTimeout(this.client.initRustCrypto(), 30_000, "initRustCrypto");
 			} else {
 				console.timeEnd("matrix.start: initRustCrypto");
 				throw err;
 			}
 		}
 		console.timeEnd("matrix.start: initRustCrypto");
+		// initRustCrypto succeeded — the on-disk rust-crypto store now
+		// provably belongs to this (user_id, device_id).  Record it
+		// before the stopped-guard below so the marker reflects disk
+		// reality even if this transport is torn down mid-start; the
+		// next start() reads it to tell a resume (keep the store) from
+		// a fresh login or account switch (wipe the store).
+		writeCryptoStoreOwner({ userId: creds.user_id, deviceId: creds.device_id });
 		// Bail if stop() ran while we were awaiting crypto init.  Without
 		// this guard, a stale strict-mode-cleanup'd transport runs the
 		// rest of start() and trips over its now-null this.client.
@@ -929,6 +1003,9 @@ export class MatrixTransport {
 		// Hooks must be in place BEFORE startClient or we miss the
 		// initial sync's events.
 		this.client.on(ClientEvent.Sync, (state: string) => {
+			// Mark the sync loop alive so beginSync's 60s watchdog can
+			// tell a real startClient from a silent no-op.
+			this.firstSyncSeen = true;
 			const mapped: SyncState =
 				state === "PREPARED" ? "ready" :
 				state === "SYNCING" ? "syncing" :
@@ -1285,8 +1362,26 @@ export class MatrixTransport {
 			// refuses to read from — see matrix-js-sdk Room.getPendingEvents.
 			pendingEventOrdering: sdk.PendingEventOrdering.Detached,
 		}).catch(err => {
+			// A rejected startClient never emits ClientEvent.Sync, so
+			// without this nothing moves syncState off "preparing".
 			console.warn("matrix: startClient failed", err);
+			if (!this.stopped && !this.firstSyncSeen) {
+				this.handlers.onSyncState("error");
+			}
 		});
+		// First-sync watchdog.  startClient is fire-and-forget; if the
+		// initial /sync never resolves, never rejects, and never emits
+		// a single ClientEvent.Sync (a wedged sync loop), nothing would
+		// ever move syncState off "preparing" and the user would sit
+		// behind the "Sync: preparing" banner forever.  After 60s with
+		// no sync event at all, surface an error state so the UI shows
+		// a retry instead of a silent stall.
+		setTimeout(() => {
+			if (!this.stopped && !this.firstSyncSeen) {
+				console.warn("matrix: no sync event 60s after startClient — surfacing error state");
+				this.handlers.onSyncState("error");
+			}
+		}, 60_000);
 		// Kick off idle-presence tracking once the sync loop is alive.
 		// Safe to call multiple times: it's idempotent (early-returns
 		// if listeners are already bound).
@@ -1516,7 +1611,10 @@ export class MatrixTransport {
 		// refreshes / transient teardowns keep the cache hot.
 		if (this.store) {
 			try {
-				await this.store.destroy();
+				// Cap store.destroy() — a wedged IDB handle here would
+				// otherwise hang stop(), which start()'s previous-teardown
+				// await blocks on.  5s is well past a healthy destroy.
+				await withTimeout(this.store.destroy(), 5_000, "store.destroy");
 			} catch (err) {
 				console.warn("matrix.stop: store.destroy() threw", err);
 			}
@@ -1552,15 +1650,14 @@ export class MatrixTransport {
 		this.ignoreListeners.clear();
 		this.nsfwPrefListeners.clear();
 		this.uiaPassword = null;
-		// Don't delete the rust-crypto IDB on stop().  Same-user
-		// stop→start cycles (page refresh, transient errors) need
-		// the megolm sessions + cross-signing state preserved; only
-		// a real account switch should wipe.  start() handles that
-		// via the LAST_USER_KEY mismatch check: when start() sees
-		// the user changed, it calls wipeRustCryptoIndexedDB(),
-		// which now properly awaits the IDB connection drain (see
-		// deleteDatabaseAwait) instead of resolving on `blocked`
-		// and racing the next initRustCrypto.
+		// Don't delete the rust-crypto IDB on stop().  Same-device
+		// stop→start cycles (page refresh, transient errors) need the
+		// megolm sessions + cross-signing state preserved; only a
+		// login as a different device should wipe.  start() handles
+		// that via the cryptoStoreOwner check — it wipes the crypto
+		// IDB before initRustCrypto whenever the (user_id, device_id)
+		// being logged in as doesn't match the device that built the
+		// store.
 		void teardownUserId;
 	}
 
@@ -1790,14 +1887,22 @@ export class MatrixTransport {
 		// shows up as the slow phase in the user's console, we know
 		// where to optimize.
 		console.time("matrix.encryptionStatus: secretStorage.getKey");
-		const keyInfo = await c.secretStorage.getKey();
+		const keyInfo = await withTimeout(
+			c.secretStorage.getKey(),
+			15_000,
+			"encryptionStatus.secretStorage.getKey",
+		);
 		console.timeEnd("matrix.encryptionStatus: secretStorage.getKey");
 		if (!keyInfo) return "needs-setup";
 		// Cross-signing readiness is the cleanest "this device is set
 		// up" signal — true iff cross-signing private keys are cached
 		// locally.  Anything less means we need the user to unlock.
 		console.time("matrix.encryptionStatus: getCrossSigningStatus");
-		const status = await crypto.getCrossSigningStatus();
+		const status = await withTimeout(
+			crypto.getCrossSigningStatus(),
+			15_000,
+			"encryptionStatus.getCrossSigningStatus",
+		);
 		console.timeEnd("matrix.encryptionStatus: getCrossSigningStatus");
 		const cached = status.privateKeysCachedLocally;
 		if (cached.masterKey && cached.selfSigningKey && cached.userSigningKey) {
