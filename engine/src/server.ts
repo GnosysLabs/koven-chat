@@ -100,6 +100,11 @@ import {
 	updateBot,
 	verifyAuthCode,
 	writeBio,
+	readSocialLinks,
+	writeSocialLinks,
+	readBanner,
+	writeBanner,
+	type SocialLink,
 	writeInstanceConfig,
 	claimFounderNumber,
 	getFounderNumber,
@@ -4925,6 +4930,8 @@ export function startServer(): void {
 					user_id: userId,
 					bio: readBio(userId) ?? "",
 					founder_number: getFounderNumber(userId),
+					social_links: readSocialLinks(userId),
+					banner_mxc: readBanner(userId),
 				});
 			}
 
@@ -4941,21 +4948,60 @@ export function startServer(): void {
 				});
 			}
 
-			// Owner-only write: requires a Matrix token, sets the bio
-			// for whichever user that token belongs to.  Empty body
-			// clears the bio.
+			// Owner-only write: requires a Matrix token, updates bio,
+			// social links and/or banner for whichever user that token
+			// belongs to.  At least one of `bio`, `social_links` or
+			// `banner_mxc` must be present.  Empty bio string clears the
+			// bio; empty social_links array clears all links; empty
+			// banner_mxc clears the banner.
 			if (req.method === "PUT" && path === "/api/profile/me") {
 				const token = extractToken(req);
 				const userId = await whoami(token);
 				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
-				const body = (await req.json().catch(() => null)) as { bio?: string } | null;
-				if (!body || typeof body.bio !== "string") {
-					return json({ errcode: "M_BAD_JSON", error: "bio string required" }, { status: 400 });
+				const body = (await req.json().catch(() => null)) as
+					{ bio?: string; social_links?: unknown; banner_mxc?: unknown } | null;
+				if (!body || (typeof body.bio !== "string" && !Array.isArray(body.social_links) && typeof body.banner_mxc !== "string")) {
+					return json({ errcode: "M_BAD_JSON", error: "bio, social_links or banner_mxc required" }, { status: 400 });
 				}
-				const trimmed = body.bio.slice(0, 300);
-				if (trimmed.length === 0) deleteBio(userId);
-				else writeBio(userId, trimmed);
-				return json({ user_id: userId, bio: trimmed });
+				// Clearing the bio writes an empty string rather than
+				// deleting the row — the row also carries social_links
+				// and banner_mxc, so deleting it would silently drop
+				// those alongside the bio.
+				if (typeof body.bio === "string") {
+					writeBio(userId, body.bio.slice(0, 300));
+				}
+				if (Array.isArray(body.social_links)) {
+					const VALID_PLATFORMS = new Set([
+						"bluesky", "cashapp", "discord", "email", "github", "gitlab",
+						"instagram", "linktree", "mastodon", "matrix", "reddit", "signal",
+						"snapchat", "soundcloud", "spotify", "telegram", "tiktok", "twitch",
+						"website", "whatsapp", "x", "youtube",
+					]);
+					const cleaned = (body.social_links as unknown[])
+						.filter((l): l is SocialLink =>
+							typeof l === "object" && l !== null
+							&& typeof (l as SocialLink).platform === "string"
+							&& typeof (l as SocialLink).url === "string"
+							&& VALID_PLATFORMS.has((l as SocialLink).platform)
+							&& (l as SocialLink).url.length > 0
+							&& (l as SocialLink).url.length <= 500,
+						)
+						.slice(0, 8);
+					writeSocialLinks(userId, cleaned);
+				}
+				if (typeof body.banner_mxc === "string") {
+					const banner = body.banner_mxc.trim();
+					if (banner !== "" && (!banner.startsWith("mxc://") || banner.length > 255)) {
+						return json({ errcode: "M_INVALID_PARAM", error: "banner_mxc" }, { status: 400 });
+					}
+					writeBanner(userId, banner);
+				}
+				return json({
+					user_id: userId,
+					bio: readBio(userId) ?? "",
+					social_links: readSocialLinks(userId),
+					banner_mxc: readBanner(userId),
+				});
 			}
 
 			// Public static-asset serving.  Whitelisted to filenames that

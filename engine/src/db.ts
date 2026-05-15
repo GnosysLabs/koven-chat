@@ -778,6 +778,10 @@ ensureColumns("bot_mcp_servers", [
 	{ name: "env_json",       ddl: "env_json TEXT NOT NULL DEFAULT '{}'" },
 	{ name: "locked_version", ddl: "locked_version TEXT" },
 ]);
+ensureColumns("user_profiles", [
+	{ name: "social_links", ddl: "social_links TEXT NOT NULL DEFAULT '[]'" },
+	{ name: "banner_mxc",   ddl: "banner_mxc TEXT NOT NULL DEFAULT ''" },
+]);
 
 export type PostRow = {
 	event_id: string;
@@ -1269,6 +1273,66 @@ export function writeBio(userId: string, bio: string): void {
 
 export function deleteBio(userId: string): void {
 	deleteBioStmt.run(userId);
+}
+
+// ─── User social links ───────────────────────────────────────────────
+
+export interface SocialLink { platform: string; url: string; }
+
+const readSocialLinksStmt = db.prepare(
+	`SELECT social_links FROM user_profiles WHERE user_id = ?`,
+);
+export function readSocialLinks(userId: string): SocialLink[] {
+	const row = readSocialLinksStmt.get(userId) as { social_links: string } | undefined;
+	if (!row) return [];
+	try { return JSON.parse(row.social_links) as SocialLink[]; }
+	catch { return []; }
+}
+
+// Upserts the social_links column without disturbing an existing bio
+// row — COALESCE ensures a first-time write doesn't zero out the bio.
+const upsertSocialLinksStmt = db.prepare(`
+	INSERT INTO user_profiles (user_id, bio, social_links, updated_at)
+	VALUES (?, COALESCE((SELECT bio FROM user_profiles WHERE user_id = ?), ''), ?, ?)
+	ON CONFLICT(user_id) DO UPDATE SET
+		social_links = excluded.social_links,
+		updated_at   = excluded.updated_at
+`);
+export function writeSocialLinks(userId: string, links: SocialLink[]): void {
+	upsertSocialLinksStmt.run(userId, userId, JSON.stringify(links), Date.now());
+}
+
+// ─── User profile banner ────────────────────────────────────────────
+//
+// Wide hero image shown at the top of profile views.  Only the
+// mxc:// pointer lives here — the bytes sit in the Matrix media repo,
+// same split as Matrix's own avatar_url.  Empty string means no banner.
+
+const readBannerStmt = db.prepare(
+	`SELECT banner_mxc FROM user_profiles WHERE user_id = ?`,
+);
+export function readBanner(userId: string): string | null {
+	const row = readBannerStmt.get(userId) as { banner_mxc: string } | undefined;
+	const v = row?.banner_mxc ?? "";
+	return v.length > 0 ? v : null;
+}
+
+// Upserts banner_mxc without disturbing an existing bio / social_links
+// row — COALESCE keeps a first-time banner write from zeroing them.
+const upsertBannerStmt = db.prepare(`
+	INSERT INTO user_profiles (user_id, bio, social_links, banner_mxc, updated_at)
+	VALUES (
+		?,
+		COALESCE((SELECT bio          FROM user_profiles WHERE user_id = ?), ''),
+		COALESCE((SELECT social_links FROM user_profiles WHERE user_id = ?), '[]'),
+		?, ?
+	)
+	ON CONFLICT(user_id) DO UPDATE SET
+		banner_mxc = excluded.banner_mxc,
+		updated_at = excluded.updated_at
+`);
+export function writeBanner(userId: string, mxc: string): void {
+	upsertBannerStmt.run(userId, userId, userId, mxc, Date.now());
 }
 
 // ─── Per-user integration secrets ───────────────────────────────────

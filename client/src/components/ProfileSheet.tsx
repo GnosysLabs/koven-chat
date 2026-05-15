@@ -20,11 +20,13 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Ban, Camera, MessageSquare, Pencil, Trash2, UserCheck, UserX } from "lucide-react";
+import { Ban, Camera, Image as ImageIcon, MessageSquare, Pencil, Trash2, UserCheck, UserX } from "lucide-react";
 import type { MatrixTransport } from "@/lib/matrix";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
+import { ProfileBanner } from "@/components/ProfileBanner";
 import { BotBadge } from "@/components/BotBadge";
-import { fetchUserBio, fetchUserProfile, updateMyBio } from "@/lib/profile";
+import { fetchUserProfile, updateMyProfileData, type SocialLink } from "@/lib/profile";
+import { SOCIAL_PLATFORMS, PLATFORM_PLACEHOLDERS, SocialIcon } from "@/components/SocialIcons";
 import { FounderBadge } from "@/components/FounderBadge";
 import { getFounderCap } from "@/lib/founders-cache";
 import { formatMxid, serverOf } from "@/lib/mxid";
@@ -164,6 +166,12 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 	const [profile, setProfile] = useState<BaseProfile | null>(null);
 	const [displayName, setDisplayName] = useState("");
 	const [bio, setBio] = useState("");
+	const [socialLinks, setSocialLinks] = useState<SocialLink[]>([]);
+	const originalSocialLinksRef = useRef<SocialLink[]>([]);
+	// Controls the inline "add link" form expansion.
+	const [addLinkOpen, setAddLinkOpen] = useState(false);
+	const [newLinkPlatform, setNewLinkPlatform] = useState(SOCIAL_PLATFORMS[0].id);
+	const [newLinkUrl, setNewLinkUrl] = useState("");
 	// Founder slot for the viewed user (1..666, null if they didn't
 	// claim one).  Drives the holographic Founder chip on the sheet.
 	const [founderNumber, setFounderNumber] = useState<number | null>(null);
@@ -202,6 +210,16 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 	const [clearAvatar, setClearAvatar] = useState(false);
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+	// Banner state.  `bannerMxc` is the saved banner, fetched with the
+	// rest of the profile; the pending* fields mirror the avatar
+	// pattern above — a freshly-picked File kept until Save, its
+	// preview URL, and a clear flag.
+	const [bannerMxc, setBannerMxc] = useState<string | null>(null);
+	const [pendingBanner, setPendingBanner] = useState<File | null>(null);
+	const [pendingBannerPreview, setPendingBannerPreview] = useState<string | null>(null);
+	const [clearBanner, setClearBanner] = useState(false);
+	const bannerInputRef = useRef<HTMLInputElement | null>(null);
+
 	const open = !!viewedUserId;
 
 	useEffect(() => {
@@ -211,6 +229,9 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 		setPendingAvatar(null);
 		setPendingAvatarPreview(null);
 		setClearAvatar(false);
+		setPendingBanner(null);
+		setPendingBannerPreview(null);
+		setClearBanner(false);
 
 		// Stale-while-revalidate: only flip into the loading state +
 		// blank the per-user state slots if we don't already have
@@ -257,6 +278,8 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 				setProfile(p);
 				setDisplayName(p.displayName);
 				setBio(fetchedProfile.bio);
+				setSocialLinks(fetchedProfile.social_links);
+				setBannerMxc(fetchedProfile.banner_mxc);
 				setFounderNumber(fetchedProfile.founder_number);
 				setLoading(false);
 				// Cache the just-fetched values so a later Cancel
@@ -264,6 +287,7 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 				// without re-fetching.
 				originalDisplayNameRef.current = p.displayName;
 				originalBioRef.current = fetchedProfile.bio;
+				originalSocialLinksRef.current = fetchedProfile.social_links;
 				// Reset editing flag — opening the sheet for a new
 				// user always starts in read-only mode regardless of
 				// whether the previous viewing was mid-edit.
@@ -354,11 +378,24 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 		};
 	}, [pendingAvatarPreview]);
 
+	useEffect(() => {
+		return () => {
+			if (pendingBannerPreview) URL.revokeObjectURL(pendingBannerPreview);
+		};
+	}, [pendingBannerPreview]);
+
 	function pickAvatar(file: File) {
 		if (pendingAvatarPreview) URL.revokeObjectURL(pendingAvatarPreview);
 		setPendingAvatar(file);
 		setPendingAvatarPreview(URL.createObjectURL(file));
 		setClearAvatar(false);
+	}
+
+	function pickBanner(file: File) {
+		if (pendingBannerPreview) URL.revokeObjectURL(pendingBannerPreview);
+		setPendingBanner(file);
+		setPendingBannerPreview(URL.createObjectURL(file));
+		setClearBanner(false);
 	}
 
 	async function toggleBlock() {
@@ -388,10 +425,21 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 				avatarFile: pendingAvatar ?? undefined,
 				clearAvatar: !pendingAvatar && clearAvatar,
 			});
-			// Bio lives on the engine — saved separately, requires the
-			// Matrix token so the engine can verify ownership via whoami.
+			// Banner: upload a freshly-picked file to the media repo,
+			// or "" to clear it.  undefined = banner left untouched.
+			let nextBannerMxc: string | undefined;
+			if (pendingBanner) {
+				nextBannerMxc = await transport.uploadAvatarImage(pendingBanner);
+			} else if (clearBanner) {
+				nextBannerMxc = "";
+			}
+			// Bio, social links + banner live on the engine, saved together.
 			if (accessToken) {
-				await updateMyBio(accessToken, bio.trim());
+				await updateMyProfileData(accessToken, {
+					bio: bio.trim(),
+					social_links: socialLinks,
+					...(nextBannerMxc !== undefined ? { banner_mxc: nextBannerMxc } : {}),
+				});
 			}
 			onSelfProfileSaved?.(avatarUrl);
 			// Update the local profile snapshot so the read-only view
@@ -411,12 +459,25 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 			// we loaded with at sheet open.
 			originalDisplayNameRef.current = displayName.trim();
 			originalBioRef.current = bio.trim();
-			// Discard any pending avatar preview blob so it isn't kept
-			// alive past the save.
+			originalSocialLinksRef.current = socialLinks;
+			// Reflect the saved banner so the read-only view we flip
+			// back to renders it without a refetch.
+			setBannerMxc(nextBannerMxc !== undefined
+				? (nextBannerMxc === "" ? null : nextBannerMxc)
+				: bannerMxc);
+			// Discard any pending avatar / banner preview blobs so they
+			// aren't kept alive past the save.
 			if (pendingAvatarPreview) URL.revokeObjectURL(pendingAvatarPreview);
+			if (pendingBannerPreview) URL.revokeObjectURL(pendingBannerPreview);
 			setPendingAvatar(null);
 			setPendingAvatarPreview(null);
 			setClearAvatar(false);
+			setPendingBanner(null);
+			setPendingBannerPreview(null);
+			setClearBanner(false);
+			setAddLinkOpen(false);
+			setNewLinkUrl("");
+			setNewLinkPlatform(SOCIAL_PLATFORMS[0].id);
 			// Flip back to read-only view, leave the dialog open so
 			// the user can confirm their changes look right.
 			setEditing(false);
@@ -431,15 +492,24 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 		// Revert in-flight edits to whatever was last fetched / saved.
 		setDisplayName(originalDisplayNameRef.current);
 		setBio(originalBioRef.current);
+		setSocialLinks(originalSocialLinksRef.current);
 		if (pendingAvatarPreview) URL.revokeObjectURL(pendingAvatarPreview);
+		if (pendingBannerPreview) URL.revokeObjectURL(pendingBannerPreview);
 		setPendingAvatar(null);
 		setPendingAvatarPreview(null);
 		setClearAvatar(false);
+		setPendingBanner(null);
+		setPendingBannerPreview(null);
+		setClearBanner(false);
+		setAddLinkOpen(false);
+		setNewLinkUrl("");
+		setNewLinkPlatform(SOCIAL_PLATFORMS[0].id);
 		setError(null);
 		setEditing(false);
 	}
 
 	const hasRealAvatar = !!(pendingAvatarPreview || (!clearAvatar && profile?.avatarUrl));
+	const hasRealBanner = !!(pendingBannerPreview || (!clearBanner && bannerMxc));
 
 	// Defer mounting the dialog until the data is FULLY ready.
 	// `loading` going false isn't enough on its own — if any fetch
@@ -492,7 +562,7 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 			<DialogContent className={isSelf && editing ? "sm:max-w-lg" : "sm:max-w-md"}>
 				<DialogHeader>
 					<DialogTitle className="flex items-center justify-between gap-2 pr-6">
-						<span>{isSelf ? "Profile" : "Member"}</span>
+						<span>Profile</span>
 						{/* Edit button — visible only on your own
 						    profile in read-only mode.  Flips into the
 						    edit form without closing the dialog.
@@ -512,10 +582,13 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 							</button>
 						)}
 					</DialogTitle>
-					<DialogDescription>
+					{/* Non-self profiles keep an sr-only description: the
+					    member's name + avatar already head the body, and
+					    surfacing the raw mxid here was visual clutter. */}
+					<DialogDescription className={isSelf ? undefined : "sr-only"}>
 						{isSelf
 							? "Visible to anyone you share a room with."
-							: profile?.userId ?? "Loading…"}
+							: profile?.displayName ? `${profile.displayName}'s profile` : "Profile"}
 					</DialogDescription>
 				</DialogHeader>
 
@@ -533,6 +606,60 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 					// grid so the dialog fits without scrolling on most
 					// laptop screens.
 					<div className="space-y-4">
+						{/* Banner editor — wide image with Upload / Change /
+						    Remove controls, mirroring the avatar block below. */}
+						<div className="space-y-2">
+							{hasRealBanner ? (
+								<ProfileBanner
+									mxc={clearBanner ? null : bannerMxc}
+									previewSrc={pendingBannerPreview}
+									className="h-24 rounded-lg"
+								/>
+							) : (
+								<div className="h-24 rounded-lg border border-dashed border-input bg-muted/30 flex items-center justify-center text-xs text-muted-foreground">
+									No banner yet
+								</div>
+							)}
+							<div className="flex items-center gap-2">
+								<Button
+									type="button"
+									variant="outline"
+									size="sm"
+									onClick={() => bannerInputRef.current?.click()}
+								>
+									<ImageIcon className="h-3.5 w-3.5 mr-1.5" />
+									{hasRealBanner ? "Change banner" : "Upload banner"}
+								</Button>
+								{hasRealBanner && (
+									<Button
+										type="button"
+										variant="ghost"
+										size="sm"
+										className="text-muted-foreground hover:text-destructive h-7"
+										onClick={() => {
+											if (pendingBannerPreview) URL.revokeObjectURL(pendingBannerPreview);
+											setPendingBanner(null);
+											setPendingBannerPreview(null);
+											setClearBanner(true);
+										}}
+									>
+										<Trash2 className="h-3.5 w-3.5 mr-1.5" />
+										Remove
+									</Button>
+								)}
+							</div>
+							<input
+								ref={bannerInputRef}
+								type="file"
+								accept="image/*"
+								className="hidden"
+								onChange={(e) => {
+									const file = e.target.files?.[0];
+									if (file) pickBanner(file);
+									e.target.value = "";
+								}}
+							/>
+						</div>
 						<div className="grid grid-cols-[auto_1fr] gap-5">
 							<div className="flex flex-col items-center gap-2">
 								{pendingAvatarPreview ? (
@@ -590,9 +717,6 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 										maxLength={100}
 										placeholder="Your name"
 									/>
-									<div className="text-[10px] font-mono text-muted-foreground truncate" title={profile.userId}>
-										{formatMxid(profile.userId, serverOf(transport?.currentUserId ?? null))}
-									</div>
 								</div>
 
 								<div className="space-y-1.5">
@@ -625,6 +749,102 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 							/>
 						</div>
 
+						{/* ─── Social links edit ─────────────────────────────
+						    Only added links are shown (no empty rows).  A
+						    collapsed "+ Add link" button at the bottom expands
+						    into a platform picker + URL field inline. */}
+						<div className="space-y-2">
+							<Label>Links <span className="text-muted-foreground font-normal">(optional)</span></Label>
+
+							{socialLinks.length > 0 && (
+								<div className="space-y-1">
+									{socialLinks.map((link, i) => (
+										<div key={i} className="flex items-center gap-2 text-sm">
+											<SocialIcon platform={link.platform} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+											<span className="flex-1 truncate text-muted-foreground">
+												<span className="text-foreground">{SOCIAL_PLATFORMS.find(p => p.id === link.platform)?.label ?? link.platform}</span>
+												{" · "}
+												<span className="font-mono text-xs">{link.url.length > 40 ? link.url.slice(0, 40) + "…" : link.url}</span>
+											</span>
+											<button
+												type="button"
+												onClick={() => setSocialLinks(prev => prev.filter((_, j) => j !== i))}
+												className="shrink-0 text-muted-foreground hover:text-destructive transition-colors text-base leading-none"
+												aria-label={`Remove ${link.platform} link`}
+											>
+												×
+											</button>
+										</div>
+									))}
+								</div>
+							)}
+
+							{!addLinkOpen && socialLinks.length < 8 && (
+								<button
+									type="button"
+									onClick={() => { setAddLinkOpen(true); setNewLinkUrl(""); setNewLinkPlatform(SOCIAL_PLATFORMS[0].id); }}
+									className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+								>
+									<span className="text-base leading-none">+</span> Add link
+								</button>
+							)}
+
+							{addLinkOpen && (
+								<div className="flex items-center gap-2">
+									<SocialIcon platform={newLinkPlatform} className="h-4 w-4 shrink-0 text-muted-foreground" />
+									<select
+										value={newLinkPlatform}
+										onChange={e => { setNewLinkPlatform(e.target.value); setNewLinkUrl(""); }}
+										className="rounded border border-input bg-transparent px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-ring shrink-0"
+									>
+										{SOCIAL_PLATFORMS.map(p => (
+											<option key={p.id} value={p.id}>{p.label}</option>
+										))}
+									</select>
+									<input
+										type={newLinkPlatform === "email" ? "email" : "url"}
+										value={newLinkUrl}
+										onChange={e => setNewLinkUrl(e.target.value)}
+										placeholder={PLATFORM_PLACEHOLDERS[newLinkPlatform] ?? "https://…"}
+										className="flex-1 min-w-0 rounded border border-input bg-transparent px-2 py-1 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+										onKeyDown={e => {
+											if (e.key === "Enter") {
+												e.preventDefault();
+												const url = newLinkUrl.trim();
+												if (url) {
+													setSocialLinks(prev => [...prev, { platform: newLinkPlatform, url }]);
+													setNewLinkUrl("");
+													setAddLinkOpen(false);
+												}
+											}
+										}}
+									/>
+									<button
+										type="button"
+										onClick={() => {
+											const url = newLinkUrl.trim();
+											if (url) {
+												setSocialLinks(prev => [...prev, { platform: newLinkPlatform, url }]);
+												setNewLinkUrl("");
+											}
+											setAddLinkOpen(false);
+										}}
+										className="shrink-0 text-xs px-2 py-1 rounded bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+									>
+										Add
+									</button>
+									<button
+										type="button"
+										onClick={() => { setAddLinkOpen(false); setNewLinkUrl(""); }}
+										className="shrink-0 text-muted-foreground hover:text-foreground text-base leading-none"
+										aria-label="Cancel"
+									>
+										×
+									</button>
+								</div>
+							)}
+						</div>
+
 						{error && (
 							<div className="text-xs text-destructive border border-destructive/40 bg-destructive/10 rounded px-3 py-2">
 								{error}
@@ -636,24 +856,25 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 					// Compact single-column — there's no editing surface
 					// here, so the layout stays narrow and quick to scan.
 					<div className="space-y-4">
-						<div className="flex items-center gap-4">
+						<ProfileBanner mxc={bannerMxc} className="h-28 rounded-lg" />
+						<div
+							className="flex items-center gap-4"
+							style={bannerMxc ? { marginTop: "-2.5rem" } : undefined}
+						>
 							<MatrixAvatar
 								mxc={profile.avatarUrl}
 								seed={profile.userId}
 								kind={isBot ? "bot" : "user"}
-								className="h-16 w-16"
+								className={`h-16 w-16${bannerMxc ? " ring-4 ring-background" : ""}`}
 							/>
 							<div className="min-w-0 flex-1">
 								<div className="text-base font-semibold truncate flex items-center gap-1.5">
 									<span className="truncate">{profile.displayName}</span>
 									{isBot && <BotBadge compact={false} />}
 								</div>
-								<div className="text-xs text-muted-foreground font-mono truncate" title={profile.userId}>
-									{formatMxid(profile.userId, serverOf(transport?.currentUserId ?? null))}
-								</div>
 							</div>
 							{/* Holograph chip lives in the header row,
-							    right-aligned next to the name/handle.
+							    right-aligned next to the name.
 							    `flex-1` on the middle column pushes the
 							    badge to the right edge automatically;
 							    `shrink-0` keeps it intact when the
@@ -673,6 +894,23 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 							<p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap">
 								{bio}
 							</p>
+						)}
+
+						{socialLinks.length > 0 && (
+							<div className="flex flex-wrap gap-1.5">
+								{socialLinks.map((link) => (
+									<a
+										key={link.platform}
+										href={link.platform === "email" ? `mailto:${link.url}` : link.url}
+										target={link.platform === "email" ? undefined : "_blank"}
+										rel="noopener noreferrer"
+										className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+										title={SOCIAL_PLATFORMS.find(p => p.id === link.platform)?.label ?? link.platform}
+									>
+										<SocialIcon platform={link.platform} className="h-4 w-4" />
+									</a>
+								))}
+							</div>
 						)}
 
 						{isBot && creator && (

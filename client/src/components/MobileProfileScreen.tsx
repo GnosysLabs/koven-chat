@@ -10,11 +10,13 @@
 // the dialog form factor is desktop-only after this rewrite.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Camera, Trash2 } from "lucide-react";
+import { Camera, Image as ImageIcon, Trash2 } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
+import { ProfileBanner } from "@/components/ProfileBanner";
 import { FounderBadge } from "@/components/FounderBadge";
 import { getFounderCap } from "@/lib/founders-cache";
-import { fetchUserProfile, updateMyBio } from "@/lib/profile";
+import { fetchUserProfile, updateMyProfileData, type SocialLink } from "@/lib/profile";
+import { SOCIAL_PLATFORMS, PLATFORM_PLACEHOLDERS, SocialIcon } from "@/components/SocialIcons";
 import { hapticImpact, hapticSelection } from "@/lib/haptics";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
@@ -59,12 +61,19 @@ export function MobileProfileScreen({
 	const [profile, setProfile] = useState<BaseProfile | null>(null);
 	const [displayName, setDisplayName] = useState("");
 	const [bio, setBio] = useState("");
+	const [socialLinks, setSocialLinks] = useState<SocialLink[]>([]);
 	const [founderNumber, setFounderNumber] = useState<number | null>(null);
 
 	// Originals captured per-fetch so Cancel reverts to the
 	// last-saved (or last-loaded) state without a re-fetch.
 	const originalDisplayNameRef = useRef("");
 	const originalBioRef = useRef("");
+	const originalSocialLinksRef = useRef<SocialLink[]>([]);
+
+	// Inline "add link" form state for the edit mode links section.
+	const [addLinkOpen, setAddLinkOpen] = useState(false);
+	const [newLinkPlatform, setNewLinkPlatform] = useState(SOCIAL_PLATFORMS[0].id);
+	const [newLinkUrl, setNewLinkUrl] = useState("");
 
 	// Pending avatar — kept in component state until Save commits it
 	// via transport.updateMyProfile.  `clearAvatar` flag covers the
@@ -74,6 +83,14 @@ export function MobileProfileScreen({
 	const [pendingAvatarPreview, setPendingAvatarPreview] = useState<string | null>(null);
 	const [clearAvatar, setClearAvatar] = useState(false);
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+	// Banner state mirrors the avatar state above — saved mxc plus
+	// the pending File / preview / clear flag used while editing.
+	const [bannerMxc, setBannerMxc] = useState<string | null>(null);
+	const [pendingBanner, setPendingBanner] = useState<File | null>(null);
+	const [pendingBannerPreview, setPendingBannerPreview] = useState<string | null>(null);
+	const [clearBanner, setClearBanner] = useState(false);
+	const bannerInputRef = useRef<HTMLInputElement | null>(null);
 
 	// Fetch on mount.  We bind cancel so a fast back-press doesn't
 	// land the state setters on an unmounted screen.
@@ -88,9 +105,12 @@ export function MobileProfileScreen({
 				setProfile(p);
 				setDisplayName(p.displayName);
 				setBio(fp.bio);
+				setSocialLinks(fp.social_links);
+				setBannerMxc(fp.banner_mxc);
 				setFounderNumber(fp.founder_number);
 				originalDisplayNameRef.current = p.displayName;
 				originalBioRef.current = fp.bio;
+				originalSocialLinksRef.current = fp.social_links;
 				setLoading(false);
 			})
 			.catch(err => {
@@ -107,20 +127,36 @@ export function MobileProfileScreen({
 		};
 	}, [pendingAvatarPreview]);
 
+	useEffect(() => {
+		return () => {
+			if (pendingBannerPreview) URL.revokeObjectURL(pendingBannerPreview);
+		};
+	}, [pendingBannerPreview]);
+
 	const dirty = useMemo(() => {
 		if (!profile) return false;
 		if (displayName.trim() !== originalDisplayNameRef.current.trim()) return true;
 		if (bio.trim() !== originalBioRef.current.trim()) return true;
 		if (pendingAvatar) return true;
 		if (clearAvatar) return true;
+		if (pendingBanner) return true;
+		if (clearBanner) return true;
+		if (JSON.stringify(socialLinks) !== JSON.stringify(originalSocialLinksRef.current)) return true;
 		return false;
-	}, [profile, displayName, bio, pendingAvatar, clearAvatar]);
+	}, [profile, displayName, bio, pendingAvatar, clearAvatar, pendingBanner, clearBanner, socialLinks]);
 
 	function pickAvatar(file: File) {
 		if (pendingAvatarPreview) URL.revokeObjectURL(pendingAvatarPreview);
 		setPendingAvatar(file);
 		setPendingAvatarPreview(URL.createObjectURL(file));
 		setClearAvatar(false);
+	}
+
+	function pickBanner(file: File) {
+		if (pendingBannerPreview) URL.revokeObjectURL(pendingBannerPreview);
+		setPendingBanner(file);
+		setPendingBannerPreview(URL.createObjectURL(file));
+		setClearBanner(false);
 	}
 
 	function enterEdit() {
@@ -132,10 +168,18 @@ export function MobileProfileScreen({
 		void hapticSelection();
 		setDisplayName(originalDisplayNameRef.current);
 		setBio(originalBioRef.current);
+		setSocialLinks(originalSocialLinksRef.current);
 		if (pendingAvatarPreview) URL.revokeObjectURL(pendingAvatarPreview);
+		if (pendingBannerPreview) URL.revokeObjectURL(pendingBannerPreview);
 		setPendingAvatar(null);
 		setPendingAvatarPreview(null);
 		setClearAvatar(false);
+		setPendingBanner(null);
+		setPendingBannerPreview(null);
+		setClearBanner(false);
+		setAddLinkOpen(false);
+		setNewLinkUrl("");
+		setNewLinkPlatform(SOCIAL_PLATFORMS[0].id);
 		setError(null);
 		setEditing(false);
 	}
@@ -151,8 +195,19 @@ export function MobileProfileScreen({
 				avatarFile: pendingAvatar ?? undefined,
 				clearAvatar: !pendingAvatar && clearAvatar,
 			});
+			// Banner upload to the media repo, or "" to clear it.
+			let nextBannerMxc: string | undefined;
+			if (pendingBanner) {
+				nextBannerMxc = await transport.uploadAvatarImage(pendingBanner);
+			} else if (clearBanner) {
+				nextBannerMxc = "";
+			}
 			if (accessToken) {
-				await updateMyBio(accessToken, bio.trim());
+				await updateMyProfileData(accessToken, {
+					bio: bio.trim(),
+					social_links: socialLinks,
+					...(nextBannerMxc !== undefined ? { banner_mxc: nextBannerMxc } : {}),
+				});
 			}
 			onSaved?.(avatarUrl);
 			setProfile(prev => prev ? {
@@ -166,10 +221,21 @@ export function MobileProfileScreen({
 			} : prev);
 			originalDisplayNameRef.current = displayName.trim();
 			originalBioRef.current = bio.trim();
+			originalSocialLinksRef.current = socialLinks;
+			setBannerMxc(nextBannerMxc !== undefined
+				? (nextBannerMxc === "" ? null : nextBannerMxc)
+				: bannerMxc);
 			if (pendingAvatarPreview) URL.revokeObjectURL(pendingAvatarPreview);
+			if (pendingBannerPreview) URL.revokeObjectURL(pendingBannerPreview);
 			setPendingAvatar(null);
 			setPendingAvatarPreview(null);
 			setClearAvatar(false);
+			setPendingBanner(null);
+			setPendingBannerPreview(null);
+			setClearBanner(false);
+			setAddLinkOpen(false);
+			setNewLinkUrl("");
+			setNewLinkPlatform(SOCIAL_PLATFORMS[0].id);
 			setEditing(false);
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
@@ -179,6 +245,7 @@ export function MobileProfileScreen({
 	}
 
 	const hasRealAvatar = !!(pendingAvatarPreview || (!clearAvatar && profile?.avatarUrl));
+	const hasRealBanner = !!(pendingBannerPreview || (!clearBanner && bannerMxc));
 
 	return (
 		<div className="flex flex-col h-full">
@@ -212,19 +279,23 @@ export function MobileProfileScreen({
 				) : !editing ? (
 					/* ─── Read mode ─────────────────────────────────── */
 					<div>
-						<div className="flex flex-col items-center px-5 pt-6 pb-7 gap-3">
+						<ProfileBanner mxc={bannerMxc} className="h-40" />
+						<div className={cn(
+							"flex flex-col items-center px-5 pb-7 gap-3",
+							bannerMxc ? "-mt-14" : "pt-6",
+						)}>
 							<MatrixAvatar
 								mxc={profile.avatarUrl}
 								seed={profile.userId}
 								kind="user"
-								className="h-28 w-28 rounded-full ring-1 ring-foreground/10"
+								className={cn(
+									"h-28 w-28 rounded-full",
+									bannerMxc ? "ring-4 ring-background" : "ring-1 ring-foreground/10",
+								)}
 							/>
 							<div className="flex flex-col items-center gap-1 max-w-full">
 								<div className="text-[22px] font-semibold tracking-[-0.01em] text-foreground leading-tight text-center px-4 max-w-[320px] break-words">
 									{profile.displayName}
-								</div>
-								<div className="text-[13px] text-muted-foreground font-mono truncate max-w-[280px]">
-									{profile.userId}
 								</div>
 								{founderNumber !== null && (
 									<div className="mt-1.5">
@@ -249,6 +320,28 @@ export function MobileProfileScreen({
 							</>
 						) : null}
 
+						{socialLinks.length > 0 && (
+							<>
+								<GroupLabel>Links</GroupLabel>
+								<GroupCard>
+									<div className="flex flex-wrap gap-2 px-4 py-3">
+										{socialLinks.map((link) => (
+											<a
+												key={link.platform}
+												href={link.platform === "email" ? `mailto:${link.url}` : link.url}
+												target={link.platform === "email" ? undefined : "_blank"}
+												rel="noopener noreferrer"
+												className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+												title={SOCIAL_PLATFORMS.find(p => p.id === link.platform)?.label ?? link.platform}
+											>
+												<SocialIcon platform={link.platform} className="h-5 w-5" />
+											</a>
+										))}
+									</div>
+								</GroupCard>
+							</>
+						)}
+
 						<GroupLabel>{bio.trim() ? "Visibility" : "Profile"}</GroupLabel>
 						<GroupCard>
 							<div className="px-4 py-3 text-[13px] leading-snug text-muted-foreground">
@@ -259,6 +352,58 @@ export function MobileProfileScreen({
 				) : (
 					/* ─── Edit mode ─────────────────────────────────── */
 					<div>
+						{/* Banner editor — full-bleed image with Change /
+						    Remove text buttons, iOS Contacts style. */}
+						<div className="flex flex-col">
+							{hasRealBanner ? (
+								<ProfileBanner
+									mxc={clearBanner ? null : bannerMxc}
+									previewSrc={pendingBannerPreview}
+									className="h-40"
+								/>
+							) : (
+								<div className="h-40 bg-muted/40 flex items-center justify-center text-[13px] text-muted-foreground">
+									No banner
+								</div>
+							)}
+							<div className="flex items-center justify-center gap-5 pt-3">
+								<button
+									type="button"
+									onClick={() => { void hapticSelection(); bannerInputRef.current?.click(); }}
+									className="inline-flex items-center gap-1.5 text-[15px] font-medium text-primary active:opacity-60 transition-opacity"
+								>
+									<ImageIcon className="h-4 w-4" strokeWidth={2.25} />
+									{hasRealBanner ? "Change Banner" : "Add Banner"}
+								</button>
+								{hasRealBanner && (
+									<button
+										type="button"
+										onClick={() => {
+											void hapticSelection();
+											if (pendingBannerPreview) URL.revokeObjectURL(pendingBannerPreview);
+											setPendingBanner(null);
+											setPendingBannerPreview(null);
+											setClearBanner(true);
+										}}
+										className="inline-flex items-center gap-1.5 text-[15px] font-medium text-destructive active:opacity-60 transition-opacity"
+									>
+										<Trash2 className="h-4 w-4" strokeWidth={2.25} />
+										Remove
+									</button>
+								)}
+							</div>
+							<input
+								ref={bannerInputRef}
+								type="file"
+								accept="image/*"
+								className="hidden"
+								onChange={(e) => {
+									const file = e.target.files?.[0];
+									if (file) pickBanner(file);
+									e.target.value = "";
+								}}
+							/>
+						</div>
 						{/* Avatar editor — centred large preview, with
 						    Change / Remove rendered as text buttons
 						    underneath in the system tint.  No nested
@@ -355,13 +500,85 @@ export function MobileProfileScreen({
 							</div>
 						</GroupCard>
 
-						<GroupLabel>Matrix ID</GroupLabel>
+						<GroupLabel>Links <span className="normal-case font-normal text-muted-foreground">(optional)</span></GroupLabel>
 						<GroupCard>
-							<div className="px-4 py-3 text-[15px] text-muted-foreground font-mono break-all">
-								{profile.userId}
+							<div className="divide-y divide-border">
+								{socialLinks.map((link, i) => (
+									<div key={i} className="flex items-center gap-3 px-4 py-2.5">
+										<SocialIcon platform={link.platform} className="h-4 w-4 shrink-0 text-muted-foreground" />
+										<div className="flex-1 min-w-0">
+											<span className="text-[15px] text-foreground">{SOCIAL_PLATFORMS.find(p => p.id === link.platform)?.label ?? link.platform}</span>
+											<span className="text-[13px] text-muted-foreground font-mono ml-2 truncate">{link.url.length > 32 ? link.url.slice(0, 32) + "…" : link.url}</span>
+										</div>
+										<button
+											type="button"
+											onClick={() => { void hapticSelection(); setSocialLinks(prev => prev.filter((_, j) => j !== i)); }}
+											className="shrink-0 text-muted-foreground hover:text-destructive text-xl leading-none transition-colors"
+											aria-label={`Remove ${link.platform} link`}
+										>
+											×
+										</button>
+									</div>
+								))}
+
+								{addLinkOpen ? (
+									<div className="px-4 py-2.5 space-y-2">
+										<div className="flex items-center gap-2">
+											<SocialIcon platform={newLinkPlatform} className="h-4 w-4 shrink-0 text-muted-foreground" />
+											<select
+												value={newLinkPlatform}
+												onChange={e => { setNewLinkPlatform(e.target.value); setNewLinkUrl(""); }}
+												className="flex-1 bg-transparent text-[15px] focus:outline-none"
+											>
+												{SOCIAL_PLATFORMS.map(p => (
+													<option key={p.id} value={p.id}>{p.label}</option>
+												))}
+											</select>
+										</div>
+										<input
+											type={newLinkPlatform === "email" ? "email" : "url"}
+											value={newLinkUrl}
+											onChange={e => setNewLinkUrl(e.target.value)}
+											placeholder={PLATFORM_PLACEHOLDERS[newLinkPlatform] ?? "https://…"}
+											className="w-full bg-transparent text-[15px] text-foreground placeholder:text-muted-foreground focus:outline-none"
+											autoCapitalize="none"
+											autoCorrect="off"
+											spellCheck={false}
+										/>
+										<div className="flex items-center gap-3">
+											<button
+												type="button"
+												onClick={() => {
+													const url = newLinkUrl.trim();
+													if (url) { setSocialLinks(prev => [...prev, { platform: newLinkPlatform, url }]); setNewLinkUrl(""); }
+													setAddLinkOpen(false);
+												}}
+												className="text-[15px] text-primary font-medium"
+											>
+												Add
+											</button>
+											<button
+												type="button"
+												onClick={() => { setAddLinkOpen(false); setNewLinkUrl(""); }}
+												className="text-[15px] text-muted-foreground"
+											>
+												Cancel
+											</button>
+										</div>
+									</div>
+								) : socialLinks.length < 8 ? (
+									<button
+										type="button"
+										onClick={() => { void hapticSelection(); setAddLinkOpen(true); setNewLinkUrl(""); setNewLinkPlatform(SOCIAL_PLATFORMS[0].id); }}
+										className="flex items-center gap-2 px-4 py-2.5 text-[15px] text-primary w-full text-left"
+									>
+										<span className="text-xl leading-none">+</span>
+										Add link
+									</button>
+								) : null}
 							</div>
 						</GroupCard>
-					</div>
+				</div>
 				)}
 
 				{error && <ErrorBanner message={error} />}

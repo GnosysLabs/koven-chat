@@ -1,11 +1,14 @@
-// User-bio + founder-status client.  Bios live on the engine, not in
-// Matrix, because the Matrix profile API has fixed fields and
-// account_data is private to the owner — neither lets us surface
-// bios to other people.  Founder number rides on the same response
-// to save a second round-trip when opening a profile.  Reads are
-// public; writes require the owner's Matrix access token.
+// User-bio + founder-status + social-links client.  All live on the
+// engine because the Matrix profile API has fixed fields and
+// account_data is private to the owner.  Reads are public; writes
+// require the owner's Matrix access token.
 
 import { ENGINE_URL } from "@/lib/urls";
+
+export interface SocialLink {
+	platform: string;
+	url: string;
+}
 
 export interface UserBioResponse {
 	user_id: string;
@@ -19,6 +22,11 @@ export interface UserProfileResponse {
 	// null otherwise.  Drives the holographic Founder badge on the
 	// profile sheet.
 	founder_number: number | null;
+	social_links: SocialLink[];
+	// mxc:// URI of the user's profile banner image, or null when
+	// unset.  The bytes live in the Matrix media repo; the engine
+	// only stores this pointer.
+	banner_mxc: string | null;
 }
 
 export async function fetchUserBio(userId: string): Promise<string> {
@@ -30,38 +38,45 @@ export async function fetchUserBio(userId: string): Promise<string> {
 	return body.bio ?? "";
 }
 
-/** Fetch the full profile (bio + founder number) for a user.
- * Use this in the profile sheet where both pieces of data are
- * visible at the same time.  Returns nulls for missing fields
- * rather than throwing so the sheet always renders. */
+/** Fetch the full profile (bio + founder number + social links) for a user. */
 export async function fetchUserProfile(userId: string): Promise<UserProfileResponse> {
 	const r = await fetch(`${ENGINE_URL}/api/profile/${encodeURIComponent(userId)}`, {
 		credentials: "omit",
 	});
 	if (!r.ok) {
-		return { user_id: userId, bio: "", founder_number: null };
+		return { user_id: userId, bio: "", founder_number: null, social_links: [], banner_mxc: null };
 	}
 	const body = (await r.json()) as UserProfileResponse;
 	return {
 		user_id: body.user_id ?? userId,
 		bio: body.bio ?? "",
 		founder_number: typeof body.founder_number === "number" ? body.founder_number : null,
+		social_links: Array.isArray(body.social_links) ? body.social_links : [],
+		banner_mxc: typeof body.banner_mxc === "string" ? body.banner_mxc : null,
 	};
 }
 
-export async function updateMyBio(accessToken: string, bio: string): Promise<string> {
+/** Update the current user's bio, social links and/or banner in one request. */
+export async function updateMyProfileData(
+	accessToken: string,
+	data: { bio?: string; social_links?: SocialLink[]; banner_mxc?: string | null },
+): Promise<void> {
 	const r = await fetch(`${ENGINE_URL}/api/profile/me`, {
 		method: "PUT",
 		headers: {
 			"Content-Type": "application/json",
 			Authorization: `Bearer ${accessToken}`,
 		},
-		body: JSON.stringify({ bio }),
+		body: JSON.stringify(data),
 	});
 	if (!r.ok) {
 		const body = await r.json().catch(() => ({})) as { error?: string };
 		throw new Error(body.error ?? `engine PUT /api/profile/me → ${r.status}`);
 	}
-	const body = (await r.json()) as UserBioResponse;
-	return body.bio ?? "";
+}
+
+/** @deprecated Use updateMyProfileData instead. */
+export async function updateMyBio(accessToken: string, bio: string): Promise<string> {
+	await updateMyProfileData(accessToken, { bio });
+	return bio;
 }

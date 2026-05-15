@@ -7,8 +7,9 @@
 import { useEffect, useState } from "react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { BotBadge } from "@/components/BotBadge";
-import { fetchUserBio } from "@/lib/profile";
-import { formatMxid, serverOf } from "@/lib/mxid";
+import { fetchUserProfile, type SocialLink } from "@/lib/profile";
+import { SOCIAL_PLATFORMS, SocialIcon } from "@/components/SocialIcons";
+import { ProfileBanner } from "@/components/ProfileBanner";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
 import { Ban, Trash2, UserCheck } from "lucide-react";
@@ -53,6 +54,8 @@ export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenPro
 		homeserver: string;
 	} | null>(null);
 	const [bio, setBio] = useState("");
+	const [socialLinks, setSocialLinks] = useState<SocialLink[]>([]);
+	const [bannerMxc, setBannerMxc] = useState<string | null>(null);
 	const [blocking, setBlocking] = useState(false);
 	const [blockError, setBlockError] = useState<string | null>(null);
 	const isBlocked = ignoredUsers.has(otherUserId);
@@ -67,14 +70,15 @@ export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenPro
 		if (profile?.userId !== otherUserId) {
 			setProfile(null);
 			setBio("");
+			setSocialLinks([]);
+			setBannerMxc(null);
 		}
-		// Matrix profile (display name, avatar) and engine bio in
-		// parallel — they're independent calls and showing one without
-		// the other is fine if the slower one fails.
+		// Matrix profile (display name, avatar) and engine profile
+		// (bio + social links) fetched in parallel.
 		Promise.all([
 			transport.getUserProfile(otherUserId).catch(() => null),
-			fetchUserBio(otherUserId).catch(() => ""),
-		]).then(([p, fetchedBio]) => {
+			fetchUserProfile(otherUserId).catch(() => null),
+		]).then(([p, ep]) => {
 			if (cancelled) return;
 			setProfile({
 				userId: otherUserId,
@@ -82,7 +86,9 @@ export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenPro
 				avatarUrl: p?.avatarUrl,
 				homeserver: p?.homeserver ?? "",
 			});
-			setBio(fetchedBio);
+			setBio(ep?.bio ?? "");
+			setSocialLinks(ep?.social_links ?? []);
+			setBannerMxc(ep?.banner_mxc ?? null);
 		});
 		return () => { cancelled = true; };
 		// `profile?.userId` is read for the staleness check but
@@ -130,6 +136,7 @@ export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenPro
 			</div>
 			<div className="flex-1 overflow-y-auto p-4">
 				{haveProfile && (<>
+				<ProfileBanner mxc={bannerMxc} className="h-16 rounded-lg mb-4" />
 				<button
 					type="button"
 					onClick={() => onOpenProfile(otherUserId)}
@@ -146,9 +153,6 @@ export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenPro
 							<span className="truncate">{profile?.displayName ?? otherUserId}</span>
 							{isBot && <BotBadge compact={false} />}
 						</div>
-						<div className="text-[10px] text-muted-foreground font-mono truncate" title={otherUserId}>
-							{formatMxid(otherUserId, serverOf(transport?.currentUserId ?? null))}
-						</div>
 					</div>
 				</button>
 
@@ -156,6 +160,23 @@ export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenPro
 					<p className="mt-4 text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap">
 						{bio}
 					</p>
+				)}
+
+				{socialLinks.length > 0 && (
+					<div className="mt-3 flex flex-wrap gap-1">
+						{socialLinks.map((link) => (
+							<a
+								key={link.platform}
+								href={link.platform === "email" ? `mailto:${link.url}` : link.url}
+								target={link.platform === "email" ? undefined : "_blank"}
+								rel="noopener noreferrer"
+								className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+								title={SOCIAL_PLATFORMS.find(p => p.id === link.platform)?.label ?? link.platform}
+							>
+								<SocialIcon platform={link.platform} className="h-3.5 w-3.5" />
+							</a>
+						))}
+					</div>
 				)}
 
 				{!isMyBot && (
