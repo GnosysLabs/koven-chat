@@ -857,8 +857,12 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 					// here, so the layout stays narrow and quick to scan.
 					<div className="space-y-4">
 						<ProfileBanner mxc={bannerMxc} className="h-28 rounded-lg" />
+						{/* relative z-10 lifts the row above the banner: the
+						    banner's mask makes it a stacking context, which
+						    would otherwise paint over (and fade into) the
+						    avatar + badge where the row overlaps it. */}
 						<div
-							className="flex items-center gap-4"
+							className="relative z-10 flex items-center gap-4"
 							style={bannerMxc ? { marginTop: "-2.5rem" } : undefined}
 						>
 							<MatrixAvatar

@@ -280,8 +280,12 @@ export function MobileProfileScreen({
 					/* ─── Read mode ─────────────────────────────────── */
 					<div>
 						<ProfileBanner mxc={bannerMxc} className="h-40" />
+						{/* relative z-10 lifts the avatar block above the
+						    banner: the banner's mask makes it a stacking
+						    context that would otherwise paint over (and
+						    fade into) the avatar where the block overlaps. */}
 						<div className={cn(
-							"flex flex-col items-center px-5 pb-7 gap-3",
+							"relative z-10 flex flex-col items-center px-5 pb-7 gap-3",
 							bannerMxc ? "-mt-14" : "pt-6",
 						)}>
 							<MatrixAvatar
