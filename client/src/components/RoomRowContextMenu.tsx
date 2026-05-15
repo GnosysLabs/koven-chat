@@ -167,7 +167,7 @@ export function RoomRowContextMenu({
 
 		// Copy affordances.
 		out.push({
-			label: isDm ? "Copy user ID" : "Copy room ID",
+			label: isDm ? "Copy username" : "Copy room ID",
 			icon: <Copy className="h-4 w-4" />,
 			onClick: onCopyId,
 		});

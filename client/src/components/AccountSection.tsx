@@ -28,6 +28,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Ban, ShieldAlert, Trash2, UserCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { serverOf, formatMxid } from "@/lib/mxid";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
 import type { Settings } from "@/state/settings";
@@ -50,6 +51,7 @@ export interface AccountSectionProps {
 }
 
 export function AccountSection({ accessToken, transport, ignoredUsers, onSignedOut, settings, onSettingsChange }: AccountSectionProps) {
+	const serverName = serverOf(transport?.currentUserId ?? null) ?? "koven.chat";
 	const blocked = useMemo(() => Array.from(ignoredUsers), [ignoredUsers]);
 	const [unblockingUser, setUnblockingUser] = useState<UserId | null>(null);
 	const [unblockError, setUnblockError] = useState<string | null>(null);
@@ -169,7 +171,7 @@ export function AccountSection({ accessToken, transport, ignoredUsers, onSignedO
 								key={userId}
 								className="flex items-center justify-between gap-3 px-3 py-2 rounded-md border border-border bg-muted/30"
 							>
-								<span className="font-mono text-xs truncate">{userId}</span>
+								<span className="font-mono text-xs truncate">{formatMxid(userId, serverName)}</span>
 								<Button
 									type="button"
 									variant="ghost"

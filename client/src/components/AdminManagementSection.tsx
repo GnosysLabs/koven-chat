@@ -22,6 +22,7 @@ import {
 	revokeAdminUser,
 	type AdminRow,
 } from "@/lib/instance";
+import { serverOf, formatMxid } from "@/lib/mxid";
 import type { MatrixTransport } from "@/lib/matrix";
 
 export interface AdminManagementSectionProps {
@@ -198,7 +199,7 @@ export function AdminManagementSection({ accessToken, transport, currentUserId }
 								/>
 								<div className="min-w-0 flex-1">
 									<div className="text-sm truncate flex items-center gap-1.5">
-										<span className="truncate">{a.user_id}</span>
+										<span className="truncate">{formatMxid(a.user_id, serverOf(currentUserId))}</span>
 										{isSelf && (
 											<span className="text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded bg-primary/15 text-primary">
 												You
@@ -277,7 +278,7 @@ export function AdminManagementSection({ accessToken, transport, currentUserId }
 									/>
 									<div className="min-w-0 flex-1">
 										<div className="text-sm truncate">{r.displayName ?? r.userId}</div>
-										<div className="text-[10px] text-muted-foreground truncate">{r.userId}</div>
+										<div className="text-[10px] text-muted-foreground truncate">{formatMxid(r.userId, serverOf(currentUserId))}</div>
 									</div>
 									<span className="text-[11px] text-primary font-medium shrink-0">
 										{pendingMxid === r.userId ? "Promoting…" : "Promote"}

@@ -152,7 +152,7 @@ function BotRow({
 					e.stopPropagation();
 					setCtxMenuPos({ x: e.clientX, y: e.clientY });
 				}}
-				title={bot.mxid}
+				title={bot.mxid.replace(/:.*$/, "")}
 				className={cn(
 					"w-full px-3 py-2 flex items-center gap-2.5 text-left text-sm relative",
 					"hover:bg-accent transition-colors",
@@ -217,7 +217,7 @@ function BotRow({
 						} satisfies ContextMenuItem] : []),
 						{ kind: "divider" } satisfies ContextMenuItem,
 						{
-							label: "Copy bot mxid",
+							label: "Copy username",
 							icon: <Copy className="h-4 w-4" />,
 							onClick: () => { void navigator.clipboard.writeText(bot.mxid); },
 						},

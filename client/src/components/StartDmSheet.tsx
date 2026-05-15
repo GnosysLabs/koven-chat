@@ -16,7 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { cn } from "@/lib/utils";
-import { serverOf } from "@/lib/mxid";
+import { serverOf, formatMxid } from "@/lib/mxid";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
 import { fetchBotDirectory, type PublicBotEntry } from "@/lib/bots-cache";
@@ -203,7 +203,7 @@ export function StartDmSheet({ open, onOpenChange, transport, onStarted }: Start
 													{r.isBot && <BotBadge />}
 												</div>
 												{r.displayName && (
-													<div className="text-[10px] text-muted-foreground font-mono truncate">{r.userId}</div>
+													<div className="text-[10px] text-muted-foreground font-mono truncate">{formatMxid(r.userId, serverName)}</div>
 												)}
 											</div>
 										</button>

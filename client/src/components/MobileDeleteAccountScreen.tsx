@@ -138,7 +138,7 @@ export function MobileDeleteAccountScreen({
 
 						<GroupLabel>What Happens</GroupLabel>
 						<GroupCard>
-							<Consequence text="Your username (Matrix ID) is permanently retired." />
+							<Consequence text="Your username is permanently retired." />
 							<Consequence text="The contents of every message you've sent are erased on the homeserver." />
 							<Consequence text="Direct conversations on your side disappear; the other party retains their copy." />
 							<Consequence text="Reports you submitted stay in the audit log." last />

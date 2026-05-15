@@ -19,6 +19,7 @@ import { Label } from "@/components/ui/label";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { cn } from "@/lib/utils";
 import { X } from "lucide-react";
+import { serverOf, formatMxid } from "@/lib/mxid";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { RoomId, UserId } from "@koven/shared";
 import { fetchBotDirectory, type PublicBotEntry } from "@/lib/bots-cache";
@@ -41,6 +42,7 @@ export interface InviteSheetProps {
 }
 
 export function InviteSheet({ open, onOpenChange, transport, roomId, roomName, isSpace }: InviteSheetProps) {
+	const serverName = serverOf(transport?.currentUserId ?? null) ?? "koven.chat";
 	const [query, setQuery] = useState("");
 	const [results, setResults] = useState<DirectoryResult[]>([]);
 	const [selected, setSelected] = useState<DirectoryResult[]>([]);
@@ -289,7 +291,7 @@ export function InviteSheet({ open, onOpenChange, transport, roomId, roomName, i
 													{r.isBot && <BotBadge />}
 												</div>
 												{r.displayName && (
-													<div className="text-[10px] text-muted-foreground font-mono truncate">{r.userId}</div>
+													<div className="text-[10px] text-muted-foreground font-mono truncate">{formatMxid(r.userId, serverName)}</div>
 												)}
 											</div>
 										</button>

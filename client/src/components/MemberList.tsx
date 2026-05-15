@@ -562,7 +562,7 @@ function MemberContextMenu({
 			)}
 			<MenuItem
 				icon={<Copy className="h-4 w-4" />}
-				label={busyAction === "copy" ? "Copied" : "Copy user ID"}
+				label={busyAction === "copy" ? "Copied" : "Copy username"}
 				onClick={() => onAction("copy")}
 				disabled={!!busyAction}
 			/>
@@ -739,7 +739,7 @@ function MemberRow({
 					isSelf && "font-medium",
 					presence === "offline" && "text-muted-foreground",
 				)}
-				title={member.userId}
+				title={member.userId.replace(/:.*$/, "")}
 			>
 				<Avatar member={member} isBot={isBot} presence={presence} />
 				<span className="flex-1 truncate flex items-center gap-1.5">
