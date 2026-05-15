@@ -629,6 +629,13 @@
 	 */
 	:root {
 		--composer-pb: max(env(safe-area-inset-bottom), 0.5rem);
+		/* Live soft-keyboard height in px (0 when down), published by
+		 * the keyboard tracker in lib/nativeShell.ts.  Keyboard-aware
+		 * surfaces fold this into their bottom padding so the primary
+		 * action (chat composer, login button) stays above the
+		 * keyboard: iOS WKWebView never shrinks the viewport for the
+		 * keyboard on its own. */
+		--keyboard-inset: 0px;
 	}
 	/* While the keyboard is up, drop the ~34pt home-indicator inset
 	 * (it's hidden behind the keyboard anyway) but KEEP the 0.5rem
@@ -722,20 +729,21 @@
 		top: 0;
 		left: 0;
 		right: 0;
-		/* `dvh` = DYNAMIC viewport height.  Browsers compute this
-		 * against the CURRENT viewport (shrinks when the keyboard
-		 * opens, grows back when it hides) — but only when the
-		 * viewport meta tag opts in via `interactive-widget=resizes-
-		 * content`, which it now does in index.html.  This lets
-		 * `#root` track the keyboard automatically: no JS event
-		 * listeners, no per-device fallback heights, no hardcoded
-		 * keyboard sizes.  Pre-iOS 15.4 falls back to `100%` of body
-		 * via the base rule a few hundred lines up.
+		/* `dvh` = dynamic viewport height.  It tracks browser-chrome
+		 * changes (the iOS Safari URL bar) but NOT the soft keyboard:
+		 * iOS WKWebView ignores `interactive-widget=resizes-content`
+		 * and never shrinks the viewport for the keyboard, so `#root`
+		 * stays full-height while the keyboard is up.  Keyboard-aware
+		 * surfaces instead lift their primary action by
+		 * `--keyboard-inset` (published by lib/nativeShell.ts); see
+		 * the PushSlot / composer / login padding rules.  `dvh` is
+		 * kept anyway (correct for the URL-bar case, just `vh`
+		 * elsewhere).  Pre-iOS 15.4 falls back to `100%` of body via
+		 * the base rule a few hundred lines up.
 		 *
-		 * `body::before` is intentionally NOT scaled by dvh — it
-		 * uses `lvh` (large viewport, static) so the theme gradient
-		 * keeps painting behind the keyboard even though `#root`
-		 * shrinks above it. */
+		 * `body::before` uses `lvh` (large viewport, static) so the
+		 * theme gradient keeps painting full-bleed behind the
+		 * keyboard. */
 		height: 100dvh;
 		overflow: hidden;
 	}
@@ -760,10 +768,10 @@
 	 *   - `(-webkit-touch-callout: none)` — old-iOS fallback for
 	 *     PWA mode that doesn't honour the display-mode query.
 	 *
-	 * Heights stay at `100dvh` (dynamic viewport height) so when
-	 * the iOS keyboard slides up, the available area shrinks,
-	 * letting the composer pin itself just above the keyboard
-	 * via the existing flex layout — no JavaScript needed.
+	 * Heights stay at `100dvh` (dynamic viewport height); the soft
+	 * keyboard is handled separately via `--keyboard-inset` (see the
+	 * `.mobile-shell #root` rule above), since iOS WKWebView does not
+	 * shrink the viewport for the keyboard.
 	 */
 	@media all and (display-mode: standalone),
 	       all and (display-mode: fullscreen) {
@@ -788,10 +796,10 @@
 		 * ::before pseudo-element with the same fixed positioning
 		 * paints the gradient edge-to-edge underneath.
 		 *
-		 * iOS keyboard handling still works: the SPA's flex
-		 * layout inside #root uses 100dvh on its inner containers
-		 * (chat shell, etc.), so when the keyboard slides up the
-		 * dvh shrinks and the composer pins itself naturally.
+		 * iOS keyboard handling is independent of this: the soft
+		 * keyboard never shrinks the iOS viewport, so keyboard-aware
+		 * surfaces lift their primary action by `--keyboard-inset`
+		 * (published by lib/nativeShell.ts) instead.
 		 */
 		html, body {
 			margin: 0;

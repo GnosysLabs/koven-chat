@@ -50,10 +50,12 @@ const DialogContent = React.forwardRef<
         // for the iOS notch / Dynamic Island on top of the existing
         // 4rem header gutter so the back arrow + content land below
         // the status bar instead of under it.  Bottom padding picks
-        // up the home-indicator inset for the same reason.
+        // up the home-indicator inset, plus `--keyboard-inset` (the
+        // live soft-keyboard height, published by lib/nativeShell.ts)
+        // so the submit button can scroll clear of the keyboard.
         "max-sm:inset-0 max-sm:left-0 max-sm:top-0 max-sm:max-w-none max-sm:max-h-dvh max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-none max-sm:border-0 max-sm:p-4",
         "max-sm:pt-[calc(env(safe-area-inset-top)+4rem)]",
-        "max-sm:pb-[calc(env(safe-area-inset-bottom)+1rem)]",
+        "max-sm:pb-[calc(env(safe-area-inset-bottom)+1rem+var(--keyboard-inset,0px))]",
         "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
         "data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%]",
         "max-sm:data-[state=open]:slide-in-from-right-4 max-sm:data-[state=closed]:slide-out-to-right-4 max-sm:data-[state=closed]:zoom-out-100 max-sm:data-[state=open]:zoom-in-100",

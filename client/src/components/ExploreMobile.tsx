@@ -152,7 +152,10 @@ export function ExploreMobile({
 		<div className="flex-1 min-h-0 overflow-y-auto">
 			<div
 				className="px-4 pt-3"
-				style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 80px)" }}
+				// `--keyboard-inset` extends the scroll runway so the
+				// last results can clear the soft keyboard when the
+				// search field is focused (0 when the keyboard is down).
+				style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 80px + var(--keyboard-inset, 0px))" }}
 			>
 				<h1 className="text-[34px] font-bold tracking-[-0.022em] leading-[1.1] text-foreground py-3">
 					Explore

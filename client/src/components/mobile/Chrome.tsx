@@ -374,7 +374,20 @@ export function PushSlot({
 		<animated.div
 			ref={slotRef}
 			{...dragBind()}
-			style={{ x }}
+			// `x` is the react-spring push / drag transform.  `padding-
+			// bottom` lifts the pushed screen's content above the soft
+			// keyboard: `--keyboard-inset` (published by
+			// lib/nativeShell.ts) shrinks this flex column's content
+			// box, so ChatPane's composer (its last flex child), and
+			// any other push view's bottom-anchored UI, rides up by
+			// exactly the keyboard height.  Scoped to `padding-bottom`
+			// so the transition never touches the spring-driven
+			// transform; the 0.25s tracks the keyboard's slide.
+			style={{
+				x,
+				paddingBottom: "var(--keyboard-inset, 0px)",
+				transition: "padding-bottom 0.25s ease-out",
+			}}
 			className={cn(
 				"absolute inset-0 z-10",
 				// `flex flex-col` so children that size themselves

@@ -31,85 +31,98 @@ export function isNativeShell(): boolean {
 		|| w.__KOVEN_DESKTOP__ === true;
 }
 
-/** Toggle `html.kb-open` while the soft keyboard is up.  Driven by
- * focus on text inputs — synchronous, fires the instant the keyboard
- * is about to come up.  Used as a defensive override for
- * `--composer-pb`: iOS's env(safe-area-inset-bottom) is supposed to
- * collapse to 0 automatically while the keyboard covers the home
- * indicator (we opt into this behavior via
- * `interactive-widget=resizes-content` in index.html), but if a given
- * WKWebView version doesn't honor that, the `:focus-within` / kb-open
- * rules in index.css still drop the inset to its 0.5rem floor.
- *
- * The composer's vertical OFFSET (moving above the keyboard) is
- * handled purely in CSS via `#root { height: 100dvh }` — no JS height
- * tracking, no per-device fallbacks, no event plumbing. */
-function isTextInput(el: EventTarget | null): boolean {
-	if (!(el instanceof HTMLElement)) return false;
-	const tag = el.tagName;
-	if (tag === "TEXTAREA") return true;
-	if (tag === "INPUT") {
-		const type = (el as HTMLInputElement).type;
-		// Buttons / checkboxes / etc. don't summon the keyboard; only
-		// text-flavored inputs.
-		return type !== "button" && type !== "submit" && type !== "checkbox"
-			&& type !== "radio" && type !== "file" && type !== "range"
-			&& type !== "color";
-	}
-	return el.isContentEditable;
+// ── Soft-keyboard tracking ────────────────────────────────────────
+//
+// iOS WKWebView never shrinks the layout viewport for the soft
+// keyboard.  With Capacitor's `resize: "none"` the WebView keeps its
+// full-screen frame, and `interactive-widget=resizes-content` (the
+// viewport-meta opt-in) is an Android-Chromium feature WebKit ignores.
+// So `100dvh` does NOT track the keyboard — the keyboard slides up
+// OVER the page and nothing moves out of the way on its own.
+//
+// `--keyboard-inset` is the fix: a CSS custom property on <html>
+// holding the live keyboard height in px (0 when down).  It is the
+// single source of truth every keyboard-aware surface reads — the
+// chat composer / push-view screens lift by it, the pre-auth login
+// and encryption columns fold it into their bottom padding, mobile
+// dialogs add it to their scroll padding.  `kb-open` is the matching
+// boolean signal (keyboard up) that index.css uses to collapse
+// `--composer-pb`'s home-indicator strip while the keyboard hides it.
+
+/** Write the keyboard height to <html> as `--keyboard-inset` and keep
+ * the `kb-open` class in sync. */
+function publishKeyboardInset(px: number): void {
+	const height = Math.max(0, Math.round(px));
+	const root = document.documentElement;
+	root.style.setProperty("--keyboard-inset", `${height}px`);
+	root.classList.toggle("kb-open", height > 0);
 }
 
-let blurResetTimer: number | null = null;
+let keyboardTrackingStarted = false;
 
-function setupKeyboardClassToggle() {
+/** Subscribe to the soft keyboard and publish its height.  Two signal
+ * sources, picked by host:
+ *
+ *   - Capacitor (iOS / Android): @capacitor/keyboard's keyboardWillShow
+ *     / keyboardWillHide.  `willShow` fires as the keyboard BEGINS its
+ *     slide-in and carries the final height, so surfaces that
+ *     transition `padding-bottom` track the slide instead of snapping.
+ *   - Plain mobile browser (iOS Safari PWA, Chrome Android): the
+ *     VisualViewport API.  The soft keyboard shrinks `visualViewport`
+ *     even when the layout viewport (and `100dvh`) stays full size.
+ *
+ * Only one source runs per host.  Listeners live for the app's
+ * lifetime — never torn down. */
+async function setupKeyboardTracking(): Promise<void> {
 	if (typeof window === "undefined") return;
-	document.addEventListener("focusin", (e) => {
-		if (!isTextInput(e.target)) return;
-		if (blurResetTimer !== null) {
-			window.clearTimeout(blurResetTimer);
-			blurResetTimer = null;
+	if (keyboardTrackingStarted) return;
+	keyboardTrackingStarted = true;
+
+	if (isCapacitor()) {
+		try {
+			const { Keyboard } = await import("@capacitor/keyboard");
+			Keyboard.addListener("keyboardWillShow", (info) => {
+				publishKeyboardInset(info.keyboardHeight);
+			});
+			Keyboard.addListener("keyboardWillHide", () => {
+				publishKeyboardInset(0);
+			});
+			return;
+		} catch {
+			// Plugin missing (e.g. the web build running under
+			// Capacitor's dev server) — fall through to VisualViewport.
 		}
-		document.documentElement.classList.add("kb-open");
-	});
-	document.addEventListener("focusout", (e) => {
-		if (!isTextInput(e.target)) return;
-		// Delay the reset — if the user is tab-hopping between inputs,
-		// focusout fires on the old input before focusin fires on the
-		// new one.  The 80ms gap catches the swap and skips the
-		// premature kb-open removal.
-		if (blurResetTimer !== null) window.clearTimeout(blurResetTimer);
-		blurResetTimer = window.setTimeout(() => {
-			blurResetTimer = null;
-			if (!isTextInput(document.activeElement)) {
-				document.documentElement.classList.remove("kb-open");
-			}
-		}, 80);
-	});
+	}
+
+	const vv = window.visualViewport;
+	if (!vv) return;
+	const sync = () => {
+		// The keyboard occupies the gap between the layout viewport
+		// (window.innerHeight) and the visual viewport.  `offsetTop`
+		// accounts for the page being scrolled within the visual
+		// viewport when a focused field pins the view upward.
+		publishKeyboardInset(window.innerHeight - vv.height - vv.offsetTop);
+	};
+	vv.addEventListener("resize", sync);
+	vv.addEventListener("scroll", sync);
+	sync();
 }
 
 /** Apply native-shell tweaks that improve mobile UX.  Currently:
  *
+ *   - Track the soft keyboard and publish `--keyboard-inset` /
+ *     `kb-open` (runs on every mobile host — Capacitor uses the
+ *     native plugin events, plain browsers use VisualViewport).
+ *
  *   - Hide the keyboard input-accessory bar (the up/down/done strip
- *     that iOS attaches above the keyboard for form-field
- *     navigation).  It looks out of place in a chat composer and
- *     covers the top of the keyboard with vestigial buttons.
+ *     iOS attaches above the keyboard for form-field navigation).
+ *     It looks out of place in a chat composer and covers the top of
+ *     the keyboard with vestigial buttons.  Capacitor only.
  *
- *   - Toggle `html.kb-open` while the soft keyboard is up.  iOS
- *     Capacitor's env(safe-area-inset-bottom) value is computed from
- *     the layout viewport and keeps reporting ~34pt of home-indicator
- *     inset even when the keyboard fully covers the indicator.  The
- *     chat composer reserves that strip as bottom padding (see
- *     `--composer-pb` in index.css) — without an override, the result
- *     is a 34pt black band between the textarea and the keyboard top.
- *     We mirror that signal into a class on <html> so CSS can drop
- *     `--composer-pb` to 0 while typing.
- *
- * Safe to call repeatedly; the Capacitor APIs are idempotent. */
+ * Safe to call repeatedly; keyboard tracking guards against
+ * double-registration and the Capacitor APIs are idempotent. */
 export async function applyNativeShellTweaks(): Promise<void> {
-	// kb-open class toggle runs on every platform — pure focus-driven,
-	// no platform APIs needed.  Used by index.css rules that need a
-	// keyboard-is-up signal for compositional overrides.
-	setupKeyboardClassToggle();
+	void setupKeyboardTracking();
 
 	if (!isCapacitor()) return;
 	try {

@@ -66,7 +66,13 @@ export function EncryptionUnlockMobile({ onUnlock, onUnlocked, onSignOut }: Encr
 				className="flex flex-col min-h-full px-6"
 				style={{
 					paddingTop: "max(env(safe-area-inset-top), 0.5rem)",
-					paddingBottom: "max(env(safe-area-inset-bottom), 1rem)",
+					// Fold the live keyboard height into the bottom
+					// padding so the Unlock button (anchored at the
+					// column's bottom) stays above the keyboard.
+					// `--keyboard-inset` is 0 when the keyboard is
+					// down, so this reduces to the safe-area inset.
+					paddingBottom: "max(env(safe-area-inset-bottom), 1rem, calc(var(--keyboard-inset, 0px) + 0.5rem))",
+					transition: "padding-bottom 0.25s ease-out",
 				}}
 			>
 				{/* Empty nav slot so vertical layout matches LoginMobile
