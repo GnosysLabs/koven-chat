@@ -876,6 +876,9 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 									<span className="truncate">{profile.displayName}</span>
 									{isBot && <BotBadge compact={false} />}
 								</div>
+								<div className="text-xs text-muted-foreground font-mono truncate">
+									{formatMxid(profile.userId, serverOf(transport?.currentUserId ?? null))}
+								</div>
 							</div>
 							{/* Holograph chip lives in the header row,
 							    right-aligned next to the name.

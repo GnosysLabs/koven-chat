@@ -14,6 +14,7 @@ import type { MatrixTransport } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
 import { Ban, Trash2, UserCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { serverOf, formatMxid } from "@/lib/mxid";
 
 export interface DmProfilePanelProps {
 	otherUserId: UserId;
@@ -152,6 +153,9 @@ export function DmProfilePanel({ otherUserId, transport, ignoredUsers, onOpenPro
 						<div className="text-sm font-semibold truncate group-hover:text-primary transition-colors flex items-center justify-center gap-1.5">
 							<span className="truncate">{profile?.displayName ?? otherUserId}</span>
 							{isBot && <BotBadge compact={false} />}
+						</div>
+						<div className="text-xs text-muted-foreground font-mono truncate">
+							{formatMxid(otherUserId, serverOf(transport?.currentUserId ?? null))}
 						</div>
 					</div>
 				</button>
