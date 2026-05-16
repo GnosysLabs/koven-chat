@@ -30,7 +30,7 @@
 // we can DRY it up then.
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, AlertCircle } from "lucide-react";
+import { ArrowLeft, AlertCircle, Users, LayoutGrid, Hash } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { isNativeShell } from "@/lib/nativeShell";
 import { hapticImpact, hapticNotification } from "@/lib/haptics";
@@ -45,10 +45,13 @@ import { HOMESERVER_URL } from "@/lib/urls";
 import { useTurnstile } from "@/lib/turnstile";
 import type { MatrixCredentials } from "@/lib/matrix";
 
+import type { InviteContext } from "@/components/Login";
+
 export interface LoginMobileProps {
 	onLoggedIn(creds: MatrixCredentials, uiaPassword: string): void;
 	addingAccount?: boolean;
 	onCancelAddAccount?(): void;
+	inviteContext?: InviteContext;
 }
 
 type Step = "email" | "code";
@@ -63,7 +66,7 @@ type Step = "email" | "code";
 const IOS_BLUE = "#0A84FF";
 const IOS_BLUE_PRESSED = "#0974DC";
 
-export function LoginMobile({ onLoggedIn, addingAccount, onCancelAddAccount }: LoginMobileProps) {
+export function LoginMobile({ onLoggedIn, addingAccount, onCancelAddAccount, inviteContext }: LoginMobileProps) {
 	const [step, setStep] = useState<Step>("email");
 	const [email, setEmail] = useState("");
 	const [code, setCode] = useState("");
@@ -204,13 +207,15 @@ export function LoginMobile({ onLoggedIn, addingAccount, onCancelAddAccount }: L
 		: !code.trim() || (isNewAccount && !username.trim()));
 
 	const heading = step === "email"
-		? (addingAccount ? "Add an account" : "Welcome")
+		? (addingAccount ? "Add an account" : inviteContext ? "You're invited" : "Welcome")
 		: (isNewAccount ? "Create your account" : "Check your email");
 
 	const subheading = step === "email"
 		? (addingAccount
 			? "Sign in to add another Koven account on this device."
-			: "Sign in or create an account with your email. We'll send you a 6-digit code.")
+			: inviteContext
+				? `Sign in or create an account to join ${inviteContext.name || inviteContext.target}.`
+				: "Sign in or create an account with your email. We'll send you a 6-digit code.")
 		: isNewAccount
 			? "Enter the code we sent and pick a username."
 			: "Enter the 6-digit code we just sent you.";
@@ -300,10 +305,14 @@ export function LoginMobile({ onLoggedIn, addingAccount, onCancelAddAccount }: L
 						)}
 					</div>
 
+					{inviteContext && step === "email" && (
+						<InviteHeroMobile invite={inviteContext} />
+					)}
+
 					{/* Title block.  34pt Bold matches `.largeTitle` in
 					    UIKit/SwiftUI.  Tracking tightened slightly per
 					    SF Pro at large sizes. */}
-					<div className="pt-12 space-y-2">
+					<div className={cn("space-y-2", inviteContext ? "pt-6" : "pt-12")}>
 						<h1 className="text-[34px] font-bold tracking-[-0.022em] leading-[1.1] text-white">
 							{heading}
 						</h1>
@@ -566,4 +575,44 @@ function verifyErrorMessage(err: VerifyCodeError, detail?: string): string {
 		case "network":             return "Can't reach the server. Check your connection and try again.";
 		default:                    return detail ?? "Sign-in failed.";
 	}
+}
+
+// ─── Invite hero (mobile) ────────────────────────────────────────
+
+function mxcToThumbnail(mxc: string | null): string | null {
+	if (!mxc || !mxc.startsWith("mxc://")) return null;
+	const stripped = mxc.slice("mxc://".length);
+	return `${HOMESERVER_URL}/_matrix/media/v3/thumbnail/${stripped}?width=96&height=96&method=crop`;
+}
+
+function InviteHeroMobile({ invite }: { invite: InviteContext }) {
+	const avatarSrc = mxcToThumbnail(invite.avatarUrl);
+	const displayName = invite.name || invite.target;
+	const Icon = invite.isSpace ? LayoutGrid : Hash;
+
+	return (
+		<div className="pt-8 flex flex-col items-center gap-3">
+			{avatarSrc ? (
+				<img
+					src={avatarSrc}
+					alt={displayName}
+					className="w-16 h-16 rounded-2xl object-cover"
+				/>
+			) : (
+				<div className="w-16 h-16 rounded-2xl bg-white/10 flex items-center justify-center">
+					<Icon className="w-7 h-7 text-white/60" />
+				</div>
+			)}
+			<div className="text-center space-y-1">
+				<p className="text-[20px] font-semibold text-white">{displayName}</p>
+				{invite.topic && (
+					<p className="text-[13px] text-white/60 max-w-[260px] line-clamp-2">{invite.topic}</p>
+				)}
+				<div className="flex items-center justify-center gap-1.5 text-[13px] text-white/50 pt-0.5">
+					<Users className="w-3.5 h-3.5" />
+					<span>{invite.memberCount.toLocaleString()} {invite.memberCount === 1 ? "member" : "members"}</span>
+				</div>
+			</div>
+		</div>
+	);
 }

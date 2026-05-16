@@ -4,6 +4,7 @@
 //   GET  /_matrix/app/v1/users/{userId}          — namespace ownership probe
 //   GET  /_matrix/app/v1/rooms/{roomAlias}       — namespace ownership probe
 //   GET  /api/instance                           — public instance config (login branding)
+//   GET  /api/invite-preview/<target>            — public room/space preview (invite landing)
 //   PUT  /api/instance                           — admin-only: update config
 //   POST /api/instance/login-bg                  — admin-only: upload login background
 //   POST /api/instance/logo                      — admin-only: upload instance logo
@@ -139,6 +140,8 @@ import {
 	getSpaceChildRoomIds,
 	inviteUserToRoom,
 	isSpaceRoom,
+	resolveRoomAlias,
+	getRoomInvitePreview,
 	readPowerLevelForUser,
 	kickOrBanAs,
 	leaveRoomAs,
@@ -895,6 +898,35 @@ export function startServer(): void {
 				// endpoint is unauthenticated so the login screen can
 				// load branding without a session.
 				return json({ config: publicInstanceConfig() });
+			}
+
+			// ─── Invite preview (public) ─────────────────────────────
+			// Returns enough metadata for the invite landing page to
+			// show "You've been invited to <Space>" before the user has
+			// an account.  No auth required; only surfaces public info
+			// (name, topic, avatar, member count).
+			if (req.method === "GET" && path.startsWith("/api/invite-preview/")) {
+				const target = decodeURIComponent(path.slice("/api/invite-preview/".length));
+				if (!target) return json({ error: "missing_target" }, { status: 400 });
+
+				let roomId = target;
+				if (target.startsWith("#")) {
+					const resolved = await resolveRoomAlias(target);
+					if (!resolved) return json({ error: "not_found" }, { status: 404 });
+					roomId = resolved;
+				}
+
+				const preview = await getRoomInvitePreview(roomId);
+				if (!preview) return json({ error: "not_found" }, { status: 404 });
+
+				return json({
+					room_id: preview.roomId,
+					name: preview.name,
+					topic: preview.topic,
+					avatar_url: preview.avatarUrl,
+					member_count: preview.memberCount,
+					is_space: preview.isSpace,
+				});
 			}
 
 			// ─── Email-code auth ─────────────────────────────────────

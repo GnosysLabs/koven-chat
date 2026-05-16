@@ -21,6 +21,7 @@ import {
 	type StoredAccount,
 } from "@/lib/accounts";
 import { Login } from "@/components/Login";
+import { InviteLanding } from "@/components/InviteLanding";
 import { SpaceBar } from "@/components/SpaceBar";
 import { RoomList } from "@/components/RoomList";
 import { MobileTopBar } from "@/components/MobileTopBar";
@@ -2103,6 +2104,10 @@ export default function App() {
 	}
 
 	if (!creds) {
+		const intent = parseShareIntent();
+		if (intent?.kind === "invite") {
+			return <InviteLanding target={intent.target} onLoggedIn={handleLogin} />;
+		}
 		return <Login onLoggedIn={handleLogin} />;
 	}
 	// Add-account mode: an existing user clicked "Add account" in the

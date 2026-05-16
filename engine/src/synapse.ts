@@ -1494,6 +1494,54 @@ export async function getRoomIconEmoji(roomId: string): Promise<string | null> {
 	return (await getRoomKovenMeta(roomId)).iconEmoji;
 }
 
+/** Resolve a room alias (#foo:server) to its room ID.  Returns null
+ * when the alias doesn't exist or the server can't resolve it. */
+export async function resolveRoomAlias(alias: string): Promise<string | null> {
+	const path = `/_matrix/client/v3/directory/room/${encodeURIComponent(alias)}`;
+	const r = await adminFetch(path);
+	if (!r.ok) return null;
+	const body = (await r.json().catch(() => null)) as { room_id?: string } | null;
+	return body?.room_id ?? null;
+}
+
+/** Public preview metadata for the invite landing page.  Fetches
+ * room details from the admin API (name, topic, member count) plus
+ * avatar from state.  Returns null when the room doesn't exist. */
+export async function getRoomInvitePreview(roomId: string): Promise<{
+	roomId: string;
+	name: string | null;
+	topic: string | null;
+	avatarUrl: string | null;
+	memberCount: number;
+	isSpace: boolean;
+} | null> {
+	const detailPath = `/_synapse/admin/v1/rooms/${encodeURIComponent(roomId)}`;
+	const r = await adminFetch(detailPath);
+	if (!r.ok) return null;
+	const detail = (await r.json().catch(() => null)) as {
+		room_id?: string;
+		name?: string;
+		topic?: string;
+		avatar?: string;
+		joined_members?: number;
+		room_type?: string | null;
+	} | null;
+	if (!detail) return null;
+
+	const state = await readRoomState(roomId);
+	const avatarContent = pickStateContent(state, "m.room.avatar");
+	const avatarUrl = (typeof avatarContent?.url === "string" ? avatarContent.url : detail.avatar) ?? null;
+
+	return {
+		roomId: detail.room_id ?? roomId,
+		name: detail.name ?? null,
+		topic: detail.topic ?? null,
+		avatarUrl,
+		memberCount: detail.joined_members ?? 0,
+		isSpace: detail.room_type === "m.space",
+	};
+}
+
 /**
  * Read `m.read` receipts for a room, rolled-forward so each event
  * sees every reader whose receipt anchors AT that event OR any

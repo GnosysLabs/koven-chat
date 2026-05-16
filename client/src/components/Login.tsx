@@ -27,6 +27,16 @@ import {
 } from "@/lib/auth";
 import { HOMESERVER_URL } from "@/lib/urls";
 import { useTurnstile } from "@/lib/turnstile";
+import { Users, Hash, LayoutGrid } from "lucide-react";
+
+export interface InviteContext {
+	target: string;
+	name: string | null;
+	topic: string | null;
+	avatarUrl: string | null;
+	memberCount: number;
+	isSpace: boolean;
+}
 
 export interface LoginProps {
 	onLoggedIn(creds: MatrixCredentials, uiaPassword: string): void;
@@ -38,6 +48,10 @@ export interface LoginProps {
 	// flow.
 	addingAccount?: boolean;
 	onCancelAddAccount?(): void;
+	// When present, the login screen renders a "You've been invited"
+	// hero card in place of the brand logo/tagline.  Passed by
+	// InviteLanding after fetching preview metadata from the engine.
+	inviteContext?: InviteContext;
 }
 
 type Step = "email" | "code";
@@ -55,13 +69,14 @@ export function Login(props: LoginProps) {
 				onLoggedIn={props.onLoggedIn}
 				addingAccount={props.addingAccount}
 				onCancelAddAccount={props.onCancelAddAccount}
+				inviteContext={props.inviteContext}
 			/>
 		);
 	}
 	return <LoginDesktop {...props} />;
 }
 
-function LoginDesktop({ onLoggedIn, addingAccount, onCancelAddAccount }: LoginProps) {
+function LoginDesktop({ onLoggedIn, addingAccount, onCancelAddAccount, inviteContext }: LoginProps) {
 	const [step, setStep] = useState<Step>("email");
 	const [email, setEmail] = useState("");
 	const [code, setCode] = useState("");
@@ -118,11 +133,13 @@ function LoginDesktop({ onLoggedIn, addingAccount, onCancelAddAccount }: LoginPr
 	//     home-indicator system strip blends seamlessly.
 	//   - Desktop browser: server-configured admin wallpaper.
 	const inNativeShell = isNativeShell();
-	const bgUrl = inNativeShell
-		? "/login-bg-mobile.png"
-		: isMobileShell
-			? null
-			: resolveAssetUrl(instance.login_background_url);
+	const bgUrl = inviteContext
+		? null
+		: inNativeShell
+			? "/login-bg-mobile.png"
+			: isMobileShell
+				? null
+				: resolveAssetUrl(instance.login_background_url);
 	// Same shape for the wordmark — prefer the locally-bundled mark
 	// in native shells so the splash → login transition doesn't flash
 	// a missing image while the server logo loads.
@@ -288,35 +305,32 @@ function LoginDesktop({ onLoggedIn, addingAccount, onCancelAddAccount }: LoginPr
 						</button>
 					</div>
 				)}
-				<div className="text-center space-y-1 flex flex-col items-center">
-					{logoUrl ? (
-						<img
-							src={logoUrl}
-							alt={brandName}
-							className="max-h-16 max-w-full object-contain"
-						/>
-					) : (
-						<h1 className="text-2xl font-semibold tracking-tight">{brandName}</h1>
-					)}
-					{addingAccount && (
-						<p className="text-xs text-muted-foreground italic">
-							Sign in to add another account
-						</p>
-					)}
-					{tagline ? (
-						<p className={cn(
-							"text-xs italic",
-							// On mobile the brand image is the user's
-							// whole canvas so muted-foreground reads
-							// faded against it; force white for the
-							// tagline.  Desktop keeps muted-foreground
-							// because the SPA renders inside a window
-							// with framing chrome that gives it consistent
-							// contrast.
-							isMobileShell ? "text-white" : "text-muted-foreground",
-						)}>{tagline}</p>
-					) : null}
-				</div>
+				{inviteContext ? (
+					<InviteHeroCard invite={inviteContext} />
+				) : (
+					<div className="text-center space-y-1 flex flex-col items-center">
+						{logoUrl ? (
+							<img
+								src={logoUrl}
+								alt={brandName}
+								className="max-h-16 max-w-full object-contain"
+							/>
+						) : (
+							<h1 className="text-2xl font-semibold tracking-tight">{brandName}</h1>
+						)}
+						{addingAccount && (
+							<p className="text-xs text-muted-foreground italic">
+								Sign in to add another account
+							</p>
+						)}
+						{tagline ? (
+							<p className={cn(
+								"text-xs italic",
+								isMobileShell ? "text-white" : "text-muted-foreground",
+							)}>{tagline}</p>
+						) : null}
+					</div>
+				)}
 
 				<div className={cn(
 					"rounded-lg overflow-hidden",
@@ -548,4 +562,52 @@ function verifyErrorMessage(err: VerifyCodeError, detail?: string): string {
 		case "network":             return "Can't reach the server. Check your connection and try again.";
 		default:                    return detail ?? "Sign-in failed.";
 	}
+}
+
+// ─── Invite hero card ────────────────────────────────────────────
+// Rendered in place of the brand logo when the user arrives via an
+// invite link without being signed in.
+
+function mxcToThumbnail(mxc: string | null): string | null {
+	if (!mxc || !mxc.startsWith("mxc://")) return null;
+	const stripped = mxc.slice("mxc://".length);
+	return `${HOMESERVER_URL}/_matrix/media/v3/thumbnail/${stripped}?width=96&height=96&method=crop`;
+}
+
+function InviteHeroCard({ invite }: { invite: InviteContext }) {
+	const avatarSrc = mxcToThumbnail(invite.avatarUrl);
+	const displayName = invite.name || invite.target;
+	const Icon = invite.isSpace ? LayoutGrid : Hash;
+
+	return (
+		<div className="text-center space-y-3">
+			<p className="text-sm text-muted-foreground">You've been invited to join</p>
+			<div className="flex flex-col items-center gap-3">
+				{avatarSrc ? (
+					<img
+						src={avatarSrc}
+						alt={displayName}
+						className="w-16 h-16 rounded-2xl object-cover"
+					/>
+				) : (
+					<div className="w-16 h-16 rounded-2xl bg-muted/30 flex items-center justify-center">
+						<Icon className="w-7 h-7 text-muted-foreground" />
+					</div>
+				)}
+				<div className="space-y-1">
+					<h1 className="text-xl font-semibold text-foreground">{displayName}</h1>
+					{invite.topic && (
+						<p className="text-xs text-muted-foreground max-w-[280px] mx-auto line-clamp-2">
+							{invite.topic}
+						</p>
+					)}
+				</div>
+				<div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+					<Users className="w-3.5 h-3.5" />
+					<span>{invite.memberCount.toLocaleString()} {invite.memberCount === 1 ? "member" : "members"}</span>
+				</div>
+			</div>
+			<p className="text-xs text-muted-foreground pt-1">Sign in or create an account to join.</p>
+		</div>
+	);
 }
