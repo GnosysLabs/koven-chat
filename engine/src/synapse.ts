@@ -1504,9 +1504,29 @@ export async function resolveRoomAlias(alias: string): Promise<string | null> {
 	return body?.room_id ?? null;
 }
 
+/** Fetch a 96px cropped thumbnail for an mxc:// URI and return it as
+ * a `data:` URI.  Goes through the authenticated client media
+ * endpoint (the only one Synapse 1.100+ serves) using the admin
+ * token, so the invite landing page can show room avatars to
+ * signed-out visitors who have no token of their own.  Returns null
+ * when the mxc is malformed or the media can't be fetched. */
+async function fetchMediaThumbnailDataUri(mxc: string | null): Promise<string | null> {
+	if (!mxc || !mxc.startsWith("mxc://")) return null;
+	const [server, mediaId] = mxc.slice("mxc://".length).split("/");
+	if (!server || !mediaId) return null;
+	const path = `/_matrix/client/v1/media/thumbnail/${encodeURIComponent(server)}/${encodeURIComponent(mediaId)}?width=96&height=96&method=crop`;
+	const r = await adminFetch(path);
+	if (!r.ok) return null;
+	const contentType = r.headers.get("content-type") ?? "image/png";
+	const b64 = Buffer.from(await r.arrayBuffer()).toString("base64");
+	return `data:${contentType};base64,${b64}`;
+}
+
 /** Public preview metadata for the invite landing page.  Fetches
  * room details from the admin API (name, topic, member count) plus
- * avatar from state.  Returns null when the room doesn't exist. */
+ * the avatar, resolved to an inline data URI so a signed-out visitor
+ * can render it without a token.  Returns null when the room
+ * doesn't exist. */
 export async function getRoomInvitePreview(roomId: string): Promise<{
 	roomId: string;
 	name: string | null;
@@ -1530,13 +1550,13 @@ export async function getRoomInvitePreview(roomId: string): Promise<{
 
 	const state = await readRoomState(roomId);
 	const avatarContent = pickStateContent(state, "m.room.avatar");
-	const avatarUrl = (typeof avatarContent?.url === "string" ? avatarContent.url : detail.avatar) ?? null;
+	const avatarMxc = (typeof avatarContent?.url === "string" ? avatarContent.url : detail.avatar) ?? null;
 
 	return {
 		roomId: detail.room_id ?? roomId,
 		name: detail.name ?? null,
 		topic: detail.topic ?? null,
-		avatarUrl,
+		avatarUrl: await fetchMediaThumbnailDataUri(avatarMxc),
 		memberCount: detail.joined_members ?? 0,
 		isSpace: detail.room_type === "m.space",
 	};

@@ -578,15 +578,12 @@ function verifyErrorMessage(err: VerifyCodeError, detail?: string): string {
 }
 
 // ─── Invite hero (mobile) ────────────────────────────────────────
-
-function mxcToThumbnail(mxc: string | null): string | null {
-	if (!mxc || !mxc.startsWith("mxc://")) return null;
-	const stripped = mxc.slice("mxc://".length);
-	return `${HOMESERVER_URL}/_matrix/media/v3/thumbnail/${stripped}?width=96&height=96&method=crop`;
-}
+// `invite.avatarUrl` is an inline data URI resolved server-side by
+// the engine — a signed-out visitor has no token to fetch
+// authenticated Synapse media itself.
 
 function InviteHeroMobile({ invite }: { invite: InviteContext }) {
-	const avatarSrc = mxcToThumbnail(invite.avatarUrl);
+	const avatarSrc = invite.avatarUrl;
 	const displayName = invite.name || invite.target;
 	const Icon = invite.isSpace ? LayoutGrid : Hash;
 
