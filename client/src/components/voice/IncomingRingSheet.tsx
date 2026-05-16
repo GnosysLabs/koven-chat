@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
+import { hapticImpact } from "@/lib/haptics";
 import { Phone, PhoneOff } from "lucide-react";
 import type { UserId, RoomId, EventId } from "@koven/shared";
 
@@ -77,6 +78,7 @@ export function IncomingRingSheet({ ring, onAccept, onDecline }: IncomingRingShe
 
 	async function handle(action: "accept" | "decline") {
 		if (busy) return;
+		void hapticImpact("medium");
 		setBusy(action);
 		try {
 			if (action === "accept") await onAccept();

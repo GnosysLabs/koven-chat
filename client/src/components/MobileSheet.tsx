@@ -26,6 +26,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useDrag } from "@use-gesture/react";
+import { hapticImpact } from "@/lib/haptics";
 import { cn } from "@/lib/utils";
 
 // 220ms feels deliberate without dragging.  Matches the swipe-to-reply
@@ -84,6 +85,7 @@ export function MobileSheet({ open, onClose, ariaLabel, children }: MobileSheetP
 		if (last) {
 			el.style.transition = `transform ${SHEET_TRANSITION_MS}ms cubic-bezier(0.2, 0.8, 0.2, 1)`;
 			if (dy > DISMISS_DISTANCE || vy > DISMISS_VELOCITY) {
+				void hapticImpact("light");
 				el.style.transform = "translateY(100%)";
 				onClose();
 			} else {
@@ -127,7 +129,7 @@ export function MobileSheet({ open, onClose, ariaLabel, children }: MobileSheetP
 					visible ? "opacity-100" : "opacity-0",
 				)}
 				style={{ transitionDuration: `${SHEET_TRANSITION_MS}ms` }}
-				onClick={onClose}
+				onClick={() => { void hapticImpact("light"); onClose(); }}
 			/>
 			{/* Sheet container.  `overflow-hidden` keeps full-bleed content
 			    (tab strips) inside the rounded top corners.  See the file

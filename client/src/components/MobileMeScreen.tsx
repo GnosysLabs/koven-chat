@@ -21,7 +21,7 @@ import type { ReactNode } from "react";
 import { ChevronRight, User as UserIcon, Settings as SettingsIcon, LogOut } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { cn } from "@/lib/utils";
-import { hapticSelection } from "@/lib/haptics";
+import { hapticImpact } from "@/lib/haptics";
 import { formatMxid, serverOf } from "@/lib/mxid";
 
 interface MobileMeScreenProps {
@@ -50,7 +50,7 @@ export function MobileMeScreen({
 	const handle = userId ? formatMxid(userId, serverOf(userId)) : "";
 
 	function tap(action: () => void) {
-		void hapticSelection();
+		void hapticImpact("light");
 		action();
 	}
 

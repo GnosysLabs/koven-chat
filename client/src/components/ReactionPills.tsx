@@ -3,6 +3,7 @@
 // emoji, click removes your reaction; otherwise it adds one.
 
 import { cn } from "@/lib/utils";
+import { hapticImpact } from "@/lib/haptics";
 import type { ReactionAggregate } from "@koven/shared";
 
 export interface ReactionPillsProps {
@@ -20,7 +21,7 @@ export function ReactionPills({ reactions, onToggle }: ReactionPillsProps) {
 					<button
 						key={r.key}
 						type="button"
-						onClick={() => onToggle(r)}
+						onClick={() => { void hapticImpact("light"); onToggle(r); }}
 						title={r.reactors.length <= 5
 							? r.reactors.join(", ")
 							: `${r.reactors.slice(0, 4).join(", ")} and ${r.reactors.length - 4} more`}

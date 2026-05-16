@@ -16,6 +16,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useDrag } from "@use-gesture/react";
 import { ChevronLeft } from "lucide-react";
+import { hapticImpact } from "@/lib/haptics";
 import { cn } from "@/lib/utils";
 
 export function NavBar({
@@ -53,12 +54,10 @@ export function NavBackButton({
 }: {
 	onClick(): void;
 }) {
-	// Arrow-only, no text label — matches the chevron-only back button
-	// MobileTopBar uses everywhere else in the app.
 	return (
 		<button
 			type="button"
-			onClick={onClick}
+			onClick={() => { void hapticImpact("light"); onClick(); }}
 			aria-label="Back"
 			className="h-10 w-10 -ml-1 rounded-full flex items-center justify-center text-primary active:opacity-60 transition-opacity"
 		>

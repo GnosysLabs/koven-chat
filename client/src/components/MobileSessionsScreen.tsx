@@ -16,7 +16,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Laptop, Smartphone, Tablet, Monitor as MonitorIcon } from "lucide-react";
 import { fetchUiaPassword } from "@/lib/auth";
-import { hapticImpact, hapticNotification, hapticSelection } from "@/lib/haptics";
+import { hapticImpact, hapticNotification } from "@/lib/haptics";
 import type { MatrixTransport } from "@/lib/matrix";
 import { cn } from "@/lib/utils";
 import {
@@ -131,7 +131,7 @@ export function MobileSessionsScreen({
 	return (
 		<div className="flex flex-col h-full">
 			<NavBar
-				left={<NavBackButton onClick={() => { void hapticSelection(); onBack(); }} />}
+				left={<NavBackButton onClick={onBack} />}
 				title="Sessions"
 			/>
 
@@ -165,7 +165,7 @@ export function MobileSessionsScreen({
 													<div className="flex items-center gap-1">
 														<button
 															type="button"
-															onClick={() => { void hapticSelection(); setConfirmId(null); }}
+															onClick={() => { void hapticImpact("light"); setConfirmId(null); }}
 															disabled={revokingId === s.deviceId}
 															className="text-[15px] text-muted-foreground font-medium px-2 py-1 active:opacity-60 disabled:opacity-50"
 														>
@@ -183,7 +183,7 @@ export function MobileSessionsScreen({
 												) : (
 													<button
 														type="button"
-														onClick={() => { void hapticSelection(); setError(null); setConfirmId(s.deviceId); }}
+														onClick={() => { void hapticImpact("light"); setError(null); setConfirmId(s.deviceId); }}
 														disabled={revoking || revokingId !== null}
 														className="text-[15px] text-destructive font-medium px-2 py-1 active:opacity-60 disabled:opacity-40"
 													>
@@ -207,7 +207,7 @@ export function MobileSessionsScreen({
 									type="button"
 									onClick={() => {
 										if (otherCount === 0) return;
-										void hapticSelection();
+										void hapticImpact("light");
 										setConfirming(true);
 									}}
 									disabled={otherCount === 0 || revoking || revokingId !== null}
@@ -233,7 +233,7 @@ export function MobileSessionsScreen({
 									<div className="flex gap-2 -mx-1">
 										<button
 											type="button"
-											onClick={() => { void hapticSelection(); setConfirming(false); }}
+											onClick={() => { void hapticImpact("light"); setConfirming(false); }}
 											disabled={revoking}
 											className="flex-1 h-10 rounded-[10px] bg-foreground/5 text-foreground text-[15px] font-medium active:bg-foreground/10 transition-colors"
 										>

@@ -20,7 +20,7 @@
 import { useState } from "react";
 import { AlertCircle, Check, Copy, Download, Lock, Shield } from "lucide-react";
 import { isNativeShell } from "@/lib/nativeShell";
-import { hapticImpact, hapticNotification, hapticSelection } from "@/lib/haptics";
+import { hapticImpact, hapticNotification } from "@/lib/haptics";
 import {
 	IosBrandSurface,
 	IosField,
@@ -109,7 +109,7 @@ export function EncryptionSetupMobile({ onSetup, onComplete, onSignOut }: Encryp
 
 	function toggleAck() {
 		setSavedAck((v) => {
-			void hapticSelection();
+			void hapticImpact("light");
 			return !v;
 		});
 	}

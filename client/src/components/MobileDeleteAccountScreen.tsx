@@ -21,7 +21,7 @@ import { ShieldAlert } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { fetchUiaPassword } from "@/lib/auth";
 import { fetchAdminStatus, purgeMyEngineState } from "@/lib/instance";
-import { hapticImpact, hapticNotification, hapticSelection } from "@/lib/haptics";
+import { hapticImpact, hapticNotification } from "@/lib/haptics";
 import type { MatrixTransport } from "@/lib/matrix";
 import { cn } from "@/lib/utils";
 import {
@@ -90,7 +90,7 @@ export function MobileDeleteAccountScreen({
 	return (
 		<div className="flex flex-col h-full">
 			<NavBar
-				left={<NavBackButton onClick={() => { void hapticSelection(); onBack(); }} />}
+				left={<NavBackButton onClick={onBack} />}
 				title="Delete Account"
 			/>
 
@@ -152,7 +152,7 @@ export function MobileDeleteAccountScreen({
 								</div>
 								<Switch
 									checked={ack}
-									onCheckedChange={(v) => { void hapticSelection(); setAck(v); }}
+									onCheckedChange={(v) => { void hapticImpact("light"); setAck(v); }}
 									disabled={running}
 								/>
 							</div>

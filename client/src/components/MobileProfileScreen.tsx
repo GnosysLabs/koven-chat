@@ -17,7 +17,7 @@ import { FounderBadge } from "@/components/FounderBadge";
 import { getFounderCap } from "@/lib/founders-cache";
 import { fetchUserProfile, updateMyProfileData, type SocialLink } from "@/lib/profile";
 import { SOCIAL_PLATFORMS, PLATFORM_PLACEHOLDERS, SocialIcon } from "@/components/SocialIcons";
-import { hapticImpact, hapticSelection } from "@/lib/haptics";
+import { hapticImpact, hapticNotification } from "@/lib/haptics";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
 import { cn } from "@/lib/utils";
@@ -160,12 +160,12 @@ export function MobileProfileScreen({
 	}
 
 	function enterEdit() {
-		void hapticSelection();
+		void hapticImpact("light");
 		setEditing(true);
 	}
 
 	function cancelEdit() {
-		void hapticSelection();
+		void hapticImpact("light");
 		setDisplayName(originalDisplayNameRef.current);
 		setBio(originalBioRef.current);
 		setSocialLinks(originalSocialLinksRef.current);
@@ -209,6 +209,7 @@ export function MobileProfileScreen({
 					...(nextBannerMxc !== undefined ? { banner_mxc: nextBannerMxc } : {}),
 				});
 			}
+			void hapticNotification("success");
 			onSaved?.(avatarUrl);
 			setProfile(prev => prev ? {
 				...prev,
@@ -238,6 +239,7 @@ export function MobileProfileScreen({
 			setNewLinkPlatform(SOCIAL_PLATFORMS[0].id);
 			setEditing(false);
 		} catch (err) {
+			void hapticNotification("error");
 			setError(err instanceof Error ? err.message : String(err));
 		} finally {
 			setPending(false);
@@ -257,7 +259,7 @@ export function MobileProfileScreen({
 			<NavBar
 				left={editing
 					? <NavTextButton label="Cancel" onClick={cancelEdit} disabled={pending} />
-					: <NavBackButton onClick={() => { void hapticSelection(); onBack(); }} />
+					: <NavBackButton onClick={onBack} />
 				}
 				title={editing ? "Edit Profile" : "Profile"}
 				right={editing
@@ -373,7 +375,7 @@ export function MobileProfileScreen({
 							<div className="flex items-center justify-center gap-5 pt-3">
 								<button
 									type="button"
-									onClick={() => { void hapticSelection(); bannerInputRef.current?.click(); }}
+									onClick={() => { void hapticImpact("light"); bannerInputRef.current?.click(); }}
 									className="inline-flex items-center gap-1.5 text-[15px] font-medium text-primary active:opacity-60 transition-opacity"
 								>
 									<ImageIcon className="h-4 w-4" strokeWidth={2.25} />
@@ -383,7 +385,7 @@ export function MobileProfileScreen({
 									<button
 										type="button"
 										onClick={() => {
-											void hapticSelection();
+											void hapticImpact("light");
 											if (pendingBannerPreview) URL.revokeObjectURL(pendingBannerPreview);
 											setPendingBanner(null);
 											setPendingBannerPreview(null);
@@ -430,7 +432,7 @@ export function MobileProfileScreen({
 							<div className="flex items-center gap-5">
 								<button
 									type="button"
-									onClick={() => { void hapticSelection(); fileInputRef.current?.click(); }}
+									onClick={() => { void hapticImpact("light"); fileInputRef.current?.click(); }}
 									className="inline-flex items-center gap-1.5 text-[15px] font-medium text-primary active:opacity-60 transition-opacity"
 								>
 									<Camera className="h-4 w-4" strokeWidth={2.25} />
@@ -440,7 +442,7 @@ export function MobileProfileScreen({
 									<button
 										type="button"
 										onClick={() => {
-											void hapticSelection();
+											void hapticImpact("light");
 											if (pendingAvatarPreview) URL.revokeObjectURL(pendingAvatarPreview);
 											setPendingAvatar(null);
 											setPendingAvatarPreview(null);
@@ -516,7 +518,7 @@ export function MobileProfileScreen({
 										</div>
 										<button
 											type="button"
-											onClick={() => { void hapticSelection(); setSocialLinks(prev => prev.filter((_, j) => j !== i)); }}
+											onClick={() => { void hapticImpact("light"); setSocialLinks(prev => prev.filter((_, j) => j !== i)); }}
 											className="shrink-0 text-muted-foreground hover:text-destructive text-xl leading-none transition-colors"
 											aria-label={`Remove ${link.platform} link`}
 										>
@@ -573,7 +575,7 @@ export function MobileProfileScreen({
 								) : socialLinks.length < 8 ? (
 									<button
 										type="button"
-										onClick={() => { void hapticSelection(); setAddLinkOpen(true); setNewLinkUrl(""); setNewLinkPlatform(SOCIAL_PLATFORMS[0].id); }}
+										onClick={() => { void hapticImpact("light"); setAddLinkOpen(true); setNewLinkUrl(""); setNewLinkPlatform(SOCIAL_PLATFORMS[0].id); }}
 										className="flex items-center gap-2 px-4 py-2.5 text-[15px] text-primary w-full text-left"
 									>
 										<span className="text-xl leading-none">+</span>

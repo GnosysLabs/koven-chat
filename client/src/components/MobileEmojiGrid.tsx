@@ -23,7 +23,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Clock, Search, X } from "lucide-react";
 import emojiData from "@emoji-mart/data";
-import { hapticSelection } from "@/lib/haptics";
+import { hapticImpact } from "@/lib/haptics";
 import { cn } from "@/lib/utils";
 
 interface RawEmoji {
@@ -214,12 +214,12 @@ export function MobileEmojiGrid({ onPick }: MobileEmojiGridProps) {
 		if (!container || !node) return;
 		container.scrollTo({ top: node.offsetTop, behavior: "auto" });
 		setActiveTab(id);
-		void hapticSelection();
+		void hapticImpact("light");
 	}
 
 	function pick(e: Emoji) {
 		recordFrequent(e.id);
-		void hapticSelection();
+		void hapticImpact("light");
 		onPick(e.native);
 	}
 

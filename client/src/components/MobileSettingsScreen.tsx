@@ -26,7 +26,7 @@ import { MobileDeleteAccountScreen } from "@/components/MobileDeleteAccountScree
 import { InstanceAdminSection } from "@/components/InstanceAdminSection";
 import { AdminManagementSection } from "@/components/AdminManagementSection";
 import { fetchAdminStatus } from "@/lib/instance";
-import { hapticImpact, hapticSelection } from "@/lib/haptics";
+import { hapticImpact } from "@/lib/haptics";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
 import {
@@ -81,12 +81,12 @@ export function MobileSettingsScreen({
 	}, [accessToken]);
 
 	function push(s: SubScreen) {
-		void hapticSelection();
+		void hapticImpact("light");
 		setSub(s);
 	}
 
 	function pop() {
-		void hapticSelection();
+		void hapticImpact("light");
 		setSub(null);
 	}
 
@@ -106,7 +106,7 @@ export function MobileSettingsScreen({
 				)}
 			>
 			<NavBar
-				left={<NavBackButton onClick={() => { void hapticSelection(); onBack(); }} />}
+				left={<NavBackButton onClick={onBack} />}
 				title="Settings"
 			/>
 
@@ -325,7 +325,7 @@ function AppearanceSubScreen({
 						themes={THEMES.filter(t => t.mode === "dark")}
 						activeId={settings.theme}
 						onPick={id => {
-							void hapticSelection();
+							void hapticImpact("light");
 							onSettingsChange({ ...settings, theme: id });
 						}}
 					/>
@@ -337,7 +337,7 @@ function AppearanceSubScreen({
 						themes={THEMES.filter(t => t.mode === "light")}
 						activeId={settings.theme}
 						onPick={id => {
-							void hapticSelection();
+							void hapticImpact("light");
 							onSettingsChange({ ...settings, theme: id });
 						}}
 					/>

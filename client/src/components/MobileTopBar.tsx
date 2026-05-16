@@ -28,6 +28,7 @@
 
 import type { ReactNode } from "react";
 import { ChevronLeft, Menu } from "lucide-react";
+import { hapticImpact } from "@/lib/haptics";
 import { cn } from "@/lib/utils";
 
 interface MobileTopBarProps {
@@ -65,7 +66,7 @@ export function MobileTopBar({ onBack, onMenu, title, rightSlot }: MobileTopBarP
 				{onBack ? (
 					<button
 						type="button"
-						onClick={onBack}
+						onClick={() => { void hapticImpact("light"); onBack(); }}
 						aria-label="Back"
 						className="h-10 w-10 rounded-full flex items-center justify-center text-primary active:opacity-60 transition-opacity"
 					>
@@ -74,7 +75,7 @@ export function MobileTopBar({ onBack, onMenu, title, rightSlot }: MobileTopBarP
 				) : onMenu ? (
 					<button
 						type="button"
-						onClick={onMenu}
+						onClick={() => { void hapticImpact("light"); onMenu(); }}
 						aria-label="Open menu"
 						className="h-10 w-10 rounded-full flex items-center justify-center text-foreground active:opacity-60 transition-opacity"
 					>

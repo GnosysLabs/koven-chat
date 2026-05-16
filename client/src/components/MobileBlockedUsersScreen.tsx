@@ -21,7 +21,7 @@
 import { useEffect, useState } from "react";
 import { UserCheck } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
-import { hapticImpact, hapticSelection } from "@/lib/haptics";
+import { hapticImpact, hapticNotification } from "@/lib/haptics";
 import { formatMxid, serverOf } from "@/lib/mxid";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
@@ -97,7 +97,9 @@ export function MobileBlockedUsersScreen({
 		setError(null);
 		try {
 			await transport.unignoreUser(userId);
+			void hapticNotification("success");
 		} catch (err) {
+			void hapticNotification("error");
 			setError(err instanceof Error ? err.message : String(err));
 		} finally {
 			setUnblocking(null);
@@ -110,7 +112,7 @@ export function MobileBlockedUsersScreen({
 	return (
 		<div className="flex flex-col h-full">
 			<NavBar
-				left={<NavBackButton onClick={() => { void hapticSelection(); onBack(); }} />}
+				left={<NavBackButton onClick={onBack} />}
 				title="Blocked"
 			/>
 

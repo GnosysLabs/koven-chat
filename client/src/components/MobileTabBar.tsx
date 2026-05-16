@@ -25,6 +25,7 @@
 
 import type { ReactNode } from "react";
 import { MessageSquare, Compass, LayoutGrid, User } from "lucide-react";
+import { hapticImpact } from "@/lib/haptics";
 import { cn } from "@/lib/utils";
 
 export type MobileTab = "chats" | "spaces" | "explore" | "me";
@@ -94,7 +95,7 @@ export function MobileTabBar({ active, onChange, unreadByTab }: MobileTabBarProp
 						<button
 							key={t.key}
 							type="button"
-							onClick={() => onChange(t.key)}
+							onClick={() => { if (!isActive) void hapticImpact("light"); onChange(t.key); }}
 							aria-current={isActive ? "page" : undefined}
 							aria-label={t.label}
 							className={cn(
