@@ -3,7 +3,7 @@
 // joined space, "+" to create a space, and Settings/Sign out at the
 // bottom.  Selection here drives what the RoomList shows.
 
-import { forwardRef, useMemo, useState } from "react";
+import { forwardRef, useEffect, useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
 import type { Room, Space, SpaceId, UserId } from "@koven/shared";
 import { Bot, Compass, EyeOff, Globe, Plus, Settings, Shield, User } from "lucide-react";
@@ -126,6 +126,39 @@ export function SpaceBar({
 	// rather than per-tile state because only one menu can be open
 	// at a time anyway.
 	const [spaceCtxMenu, setSpaceCtxMenu] = useState<{ space: Space; x: number; y: number } | null>(null);
+
+	// Optimistic reorder layer.  dnd-kit snaps the dragged tile back to
+	// its original slot the instant the drop resolves, then waits for
+	// props to update.  Persisting the order goes through account_data
+	// and a full sync round-trip, so without an override the user sees
+	// the tile jump home and then jump again once sync lands.  We record
+	// the predicted order locally and render against it until the
+	// incoming `spaces` prop matches — then drop the override.
+	const [optimisticOrder, setOptimisticOrder] = useState<SpaceId[] | null>(null);
+
+	const orderedSpaces = useMemo(() => {
+		if (!optimisticOrder) return spaces;
+		const byId = new Map(spaces.map(s => [s.id, s]));
+		const ranked = optimisticOrder
+			.map(id => byId.get(id))
+			.filter((s): s is Space => !!s);
+		// Append any spaces the override doesn't cover (e.g. joined
+		// since the drag started) so nothing drops off the rail.
+		for (const s of spaces) {
+			if (!optimisticOrder.includes(s.id as SpaceId)) ranked.push(s);
+		}
+		return ranked;
+	}, [spaces, optimisticOrder]);
+
+	// Once the synced `spaces` order matches the optimistic override,
+	// the override is redundant — clear it so future drags start clean.
+	useEffect(() => {
+		if (!optimisticOrder) return;
+		const same = spaces.length === optimisticOrder.length
+			&& spaces.every((s, i) => s.id === optimisticOrder[i]);
+		if (same) setOptimisticOrder(null);
+	}, [spaces, optimisticOrder]);
+
 	const exploreActive = activeSpace?.kind === "explore";
 	const dmsActive = activeSpace?.kind === "dms";
 	const botsActive = activeSpace?.kind === "bots";
@@ -148,14 +181,15 @@ export function SpaceBar({
 	function handleDragEnd(e: DragEndEvent) {
 		const { active, over } = e;
 		if (!over || active.id === over.id || !onReorderSpaces) return;
-		const oldIdx = spaces.findIndex(s => s.id === active.id);
-		const newIdx = spaces.findIndex(s => s.id === over.id);
+		const oldIdx = orderedSpaces.findIndex(s => s.id === active.id);
+		const newIdx = orderedSpaces.findIndex(s => s.id === over.id);
 		if (oldIdx < 0 || newIdx < 0) return;
-		const next = arrayMove(spaces, oldIdx, newIdx).map(s => s.id as SpaceId);
+		const next = arrayMove(orderedSpaces, oldIdx, newIdx).map(s => s.id as SpaceId);
+		setOptimisticOrder(next);
 		void onReorderSpaces(next);
 	}
 
-	const spaceTiles = spaces.map(space => {
+	const spaceTiles = orderedSpaces.map(space => {
 		const active = activeSpace?.kind === "space" && activeSpace.id === space.id;
 		// Attention dot for spaces: any child room with an
 		// unread, highlight, or pending invite — but only
@@ -252,7 +286,7 @@ export function SpaceBar({
 						onDragEnd={handleDragEnd}
 					>
 						<SortableContext
-							items={spaces.map(s => s.id)}
+							items={orderedSpaces.map(s => s.id)}
 							strategy={verticalListSortingStrategy}
 						>
 							{spaceTiles}
