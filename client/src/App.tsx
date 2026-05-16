@@ -50,7 +50,6 @@ import { CreateRoomSheet } from "@/components/CreateRoomSheet";
 import { JoinConfirmSheet } from "@/components/JoinConfirmSheet";
 import { ShareIntentProvider } from "@/lib/shareIntentContext";
 import { CreateSpaceSheet } from "@/components/CreateSpaceSheet";
-import { MobileBlockScreen } from "@/components/MobileBlockScreen";
 import { StartDmSheet } from "@/components/StartDmSheet";
 import { SpaceEditSheet } from "@/components/SpaceEditSheet";
 import { SpaceCategoriesSheet } from "@/components/SpaceCategoriesSheet";
@@ -2081,27 +2080,10 @@ export default function App() {
 		return m;
 	}, [state.activeRoomId, state.membersByRoom]);
 
-	// Hard mobile block.  When the viewport / pointer detection in
-	// lib/mobile.ts reports a mobile context AND we're not running
-	// inside any native shell, render a takeover that points users to
-	// the desktop installer.  The block is meant for mobile browsers
-	// — when the same web bundle is wrapped by a native shell
-	// (Tauri desktop, Capacitor iOS / Android, …) we trust the shell
-	// to gate launch on a supported platform.
-	//
-	// Detection markers:
-	//   - `window.isTauri`          — Tauri 2 (any platform)
-	//   - `window.Capacitor`        — Capacitor (iOS / Android shells)
-	//   - `__KOVEN_DESKTOP__`       — legacy fallback from the desktop
-	//                                 init-script in case the runtime
-	//                                 markers are ever missing
 	const isNativeShell = typeof window !== "undefined"
 		&& ((window as { isTauri?: boolean }).isTauri === true
 			|| (window as { Capacitor?: unknown }).Capacitor !== undefined
 			|| (window as { __KOVEN_DESKTOP__?: boolean }).__KOVEN_DESKTOP__ === true);
-	if (isMobileShell && !isNativeShell) {
-		return <MobileBlockScreen />;
-	}
 
 	if (!creds) {
 		const intent = parseShareIntent();
