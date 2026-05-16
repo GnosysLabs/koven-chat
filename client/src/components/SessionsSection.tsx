@@ -44,6 +44,12 @@ export function SessionsSection({ accessToken, transport }: SessionsSectionProps
 	const [revoking, setRevoking] = useState(false);
 	const [confirming, setConfirming] = useState(false);
 	const [reloadKey, setReloadKey] = useState(0);
+	// Per-row sign-out state.  `confirmId` is the device showing its
+	// inline "sign out?" confirmation; `revokingId` is the device
+	// whose revoke request is in flight.  Single-valued because only
+	// one row can be mid-gesture at a time.
+	const [confirmId, setConfirmId] = useState<string | null>(null);
+	const [revokingId, setRevokingId] = useState<string | null>(null);
 
 	// Pull device list on mount + after every revoke.  Don't poll —
 	// the list only changes from explicit gestures (this UI, or a
@@ -94,6 +100,26 @@ export function SessionsSection({ accessToken, transport }: SessionsSectionProps
 			setError(err instanceof Error ? err.message : String(err));
 		} finally {
 			setRevoking(false);
+		}
+	}
+
+	// Sign out one specific device.  Same engine-issued UIA password
+	// as the bulk path, scoped to a single device id.
+	async function doRevokeOne(deviceId: string) {
+		if (!transport) return;
+		setRevokingId(deviceId);
+		setError(null);
+		try {
+			const pw = await fetchUiaPassword(accessToken);
+			transport.setUiaPassword(pw);
+			await transport.revokeSession(deviceId, pw);
+			transport.setUiaPassword(null);
+			setConfirmId(null);
+			setReloadKey(k => k + 1);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setRevokingId(null);
 		}
 	}
 
@@ -150,6 +176,41 @@ export function SessionsSection({ accessToken, transport }: SessionsSectionProps
 										)}
 									</div>
 								</div>
+								{!s.isCurrent && (
+									<div className="shrink-0 self-center">
+										{confirmId === s.deviceId ? (
+											<div className="flex items-center gap-1">
+												<button
+													type="button"
+													onClick={() => setConfirmId(null)}
+													disabled={revokingId === s.deviceId}
+													className="text-xs text-muted-foreground hover:text-foreground px-1.5 py-1 rounded disabled:opacity-50"
+												>
+													Cancel
+												</button>
+												<button
+													type="button"
+													onClick={() => doRevokeOne(s.deviceId)}
+													disabled={revokingId === s.deviceId}
+													className="text-xs font-medium text-destructive hover:bg-destructive/10 px-2 py-1 rounded disabled:opacity-60"
+												>
+													{revokingId === s.deviceId ? "Signing out…" : "Sign out?"}
+												</button>
+											</div>
+										) : (
+											<button
+												type="button"
+												onClick={() => { setError(null); setConfirmId(s.deviceId); }}
+												disabled={revoking || revokingId !== null}
+												className="text-muted-foreground hover:text-destructive hover:bg-destructive/10 p-1.5 rounded transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+												title="Sign out this session"
+												aria-label={`Sign out ${s.displayName || s.deviceId}`}
+											>
+												<LogOut className="h-3.5 w-3.5" />
+											</button>
+										)}
+									</div>
+								)}
 							</li>
 						))}
 					</ul>
@@ -182,7 +243,7 @@ export function SessionsSection({ accessToken, transport }: SessionsSectionProps
 						variant="outline"
 						size="sm"
 						onClick={() => setConfirming(true)}
-						disabled={!transport || otherCount === 0 || revoking}
+						disabled={!transport || otherCount === 0 || revoking || revokingId !== null}
 						className="text-muted-foreground hover:text-destructive hover:bg-destructive/10"
 					>
 						<LogOut className="h-3.5 w-3.5 mr-1.5" />

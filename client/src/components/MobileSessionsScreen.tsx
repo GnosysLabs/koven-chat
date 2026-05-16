@@ -13,7 +13,7 @@
 // cleaner than wrestling the desktop component into a different
 // shape.
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Laptop, Smartphone, Tablet, Monitor as MonitorIcon } from "lucide-react";
 import { fetchUiaPassword } from "@/lib/auth";
 import { hapticImpact, hapticNotification, hapticSelection } from "@/lib/haptics";
@@ -52,6 +52,11 @@ export function MobileSessionsScreen({
 	const [revoking, setRevoking] = useState(false);
 	const [confirming, setConfirming] = useState(false);
 	const [reloadKey, setReloadKey] = useState(0);
+	// Per-row sign-out state.  `confirmId` is the device showing its
+	// inline Cancel / Confirm pair; `revokingId` is the device whose
+	// revoke is in flight.  Single-valued — one row mid-gesture max.
+	const [confirmId, setConfirmId] = useState<string | null>(null);
+	const [revokingId, setRevokingId] = useState<string | null>(null);
 
 	useEffect(() => {
 		if (!transport) return;
@@ -97,6 +102,29 @@ export function MobileSessionsScreen({
 		}
 	}
 
+	// Sign out one specific device.  Same engine-issued UIA password
+	// as the bulk path, scoped to a single device id.
+	async function doRevokeOne(deviceId: string) {
+		if (!transport) return;
+		void hapticImpact("medium");
+		setRevokingId(deviceId);
+		setError(null);
+		try {
+			const pw = await fetchUiaPassword(accessToken);
+			transport.setUiaPassword(pw);
+			await transport.revokeSession(deviceId, pw);
+			transport.setUiaPassword(null);
+			void hapticNotification("success");
+			setConfirmId(null);
+			setReloadKey(k => k + 1);
+		} catch (err) {
+			void hapticNotification("error");
+			setError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setRevokingId(null);
+		}
+	}
+
 	const currentSession = sessions?.find(s => s.isCurrent);
 	const otherSessions = sessions?.filter(s => !s.isCurrent) ?? [];
 
@@ -132,6 +160,37 @@ export function MobileSessionsScreen({
 											key={s.deviceId}
 											session={s}
 											last={idx === otherSessions.length - 1}
+											action={
+												confirmId === s.deviceId ? (
+													<div className="flex items-center gap-1">
+														<button
+															type="button"
+															onClick={() => { void hapticSelection(); setConfirmId(null); }}
+															disabled={revokingId === s.deviceId}
+															className="text-[15px] text-muted-foreground font-medium px-2 py-1 active:opacity-60 disabled:opacity-50"
+														>
+															Cancel
+														</button>
+														<button
+															type="button"
+															onClick={() => doRevokeOne(s.deviceId)}
+															disabled={revokingId === s.deviceId}
+															className="text-[15px] text-destructive font-semibold px-2 py-1 active:opacity-60 disabled:opacity-60"
+														>
+															{revokingId === s.deviceId ? "…" : "Confirm"}
+														</button>
+													</div>
+												) : (
+													<button
+														type="button"
+														onClick={() => { void hapticSelection(); setError(null); setConfirmId(s.deviceId); }}
+														disabled={revoking || revokingId !== null}
+														className="text-[15px] text-destructive font-medium px-2 py-1 active:opacity-60 disabled:opacity-40"
+													>
+														Sign Out
+													</button>
+												)
+											}
 										/>
 									))}
 								</GroupCard>
@@ -151,7 +210,7 @@ export function MobileSessionsScreen({
 										void hapticSelection();
 										setConfirming(true);
 									}}
-									disabled={otherCount === 0 || revoking}
+									disabled={otherCount === 0 || revoking || revokingId !== null}
 									className={cn(
 										"w-full text-left px-4 min-h-[52px]",
 										"text-[17px] font-medium",
@@ -201,7 +260,13 @@ export function MobileSessionsScreen({
 	);
 }
 
-function SessionRowView({ session, last }: { session: SessionRow; last: boolean }) {
+function SessionRowView({ session, last, action }: {
+	session: SessionRow;
+	last: boolean;
+	// Trailing control — the per-row sign-out button / confirm pair.
+	// Omitted for the current device (which can't be revoked here).
+	action?: ReactNode;
+}) {
 	// Best-effort device icon — match common platform strings the
 	// Matrix display_name carries.  Falls through to a generic
 	// monitor for anything unrecognised.
@@ -250,6 +315,7 @@ function SessionRowView({ session, last }: { session: SessionRow; last: boolean 
 					</div>
 				)}
 			</div>
+			{action && <div className="shrink-0 self-center">{action}</div>}
 		</div>
 	);
 }

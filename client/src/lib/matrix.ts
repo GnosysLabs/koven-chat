@@ -32,6 +32,7 @@ import type {
 	FlagCategory,
 } from "@koven/shared";
 import { ENGINE_URL } from "@/lib/urls";
+import { platform } from "@/lib/mobile";
 
 // Synapse OG-preview response, normalised into a flat shape the UI
 // can render without poking through `og:*` keys.  `imageMxc` is a
@@ -538,10 +539,17 @@ export async function loginWithPassword(
 ): Promise<MatrixCredentials> {
 	// Allow the user to type "alice" or "@alice:localhost" — we normalize.
 	const tempClient = sdk.createClient({ baseUrl: homeserver });
+	// Born-correct device label.  computeDeviceLabel() reads the
+	// platform + browser so the Sessions list shows "Koven Web
+	// (Chrome)" / "Koven Mobile (iOS)" / "Koven Desktop (macOS)" from
+	// the moment the device is created.  syncOwnDeviceLabel() still
+	// re-applies it on every sync, but that only heals the *current*
+	// device — a session signed into once and never reopened would
+	// otherwise keep the generic label forever.
 	const response = await tempClient.login("m.login.password", {
 		identifier: { type: "m.id.user", user: username },
 		password,
-		initial_device_display_name: "Koven Web",
+		initial_device_display_name: await computeDeviceLabel(),
 	});
 	if (!response.access_token || !response.user_id || !response.device_id) {
 		throw new Error("Login response missing required fields");
@@ -5529,9 +5537,8 @@ export class MatrixTransport {
 	 * user to refresh).
 	 */
 	async revokeOtherSessions(password?: string): Promise<number> {
-		const creds = this.creds;
 		const c = this.requireClient();
-		if (!creds) throw new Error("not logged in");
+		if (!this.creds) throw new Error("not logged in");
 		const pw = password ?? this.uiaPassword;
 		if (!pw) throw new Error("UIA password unavailable; call setUiaPassword first");
 
@@ -5549,7 +5556,43 @@ export class MatrixTransport {
 			)
 			.map(d => d.device_id);
 		if (targets.length === 0) return 0;
+		await this.deleteDevices(targets, pw);
+		return targets.length;
+	}
 
+	/**
+	 * Revoke a single other session by device id.  Same UIA-
+	 * protected `delete_devices` path as `revokeOtherSessions`,
+	 * scoped to one device — backs the per-row "sign out" control in
+	 * the Sessions list.
+	 *
+	 * Refuses the current device: ending your own session is a
+	 * logout, not a revoke, and deleting your own device id mid-
+	 * session wedges the crypto store.  The engine bootstrap device
+	 * is never reached here because `fetchSessions` hides it from the
+	 * list the UI renders from.
+	 */
+	async revokeSession(deviceId: string, password?: string): Promise<void> {
+		const c = this.requireClient();
+		if (!this.creds) throw new Error("not logged in");
+		const pw = password ?? this.uiaPassword;
+		if (!pw) throw new Error("UIA password unavailable; call setUiaPassword first");
+		if (deviceId === c.getDeviceId()) {
+			throw new Error("Use sign out to end the current session.");
+		}
+		await this.deleteDevices([deviceId], pw);
+	}
+
+	/**
+	 * Shared UIA dance behind both revoke paths.  Probes Synapse's
+	 * `delete_devices` endpoint to obtain the auth session id, then
+	 * re-POSTs with the engine-issued ephemeral password.  `targets`
+	 * is used verbatim — callers own the current-device / bootstrap-
+	 * device exclusions.
+	 */
+	private async deleteDevices(targets: string[], pw: string): Promise<void> {
+		const creds = this.creds;
+		if (!creds) throw new Error("not logged in");
 		const url = `${creds.homeserver}/_matrix/client/v3/delete_devices`;
 		const headers: Record<string, string> = {
 			"Content-Type": "application/json",
@@ -5563,11 +5606,9 @@ export class MatrixTransport {
 			headers,
 			body: JSON.stringify({ devices: targets }),
 		});
-		if (probe.ok) {
-			// Rare but possible if the user already authed recently;
-			// device wipe went through on the first call.
-			return targets.length;
-		}
+		// Rare but possible if the user already authed recently — the
+		// wipe went through on the first call, no UIA challenge needed.
+		if (probe.ok) return;
 		const probeJson = (await probe.json().catch(() => ({}))) as Record<string, unknown>;
 		const session = (probeJson as { session?: string }).session;
 		if (!session) {
@@ -5592,7 +5633,6 @@ export class MatrixTransport {
 			const body = (await finalRes.json().catch(() => ({}))) as Record<string, unknown>;
 			throw new Error(messageFromMatrixError(body, `Revoke failed (${finalRes.status})`));
 		}
-		return targets.length;
 	}
 
 	/** Joined members of a room, sorted by power level then name. */
@@ -6679,14 +6719,21 @@ async function computeDeviceLabel(): Promise<string> {
 	return `Koven Web${await browserHint()}`;
 }
 
+// Platform suffix for the device label.  Delegates to mobile.ts's
+// detectPlatform() instead of sniffing the UA here: the iPhone UA
+// string carries the literal substring "like Mac OS X", so a naive
+// /Mac OS X/ test run first mislabels every iOS session as macOS.
+// detectPlatform() tests iPhone/iPad/iPod first, and also catches
+// iPad-in-desktop-mode (which reports "Macintosh") via maxTouchPoints.
 function osHint(): string {
-	const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
-	if (/Mac OS X/.test(ua)) return " (macOS)";
-	if (/Windows/.test(ua)) return " (Windows)";
-	if (/Android/.test(ua)) return " (Android)";
-	if (/iPhone|iPad|iPod/.test(ua)) return " (iOS)";
-	if (/Linux/.test(ua)) return " (Linux)";
-	return "";
+	switch (platform) {
+		case "ios": return " (iOS)";
+		case "android": return " (Android)";
+		case "macos": return " (macOS)";
+		case "windows": return " (Windows)";
+		case "linux": return " (Linux)";
+		default: return "";
+	}
 }
 
 async function browserHint(): Promise<string> {
