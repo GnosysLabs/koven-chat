@@ -2,11 +2,10 @@
 // we detect we're running inside Capacitor (iOS / Android).  Has no
 // effect in a regular browser or under Tauri.
 //
-// Why dynamic-import the Capacitor plugins instead of static-import:
-// the koven-web client is the same bundle that gets shipped to the
-// web, to Tauri desktop, and to Capacitor mobile.  Vite still needs
-// these packages installed so it can analyze the imports, but dynamic
-// imports keep the native plugin code out of hosts that never call it.
+// Capacitor plugin calls go through the injected bridge global instead
+// of package imports.  The production iOS bundle is loaded by WKWebView,
+// where a leftover bare `@capacitor/*` import cannot be resolved at
+// runtime.
 
 /** True when running inside a Capacitor WebView (iOS / Android shell). */
 export function isCapacitor(): boolean {
@@ -14,7 +13,7 @@ export function isCapacitor(): boolean {
 		&& (window as { Capacitor?: unknown }).Capacitor !== undefined;
 }
 
-/** True when running inside any native shell — Capacitor (iOS / Android)
+/** True when running inside any native shell: Capacitor (iOS / Android)
  * OR Tauri (desktop / mobile experimental) OR the legacy
  * `__KOVEN_DESKTOP__` init flag.  Use this for "we are not a regular
  * mobile browser" decisions like showing the brand wallpaper /
@@ -31,18 +30,64 @@ export function isNativeShell(): boolean {
 		|| w.__KOVEN_DESKTOP__ === true;
 }
 
+interface KeyboardInfo {
+	keyboardHeight: number;
+}
+
+interface KeyboardListenerHandle {
+	remove(): Promise<void> | void;
+}
+
+interface NativeKeyboardPlugin {
+	addListener(
+		eventName: "keyboardWillShow",
+		listenerFunc: (info: KeyboardInfo) => void,
+	): Promise<KeyboardListenerHandle> | KeyboardListenerHandle;
+	addListener(
+		eventName: "keyboardWillHide",
+		listenerFunc: () => void,
+	): Promise<KeyboardListenerHandle> | KeyboardListenerHandle;
+	setAccessoryBarVisible(options: { isVisible: boolean }): Promise<void>;
+}
+
+interface CapacitorBridge {
+	Plugins?: {
+		Keyboard?: NativeKeyboardPlugin;
+		[name: string]: unknown;
+	};
+}
+
+interface KeyboardWindowEvent extends Event {
+	keyboardHeight?: number;
+	detail?: {
+		keyboardHeight?: number;
+	};
+}
+
+function getKeyboardPlugin(): NativeKeyboardPlugin | null {
+	if (typeof window === "undefined") return null;
+	const bridge = (window as unknown as { Capacitor?: CapacitorBridge }).Capacitor;
+	return bridge?.Plugins?.Keyboard ?? null;
+}
+
+function readKeyboardHeight(event: Event): number | null {
+	const keyboardEvent = event as KeyboardWindowEvent;
+	const height = keyboardEvent.keyboardHeight ?? keyboardEvent.detail?.keyboardHeight;
+	return typeof height === "number" && Number.isFinite(height) ? height : null;
+}
+
 // ── Soft-keyboard tracking ────────────────────────────────────────
 //
 // iOS WKWebView never shrinks the layout viewport for the soft
 // keyboard.  With Capacitor's `resize: "none"` the WebView keeps its
 // full-screen frame, and `interactive-widget=resizes-content` (the
 // viewport-meta opt-in) is an Android-Chromium feature WebKit ignores.
-// So `100dvh` does NOT track the keyboard — the keyboard slides up
+// So `100dvh` does NOT track the keyboard.  The keyboard slides up
 // OVER the page and nothing moves out of the way on its own.
 //
 // `--keyboard-inset` is the fix: a CSS custom property on <html>
 // holding the live keyboard height in px (0 when down).  It is the
-// single source of truth every keyboard-aware surface reads — the
+// single source of truth every keyboard-aware surface reads: the
 // chat composer / push-view screens lift by it, the pre-auth login
 // and encryption columns fold it into their bottom padding, mobile
 // dialogs add it to their scroll padding.  `kb-open` is the matching
@@ -63,34 +108,48 @@ let keyboardTrackingStarted = false;
 /** Subscribe to the soft keyboard and publish its height.  Two signal
  * sources, picked by host:
  *
- *   - Capacitor (iOS / Android): @capacitor/keyboard's keyboardWillShow
- *     / keyboardWillHide.  `willShow` fires as the keyboard BEGINS its
- *     slide-in and carries the final height, so surfaces that
- *     transition `padding-bottom` track the slide instead of snapping.
+ *   - Capacitor (iOS / Android): the native Keyboard plugin's window
+ *     events publish the height.  The bridge listener also records the
+ *     same signal when `window.Capacitor.Plugins.Keyboard` is present.
+ *     `willShow` fires as the keyboard BEGINS its slide-in and carries
+ *     the final height, so surfaces that transition `padding-bottom`
+ *     track the slide instead of snapping.
  *   - Plain mobile browser (iOS Safari PWA, Chrome Android): the
  *     VisualViewport API.  The soft keyboard shrinks `visualViewport`
  *     even when the layout viewport (and `100dvh`) stays full size.
  *
- * Only one source runs per host.  Listeners live for the app's
- * lifetime — never torn down. */
+ * The Capacitor and browser paths are mutually exclusive.  Listeners
+ * live for the app's lifetime and are never torn down. */
 async function setupKeyboardTracking(): Promise<void> {
 	if (typeof window === "undefined") return;
 	if (keyboardTrackingStarted) return;
 	keyboardTrackingStarted = true;
 
+	window.addEventListener("keyboardWillShow", (e) => {
+		const h = readKeyboardHeight(e);
+		if (h !== null) publishKeyboardInset(h);
+	});
+	window.addEventListener("keyboardWillHide", () => {
+		publishKeyboardInset(0);
+	});
+
 	if (isCapacitor()) {
+		const keyboard = getKeyboardPlugin();
+		if (!keyboard) return;
+
 		try {
-			const { Keyboard } = await import("@capacitor/keyboard");
-			Keyboard.addListener("keyboardWillShow", (info) => {
+			keyboard.addListener("keyboardWillShow", (info) => {
 				publishKeyboardInset(info.keyboardHeight);
 			});
-			Keyboard.addListener("keyboardWillHide", () => {
+			keyboard.addListener("keyboardWillHide", () => {
 				publishKeyboardInset(0);
 			});
 			return;
 		} catch {
-			// Plugin missing (e.g. the web build running under
-			// Capacitor's dev server) — fall through to VisualViewport.
+			// If the bridge listener path fails, keep the raw window
+			// event path alive.  That is the same native signal and it
+			// carries the keyboard height on iOS.
+			return;
 		}
 	}
 
@@ -111,7 +170,7 @@ async function setupKeyboardTracking(): Promise<void> {
 /** Apply native-shell tweaks that improve mobile UX.  Currently:
  *
  *   - Track the soft keyboard and publish `--keyboard-inset` /
- *     `kb-open` (runs on every mobile host — Capacitor uses the
+ *     `kb-open` (runs on every mobile host.  Capacitor uses the
  *     native plugin events, plain browsers use VisualViewport).
  *
  *   - Hide the keyboard input-accessory bar (the up/down/done strip
@@ -125,11 +184,11 @@ export async function applyNativeShellTweaks(): Promise<void> {
 	void setupKeyboardTracking();
 
 	if (!isCapacitor()) return;
+	const keyboard = getKeyboardPlugin();
+	if (!keyboard) return;
 	try {
-		const { Keyboard } = await import("@capacitor/keyboard");
-		await Keyboard.setAccessoryBarVisible({ isVisible: false });
+		await keyboard.setAccessoryBarVisible({ isVisible: false });
 	} catch {
-		// Plugin not installed (e.g. running web build via Capacitor's
-		// dev-server in a browser) — silently no-op.
+		// Plugin not installed, silently no-op.
 	}
 }

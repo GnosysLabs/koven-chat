@@ -105,3 +105,11 @@ caddy_config/
 /scratch/
 # Local working agreements; never published.
 CLAUDE.md
+
+# Agent / Claude Code tooling, local to each operator.
+.claude/
+AGENTS.md
+
+# Social-link icon source SVGs — inlined into SocialIcons.tsx at build,
+# kept out of the repo as a local asset working set.
+social-icons/

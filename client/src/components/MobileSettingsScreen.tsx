@@ -95,7 +95,7 @@ export function MobileSettingsScreen({
 
 	/* ─── Root settings list ──────────────────────────────────────────
 	   The root always renders; each sub-screen is overlaid via
-	   PushSlot so back-navigation plays a clean slide-out animation
+	   PushSlot so back-navigation plays a clean fade-out animation
 	   instead of an instant unmount. */
 	return (
 		<div className="relative flex flex-col h-full overflow-hidden">
@@ -214,7 +214,7 @@ export function MobileSettingsScreen({
 
 			{/* Sub-screens.  Each PushSlot defers unmount until its
 			    exit animation finishes, so popping back to the root
-			    plays a slide-out instead of an instant disappear. */}
+			    plays a fade-out instead of an instant disappear. */}
 			<PushSlot visible={sub === "appearance"} onPop={pop}>
 				<AppearanceSubScreen
 					settings={settings}
@@ -361,7 +361,7 @@ function SubScreenShell({
 	return (
 		<div className="flex flex-col h-full">
 			<NavBar
-				left={<NavBackButton onClick={onBack} label="Settings" />}
+				left={<NavBackButton onClick={onBack} />}
 				title={title}
 			/>
 			<div className="flex-1 overflow-y-auto">

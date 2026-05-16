@@ -43,7 +43,7 @@ import { GallerySheet } from "@/components/GallerySheet";
 import { MarkdownContent } from "@/components/MarkdownContent";
 import { isMobileShell } from "@/lib/mobile";
 import { hapticImpact } from "@/lib/haptics";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
 import { MobileReactionSheet } from "@/components/MobileReactionSheet";
 
 // Heuristic: does this body have any markdown shape?  Cheap regex
@@ -108,7 +108,7 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import { AlertTriangle, ArrowDown, ArrowUp, BarChart3, Check, CheckCheck, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Images, Lock, MessageSquare as MessageSquareIcon, Paperclip, Play, Plus, Scale, Settings, X } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, BarChart3, Check, CheckCheck, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Images, Lock, MessageSquare as MessageSquareIcon, Paperclip, Play, Plus, Reply, Scale, Settings, X } from "lucide-react";
 
 export interface ChatPaneProps {
 	room: Room | null;
@@ -421,7 +421,12 @@ export function ChatPane({
 	// button (iMessage app-picker convention).  Open state lives here
 	// so menu items can close the popover after picking.
 	const [composerMenuOpen, setComposerMenuOpen] = useState(false);
+	const composerMenuPointerHandledRef = useRef(false);
 	const composeInputRef = useRef<HTMLTextAreaElement | null>(null);
+	const toggleComposerMenu = useCallback(() => {
+		void hapticImpact("light");
+		setComposerMenuOpen(open => !open);
+	}, []);
 	// Auto-grow the composer to fit its content (Discord-style).  Runs
 	// on every draft change: clear the inline height so scrollHeight
 	// reflects the natural content height, then write that back as the
@@ -837,6 +842,9 @@ export function ChatPane({
 		);
 	}
 	const activeRoom = room;
+	// True when this DM's other party is a bot.  Bots can't join live
+	// calls, so the voice bar is suppressed for bot DMs.
+	const isBotDm = room.kind === "dm" && !!room.dmUserId && !!botMxids?.has(room.dmUserId);
 
 	// ─── @-mention autocomplete ────────────────────────────────────
 	// Look at the cursor position inside the draft.  If we're sitting
@@ -1065,11 +1073,7 @@ export function ChatPane({
 					reactions={reactionsByMessage.get(m.id) ?? EMPTY_REACTIONS}
 					flags={flagsByMessage.get(m.id)}
 					isDm={activeRoom.kind === "dm"}
-					isBotDm={
-						activeRoom.kind === "dm"
-							&& !!activeRoom.dmUserId
-							&& !!botMxids?.has(activeRoom.dmUserId)
-					}
+					isBotDm={isBotDm}
 					receiptsVersion={receiptsVersion ?? 0}
 					memberAvatars={memberAvatars}
 					memberNames={memberNamesByUserId}
@@ -1284,7 +1288,7 @@ export function ChatPane({
 			    noise (#announcements, #report-a-bug); reader
 			    defaults to true.  DMs ignore `liveEnabled` since
 			    1:1 calls aren't a "channel" the user opts in/out of. */}
-			{accessToken && (room.kind === "dm" || room.liveEnabled !== false) && (
+			{accessToken && !isBotDm && (room.kind === "dm" || room.liveEnabled !== false) && (
 				<RoomVoiceBar
 					roomId={room.id}
 					roomName={room.name}
@@ -1555,11 +1559,31 @@ export function ChatPane({
 						// row.  Tap → popover; choose → action fires,
 						// popover dismisses.
 						<Popover open={composerMenuOpen} onOpenChange={setComposerMenuOpen}>
-							<PopoverTrigger asChild>
+							<PopoverAnchor asChild>
 								<button
 									type="button"
 									disabled={uploading}
 									aria-label="Add attachment"
+									aria-haspopup="dialog"
+									aria-expanded={composerMenuOpen}
+									onPointerDown={(e) => {
+										e.preventDefault();
+										composerMenuPointerHandledRef.current = true;
+										toggleComposerMenu();
+									}}
+									onClick={(e) => {
+										e.preventDefault();
+										if (composerMenuPointerHandledRef.current) {
+											composerMenuPointerHandledRef.current = false;
+											return;
+										}
+										toggleComposerMenu();
+									}}
+									onKeyDown={(e) => {
+										if (e.key !== "Enter" && e.key !== " ") return;
+										e.preventDefault();
+										toggleComposerMenu();
+									}}
 									className={cn(
 										"shrink-0 size-9 rounded-full",
 										"text-foreground bg-foreground/[0.08] active:bg-foreground/[0.16]",
@@ -1569,8 +1593,14 @@ export function ChatPane({
 								>
 									<Plus className="size-[20px]" strokeWidth={2.5} />
 								</button>
-							</PopoverTrigger>
-							<PopoverContent side="top" align="start" className="w-56 p-1">
+							</PopoverAnchor>
+							<PopoverContent
+								side="top"
+								align="start"
+								onOpenAutoFocus={(e) => e.preventDefault()}
+								onCloseAutoFocus={(e) => e.preventDefault()}
+								className="w-56 p-1"
+							>
 								{onSendAttachment && (
 									<button
 										type="button"
@@ -2019,6 +2049,10 @@ function MessageRowComponent({
 	// Now the row visibly translates with the finger up to a soft
 	// cap, rubber-bands past it, and snaps back on release.
 	const rowRef = useRef<HTMLDivElement | null>(null);
+	// Reply-arrow affordance revealed in the gap as the row swipes
+	// right.  Counter-translated against the row so it stays pinned at
+	// the screen's leading edge while the message slides away from it.
+	const replyIconRef = useRef<HTMLDivElement | null>(null);
 	const longPressTimerRef = useRef<number | null>(null);
 	const longPressStartRef = useRef<{ x: number; y: number } | null>(null);
 	const swipeRepliedRef = useRef(false);
@@ -2068,12 +2102,28 @@ function MessageRowComponent({
 		const tx = dx <= SWIPE_SOFT_CAP
 			? dx
 			: SWIPE_SOFT_CAP + (dx - SWIPE_SOFT_CAP) * 0.3;
+		// Reply-arrow progress: 0 until the swipe starts, 1 once it has
+		// reached the commit threshold (icon fully opaque + full size).
+		const p = Math.min(1, dx / SWIPE_REPLY_THRESHOLD);
+		const icon = replyIconRef.current;
 		if (active) {
 			rowRef.current.style.transform = `translateX(${tx}px)`;
 			rowRef.current.style.transition = "none";
+			if (icon) {
+				icon.style.transition = "none";
+				icon.style.opacity = String(p);
+				// Counter-translate so the arrow holds its screen
+				// position while the message slides out from over it.
+				icon.style.transform = `translateX(${-tx}px) scale(${0.6 + 0.4 * p})`;
+			}
 		} else {
 			rowRef.current.style.transform = "";
 			rowRef.current.style.transition = "transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1)";
+			if (icon) {
+				icon.style.transition = "opacity 160ms ease, transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1)";
+				icon.style.opacity = "0";
+				icon.style.transform = "translateX(0px) scale(0.6)";
+			}
 		}
 		if (last && dx >= SWIPE_REPLY_THRESHOLD && !swipeRepliedRef.current) {
 			swipeRepliedRef.current = true;
@@ -2254,7 +2304,7 @@ function MessageRowComponent({
 			data-message-id={message.id}
 			data-actions-locked={actionsLocked ? "true" : undefined}
 			className={cn(
-				"flex gap-3 items-start",
+				"relative flex gap-3 items-start",
 				rowPadding,
 				mentionHighlight,
 				flashHighlight,
@@ -2281,6 +2331,18 @@ function MessageRowComponent({
 			ref={rowRef}
 			{...dragBind()}
 		>
+			{isMobileShell && (
+				<div
+					ref={replyIconRef}
+					aria-hidden
+					className="absolute left-1 inset-y-0 flex items-center pointer-events-none"
+					style={{ opacity: 0 }}
+				>
+					<div className="flex items-center justify-center size-9 rounded-full bg-foreground/10">
+						<Reply className="size-[18px] text-primary" strokeWidth={2.5} />
+					</div>
+				</div>
+			)}
 			<AvatarSlot
 				mxc={avatarMxc}
 				seed={message.sender}

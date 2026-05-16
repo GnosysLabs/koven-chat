@@ -23,7 +23,8 @@
 // Last-message preview reads from the live timeline via
 // `transport.getRoomMessages` (in-memory; no network call).
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useDrag } from "@use-gesture/react";
 import { MessageSquare, Lock, BellOff, PenSquare, ChevronRight } from "lucide-react";
 import type { Message, Room, RoomId, UserId } from "@koven/shared";
 import type { MatrixTransport } from "@/lib/matrix";
@@ -38,6 +39,13 @@ import { cn } from "@/lib/utils";
 // is universal across themes (Apple's HIG keeps `.systemRed` constant
 // the same way).
 const IOS_RED = "#FF3B30";
+
+// Swipe-to-delete geometry (iOS Messages calibration).  The Delete
+// action rests at 84pt wide once the row is held open; a swipe that
+// drags the row more than 55% of its own width past that commits the
+// delete outright (the full-swipe shortcut iMessage gives you).
+const DELETE_ACTION_WIDTH = 84;
+const SWIPE_DELETE_COMMIT = 0.55;
 
 interface ChatsListMobileProps {
 	rooms: Room[];
@@ -56,13 +64,20 @@ interface ChatsListMobileProps {
 	onCreateRoom(): void;
 	onAcceptInvite(id: RoomId): Promise<void> | void;
 	onDeclineInvite(id: RoomId): Promise<void> | void;
+	// Leave the DM.  Wired to transport.leaveRoom in App.tsx; the row
+	// unmounts once the membership change drops the room from state.
+	onDeleteRoom(id: RoomId): Promise<void> | void;
 }
 
 export function ChatsListMobile({
 	rooms, transport, currentUserId, botMxids, roomsLoaded,
 	onSelectRoom, onCreateRoom,
-	onAcceptInvite, onDeclineInvite,
+	onAcceptInvite, onDeclineInvite, onDeleteRoom,
 }: ChatsListMobileProps) {
+	// At most one row's Delete action is open at a time (iOS Messages
+	// behaviour) — opening another, scrolling, or tapping a row all
+	// close whatever was open.
+	const [swipedRoomId, setSwipedRoomId] = useState<RoomId | null>(null);
 	const { invites, dms } = useMemo(() => {
 		const dmRooms = rooms.filter(r => r.kind === "dm");
 		// Invites first; the rest sorted by last-active descending
@@ -90,7 +105,10 @@ export function ChatsListMobile({
 		// Transparent so the page inherits body::before's
 		// --bg-gradient — same colour tones the desktop chat pane
 		// uses, instead of a flat bg-background.
-		<div className="flex-1 min-h-0 overflow-y-auto">
+		<div
+			className="flex-1 min-h-0 overflow-y-auto"
+			onScroll={() => { if (swipedRoomId) setSwipedRoomId(null); }}
+		>
 			<div
 				className="pt-2"
 				style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 80px)" }}
@@ -175,6 +193,9 @@ export function ChatsListMobile({
 								currentUserId={currentUserId}
 								isBot={!!room.dmUserId && botMxids.has(room.dmUserId)}
 								onClick={() => selectRoom(room.id)}
+								onDelete={() => onDeleteRoom(room.id)}
+								open={swipedRoomId === room.id}
+								onOpenChange={(o) => setSwipedRoomId(o ? room.id : null)}
 								showDivider={idx > 0}
 							/>
 						))}
@@ -186,13 +207,16 @@ export function ChatsListMobile({
 }
 
 function ChatRow({
-	room, transport, currentUserId, isBot, onClick, showDivider,
+	room, transport, currentUserId, isBot, onClick, onDelete, open, onOpenChange, showDivider,
 }: {
 	room: Room;
 	transport: MatrixTransport | null;
 	currentUserId: UserId;
 	isBot: boolean;
 	onClick(): void;
+	onDelete(): Promise<void> | void;
+	open: boolean;
+	onOpenChange(open: boolean): void;
 	showDivider: boolean;
 }) {
 	// Live-timeline read.  In-memory; cheap.  Returns [] if the
@@ -205,88 +229,194 @@ function ChatRow({
 	const hasHighlight = (room.highlightCount ?? 0) > 0;
 	const isMuted = false; // notify-level isn't on the Room type; future hook
 
+	const cardRef = useRef<HTMLButtonElement | null>(null);
+	const deleteRef = useRef<HTMLButtonElement | null>(null);
+	// `open` mirrored into a ref so the drag handler reads the latest
+	// value without re-binding useDrag every render.
+	const openRef = useRef(open);
+	openRef.current = open;
+	// Set true once a drag travels far enough to count as a swipe, so
+	// the click that fires on release doesn't also open the chat.
+	const movedRef = useRef(false);
+	const [deleting, setDeleting] = useState(false);
+
+	// Slide the row to `x` (<= 0) and grow the Delete action to fill
+	// the gap it opens.  Written straight to the DOM so the drag stays
+	// 1:1 with the finger — no React re-render per pointer move.
+	function setX(x: number, animate: boolean) {
+		const card = cardRef.current;
+		const del = deleteRef.current;
+		const ease = "cubic-bezier(0.2, 0.8, 0.2, 1)";
+		if (card) {
+			card.style.transition = animate ? `transform 240ms ${ease}` : "none";
+			card.style.transform = `translateX(${x}px)`;
+		}
+		if (del) {
+			del.style.transition = animate ? `width 240ms ${ease}` : "none";
+			del.style.width = `${Math.max(0, -x)}px`;
+		}
+	}
+
+	// React to external open / close: a sibling row opening or the
+	// list scrolling flips `open` false and slides this row home.
+	useEffect(() => {
+		setX(open ? -DELETE_ACTION_WIDTH : 0, true);
+	}, [open]);
+
+	async function commitDelete() {
+		if (deleting) return;
+		setDeleting(true);
+		void hapticNotification("warning");
+		try {
+			await onDelete();
+			// Row unmounts once the room leaves state.rooms.
+		} catch {
+			setDeleting(false);
+			onOpenChange(false);
+		}
+	}
+
+	const dragBind = useDrag(({ first, active, last: released, movement: [mx], tap }) => {
+		if (first) movedRef.current = false;
+		if (Math.abs(mx) > 6) movedRef.current = true;
+		if (tap) return;
+		const card = cardRef.current;
+		if (!card) return;
+		// Anchor the drag to wherever the row was resting.
+		const base = openRef.current ? -DELETE_ACTION_WIDTH : 0;
+		let x = base + mx;
+		// No travel past the closed position — resist a rightward pull.
+		if (x > 0) x = x * 0.16;
+		const width = card.offsetWidth || window.innerWidth;
+		if (active) {
+			setX(x, false);
+			return;
+		}
+		if (released) {
+			if (-x > width * SWIPE_DELETE_COMMIT) {
+				// Full swipe past the commit line: slide off and leave.
+				setX(-width, true);
+				void hapticImpact("medium");
+				void commitDelete();
+				return;
+			}
+			const shouldOpen = -x > DELETE_ACTION_WIDTH * 0.5;
+			setX(shouldOpen ? -DELETE_ACTION_WIDTH : 0, true);
+			if (shouldOpen !== openRef.current) {
+				if (shouldOpen) void hapticImpact("light");
+				onOpenChange(shouldOpen);
+			}
+		}
+	}, { axis: "x", pointer: { touch: true }, filterTaps: true });
+
 	return (
 		<>
 			{showDivider && <div className="ml-[68px] h-px bg-foreground/[0.08]" aria-hidden />}
-			<button
-				type="button"
-				onClick={onClick}
-				className="relative w-full flex items-stretch gap-3 pl-4 pr-3 py-2.5 active:bg-foreground/[0.06] transition-colors"
-			>
-				{/* Leading unread dot.  Absolutely positioned in the
-				    row's leading padding so it overlays without
-				    affecting avatar position — every row's avatar
-				    starts at the same x.  Matches iOS Messages,
-				    where read rows don't have any reserved space
-				    for the dot. */}
-				{unread > 0 && (
-					<span
-						className={cn(
-							"absolute left-1 top-1/2 -translate-y-1/2 block size-[10px] rounded-full",
-							hasHighlight ? "" : "bg-primary",
-						)}
-						style={hasHighlight ? { backgroundColor: IOS_RED } : undefined}
-						aria-label={`${unread} unread`}
-					/>
-				)}
-
-				{/* Avatar.  DM, so circular.  Presence dot is part
-				    of MatrixAvatar siblings — wrapped here so the
-				    DM presence dot lands cleanly on the bottom-right. */}
-				<div className="relative shrink-0 self-center">
-					<MatrixAvatar
-						mxc={room.avatarUrl}
-						seed={room.dmUserId ?? room.id}
-						kind={isBot ? "bot" : "user"}
-						className="h-[52px] w-[52px] rounded-full"
-					/>
-					{room.dmPresence === "online" && (
+			<div className="relative overflow-hidden">
+				{/* Delete action — sits in the gap the row opens as it
+				    slides left, growing from 0 width so it never peeks
+				    out from under a closed row. */}
+				<button
+					ref={deleteRef}
+					type="button"
+					onClick={() => void commitDelete()}
+					disabled={deleting}
+					aria-label={`Delete chat with ${room.name || "Untitled"}`}
+					className="absolute inset-y-0 right-0 flex items-center justify-center overflow-hidden text-white text-[15px] font-medium"
+					style={{ width: 0, backgroundColor: IOS_RED }}
+				>
+					<span className="whitespace-nowrap px-3">
+						{deleting ? "Deleting…" : "Delete"}
+					</span>
+				</button>
+				<button
+					ref={cardRef}
+					type="button"
+					{...dragBind()}
+					onClick={() => {
+						// A swipe that ended in a stray click must not
+						// also open the chat; an open row taps closed.
+						if (movedRef.current) { movedRef.current = false; return; }
+						if (openRef.current) { onOpenChange(false); return; }
+						onClick();
+					}}
+					className="relative w-full flex items-stretch gap-3 pl-4 pr-3 py-2.5 active:bg-foreground/[0.06] transition-colors touch-pan-y"
+				>
+					{/* Leading unread dot.  Absolutely positioned in the
+					    row's leading padding so it overlays without
+					    affecting avatar position — every row's avatar
+					    starts at the same x.  Matches iOS Messages,
+					    where read rows don't have any reserved space
+					    for the dot. */}
+					{unread > 0 && (
 						<span
-							className="absolute -bottom-0.5 -right-0.5 size-[14px] rounded-full ring-[3px] ring-background"
-							style={{ backgroundColor: "#34C759" }}
-							aria-label="Online"
+							className={cn(
+								"absolute left-1 top-1/2 -translate-y-1/2 block size-[10px] rounded-full",
+								hasHighlight ? "" : "bg-primary",
+							)}
+							style={hasHighlight ? { backgroundColor: IOS_RED } : undefined}
+							aria-label={`${unread} unread`}
 						/>
 					)}
-					{room.dmPresence === "unavailable" && (
-						<span
-							className="absolute -bottom-0.5 -right-0.5 size-[14px] rounded-full ring-[3px] ring-background"
-							style={{ backgroundColor: "#FF9F0A" }}
-							aria-label="Idle"
-						/>
-					)}
-				</div>
 
-				{/* Content column.  Two lines: name + time (top),
-				    preview (bottom).  text-left because the parent
-				    button centers text by default. */}
-				<div className="flex-1 min-w-0 text-left flex flex-col justify-center gap-0.5">
-					<div className="flex items-center gap-1.5">
-						<span className={cn(
-							"text-[17px] truncate leading-tight",
-							unread > 0 ? "font-semibold text-foreground" : "font-medium text-foreground",
-						)}>
-							{room.name || "Untitled"}
-						</span>
-						{room.encrypted && (
-							<Lock className="size-[13px] shrink-0 text-muted-foreground" strokeWidth={2.25} />
+					{/* Avatar.  DM, so circular.  Presence dot is part
+					    of MatrixAvatar siblings — wrapped here so the
+					    DM presence dot lands cleanly on the bottom-right. */}
+					<div className="relative shrink-0 self-center">
+						<MatrixAvatar
+							mxc={room.avatarUrl}
+							seed={room.dmUserId ?? room.id}
+							kind={isBot ? "bot" : "user"}
+							className="h-[52px] w-[52px] rounded-full"
+						/>
+						{room.dmPresence === "online" && (
+							<span
+								className="absolute -bottom-0.5 -right-0.5 size-[14px] rounded-full ring-[3px] ring-background"
+								style={{ backgroundColor: "#34C759" }}
+								aria-label="Online"
+							/>
 						)}
-						{isMuted && (
-							<BellOff className="size-[13px] shrink-0 text-muted-foreground" strokeWidth={2.25} />
+						{room.dmPresence === "unavailable" && (
+							<span
+								className="absolute -bottom-0.5 -right-0.5 size-[14px] rounded-full ring-[3px] ring-background"
+								style={{ backgroundColor: "#FF9F0A" }}
+								aria-label="Idle"
+							/>
 						)}
-						<span className="ml-auto shrink-0 text-[13px] text-muted-foreground tabular-nums">
-							{time}
-						</span>
 					</div>
-					<div className="text-[15px] leading-snug text-muted-foreground line-clamp-2">
-						{preview}
+
+					{/* Content column.  Two lines: name + time (top),
+					    preview (bottom).  text-left because the parent
+					    button centers text by default. */}
+					<div className="flex-1 min-w-0 text-left flex flex-col justify-center gap-0.5">
+						<div className="flex items-center gap-1.5">
+							<span className={cn(
+								"text-[17px] truncate leading-tight",
+								unread > 0 ? "font-semibold text-foreground" : "font-medium text-foreground",
+							)}>
+								{room.name || "Untitled"}
+							</span>
+							{room.encrypted && (
+								<Lock className="size-[13px] shrink-0 text-muted-foreground" strokeWidth={2.25} />
+							)}
+							{isMuted && (
+								<BellOff className="size-[13px] shrink-0 text-muted-foreground" strokeWidth={2.25} />
+							)}
+							<span className="ml-auto shrink-0 text-[13px] text-muted-foreground tabular-nums">
+								{time}
+							</span>
+						</div>
+						<div className="text-[15px] leading-snug text-muted-foreground line-clamp-2">
+							{preview}
+						</div>
 					</div>
-				</div>
-				<ChevronRight
-					className="self-center shrink-0 size-[18px] text-muted-foreground/40 -mr-1"
-					strokeWidth={2.5}
-					aria-hidden
-				/>
-			</button>
+					<ChevronRight
+						className="self-center shrink-0 size-[18px] text-muted-foreground/40 -mr-1"
+						strokeWidth={2.5}
+						aria-hidden
+					/>
+				</button>
+			</div>
 		</>
 	);
 }

@@ -2627,6 +2627,17 @@ export default function App() {
 								dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
 							}
 						}}
+						onDeleteRoom={async (roomId) => {
+							if (!transport) return;
+							try {
+								await transport.leaveRoom(roomId as RoomId);
+								if (state.activeRoomId === roomId) {
+									dispatch({ type: "set_active_room", roomId: null });
+								}
+							} catch (e) {
+								dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+							}
+						}}
 					/>
 				) : (
 				<RoomList
@@ -2713,8 +2724,8 @@ export default function App() {
 				)}
 				<div className="contents" data-mobile-pane="main">
 				{/* On mobile the main pane is reserved exclusively for the
-				    chat (wrapped in PushSlot below) so it can slide in
-				    from the right.  Explore / Bots / SpaceLanding render
+				    chat (wrapped in PushSlot below) so it can fade in.
+				    Explore / Bots / SpaceLanding render
 				    in the LIST pane on mobile (see ExploreMobile,
 				    BotList, SpaceHomeMobile above) — gating these
 				    branches on !isMobileShell keeps them from doubling
@@ -2795,8 +2806,8 @@ export default function App() {
 				) : (
 				(() => {
 					// ChatPane lives inside a PushSlot on mobile so it
-					// slides in from the right when activeRoomId becomes
-					// set, matching the iOS push the Me tab uses for
+					// fades in when activeRoomId becomes set, matching
+					// the push the Me tab uses for
 					// Profile / Settings.  Swipe-from-left-edge OR
 					// PushSlot's exit animation reveals the list pane
 					// underneath (now kept mounted as the push
@@ -3430,15 +3441,15 @@ export default function App() {
 				     }}
 				>
 					{/* Root Me view — always mounted underneath so the
-					    push views slide in over it (and the user sees
-					    the root revealed when they slide back).
+					    push views fade in over it (and the user sees
+					    the root revealed when a push is popped).
 					    `pt-[env(safe-area-inset-top)]` lifts the root
 					    content below the status bar; push views handle
 					    that internally via their own NavBar.
 
-					    `mobile-push-underlayer` + `.is-pushed` give it
-					    the iOS parallax + dim treatment whenever
-					    something is pushed over it. */}
+					    `mobile-push-underlayer` + `.is-pushed` keep the
+					    underlayer from intercepting taps while something
+					    is pushed over it. */}
 					<div
 						className={`flex-1 flex flex-col min-h-0 mobile-push-underlayer${meStack !== "root" ? " is-pushed" : ""}`}
 					>
@@ -3474,7 +3485,7 @@ export default function App() {
 
 					{/* Push views.  PushSlot defers unmount until the
 					    exit animation finishes, so popping back to the
-					    root plays a clean slide-out instead of an
+					    root plays a clean fade-out instead of an
 					    instant disappear.  `onPop` enables the
 					    swipe-from-left-edge gesture. */}
 					<PushSlot
@@ -3529,9 +3540,9 @@ export default function App() {
 			    space is selected, SpaceHomeMobile after drill-in.
 			    Selecting a room from inside SpaceHome dispatches
 			    set_active_room, which clears the tab bar and lets
-			    the ChatPane (z=40 in main pane CSS) slide in over
+			    the ChatPane (z=40 in main pane CSS) fade in over
 			    the top of THIS overlay — we stay mounted so that
-			    when the user pops the chat back, it slides off to
+			    when the user pops the chat back, it fades out to
 			    reveal SpaceHomeMobile underneath rather than
 			    re-mounting the overlay on top of the chat's exit
 			    animation. */}
@@ -3556,10 +3567,9 @@ export default function App() {
 				     }}
 				>
 					{/* Underlayer — spaces list, always rendered so the
-					    PushSlot below has a proper underlayer for the
-					    parallax dim while SpaceHomeMobile slides in
-					    from the right.  `is-pushed` toggles via
-					    `mobileSelectedSpaceId`. */}
+					    PushSlot below has something to reveal as
+					    SpaceHomeMobile fades in over it.  `is-pushed`
+					    toggles via `mobileSelectedSpaceId`. */}
 					<div className={`flex-1 min-h-0 overflow-hidden mobile-push-underlayer${mobileSelectedSpaceId ? " is-pushed" : ""}`}>
 						<SpacesListMobile
 							spaces={state.spaces}
@@ -3567,7 +3577,7 @@ export default function App() {
 							onOpenSpace={(id) => setMobileSelectedSpaceId(id as SpaceId)}
 						/>
 					</div>
-					{/* Push slot — SpaceHomeMobile slides in over the
+					{/* Push slot — SpaceHomeMobile fades in over the
 					    list when a space is selected.  Swipe from the
 					    left edge or the chevron-back to dismiss. */}
 					<PushSlot

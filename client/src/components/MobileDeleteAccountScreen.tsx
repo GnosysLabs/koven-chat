@@ -90,7 +90,7 @@ export function MobileDeleteAccountScreen({
 	return (
 		<div className="flex flex-col h-full">
 			<NavBar
-				left={<NavBackButton onClick={() => { void hapticSelection(); onBack(); }} label="Settings" />}
+				left={<NavBackButton onClick={() => { void hapticSelection(); onBack(); }} />}
 				title="Delete Account"
 			/>
 

@@ -22,6 +22,7 @@ import { ChevronRight, User as UserIcon, Settings as SettingsIcon, LogOut } from
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { cn } from "@/lib/utils";
 import { hapticSelection } from "@/lib/haptics";
+import { formatMxid, serverOf } from "@/lib/mxid";
 
 interface MobileMeScreenProps {
 	userId: string | null;
@@ -44,6 +45,9 @@ export function MobileMeScreen({
 		? userId.slice(1).split(":")[0] ?? userId
 		: userId ?? "—";
 	const shownName = displayName?.trim() || localpart;
+	// The @handle, suffix-collapsed when it's on the user's own server
+	// (always true here — this is the user's own id).
+	const handle = userId ? formatMxid(userId, serverOf(userId)) : "";
 
 	function tap(action: () => void) {
 		void hapticSelection();
@@ -87,7 +91,7 @@ export function MobileMeScreen({
 						{shownName}
 					</div>
 					<div className="text-[13px] text-muted-foreground font-mono truncate max-w-[280px]">
-						{userId ?? ""}
+						{handle}
 					</div>
 				</div>
 			</button>

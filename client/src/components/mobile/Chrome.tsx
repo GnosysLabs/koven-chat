@@ -15,7 +15,6 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useDrag } from "@use-gesture/react";
-import { useSpring, animated } from "@react-spring/web";
 import { ChevronLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -51,20 +50,19 @@ export function NavBar({
 
 export function NavBackButton({
 	onClick,
-	label = "Back",
 }: {
 	onClick(): void;
-	label?: string;
 }) {
+	// Arrow-only, no text label — matches the chevron-only back button
+	// MobileTopBar uses everywhere else in the app.
 	return (
 		<button
 			type="button"
 			onClick={onClick}
 			aria-label="Back"
-			className="inline-flex items-center gap-0.5 pl-1 pr-2 h-11 text-primary active:opacity-60 transition-opacity"
+			className="h-10 w-10 -ml-1 rounded-full flex items-center justify-center text-primary active:opacity-60 transition-opacity"
 		>
-			<ChevronLeft className="h-[26px] w-[26px] -ml-1" strokeWidth={2.5} />
-			<span className="text-[17px] truncate max-w-[80px]">{label}</span>
+			<ChevronLeft className="h-[26px] w-[26px]" strokeWidth={2.5} />
 		</button>
 	);
 }
@@ -147,29 +145,27 @@ export function ErrorBanner({ message }: { message: string }) {
 }
 
 /**
- * PushSlot — wraps a push-view child so it slides in from the right
- * on mount and slides out to the right on the next render where
- * `visible` flips false.  Defers unmount until the exit spring
- * lands so the parent doesn't need to manage timers itself.
+ * PushSlot — wraps a push-view child so it fades and scales in on
+ * mount (opacity 0→1, scale 0.97→1) and fades / scales back out on
+ * the next render where `visible` flips false.  Defers unmount until
+ * the fade-out has finished so the parent doesn't manage timers.
+ *
+ * The enter / exit tween is a plain CSS transition (the `.push-slot`
+ * rule in index.css), NOT a JS animation library.  A CSS transition
+ * is driven by the compositor, so it runs identically in every
+ * WebKit and Blink build.  The previous react-spring version's
+ * requestAnimationFrame frameloop did not advance inside the
+ * production iOS WebView — every pushed view stayed frozen at its
+ * initial (off-screen / faded-out) frame, so tapping a chat looked
+ * like it did nothing at all.
  *
  * Optionally accepts `onPop` to enable the iOS swipe-from-left-edge
  * back gesture: pointerdown within 24px of the left edge starts the
- * drag, the view follows the pointer in real time, and release past
- * a threshold (40% of width or fast horizontal velocity) commits
- * the pop by calling `onPop` (which should flip `visible` false).
- *
- * Animation is driven by @react-spring/web — interruptions tween
- * smoothly from the current frame, so rapid back-and-forth taps
- * never produce the "backwards snap" the previous CSS-keyframe
- * version did.  Drag velocity carries into the release spring, so
- * a fast flick completes off-screen with momentum.
- *
- * The spring also writes a `--push-progress` CSS variable
- * (0 = docked at centre, 1 = off-screen right) onto the nearest
- * `[data-push-host]` ancestor.  Sibling underlayer elements use
- * that variable to parallax/dim in lockstep with the drag, instead
- * of the previous "frozen during the swipe, snap at the end"
- * behaviour.
+ * drag, horizontal travel fades / shrinks the view in real time
+ * (written straight onto the DOM node, no React re-render per move),
+ * and release past a threshold (40% of width or a fast horizontal
+ * flick) commits the pop by calling `onPop` (which should flip
+ * `visible` false).
  *
  * Usage:
  *   <PushSlot visible={meStack === "profile"} onPop={() => setMeStack("root")}>
@@ -179,11 +175,11 @@ export function ErrorBanner({ message }: { message: string }) {
 const EDGE_ZONE_PX = 24;
 const POP_DISTANCE_THRESHOLD = 0.4; // 40% of width
 const POP_VELOCITY_THRESHOLD = 0.5; // px/ms
-// UIKit's push transition lands near 280ms with an ease-out curve.
-// tension 320 / friction 32 gives a perceptually-equivalent spring
-// that interrupts cleanly mid-flight (the main reason we're on a
-// spring at all instead of a CSS transition).
-const SPRING_CONFIG = { tension: 320, friction: 32, clamp: false };
+// Keep in sync with the `.push-slot` transition duration in index.css.
+const PUSH_TRANSITION_MS = 280;
+// Scale travels 0.97 (entering / leaving) → 1 (docked).  The CSS class
+// owns the resting values; this constant drives the live drag only.
+const SCALE_TRAVEL = 0.03;
 
 function prefersReducedMotion(): boolean {
 	if (typeof window === "undefined") return false;
@@ -199,119 +195,83 @@ export function PushSlot({
 	onPop?(): void;
 	children: ReactNode;
 }) {
+	// `mounted` gates the DOM node; `shown` is the CSS target state
+	// (true = docked, false = faded out).  Toggling `shown` is what
+	// triggers the `.push-slot` transition.
 	const [mounted, setMounted] = useState(visible);
+	const [shown, setShown] = useState(visible);
 	const slotRef = useRef<HTMLDivElement | null>(null);
 	const activeRef = useRef(false);
-	// Latch the child for the exit slide so the parent can clear the
+	// Latch the child for the exit fade so the parent can clear the
 	// new-child slot the moment it pops the stack — the latched
-	// ReactNode keeps rendering until the spring lands.
+	// ReactNode keeps rendering until the unmount timer fires.
 	const latchedChild = useRef<ReactNode>(children);
 	if (visible) latchedChild.current = children;
-	// Captured at the start of every drag-commit so the spring can
-	// inherit the user's flick velocity (fast flick → fast exit;
-	// slow drag past threshold → measured exit).  Cleared once the
-	// exit effect consumes it so a subsequent tap-back doesn't get
-	// a stale push.
-	const releaseVelocityRef = useRef(0);
-	// `visible` from the latest render, read inside spring `onRest`
-	// callbacks where the closure-captured `visible` is stale.  Used
-	// to guard against unmounting after a cancelled exit (visible
-	// flipped back true while we were mid-slide-out).
+	// `visible` from the latest render, read inside the deferred rAF /
+	// timeout callbacks where the closure-captured value is stale.
 	const visibleRef = useRef(visible);
 	visibleRef.current = visible;
+	const exitTimerRef = useRef<number | null>(null);
+	const enterRafRef = useRef<number | null>(null);
 
-	const getWidth = () => {
-		return slotRef.current?.offsetWidth || window.innerWidth || 1;
-	};
+	const getWidth = () => slotRef.current?.offsetWidth || window.innerWidth || 1;
 
-	const [{ x }, api] = useSpring(() => ({
-		x: visible ? 0 : getWidth(),
-		config: SPRING_CONFIG,
-	}));
-
-	// Drive enter / exit from the `visible` prop.  Spring continues
-	// from its current frame on every api.start — no `from`, no
-	// snap.  Mid-flight interruptions (tap-back during enter, tap-
-	// open during exit) reverse direction smoothly from wherever the
-	// element happens to be.
+	// Drive enter / exit from the `visible` prop.
 	useEffect(() => {
+		// Cancel any scheduling still in flight from a previous flip so
+		// rapid back-and-forth toggles can't fight each other.
+		if (exitTimerRef.current !== null) {
+			clearTimeout(exitTimerRef.current);
+			exitTimerRef.current = null;
+		}
+		if (enterRafRef.current !== null) {
+			cancelAnimationFrame(enterRafRef.current);
+			enterRafRef.current = null;
+		}
+
 		if (visible) {
 			setMounted(true);
-			api.start({
-				x: 0,
-				config: SPRING_CONFIG,
-				immediate: prefersReducedMotion(),
+			// Drop any inline overrides a drag (or an interrupted exit)
+			// left behind so the `.push-slot` class fully owns the tween.
+			const slot = slotRef.current;
+			if (slot) {
+				slot.style.opacity = "";
+				slot.style.transform = "";
+				slot.style.transition = "";
+			}
+			// Mount at the hidden frame, then flip `shown` true a frame
+			// later so the browser has a "from" state to transition out
+			// of.  Two rAFs: the node is committed and painted hidden by
+			// the time the second one runs.
+			enterRafRef.current = requestAnimationFrame(() => {
+				enterRafRef.current = requestAnimationFrame(() => {
+					enterRafRef.current = null;
+					void slotRef.current?.offsetHeight; // flush layout
+					if (visibleRef.current) setShown(true);
+				});
 			});
 			return;
 		}
+
 		if (!mounted) return;
-		const v = releaseVelocityRef.current;
-		releaseVelocityRef.current = 0;
-		api.start({
-			x: getWidth(),
-			config: { ...SPRING_CONFIG, velocity: v },
-			immediate: prefersReducedMotion(),
-			onRest: (result) => {
-				// Only unmount if the exit actually completed AND
-				// we're still meant to be hidden.  If `visible`
-				// flipped back true mid-exit, a new spring is
-				// already pulling x toward 0 and we must not yank
-				// the DOM out from under it.
-				if (result.finished && !visibleRef.current) {
-					setMounted(false);
-				}
-			},
-		});
-	// `mounted` intentionally omitted: we set it inside this effect,
-	// and re-running on its change would loop.  `api` is stable.
+		// Exit: flip to the hidden frame, unmount once the fade-out has
+		// had time to land.  A plain timer (not `transitionend`) stays
+		// reliable even if the event is dropped or coalesced.
+		setShown(false);
+		const ms = prefersReducedMotion() ? 0 : PUSH_TRANSITION_MS;
+		exitTimerRef.current = window.setTimeout(() => {
+			exitTimerRef.current = null;
+			if (!visibleRef.current) setMounted(false);
+		}, ms + 60);
+	// `mounted` intentionally omitted: we set it inside this effect.
 	// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [visible]);
 
-	// Write the live drag progress (0 = docked, 1 = off-screen) onto
-	// the nearest [data-push-host] ancestor as a CSS custom property.
-	// Sibling underlayers read it to parallax in lockstep with the
-	// foreground, including during the swipe-back gesture.  Scoped
-	// to the host (not document root) so multiple PushSlot stacks
-	// in different overlays don't fight over the same variable.
-	//
-	// We use rAF polling rather than a SpringValue subscription
-	// because react-spring's public API doesn't expose a per-frame
-	// listener for an animated value off-DOM; piping the value into
-	// an <animated.*> style only sets it on that one element, but
-	// the underlayer is a sibling — it needs the var on a shared
-	// ancestor.  The rAF tick runs at the same cadence as the
-	// spring (and skips writes when the value hasn't changed), so
-	// the cost is one comparison + at most one style write per
-	// frame, only while a slot is mounted.
-	useEffect(() => {
-		if (!mounted) return;
-		const slot = slotRef.current;
-		if (!slot) return;
-		const host =
-			(slot.closest("[data-push-host]") as HTMLElement | null) ??
-			(slot.closest("[data-mobile-view]") as HTMLElement | null) ??
-			slot.parentElement ??
-			document.documentElement;
-		let raf = 0;
-		let last = -1;
-		const tick = () => {
-			const w = getWidth();
-			const v = x.get();
-			const p = Math.min(1, Math.max(0, v / w));
-			if (p !== last) {
-				host.style.setProperty("--push-progress", String(p));
-				last = p;
-			}
-			raf = requestAnimationFrame(tick);
-		};
-		raf = requestAnimationFrame(tick);
-		return () => {
-			cancelAnimationFrame(raf);
-			// Reset to "no push" so the underlayer returns to
-			// identity when this slot unmounts.
-			host.style.setProperty("--push-progress", "1");
-		};
-	}, [x, mounted]);
+	// Tidy up pending timers / frames if the slot unmounts mid-flight.
+	useEffect(() => () => {
+		if (exitTimerRef.current !== null) clearTimeout(exitTimerRef.current);
+		if (enterRafRef.current !== null) cancelAnimationFrame(enterRafRef.current);
+	}, []);
 
 	const dragBind = useDrag(({
 		first, last, active, movement: [mx], velocity: [vx], xy, cancel,
@@ -324,8 +284,7 @@ export function PushSlot({
 				return;
 			}
 			const rect = slot.getBoundingClientRect();
-			const relX = xy[0] - rect.left;
-			if (relX > EDGE_ZONE_PX) {
+			if (xy[0] - rect.left > EDGE_ZONE_PX) {
 				cancel();
 				return;
 			}
@@ -333,34 +292,36 @@ export function PushSlot({
 		}
 		if (!activeRef.current) return;
 
+		const width = getWidth();
 		const dx = Math.max(0, mx);
+		const p = Math.min(1, dx / width);
 
 		if (active) {
-			// Finger 1:1.  immediate=true bypasses spring physics so
-			// the slot tracks touch exactly; physics re-engages on
-			// release below.
-			api.start({ x: dx, immediate: true });
+			// Track the finger straight on the DOM node — no React
+			// re-render per pointer move.  `transition: none` keeps it
+			// 1:1 with the drag.
+			slot.style.transition = "none";
+			slot.style.opacity = String(1 - p);
+			slot.style.transform = `scale(${1 - SCALE_TRAVEL * p})`;
 			return;
 		}
 		if (last) {
 			activeRef.current = false;
-			const width = getWidth();
 			const past = dx > width * POP_DISTANCE_THRESHOLD;
 			const flick = vx > POP_VELOCITY_THRESHOLD && dx > 24;
-
+			// Restore the class-owned transition for the settle.
+			slot.style.transition = "";
 			if ((past || flick) && onPop) {
-				// Stash velocity so the visible→false effect's exit
-				// spring inherits the flick energy, then let the
-				// parent flip visible — that triggers the unified
-				// exit path (no duplicated api.start here).
-				releaseVelocityRef.current = vx;
+				// Carry the fade-out on from where the finger left it,
+				// then let the parent flip `visible` (→ exit effect).
+				slot.style.opacity = "0";
+				slot.style.transform = `scale(${1 - SCALE_TRAVEL})`;
 				onPop();
 			} else {
-				api.start({
-					x: 0,
-					config: SPRING_CONFIG,
-					immediate: prefersReducedMotion(),
-				});
+				// Snap back: clear the inline overrides so the docked
+				// `.push-slot--shown` class transitions it home.
+				slot.style.opacity = "";
+				slot.style.transform = "";
 			}
 		}
 	}, {
@@ -371,54 +332,39 @@ export function PushSlot({
 	if (!mounted) return null;
 
 	return (
-		<animated.div
+		<div
 			ref={slotRef}
 			{...dragBind()}
-			// `x` is the react-spring push / drag transform.  `padding-
-			// bottom` lifts the pushed screen's content above the soft
-			// keyboard: `--keyboard-inset` (published by
+			// `padding-bottom` lifts the pushed screen's content above
+			// the soft keyboard: `--keyboard-inset` (published by
 			// lib/nativeShell.ts) shrinks this flex column's content
-			// box, so ChatPane's composer (its last flex child), and
-			// any other push view's bottom-anchored UI, rides up by
-			// exactly the keyboard height.  Scoped to `padding-bottom`
-			// so the transition never touches the spring-driven
-			// transform; the 0.25s tracks the keyboard's slide.
-			style={{
-				x,
-				paddingBottom: "var(--keyboard-inset, 0px)",
-				transition: "padding-bottom 0.25s ease-out",
-			}}
+			// box, so ChatPane's composer (its last flex child) rides
+			// up by exactly the keyboard height.  The `.push-slot`
+			// class transitions it alongside the fade.
+			style={{ paddingBottom: "var(--keyboard-inset, 0px)" }}
 			className={cn(
+				// `.push-slot` (index.css) owns opacity / transform /
+				// transition; `--shown` is the docked target state.
+				"push-slot",
+				shown && "push-slot--shown",
 				"absolute inset-0 z-10",
-				// `flex flex-col` so children that size themselves
-				// via `flex-1` (ChatPane, SpaceHomeMobile) actually
-				// fill the slot.  Without this they collapsed to
-				// natural content height, leaving an "empty" PushSlot
-				// below them — which on the chat use exposed the
-				// parallaxed list underneath, and on the space
-				// detail use broke scrolling because the
-				// `flex-1 overflow-y-auto` container had no defined
-				// height to scroll within.
+				// `flex flex-col` so children that size themselves via
+				// `flex-1` (ChatPane, SpaceHomeMobile) fill the slot.
 				"flex flex-col",
-				// NOTE: no `bg-background` here.  When PushSlot is
-				// used as a direct child of `data-mobile-pane="main"`
-				// (the chat overlay), index.css's
-				// `.mobile-shell [data-mobile-pane] > * { background:
-				// transparent !important }` rule strips the wrapper's
-				// background, letting the parallaxed list pane peek
-				// through.  The opaque layer is painted by the nested
-				// `<div>` below instead — a grandchild of the pane,
-				// so the !important rule doesn't reach it.
+				// NOTE: no `bg-background` here.  When PushSlot is a
+				// direct child of `data-mobile-pane="main"` (the chat
+				// overlay), index.css's `[data-mobile-pane] > * {
+				// background: transparent !important }` rule strips the
+				// wrapper background.  The opaque layer is the nested
+				// `<div>` below — a grandchild, out of that rule's reach.
 				"touch-pan-y",
-				"will-change-transform",
 			)}
 		>
-			{/* Opaque bg layer.  Nested one level deeper than the
-			    slot wrapper so the pane-level transparent !important
-			    rule (which only targets direct children of the pane)
-			    can't reach it.  -z-10 puts it behind the latched
-			    child while staying inside the slot's own stacking
-			    context (the slot itself is z-10 in the pane). */}
+			{/* Opaque bg layer.  Nested one level deeper than the slot
+			    so the pane-level transparent !important rule (direct
+			    children of the pane only) can't reach it.  -z-10 puts
+			    it behind the latched child, inside the slot's own
+			    stacking context. */}
 			<div
 				aria-hidden
 				className="absolute inset-0 -z-10 bg-background pointer-events-none"
@@ -430,6 +376,6 @@ export function PushSlot({
 				}}
 			/>
 			{latchedChild.current}
-		</animated.div>
+		</div>
 	);
 }
