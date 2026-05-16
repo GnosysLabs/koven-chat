@@ -18,13 +18,13 @@
 //     pair so the initial render lands with translateY(100%) and the
 //     transition fires on the very next frame.
 //   - Drag region is limited to the handle strip at the top.  Letting
-//     the whole sheet drag would fight emoji-mart's internal scroll
-//     (the picker has its own scrolling category list inside).
+//     the whole sheet drag would fight the emoji grid's internal
+//     scroll (the picker has its own scrolling category list inside).
 
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useDrag } from "@use-gesture/react";
-import { InlineEmojiPicker } from "@/components/EmojiPicker";
+import { MobileEmojiGrid } from "@/components/MobileEmojiGrid";
 import { cn } from "@/lib/utils";
 
 export interface MobileReactionSheetProps {
@@ -148,18 +148,25 @@ export function MobileReactionSheet({ open, onClose, onPick }: MobileReactionShe
 				style={{ transitionDuration: `${SHEET_TRANSITION_MS}ms` }}
 				onClick={onClose}
 			/>
-			{/* Sheet container.  rounded-t-xl for the docked top corners,
-			    safe-area padding for the iPhone home indicator strip. */}
+			{/* Sheet container.  rounded-t-xl for the docked top corners.
+			    `bottom` tracks the soft keyboard via `--keyboard-inset`
+			    (published on <html> by nativeShell.ts): iOS WKWebView
+			    runs with Capacitor `resize: "none"`, so the keyboard
+			    slides up OVER the page and nothing moves on its own.
+			    Lifting `bottom` keeps the search field and grid above
+			    the keyboard.  The bottom padding is the home-indicator
+			    safe area, collapsed once the keyboard covers it. */}
 			<div
 				ref={sheetRef}
 				className={cn(
-					"absolute bottom-0 left-0 right-0 bg-popover text-popover-foreground",
+					"absolute left-0 right-0 bg-popover text-popover-foreground",
 					"rounded-t-xl shadow-2xl border-t border-border",
-					"pb-[env(safe-area-inset-bottom)]",
 				)}
 				style={{
+					bottom: "var(--keyboard-inset, 0px)",
+					paddingBottom: "max(0px, calc(env(safe-area-inset-bottom) - var(--keyboard-inset, 0px)))",
 					transform: visible ? "translateY(0)" : "translateY(100%)",
-					transition: `transform ${SHEET_TRANSITION_MS}ms cubic-bezier(0.2, 0.8, 0.2, 1)`,
+					transition: `transform ${SHEET_TRANSITION_MS}ms cubic-bezier(0.2, 0.8, 0.2, 1), bottom ${SHEET_TRANSITION_MS}ms cubic-bezier(0.2, 0.8, 0.2, 1)`,
 				}}
 			>
 				{/* Handle strip.  touch-none so the browser doesn't try to
@@ -171,11 +178,10 @@ export function MobileReactionSheet({ open, onClose, onPick }: MobileReactionShe
 				>
 					<div className="h-1.5 w-10 rounded-full bg-muted-foreground/30" />
 				</div>
-				{/* Center the picker.  emoji-mart paints at its intrinsic
-				    width (~360px); on phones 360-430px wide that leaves a
-				    small symmetric gutter, which looks intentional. */}
-				<div className="flex justify-center pb-3">
-					<InlineEmojiPicker onPick={onPick} />
+				{/* Discord-style emoji grid.  Fills the sheet width edge to
+				    edge (the grid handles its own internal padding). */}
+				<div className="pb-3">
+					<MobileEmojiGrid onPick={onPick} />
 				</div>
 			</div>
 		</div>,
