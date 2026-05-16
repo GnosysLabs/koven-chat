@@ -421,6 +421,11 @@ export function ChatPane({
 	// button (iMessage app-picker convention).  Open state lives here
 	// so menu items can close the popover after picking.
 	const [composerMenuOpen, setComposerMenuOpen] = useState(false);
+	// GIF / clip / sticker sheet open state.  Lives here (not inside
+	// MediaPicker) so the sheet outlives the "+" menu popover: the menu
+	// item that opens it closes the menu, which would unmount a picker
+	// nested inside the menu's content.
+	const [gifSheetOpen, setGifSheetOpen] = useState(false);
 	const composerMenuPointerHandledRef = useRef(false);
 	const composeInputRef = useRef<HTMLTextAreaElement | null>(null);
 	const toggleComposerMenu = useCallback(() => {
@@ -1557,7 +1562,10 @@ export function ChatPane({
 						// media/poll/GIF entries live behind a single
 						// "+" button so the composer doesn't crowd the
 						// row.  Tap → popover; choose → action fires,
-						// popover dismisses.
+						// popover dismisses.  The GIF sheet renders as a
+						// sibling of the menu (not a child) so it outlives
+						// the menu closing when its entry is tapped.
+						<>
 						<Popover open={composerMenuOpen} onOpenChange={setComposerMenuOpen}>
 							<PopoverAnchor asChild>
 								<button
@@ -1642,32 +1650,36 @@ export function ChatPane({
 									</button>
 								)}
 								{onSendAttachment && klipyEnabled && accessToken && (
-									<MediaPicker
-										accessToken={accessToken}
+									<button
+										type="button"
 										disabled={pendingAttachments.length > 0}
-										onPick={(m) => {
+										onClick={() => {
 											setComposerMenuOpen(false);
-											sendMedia(m);
+											void hapticImpact("light");
+											setGifSheetOpen(true);
 										}}
+										className={cn(
+											"w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-[15px]",
+											"hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
+										)}
 									>
-										<button
-											type="button"
-											disabled={pendingAttachments.length > 0}
-											onClick={() => void hapticImpact("light")}
-											className={cn(
-												"w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-[15px]",
-												"hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
-											)}
-										>
-											<span className="inline-flex items-center justify-center size-[18px] text-[10px] font-bold tracking-wide text-muted-foreground border border-current rounded-sm">
-												GIF
-											</span>
-											<span>GIF</span>
-										</button>
-									</MediaPicker>
+										<span className="inline-flex items-center justify-center size-[18px] text-[10px] font-bold tracking-wide text-muted-foreground border border-current rounded-sm">
+											GIF
+										</span>
+										<span>GIF</span>
+									</button>
 								)}
 							</PopoverContent>
 						</Popover>
+						{onSendAttachment && klipyEnabled && accessToken && (
+							<MediaPicker
+								accessToken={accessToken}
+								open={gifSheetOpen}
+								onOpenChange={setGifSheetOpen}
+								onPick={sendMedia}
+							/>
+						)}
+						</>
 					) : (
 						<>
 							{onSendAttachment && (
