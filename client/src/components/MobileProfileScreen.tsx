@@ -348,12 +348,6 @@ export function MobileProfileScreen({
 							</>
 						)}
 
-						<GroupLabel>{bio.trim() ? "Visibility" : "Profile"}</GroupLabel>
-						<GroupCard>
-							<div className="px-4 py-3 text-[13px] leading-snug text-muted-foreground">
-								Visible to anyone you share a room with. Tap Edit to change your display name, bio, or avatar.
-							</div>
-						</GroupCard>
 					</div>
 				) : (
 					/* ─── Edit mode ─────────────────────────────────── */

@@ -1169,19 +1169,14 @@ export function ChatPane({
 							room.kind === "dm" ? "rounded-full" : "rounded-md",
 						)}
 					/>
-					<div className="flex flex-col min-w-0">
-						<span className="text-sm font-semibold truncate flex items-center gap-1.5">
-							<span className="truncate">{room.name}</span>
-							{room.kind === "dm" && room.dmUserId && botMxids?.has(room.dmUserId) && (
-								<BotBadge />
-							)}
-						</span>
-						{room.topic && (
-							<span className="text-xs text-muted-foreground truncate max-w-[60ch]">{room.topic}</span>
+					<span className="text-sm font-semibold truncate flex items-center gap-1.5 min-w-0">
+						<span className="truncate">{room.name}</span>
+						{room.kind === "dm" && room.dmUserId && botMxids?.has(room.dmUserId) && (
+							<BotBadge />
 						)}
-					</div>
+					</span>
 				</div>
-				<div className="flex items-center gap-2 shrink-0">
+				<div className="flex items-center gap-1 shrink-0">
 					{room.kind === "private" && (
 						<RoomBadge
 							icon={<EyeOff className="h-3 w-3" />}
@@ -1229,11 +1224,11 @@ export function ChatPane({
 						<button
 							type="button"
 							onClick={() => setGalleryOpen(true)}
-							className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+							className="size-11 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
 							title="Shared media"
 							aria-label="Shared media"
 						>
-							<Images className="h-4 w-4" />
+							<Images className="h-5 w-5" />
 						</button>
 					)}
 					{room.kind !== "dm" && !room.isInvite && !room.encrypted && (
@@ -1244,11 +1239,11 @@ export function ChatPane({
 						<button
 							type="button"
 							onClick={() => onOpenModLog(room.id as EventId)}
-							className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+							className="size-11 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
 							title="Public mod log"
 							aria-label="Public mod log"
 						>
-							<Scale className="h-4 w-4" />
+							<Scale className="h-5 w-5" />
 						</button>
 					)}
 					{onFlagRoom && room.kind !== "dm" && !room.isInvite && !room.encrypted && (
@@ -1259,22 +1254,22 @@ export function ChatPane({
 						<button
 							type="button"
 							onClick={() => setRoomFlagOpen(true)}
-							className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+							className="size-11 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
 							title="Report this room"
 							aria-label="Report this room"
 						>
-							<Flag className="h-4 w-4" />
+							<Flag className="h-5 w-5" />
 						</button>
 					)}
 					{room.kind !== "dm" && !room.isInvite && (room.myPowerLevel ?? 0) >= 50 && (
 						<button
 							type="button"
 							onClick={() => onEditRoom(room.id as EventId)}
-							className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+							className="size-11 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
 							title="Room settings"
 							aria-label="Room settings"
 						>
-							<Settings className="h-4 w-4" />
+							<Settings className="h-5 w-5" />
 						</button>
 					)}
 				</div>
@@ -1546,12 +1541,11 @@ export function ChatPane({
 							multiple
 							className="hidden"
 							onChange={e => {
+								setComposerMenuOpen(false);
 								const list = e.target.files;
 								if (list && list.length > 0) {
 									pickAttachments(Array.from(list));
 								}
-								// Reset so the same file(s) can be re-
-								// picked after a remove + re-attach.
 								e.target.value = "";
 							}}
 							disabled={uploading}
@@ -1614,13 +1608,8 @@ export function ChatPane({
 										type="button"
 										disabled={pendingAttachments.length >= MAX_PENDING_ATTACHMENTS}
 										onClick={() => {
-											setComposerMenuOpen(false);
 											void hapticImpact("light");
-											// Delay one tick so the popover
-											// can dismiss before the system
-											// file picker takes over input
-											// focus.
-											setTimeout(() => fileInputRef.current?.click(), 0);
+											fileInputRef.current?.click();
 										}}
 										className={cn(
 											"w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-[15px]",

@@ -1,53 +1,30 @@
-// MobileMeScreen — iOS HIG "Me" tab landing.  Three pillars: clarity
-// (every glyph + row reads at a glance), deference (the user's
-// identity dominates; chrome recedes), depth (grouped inset cards
-// layered over the tab's background).
+// MobileMeScreen — iOS HIG "Me" tab landing.
 //
 // Layout (top → bottom):
-//   1. Large title "Me" — 34pt bold, leading-edge aligned, sits in
-//      the scrolling content so it collapses to the compact nav-bar
-//      title on scroll.
-//   2. Hero: 96pt avatar centred, 22pt semibold display name, 13pt
-//      muted handle.  Tap target opens Profile.
-//   3. Grouped list — "Account" (View Profile, Settings) with a
+//   1. Large title "Me" — 34pt bold, leading-edge aligned, collapses
+//      to the compact nav-bar title on scroll.
+//   2. Grouped list — "Account" (View Profile, Settings) with a
 //      single bottom-rounded card.  "Session" (Sign out destructive)
 //      as a standalone card.
 //
-// Touch targets: 44pt minimum (44pt hero rows, 56pt list rows).
-// Body: 17pt regular.  Caption: 13pt secondary.  Tint: theme primary.
-// Haptic: selection on every row tap so iOS muscle-memory fires.
+// Touch targets: 52pt list rows.  Haptic on every row tap.
 
 import type { ReactNode } from "react";
 import { ChevronRight, User as UserIcon, Settings as SettingsIcon, LogOut } from "lucide-react";
-import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { cn } from "@/lib/utils";
 import { hapticImpact } from "@/lib/haptics";
-import { formatMxid, serverOf } from "@/lib/mxid";
 
 interface MobileMeScreenProps {
-	userId: string | null;
-	avatarMxc?: string | null;
-	displayName?: string | null;
 	onOpenProfile(): void;
 	onOpenSettings(): void;
 	onSignOut(): void;
 }
 
 export function MobileMeScreen({
-	userId,
-	avatarMxc,
-	displayName,
 	onOpenProfile,
 	onOpenSettings,
 	onSignOut,
 }: MobileMeScreenProps) {
-	const localpart = userId?.startsWith("@")
-		? userId.slice(1).split(":")[0] ?? userId
-		: userId ?? "—";
-	const shownName = displayName?.trim() || localpart;
-	// The @handle, suffix-collapsed when it's on the user's own server
-	// (always true here — this is the user's own id).
-	const handle = userId ? formatMxid(userId, serverOf(userId)) : "";
 
 	function tap(action: () => void) {
 		void hapticImpact("light");
@@ -64,37 +41,6 @@ export function MobileMeScreen({
 					Me
 				</h1>
 			</div>
-
-			{/* Hero — avatar centred, name + handle below.  Tappable
-			    surface opens the user's own profile push view. */}
-			<button
-				type="button"
-				onClick={() => tap(onOpenProfile)}
-				className={cn(
-					"w-full flex flex-col items-center gap-3 px-5 pt-2 pb-6",
-					"transition-opacity active:opacity-70",
-				)}
-				aria-label="Open your profile"
-			>
-				{userId ? (
-					<MatrixAvatar
-						mxc={avatarMxc ?? undefined}
-						seed={userId}
-						kind="user"
-						className="h-24 w-24 rounded-full shrink-0 ring-1 ring-foreground/10"
-					/>
-				) : (
-					<div className="h-24 w-24 rounded-full bg-muted shrink-0" />
-				)}
-				<div className="flex flex-col items-center gap-0.5 max-w-full">
-					<div className="text-[22px] font-semibold tracking-[-0.01em] text-foreground truncate max-w-[280px] leading-tight">
-						{shownName}
-					</div>
-					<div className="text-[13px] text-muted-foreground font-mono truncate max-w-[280px]">
-						{handle}
-					</div>
-				</div>
-			</button>
 
 			{/* Account group — grouped inset card.  Theme adapts via
 			    `bg-card`; hairline separators between rows render via

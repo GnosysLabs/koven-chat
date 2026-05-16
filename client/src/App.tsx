@@ -3475,8 +3475,6 @@ export default function App() {
 							}
 						/>
 						<MobileMeScreen
-							userId={creds.user_id}
-							avatarMxc={myAvatarMxc}
 							onOpenProfile={() => setMeStack("profile")}
 							onOpenSettings={() => setMeStack("settings")}
 							onSignOut={handleSignOut}
