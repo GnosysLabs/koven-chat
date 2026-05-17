@@ -160,15 +160,6 @@ export function SpaceEditSheet({ space, currentUserId, onClose, onSave, onLeave,
 		if (trimmedEmoji !== (space.iconEmoji ?? "")) opts.iconEmoji = trimmedEmoji;
 		if (nsfw !== !!space.nsfw) opts.nsfw = nsfw;
 
-		// If nothing changed, just close.
-		const hasChanges =
-			opts.name !== undefined ||
-			opts.topic !== undefined ||
-			opts.visibility !== undefined ||
-			opts.avatarFile !== undefined ||
-			opts.clearAvatar ||
-			opts.iconEmoji !== undefined ||
-			opts.nsfw !== undefined;
 		if (!hasChanges) {
 			onClose();
 			return;
@@ -186,6 +177,16 @@ export function SpaceEditSheet({ space, currentUserId, onClose, onSave, onLeave,
 	}
 
 	const hasRealAvatar = !!(avatarPreview || (!clearAvatar && space?.avatarUrl));
+
+	const hasChanges = !!space && (
+		name.trim() !== (space.name ?? "") ||
+		topic.trim() !== (space.topic ?? "") ||
+		visibility !== (space.kind === "public" ? "public" : "private") ||
+		!!avatarFile ||
+		clearAvatar ||
+		iconEmoji.trim() !== (space.iconEmoji ?? "") ||
+		nsfw !== !!space.nsfw
+	);
 
 	// Delete-confirmation view replaces the settings form when the
 	// creator clicks Delete.  Lists the child rooms by name so the
@@ -452,8 +453,20 @@ export function SpaceEditSheet({ space, currentUserId, onClose, onSave, onLeave,
 						</div>
 					)}
 
-					{(showLeave || showDelete) && !confirmingLeave && !confirmingDelete && (
-						<div className="flex flex-col gap-2 pt-4 mt-2 border-t border-destructive/20">
+					<DialogFooter>
+						<Button type="button" variant="ghost" onClick={onClose} disabled={pending}>
+							Cancel
+						</Button>
+						<Button type="submit" disabled={!name.trim() || !hasChanges || pending}>
+							{pending ? "Saving…" : "Save"}
+						</Button>
+					</DialogFooter>
+				</form>
+
+				{(showLeave || showDelete) && !confirmingLeave && !confirmingDelete && (
+					<div className="space-y-3 pt-4 mt-2 border-t border-destructive/20">
+						<span className="text-xs font-medium uppercase tracking-wide text-destructive">Danger zone</span>
+						<div className="flex flex-col gap-2">
 							{showLeave && (
 								<Button
 									type="button"
@@ -479,28 +492,19 @@ export function SpaceEditSheet({ space, currentUserId, onClose, onSave, onLeave,
 								</Button>
 							)}
 						</div>
-					)}
-					{confirmingLeave && (
-						<div className="flex items-center gap-2 flex-wrap pt-4 mt-2 border-t border-destructive/20">
-							<span className="text-xs text-muted-foreground">Leave this space and its rooms?</span>
-							<Button type="button" variant="ghost" size="sm" onClick={() => setConfirmingLeave(false)} disabled={pending}>
-								Cancel
-							</Button>
-							<Button type="button" variant="destructive" size="sm" onClick={doLeave} disabled={pending}>
-								{pending ? "Leaving…" : "Confirm leave"}
-							</Button>
-						</div>
-					)}
-
-					<DialogFooter>
-						<Button type="button" variant="ghost" onClick={onClose} disabled={pending}>
+					</div>
+				)}
+				{confirmingLeave && (
+					<div className="flex items-center gap-2 flex-wrap pt-4 mt-2 border-t border-destructive/20">
+						<span className="text-xs text-muted-foreground">Leave this space and its rooms?</span>
+						<Button type="button" variant="ghost" size="sm" onClick={() => setConfirmingLeave(false)} disabled={pending}>
 							Cancel
 						</Button>
-						<Button type="submit" disabled={!name.trim() || pending}>
-							{pending ? "Saving…" : "Save"}
+						<Button type="button" variant="destructive" size="sm" onClick={doLeave} disabled={pending}>
+							{pending ? "Leaving…" : "Confirm leave"}
 						</Button>
-					</DialogFooter>
-				</form>
+					</div>
+				)}
 			</DialogContent>
 		</Dialog>
 	);

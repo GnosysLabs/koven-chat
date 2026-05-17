@@ -96,6 +96,7 @@ export interface ContextMenuProps {
 
 export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
 	const ref = useRef<HTMLDivElement | null>(null);
+	const mountedAtRef = useRef(Date.now());
 
 	// Outside-mousedown / Escape dismissal.  mousedown (not click) so
 	// a fresh right-click on another row closes us BEFORE that row's
@@ -113,7 +114,12 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
 	// nginx logs showing zero PUTs from the user despite repeated
 	// attempts).
 	useEffect(() => {
+		mountedAtRef.current = Date.now();
 		const onDown = (e: MouseEvent) => {
+			// Grace period: on mobile, lifting the finger after a long
+			// press generates a synthetic mousedown.  Without this guard
+			// the menu opens then immediately closes from that event.
+			if (Date.now() - mountedAtRef.current < 300) return;
 			const target = e.target as HTMLElement | null;
 			if (!ref.current || !target) return;
 			if (ref.current.contains(target)) return;
@@ -160,7 +166,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
 			role="menu"
 			style={{ position: "fixed", left, top, zIndex: 70 }}
 			className={cn(
-				"min-w-[13.75rem] rounded-md border border-border bg-popover text-popover-foreground shadow-md",
+				"min-w-[13.75rem] rounded-xl border border-border bg-popover text-popover-foreground shadow-md",
 				"py-1 text-sm",
 			)}
 			onContextMenu={(e) => e.preventDefault()}
@@ -328,7 +334,7 @@ function SubmenuRow({
 					data-submenu-portal="true"
 					style={{ position: "fixed", left: submenuPos.left, top: submenuPos.top, zIndex: 71 }}
 					className={cn(
-						"min-w-[13.75rem] rounded-md border border-border bg-popover text-popover-foreground shadow-md",
+						"min-w-[13.75rem] rounded-xl border border-border bg-popover text-popover-foreground shadow-md",
 						"py-1 text-sm",
 					)}
 					onContextMenu={(e) => e.preventDefault()}

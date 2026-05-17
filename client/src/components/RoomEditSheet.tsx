@@ -167,14 +167,6 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 		const currentLiveEnabled = room.liveEnabled !== false;
 		if (liveEnabled !== currentLiveEnabled) opts.liveEnabled = liveEnabled;
 
-		// If nothing changed, just close.
-		const hasChanges =
-			opts.name !== undefined ||
-			opts.topic !== undefined ||
-			opts.avatarFile !== undefined ||
-			opts.clearAvatar ||
-			opts.iconEmoji !== undefined ||
-			opts.liveEnabled !== undefined;
 		if (!hasChanges) {
 			onClose();
 			return;
@@ -192,6 +184,15 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 	}
 
 	const hasRealAvatar = !!(avatarPreview || (!clearAvatar && room?.avatarUrl));
+
+	const hasChanges = !!room && (
+		name.trim() !== (room.name ?? "") ||
+		topic.trim() !== (room.topic ?? "") ||
+		!!avatarFile ||
+		clearAvatar ||
+		iconEmoji.trim() !== (room.iconEmoji ?? "") ||
+		liveEnabled !== (room.liveEnabled !== false)
+	);
 
 	// Delete-confirmation view — full-body replacement so the user
 	// sees exactly what they're firing.  Rooms have no children to
@@ -446,8 +447,20 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 						</div>
 					)}
 
-					{(showLeave || showDelete) && !confirmingLeave && !confirmingDelete && (
-						<div className="flex flex-col gap-2 pt-4 mt-2 border-t border-destructive/20">
+					<DialogFooter>
+						<Button type="button" variant="ghost" onClick={onClose} disabled={pending}>
+							Cancel
+						</Button>
+						<Button type="submit" disabled={!name.trim() || !hasChanges || pending}>
+							{pending ? "Saving…" : "Save"}
+						</Button>
+					</DialogFooter>
+				</form>
+
+				{(showLeave || showDelete) && !confirmingLeave && !confirmingDelete && (
+					<div className="space-y-3 pt-4 mt-2 border-t border-destructive/20">
+						<span className="text-xs font-medium uppercase tracking-wide text-destructive">Danger zone</span>
+						<div className="flex flex-col gap-2">
 							{showLeave && (
 								<Button
 									type="button"
@@ -473,17 +486,19 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 								</Button>
 							)}
 						</div>
-					)}
-
-					<DialogFooter>
-						<Button type="button" variant="ghost" onClick={onClose} disabled={pending}>
+					</div>
+				)}
+				{confirmingLeave && (
+					<div className="flex items-center gap-2 flex-wrap pt-4 mt-2 border-t border-destructive/20">
+						<span className="text-xs text-muted-foreground">Leave this room?</span>
+						<Button type="button" variant="ghost" size="sm" onClick={() => setConfirmingLeave(false)} disabled={pending}>
 							Cancel
 						</Button>
-						<Button type="submit" disabled={!name.trim() || pending}>
-							{pending ? "Saving…" : "Save"}
+						<Button type="button" variant="destructive" size="sm" onClick={doLeave} disabled={pending}>
+							{pending ? "Leaving…" : "Confirm leave"}
 						</Button>
-					</DialogFooter>
-				</form>
+					</div>
+				)}
 			</DialogContent>
 		</Dialog>
 	);

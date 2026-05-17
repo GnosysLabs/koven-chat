@@ -3075,9 +3075,9 @@ function AttachmentImage({ message }: { message: Message }) {
 				alt={message.mediaName ?? "attachment"}
 				width={displayWidth}
 				height={displayHeight}
-				className="rounded-lg block"
+				className={cn("rounded-lg block", isMobileShell && "pointer-events-none")}
 				style={{ maxWidth: "100%", height: "auto", aspectRatio: `${displayWidth}/${displayHeight}` }}
-				onContextMenu={onContextMenu}
+				onContextMenu={isMobileShell ? undefined : onContextMenu}
 			/>
 			{menu}
 		</>
@@ -3149,7 +3149,7 @@ function AttachmentVideo({ message }: { message: Message }) {
 		);
 	}
 	return (
-		<div className="relative inline-block group/video" style={{ maxWidth: "100%" }} onContextMenu={onContextMenu}>
+		<div className="relative inline-block group/video" style={{ maxWidth: "100%" }} onContextMenu={isMobileShell ? undefined : onContextMenu}>
 			<video
 				ref={videoRef}
 				src={url}

@@ -1,44 +1,42 @@
 // SpacesListMobile — the "Spaces" tab landing on mobile.  Shows the
 // user's joined spaces as an iOS HIG list; tapping a row drills into
-// that space's home (SpaceHomeMobile).
-//
-// HIG calibration:
-//   - 34pt Large Title at the top.  Stays static for now (no scroll-
-//     collapse to compact title yet — that's an iOS-26 polish for
-//     later when we wire scroll observation).
-//   - List rows: 17pt primary title + 13pt secondary (member count
-//     + room count) + chevron.  Avatar leads at 48pt rounded-2xl.
-//   - Row height 64pt — fits 44pt min target + comfortable padding.
-//   - Hairline dividers between rows (iOS "inset grouped" feel).
-//   - Press state: `active:bg-foreground/5` for tactile feedback.
-//   - Haptic light-impact on tap.
-//
-// The screen sits BETWEEN the MobileTopBar and MobileTabBar — those
-// already paint their own translucent material.  Content scrolls
-// behind both (with bottom padding clearance for the tab bar pill).
+// that space's home (SpaceHomeMobile).  Long-pressing a row opens the
+// same context menu the desktop SpaceBar offers on right-click.
 
-import { useMemo } from "react";
+import { useRef, useMemo, useState } from "react";
 import { ChevronRight, LayoutGrid } from "lucide-react";
-import type { Space, Room } from "@koven/shared";
+import type { Space, Room, UserId } from "@koven/shared";
+import type { MatrixTransport } from "@/lib/matrix";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
+import { SpaceTileContextMenu } from "@/components/SpaceTileContextMenu";
+import { buildInviteUrl } from "@/lib/inviteLink";
 import { hapticImpact } from "@/lib/haptics";
 
 interface SpacesListMobileProps {
 	spaces: Space[];
 	rooms: Room[];
+	currentUserId: UserId;
+	accessToken: string;
+	transport: MatrixTransport | null;
 	onOpenSpace(spaceId: string): void;
+	onEditSpace?(spaceId: string): void;
+	onManageCategories?(spaceId: string): void;
+	onAddRoom?(spaceId: string): void;
+	onLeaveSpace?(spaceId: string): void;
+	onDeleteSpace?(spaceId: string): void;
+	onMarkAllReadInSpace?(spaceId: string): void;
 }
 
-export function SpacesListMobile({ spaces, rooms, onOpenSpace }: SpacesListMobileProps) {
-	// Sort spaces alphabetically — same convention the SpaceBar
-	// uses on desktop.  Cheap; could swap to last-active later.
+export function SpacesListMobile({
+	spaces, rooms, currentUserId, accessToken, transport,
+	onOpenSpace, onEditSpace, onManageCategories, onAddRoom,
+	onLeaveSpace, onDeleteSpace, onMarkAllReadInSpace,
+}: SpacesListMobileProps) {
 	const sorted = useMemo(
 		() => [...spaces].sort((a, b) => a.name.localeCompare(b.name)),
 		[spaces],
 	);
 
-	// Pre-aggregate per-space counts so each row doesn't iterate the
-	// full rooms list again on every render.
 	const roomCountBySpace = useMemo(() => {
 		const m = new Map<string, number>();
 		for (const r of rooms) {
@@ -49,87 +47,168 @@ export function SpacesListMobile({ spaces, rooms, onOpenSpace }: SpacesListMobil
 		return m;
 	}, [rooms]);
 
+	const [ctxMenu, setCtxMenu] = useState<{ space: Space; x: number; y: number } | null>(null);
+
 	function selectSpace(id: string) {
 		void hapticImpact("light");
 		onOpenSpace(id);
 	}
 
+	function roomsInSpace(space: Space): Room[] {
+		return rooms.filter(r =>
+			space.childRoomIds.includes(r.id) || r.parentSpaceIds.includes(space.id),
+		);
+	}
+
 	return (
-		// No own bg — lets the parent overlay's --bg-gradient (and
-		// behind it body::before) show through, so this surface
-		// inherits the user's theme colour tones the way the chat
-		// pane does.
 		<div className="flex-1 min-h-0 overflow-y-auto">
-			{/* Pad the bottom so the last row clears the floating tab
-			    bar (49pt pill + 8pt margin + safe-area-bottom). */}
 			<div
-				className="px-4 pt-2"
+				className="pt-2"
 				style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 80px)" }}
 			>
-				<h1 className="text-[34px] font-bold tracking-[-0.022em] leading-[1.1] text-foreground py-3">
+				<h1 className="text-[34px] font-bold tracking-[-0.022em] leading-[1.1] text-foreground py-3 px-4">
 					Spaces
 				</h1>
 
 				{sorted.length === 0 ? (
 					<EmptyState />
 				) : (
-					<div className="rounded-2xl bg-card/60 backdrop-blur-xl border border-foreground/10 overflow-hidden">
+					<div>
 						{sorted.map((s, idx) => (
 							<SpaceRow
 								key={s.id}
 								space={s}
 								roomCount={roomCountBySpace.get(s.id) ?? 0}
 								onClick={() => selectSpace(s.id)}
-								// Hairline between rows, inset to match
-								// iOS "Settings" grouped-list look — the
-								// avatar's left edge defines the inset.
+								onLongPress={(pos) => setCtxMenu({ space: s, ...pos })}
 								showDivider={idx > 0}
 							/>
 						))}
 					</div>
 				)}
 			</div>
+
+			{ctxMenu && transport && (
+				<SpaceTileContextMenu
+					x={ctxMenu.x}
+					y={ctxMenu.y}
+					space={ctxMenu.space}
+					currentUserId={currentUserId}
+					accessToken={accessToken}
+					roomsInSpace={roomsInSpace(ctxMenu.space)}
+					onMarkAllRead={() => {
+						const ids = roomsInSpace(ctxMenu.space).map(r => r.id);
+						for (const rid of ids) {
+							transport.markAsRead(rid).catch(err => {
+								console.warn(`SpacesListMobile: markAsRead ${rid} failed`, err);
+							});
+						}
+						onMarkAllReadInSpace?.(ctxMenu.space.id);
+					}}
+					onCopyId={() => {
+						void navigator.clipboard.writeText(ctxMenu.space.id);
+					}}
+					onCopyInviteLink={() => {
+						void navigator.clipboard.writeText(buildInviteUrl(ctxMenu.space.id));
+					}}
+					onEdit={onEditSpace ? () => onEditSpace(ctxMenu.space.id) : undefined}
+					onManageCategories={onManageCategories ? () => onManageCategories(ctxMenu.space.id) : undefined}
+					onAddRoom={onAddRoom ? () => onAddRoom(ctxMenu.space.id) : undefined}
+					onLeave={() => {
+						if (onLeaveSpace) onLeaveSpace(ctxMenu.space.id);
+						else transport.leaveRoom(ctxMenu.space.id).catch(err => {
+							console.warn("SpacesListMobile: leave space failed", err);
+						});
+					}}
+					onDelete={onDeleteSpace ? () => onDeleteSpace(ctxMenu.space.id) : undefined}
+					onClose={() => setCtxMenu(null)}
+				/>
+			)}
 		</div>
 	);
 }
 
 function SpaceRow({
-	space, roomCount, onClick, showDivider,
+	space, roomCount, onClick, onLongPress, showDivider,
 }: {
 	space: Space;
 	roomCount: number;
 	onClick(): void;
+	onLongPress(pos: { x: number; y: number }): void;
 	showDivider: boolean;
 }) {
+	const timerRef = useRef<number | null>(null);
+	const startRef = useRef<{ x: number; y: number } | null>(null);
+	const firedRef = useRef(false);
+
+	function onTouchStart(e: React.TouchEvent) {
+		const t = e.touches[0];
+		if (!t) return;
+		startRef.current = { x: t.clientX, y: t.clientY };
+		firedRef.current = false;
+		timerRef.current = window.setTimeout(() => {
+			timerRef.current = null;
+			firedRef.current = true;
+			void hapticImpact("medium");
+			onLongPress(startRef.current!);
+		}, 500);
+	}
+
+	function onTouchMove(e: React.TouchEvent) {
+		if (timerRef.current === null) return;
+		const t = e.touches[0];
+		if (!t || !startRef.current) return;
+		if (Math.abs(t.clientX - startRef.current.x) > 8 || Math.abs(t.clientY - startRef.current.y) > 8) {
+			window.clearTimeout(timerRef.current);
+			timerRef.current = null;
+		}
+	}
+
+	function onTouchEnd() {
+		if (timerRef.current !== null) {
+			window.clearTimeout(timerRef.current);
+			timerRef.current = null;
+		}
+		startRef.current = null;
+	}
+
 	const memberLabel = space.kind === "private"
 		? "Private"
 		: `${roomCount} ${roomCount === 1 ? "room" : "rooms"}`;
 	return (
 		<>
 			{showDivider && (
-				<div className="ml-[76px] h-px bg-foreground/8" aria-hidden />
+				<div className="ml-[68px] h-px bg-foreground/[0.08]" aria-hidden />
 			)}
 			<button
 				type="button"
-				onClick={onClick}
-				className="w-full flex items-center gap-3 px-4 py-3 active:bg-foreground/[0.06] transition-colors"
+				onClick={() => { if (!firedRef.current) onClick(); }}
+				onTouchStart={onTouchStart}
+				onTouchMove={onTouchMove}
+				onTouchEnd={onTouchEnd}
+				onTouchCancel={onTouchEnd}
+				className="w-full flex items-center gap-3 pl-4 pr-3 py-2.5 active:bg-foreground/[0.06] transition-colors select-none [-webkit-user-select:none] [-webkit-touch-callout:none]"
 			>
 				<MatrixAvatar
 					mxc={space.avatarUrl}
 					emoji={space.iconEmoji}
 					seed={space.id}
 					kind="room"
-					className="h-12 w-12 rounded-2xl shrink-0"
+					className="h-[52px] w-[52px] rounded-2xl shrink-0"
 				/>
 				<div className="flex-1 min-w-0 text-left">
-					<div className="text-[17px] font-medium text-foreground truncate">
+					<div className="text-[17px] font-medium text-foreground truncate leading-tight">
 						{space.name || "Untitled space"}
 					</div>
-					<div className="text-[13px] text-muted-foreground truncate">
+					<div className="text-[15px] text-muted-foreground leading-snug line-clamp-2">
 						{space.topic ? space.topic : memberLabel}
 					</div>
 				</div>
-				<ChevronRight className="h-5 w-5 text-muted-foreground/60 shrink-0" strokeWidth={2.5} />
+				<ChevronRight
+					className="self-center shrink-0 size-[18px] text-muted-foreground/40 -mr-1"
+					strokeWidth={2.5}
+					aria-hidden
+				/>
 			</button>
 		</>
 	);

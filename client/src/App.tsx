@@ -2595,6 +2595,7 @@ export default function App() {
 						rooms={state.rooms}
 						transport={transport}
 						currentUserId={creds.user_id as UserId}
+						accessToken={creds.access_token}
 						botMxids={botMxids}
 						// Same gate RoomList uses for its empty hint — wait
 						// until matrix-js-sdk has fanned rooms into state.rooms
@@ -2616,6 +2617,15 @@ export default function App() {
 							}
 						}}
 						onDeleteRoom={(roomId) => openDeleteDmFor(roomId as RoomId)}
+						onOpenProfile={(userId) => setViewedUserId(userId)}
+						onBlockDmUser={async (userId) => {
+							if (!transport) return;
+							try {
+								await transport.ignoreUser(userId);
+							} catch (e) {
+								dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+							}
+						}}
 					/>
 				) : (
 				<RoomList
@@ -3550,7 +3560,32 @@ export default function App() {
 						<SpacesListMobile
 							spaces={state.spaces}
 							rooms={state.rooms}
+							currentUserId={creds.user_id as UserId}
+							accessToken={creds.access_token}
+							transport={transport}
 							onOpenSpace={(id) => setMobileSelectedSpaceId(id as SpaceId)}
+							onEditSpace={(id) => setEditingSpaceId(id as SpaceId)}
+							onManageCategories={(id) => setCategoriesSpaceId(id as SpaceId)}
+							onAddRoom={(id) => {
+								dispatch({ type: "set_active_space", space: { kind: "space", id: id as SpaceId } });
+								void openCreateRoomGated();
+							}}
+							onLeaveSpace={(id) => {
+								if (state.activeSpace?.kind === "space" && state.activeSpace.id === id) {
+									dispatch({ type: "set_active_space", space: { kind: "dms" } });
+								}
+								transport?.leaveSpaceWithChildren(id as SpaceId).catch(err => {
+									dispatch({ type: "error", message: err instanceof Error ? err.message : String(err) });
+								});
+							}}
+							onDeleteSpace={(id) => {
+								if (state.activeSpace?.kind === "space" && state.activeSpace.id === id) {
+									dispatch({ type: "set_active_space", space: { kind: "dms" } });
+								}
+								transport?.purgeSpace(id as SpaceId).catch(err => {
+									dispatch({ type: "error", message: err instanceof Error ? err.message : String(err) });
+								});
+							}}
 						/>
 					</div>
 					{/* Push slot — SpaceHomeMobile fades in over the
@@ -3578,6 +3613,8 @@ export default function App() {
 									space={space}
 									rooms={childRooms}
 									currentUserId={creds.user_id as UserId}
+									accessToken={creds.access_token}
+									transport={transport}
 									onSelectRoom={(roomId) => {
 										dispatch({ type: "set_active_space", space: { kind: "space", id: mobileSelectedSpaceId } });
 										dispatch({ type: "set_active_room", roomId });
@@ -3591,6 +3628,17 @@ export default function App() {
 									}}
 									onOpenSettings={() => {
 										setEditingSpaceId(mobileSelectedSpaceId);
+									}}
+									onEditRoom={(roomId) => setEditingRoomId(roomId)}
+									onLeaveRoom={(roomId) => {
+										transport?.leaveRoom(roomId).catch(err => {
+											dispatch({ type: "error", message: err instanceof Error ? err.message : String(err) });
+										});
+									}}
+									onDeleteRoom={(roomId) => {
+										transport?.purgeRoom(roomId).catch(err => {
+											dispatch({ type: "error", message: err instanceof Error ? err.message : String(err) });
+										});
 									}}
 								/>
 							);

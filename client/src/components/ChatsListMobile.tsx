@@ -29,6 +29,7 @@ import { MessageSquare, Lock, BellOff, PenSquare, ChevronRight } from "lucide-re
 import type { Message, Room, RoomId, UserId } from "@koven/shared";
 import type { MatrixTransport } from "@/lib/matrix";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
+import { RoomRowContextMenu } from "@/components/RoomRowContextMenu";
 import { hapticImpact, hapticNotification } from "@/lib/haptics";
 import { cn } from "@/lib/utils";
 
@@ -51,6 +52,7 @@ interface ChatsListMobileProps {
 	rooms: Room[];
 	transport: MatrixTransport | null;
 	currentUserId: UserId;
+	accessToken: string;
 	botMxids: Set<UserId>;
 	// True once initial sync has reached `syncing` or `ready` — at
 	// that point matrix-js-sdk has fanned the user's joined rooms
@@ -67,17 +69,21 @@ interface ChatsListMobileProps {
 	// Leave the DM.  Wired to transport.leaveRoom in App.tsx; the row
 	// unmounts once the membership change drops the room from state.
 	onDeleteRoom(id: RoomId): Promise<void> | void;
+	onOpenProfile?(userId: UserId): void;
+	onBlockDmUser?(userId: UserId): void;
 }
 
 export function ChatsListMobile({
-	rooms, transport, currentUserId, botMxids, roomsLoaded,
+	rooms, transport, currentUserId, accessToken, botMxids, roomsLoaded,
 	onSelectRoom, onCreateRoom,
 	onAcceptInvite, onDeclineInvite, onDeleteRoom,
+	onOpenProfile, onBlockDmUser,
 }: ChatsListMobileProps) {
 	// At most one row's Delete action is open at a time (iOS Messages
 	// behaviour) — opening another, scrolling, or tapping a row all
 	// close whatever was open.
 	const [swipedRoomId, setSwipedRoomId] = useState<RoomId | null>(null);
+	const [ctxMenu, setCtxMenu] = useState<{ room: Room; x: number; y: number } | null>(null);
 	const { invites, dms } = useMemo(() => {
 		const dmRooms = rooms.filter(r => r.kind === "dm");
 		// Invites first; the rest sorted by last-active descending
@@ -193,6 +199,7 @@ export function ChatsListMobile({
 								currentUserId={currentUserId}
 								isBot={!!room.dmUserId && botMxids.has(room.dmUserId)}
 								onClick={() => selectRoom(room.id)}
+								onLongPress={(pos) => setCtxMenu({ room, ...pos })}
 								onDelete={() => onDeleteRoom(room.id)}
 								open={swipedRoomId === room.id}
 								onOpenChange={(o) => setSwipedRoomId(o ? room.id : null)}
@@ -202,18 +209,49 @@ export function ChatsListMobile({
 					</div>
 				) : null}
 			</div>
+
+			{ctxMenu && transport && (
+				<RoomRowContextMenu
+					x={ctxMenu.x}
+					y={ctxMenu.y}
+					room={ctxMenu.room}
+					currentUserId={currentUserId}
+					accessToken={accessToken}
+					activeSpaceId={null}
+					isFounder={ctxMenu.room.creatorId === currentUserId}
+					canEdit={false}
+					onMarkRead={() => {
+						transport.markAsRead(ctxMenu.room.id).catch(err => {
+							console.warn(`ChatsListMobile: markAsRead failed`, err);
+						});
+					}}
+					onMarkUnread={() => {}}
+					onCopyId={() => {
+						void navigator.clipboard.writeText(ctxMenu.room.dmUserId ?? ctxMenu.room.id);
+					}}
+					onOpenProfile={onOpenProfile && ctxMenu.room.dmUserId
+						? () => onOpenProfile(ctxMenu.room.dmUserId as UserId)
+						: undefined}
+					onBlockDmUser={onBlockDmUser && ctxMenu.room.dmUserId
+						? () => onBlockDmUser(ctxMenu.room.dmUserId as UserId)
+						: undefined}
+					onLeave={() => void onDeleteRoom(ctxMenu.room.id)}
+					onClose={() => setCtxMenu(null)}
+				/>
+			)}
 		</div>
 	);
 }
 
 function ChatRow({
-	room, transport, currentUserId, isBot, onClick, onDelete, open, onOpenChange, showDivider,
+	room, transport, currentUserId, isBot, onClick, onLongPress, onDelete, open, onOpenChange, showDivider,
 }: {
 	room: Room;
 	transport: MatrixTransport | null;
 	currentUserId: UserId;
 	isBot: boolean;
 	onClick(): void;
+	onLongPress(pos: { x: number; y: number }): void;
 	onDelete(): Promise<void> | void;
 	open: boolean;
 	onOpenChange(open: boolean): void;
@@ -231,6 +269,19 @@ function ChatRow({
 
 	const cardRef = useRef<HTMLButtonElement | null>(null);
 	const deleteRef = useRef<HTMLButtonElement | null>(null);
+
+	// Long-press gesture (integrated into useDrag to avoid touch/pointer conflicts)
+	const lpTimerRef = useRef<number | null>(null);
+	const lpStartRef = useRef<{ x: number; y: number } | null>(null);
+	const lpFiredRef = useRef(false);
+
+	function cancelLongPress() {
+		if (lpTimerRef.current !== null) {
+			window.clearTimeout(lpTimerRef.current);
+			lpTimerRef.current = null;
+		}
+	}
+
 	// `open` mirrored into a ref so the drag handler reads the latest
 	// value without re-binding useDrag every render.
 	const openRef = useRef(open);
@@ -276,12 +327,30 @@ function ChatRow({
 		}
 	}
 
-	const dragBind = useDrag(({ first, active, last: released, movement: [mx], tap }) => {
-		if (first) movedRef.current = false;
-		if (Math.abs(mx) > 6) movedRef.current = true;
-		if (tap) return;
+	const dragBind = useDrag(({ first, active, last: released, movement: [mx], tap, xy }) => {
+		if (first) {
+			movedRef.current = false;
+			lpFiredRef.current = false;
+			lpStartRef.current = { x: xy[0], y: xy[1] };
+			lpTimerRef.current = window.setTimeout(() => {
+				lpTimerRef.current = null;
+				lpFiredRef.current = true;
+				void hapticImpact("medium");
+				onLongPress(lpStartRef.current!);
+			}, 500);
+		}
+		if (Math.abs(mx) > 6) {
+			movedRef.current = true;
+			cancelLongPress();
+		}
+		if (tap) {
+			cancelLongPress();
+			return;
+		}
+		if (released) cancelLongPress();
 		const card = cardRef.current;
 		if (!card) return;
+		if (lpFiredRef.current) return;
 		// Anchor the drag to wherever the row was resting.
 		const base = openRef.current ? -DELETE_ACTION_WIDTH : 0;
 		let x = base + mx;
@@ -336,11 +405,12 @@ function ChatRow({
 					onClick={() => {
 						// A swipe that ended in a stray click must not
 						// also open the chat; an open row taps closed.
+						if (lpFiredRef.current) { lpFiredRef.current = false; return; }
 						if (movedRef.current) { movedRef.current = false; return; }
 						if (openRef.current) { onOpenChange(false); return; }
 						onClick();
 					}}
-					className="relative w-full flex items-stretch gap-3 pl-4 pr-3 py-2.5 active:bg-foreground/[0.06] transition-colors touch-pan-y"
+					className="relative w-full flex items-stretch gap-3 pl-4 pr-3 py-2.5 active:bg-foreground/[0.06] transition-colors touch-pan-y [-webkit-touch-callout:none]"
 				>
 					{/* Leading unread dot.  Absolutely positioned in the
 					    row's leading padding so it overlays without

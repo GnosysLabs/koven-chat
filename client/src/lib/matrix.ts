@@ -1049,6 +1049,9 @@ export class MatrixTransport {
 				void this.pruneStaleDirectRooms().catch(err =>
 					console.warn("matrix: m.direct prune failed", err),
 				);
+				void this.reconcileGhostRooms().catch(err =>
+					console.warn("matrix: ghost room reconciliation failed", err),
+				);
 			}
 		});
 
@@ -4805,6 +4808,48 @@ export class MatrixTransport {
 		}
 	}
 
+	// Reconcile locally-cached "joined" rooms against what the
+	// homeserver actually knows.  After an admin purge, the leave
+	// event may never reach clients that weren't syncing at the
+	// time (Synapse purges events before delivery).  This one-shot
+	// call on sync-ready asks Synapse for the real joined-room set
+	// and forgets any local rooms that are no longer server-side.
+	private async reconcileGhostRooms(): Promise<void> {
+		const c = this.client;
+		const token = this.creds?.access_token;
+		if (!c || !token) return;
+		let serverRoomIds: Set<string>;
+		try {
+			const res = await fetch(
+				`${c.getHomeserverUrl()}/_matrix/client/v3/joined_rooms`,
+				{ headers: { Authorization: `Bearer ${token}` } },
+			);
+			if (!res.ok) return;
+			const body = (await res.json()) as { joined_rooms?: string[] };
+			serverRoomIds = new Set(body.joined_rooms ?? []);
+		} catch {
+			return;
+		}
+		let pruned = 0;
+		for (const r of c.getRooms()) {
+			if (r.getMyMembership() !== "join") continue;
+			if (serverRoomIds.has(r.roomId)) continue;
+			// Local says "join" but server disagrees.  Force-flip the
+			// local membership so getRooms() drops it immediately.
+			try {
+				(r as unknown as { updateMyMembership: (m: string) => void })
+					.updateMyMembership("leave");
+			} catch { /* older SDK versions */ }
+			await c.forget(r.roomId).catch(() => {});
+			pruned++;
+		}
+		if (pruned > 0) {
+			console.log(`matrix: reconcileGhostRooms pruned ${pruned} stale room(s)`);
+			this.emitRoomList();
+			this.emitSpaceList();
+		}
+	}
+
 	/**
 	 * Hard-delete a single non-space room (channel inside a space)
 	 * for every member.  Asks the engine to call Synapse's admin
@@ -6026,15 +6071,26 @@ export class MatrixTransport {
 			isDm ? "dm" : (joinRule === "public" ? "public" : "private");
 
 		// m.space.parent state events name the spaces this room is in.
-		// We trust the room's self-declaration here; broken-link cases
-		// (parent declared but space doesn't list room as child) are
-		// rare and the UI can still find the room via Home.
+		// Cross-reference against the parent space's m.space.child to
+		// guard against stale local state: after an admin purge, the
+		// room's cached m.space.parent persists in IndexedDB but the
+		// space's m.space.child has already been cleared.  Without
+		// this check, purged rooms ghost in the space's room list on
+		// clients that missed the leave event.
 		const parentEvents = r.currentState.getStateEvents("m.space.parent");
 		const parentSpaceIds: SpaceId[] = [];
 		for (const ev of parentEvents) {
 			const sk = ev.getStateKey();
 			const content = ev.getContent();
 			if (sk && content && Array.isArray(content.via) && content.via.length > 0) {
+				const parentRoom = this.client?.getRoom(sk);
+				if (parentRoom) {
+					const childEv = parentRoom.currentState.getStateEvents("m.space.child", r.roomId);
+					const childContent = childEv?.getContent();
+					if (!childContent || !Array.isArray(childContent.via) || childContent.via.length === 0) {
+						continue;
+					}
+				}
 				parentSpaceIds.push(sk as SpaceId);
 			}
 		}
