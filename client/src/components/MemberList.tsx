@@ -497,16 +497,6 @@ function MemberContextMenu({
 
 	if (typeof document === "undefined") return null;
 
-	// Cursor clamp.  Menu is roughly 180x{40 per item}; assume up
-	// to 6 items (~240px) and clamp generously so it never escapes
-	// the viewport.
-	const menuW = 200;
-	const menuH = 240;
-	const vw = typeof window !== "undefined" ? window.innerWidth : 1200;
-	const vh = typeof window !== "undefined" ? window.innerHeight : 800;
-	const left = Math.min(x, vw - menuW - 8);
-	const top = Math.min(y, vh - menuH - 8);
-
 	const showDm = !isSelf && canDm;
 	// Founder branch: full Kick / Ban affordance against ANY bot in
 	// the space — including the founder's own.  A founder who also
@@ -531,6 +521,31 @@ function MemberContextMenu({
 		&& !isSelf
 		&& canModerateRoom
 		&& (canKickMember || canBanMember || canPromoteToMod || canPromoteToAdmin || canResetRole);
+
+	// Cursor clamp.  Estimate height from the actual visible items
+	// so the menu never escapes the viewport, even when admin
+	// moderation items push it well past a fixed-height assumption.
+	const itemH = 32;
+	const dividerH = 9;
+	const padH = 8;
+	let itemCount = 1 + (showDm ? 1 : 0) + 1;
+	let dividerCount = 0;
+	if (showFounderKickBan) { dividerCount++; itemCount += 2; }
+	if (showOwnerRemove) { dividerCount++; itemCount += 1; }
+	if (showAdminModeration) {
+		dividerCount++;
+		if (canPromoteToMod) itemCount++;
+		if (canPromoteToAdmin) itemCount++;
+		if (canResetRole) itemCount++;
+		if (canKickMember) itemCount++;
+		if (canBanMember) itemCount++;
+	}
+	const menuW = 200;
+	const menuH = itemCount * itemH + dividerCount * dividerH + padH * 2;
+	const vw = typeof window !== "undefined" ? window.innerWidth : 1200;
+	const vh = typeof window !== "undefined" ? window.innerHeight : 800;
+	const left = Math.max(8, Math.min(x, vw - menuW - 8));
+	const top = Math.max(8, Math.min(y, vh - menuH - 8));
 
 	return createPortal(
 		<div
