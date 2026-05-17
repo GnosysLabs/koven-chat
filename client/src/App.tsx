@@ -2615,17 +2615,7 @@ export default function App() {
 								dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
 							}
 						}}
-						onDeleteRoom={async (roomId) => {
-							if (!transport) return;
-							try {
-								await transport.leaveRoom(roomId as RoomId);
-								if (state.activeRoomId === roomId) {
-									dispatch({ type: "set_active_room", roomId: null });
-								}
-							} catch (e) {
-								dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
-							}
-						}}
+						onDeleteRoom={(roomId) => openDeleteDmFor(roomId as RoomId)}
 					/>
 				) : (
 				<RoomList
