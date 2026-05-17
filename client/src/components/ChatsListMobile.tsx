@@ -125,7 +125,7 @@ export function ChatsListMobile({
 				    the nav bar. */}
 				<div className="flex items-center justify-between py-3 px-4">
 					<h1 className="text-[34px] font-bold tracking-[-0.022em] leading-[1.1] text-foreground">
-						Chats
+						DMs
 					</h1>
 					<button
 						type="button"
