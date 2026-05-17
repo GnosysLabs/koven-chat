@@ -108,7 +108,8 @@ import {
 	DialogHeader,
 	DialogTitle,
 } from "@/components/ui/dialog";
-import { AlertTriangle, ArrowDown, ArrowUp, BarChart3, Check, CheckCheck, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Images, Lock, MessageSquare as MessageSquareIcon, Paperclip, Play, Plus, Reply, Scale, Settings, X } from "lucide-react";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { AlertTriangle, ArrowDown, ArrowUp, BarChart3, Check, CheckCheck, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Images, Lock, Maximize2, MessageSquare as MessageSquareIcon, Minimize2, Paperclip, Pause, Play, Plus, Reply, Scale, Settings, X } from "lucide-react";
 
 export interface ChatPaneProps {
 	room: Room | null;
@@ -3119,6 +3120,214 @@ function AttachmentImage({ message }: { message: Message }) {
 	);
 }
 
+function formatVideoTime(seconds: number): string {
+	const safe = Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : 0;
+	const m = Math.floor(safe / 60);
+	const s = safe % 60;
+	return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+// Fully custom video player surface: glass play button, a draggable
+// scrubber, a time readout, and an expand/collapse control.  Native
+// `<video controls>` is deliberately not used: in the iOS WKWebView
+// shell its fullscreen and picture-in-picture buttons are dead, so we
+// own the whole control layer and route "expand" to an in-app lightbox
+// instead of the platform fullscreen path.
+function VideoPlayer({
+	url,
+	poster,
+	videoRef,
+	mediaStyle,
+	displayWidth,
+	displayHeight,
+	autoPlay,
+	initialTime,
+	expanded,
+	onExpand,
+	onCollapse,
+}: {
+	url: string;
+	poster?: string;
+	videoRef: React.MutableRefObject<HTMLVideoElement | null>;
+	mediaStyle: React.CSSProperties;
+	displayWidth: number;
+	displayHeight: number;
+	autoPlay?: boolean;
+	initialTime?: number;
+	expanded?: boolean;
+	onExpand?: () => void;
+	onCollapse?: () => void;
+}) {
+	const [playing, setPlaying] = useState(false);
+	const [started, setStarted] = useState(false);
+	const [hovered, setHovered] = useState(false);
+	const [scrubbing, setScrubbing] = useState(false);
+	const [currentTime, setCurrentTime] = useState(initialTime ?? 0);
+	const [duration, setDuration] = useState(0);
+	const trackRef = useRef<HTMLDivElement | null>(null);
+
+	function togglePlay() {
+		const v = videoRef.current;
+		if (!v) return;
+		if (v.paused) {
+			v.play().catch(() => { /* play() can reject under autoplay policy, harmless */ });
+		} else {
+			v.pause();
+		}
+	}
+
+	// Map a pointer x-coordinate onto the track's width and seek there.
+	function seekToClientX(clientX: number) {
+		const v = videoRef.current;
+		const track = trackRef.current;
+		if (!v || !track || !Number.isFinite(v.duration) || v.duration <= 0) return;
+		const rect = track.getBoundingClientRect();
+		const frac = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+		const t = frac * v.duration;
+		v.currentTime = t;
+		setCurrentTime(t);
+	}
+
+	function onScrubPointerDown(e: React.PointerEvent) {
+		e.preventDefault();
+		e.stopPropagation();
+		setScrubbing(true);
+		e.currentTarget.setPointerCapture(e.pointerId);
+		seekToClientX(e.clientX);
+	}
+	function onScrubPointerMove(e: React.PointerEvent) {
+		if (!scrubbing) return;
+		seekToClientX(e.clientX);
+	}
+	function onScrubPointerUp(e: React.PointerEvent) {
+		if (!scrubbing) return;
+		setScrubbing(false);
+		if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+			e.currentTarget.releasePointerCapture(e.pointerId);
+		}
+	}
+
+	const pct = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
+	// Bottom bar is always shown in the lightbox.  Inline it appears
+	// once playback has started: on touch (no hover) it stays put, on
+	// desktop it follows hover, and it is always shown while paused or
+	// mid-scrub so the user can grab the scrubber.
+	const showBar = expanded || (started && (isMobileShell || hovered || !playing || scrubbing));
+
+	return (
+		<div
+			className="relative inline-block group/video"
+			style={{ maxWidth: "100%" }}
+			onMouseEnter={() => setHovered(true)}
+			onMouseLeave={() => setHovered(false)}
+		>
+			<video
+				ref={videoRef}
+				src={url}
+				poster={poster}
+				preload="metadata"
+				width={displayWidth}
+				height={displayHeight}
+				className="rounded-lg block cursor-pointer"
+				style={mediaStyle}
+				autoPlay={autoPlay}
+				onClick={togglePlay}
+				onPlay={() => { setPlaying(true); setStarted(true); }}
+				onPause={() => setPlaying(false)}
+				onEnded={() => setPlaying(false)}
+				onTimeUpdate={(e) => { if (!scrubbing) setCurrentTime(e.currentTarget.currentTime); }}
+				onLoadedMetadata={(e) => {
+					setDuration(e.currentTarget.duration);
+					// Resume from where the inline player left off when
+					// opening (or vice versa when collapsing).
+					if (initialTime && initialTime > 0) {
+						e.currentTarget.currentTime = initialTime;
+						setCurrentTime(initialTime);
+					}
+				}}
+				playsInline
+			/>
+			{!playing && (
+				<button
+					type="button"
+					onClick={togglePlay}
+					aria-label="Play video"
+					// Glassmorphic centred play button for the paused
+					// state.  `pointer-events-none` on the outer span +
+					// an explicit pointer-events-auto on the inner
+					// circle so only the circle is clickable; otherwise
+					// the button would intercept clicks on the rest of
+					// the video and the scrubber underneath it.
+					className="absolute inset-0 flex items-center justify-center pointer-events-none"
+				>
+					<span
+						className={cn(
+							"pointer-events-auto h-14 w-14 rounded-full flex items-center justify-center",
+							"bg-background/30 backdrop-blur-md ring-1 ring-white/20",
+							"shadow-[0_2px_12px_rgba(0,0,0,0.35)]",
+							"transition-all duration-150",
+							"group-hover/video:bg-background/45 group-hover/video:scale-105",
+						)}
+					>
+						<Play className="h-6 w-6 text-white fill-white translate-x-0.5" />
+					</span>
+				</button>
+			)}
+			{showBar && (
+				<div
+					// Custom control bar.  stopPropagation so taps on the
+					// bar do not bubble to the video's click-to-toggle.
+					className="absolute inset-x-0 bottom-0 flex items-center gap-2.5 rounded-b-lg px-2.5 pb-2 pt-6 bg-gradient-to-t from-black/75 via-black/35 to-transparent"
+					onClick={(e) => e.stopPropagation()}
+				>
+					<button
+						type="button"
+						onClick={togglePlay}
+						aria-label={playing ? "Pause video" : "Play video"}
+						className="shrink-0 text-white/90 hover:text-white transition-colors"
+					>
+						{playing
+							? <Pause className="h-4 w-4 fill-white" />
+							: <Play className="h-4 w-4 fill-white translate-x-px" />}
+					</button>
+					<div
+						// Padded hit area so the thin track is easy to
+						// grab on touch; the visible track sits inside.
+						className="relative flex-1 py-2 cursor-pointer touch-none"
+						onPointerDown={onScrubPointerDown}
+						onPointerMove={onScrubPointerMove}
+						onPointerUp={onScrubPointerUp}
+						onPointerCancel={onScrubPointerUp}
+					>
+						<div ref={trackRef} className="relative h-1 w-full rounded-full bg-white/25">
+							<div className="absolute inset-y-0 left-0 rounded-full bg-white" style={{ width: `${pct}%` }} />
+							<div
+								className="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white shadow-[0_1px_3px_rgba(0,0,0,0.5)]"
+								style={{ left: `${pct}%` }}
+							/>
+						</div>
+					</div>
+					<span className="shrink-0 text-[11px] tabular-nums text-white/90">
+						{formatVideoTime(currentTime)} / {formatVideoTime(duration)}
+					</span>
+					{(onExpand || onCollapse) && (
+						<button
+							type="button"
+							onClick={expanded ? onCollapse : onExpand}
+							aria-label={expanded ? "Exit fullscreen" : "Fullscreen"}
+							className="shrink-0 text-white/90 hover:text-white transition-colors"
+						>
+							{expanded
+								? <Minimize2 className="h-4 w-4" />
+								: <Maximize2 className="h-4 w-4" />}
+						</button>
+					)}
+				</div>
+			)}
+		</div>
+	);
+}
+
 function AttachmentVideo({ message }: { message: Message }) {
 	const url = useMatrixAttachment(message);
 	// Sender-supplied poster (info.thumbnail_*).  Instant paint
@@ -3128,8 +3337,11 @@ function AttachmentVideo({ message }: { message: Message }) {
 	// shipped before this fix landed.
 	const poster = useMatrixVideoPoster(message);
 	const { onContextMenu, menu } = useMediaContextMenu(url, message.mediaName ?? "video");
-	const videoRef = useRef<HTMLVideoElement | null>(null);
-	const [playing, setPlaying] = useState(false);
+	const inlineVideoRef = useRef<HTMLVideoElement | null>(null);
+	const lightboxVideoRef = useRef<HTMLVideoElement | null>(null);
+	// `null` = closed.  When open it carries the inline player's
+	// position + play state so the lightbox resumes seamlessly.
+	const [lightbox, setLightbox] = useState<{ time: number; wasPlaying: boolean } | null>(null);
 
 	// Reserve the exact final box from sender-supplied dimensions.
 	// Prefer the video's own w/h (info.w / info.h on m.video); fall
@@ -3152,14 +3364,21 @@ function AttachmentVideo({ message }: { message: Message }) {
 		return { displayWidth: Math.round(w), displayHeight: Math.round(h) };
 	}, [message.mediaWidth, message.mediaHeight, message.mediaThumbWidth, message.mediaThumbHeight]);
 
-	function togglePlay() {
-		const v = videoRef.current;
-		if (!v) return;
-		if (v.paused) {
-			v.play().catch(() => { /* play() can reject under autoplay policy, harmless */ });
-		} else {
-			v.pause();
+	function openLightbox() {
+		const v = inlineVideoRef.current;
+		const time = v ? v.currentTime : 0;
+		const wasPlaying = v ? !v.paused : false;
+		if (v && !v.paused) v.pause();
+		setLightbox({ time, wasPlaying });
+	}
+	function closeLightbox() {
+		// Carry the lightbox position back to the inline player.
+		const lv = lightboxVideoRef.current;
+		const iv = inlineVideoRef.current;
+		if (lv && iv && Number.isFinite(lv.currentTime)) {
+			iv.currentTime = lv.currentTime;
 		}
+		setLightbox(null);
 	}
 
 	const mediaStyle = { maxWidth: "100%" as const, height: "auto" as const, aspectRatio: `${displayWidth}/${displayHeight}` };
@@ -3184,53 +3403,56 @@ function AttachmentVideo({ message }: { message: Message }) {
 		);
 	}
 	return (
-		<div className="relative inline-block group/video" style={{ maxWidth: "100%" }} onContextMenu={isMobileShell ? undefined : onContextMenu}>
-			<video
-				ref={videoRef}
-				src={url}
+		<div className="inline-block" style={{ maxWidth: "100%" }} onContextMenu={isMobileShell ? undefined : onContextMenu}>
+			<VideoPlayer
+				url={url}
 				poster={poster}
-				preload="metadata"
-				width={displayWidth}
-				height={displayHeight}
-				className="rounded-lg block cursor-pointer"
-				style={mediaStyle}
-				onClick={togglePlay}
-				onPlay={() => setPlaying(true)}
-				onPause={() => setPlaying(false)}
-				onEnded={() => setPlaying(false)}
-				playsInline
+				videoRef={inlineVideoRef}
+				mediaStyle={mediaStyle}
+				displayWidth={displayWidth}
+				displayHeight={displayHeight}
+				onExpand={openLightbox}
 			/>
-			{!playing && (
-				<button
-					type="button"
-					onClick={togglePlay}
-					aria-label="Play video"
-					// Glassmorphic centred play button.  Sits over
-					// the video's natural footprint without
-					// changing layout (absolute, full inset).
-					// `pointer-events-none` on the outer span + an
-					// explicit pointer-events-auto on the inner
-					// circle so only the circle is clickable.
-					// Otherwise the button intercepts clicks on the
-					// rest of the video and prevents the video
-					// itself from being interactive (e.g. tap on
-					// the side to toggle).
-					className="absolute inset-0 flex items-center justify-center pointer-events-none"
-				>
-					<span
-						className={cn(
-							"pointer-events-auto h-14 w-14 rounded-full flex items-center justify-center",
-							"bg-background/30 backdrop-blur-md ring-1 ring-white/20",
-							"shadow-[0_2px_12px_rgba(0,0,0,0.35)]",
-							"transition-all duration-150",
-							"group-hover/video:bg-background/45 group-hover/video:scale-105",
-						)}
-					>
-						<Play className="h-6 w-6 text-white fill-white translate-x-0.5" />
-					</span>
-				</button>
-			)}
 			{menu}
+			<DialogPrimitive.Root open={!!lightbox} onOpenChange={(o) => { if (!o) closeLightbox(); }}>
+				<DialogPrimitive.Portal>
+					<DialogPrimitive.Overlay className="fixed inset-0 z-[70] bg-black/90 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+					<DialogPrimitive.Content
+						className="fixed inset-0 z-[70] outline-none flex items-center justify-center p-4 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0"
+						aria-describedby={undefined}
+						// Tapping the dark backdrop (the Content itself,
+						// not the centred player) closes the lightbox.
+						onClick={(e) => { if (e.target === e.currentTarget) closeLightbox(); }}
+					>
+						<DialogPrimitive.Title className="sr-only">
+							{message.mediaName ?? "Video"}
+						</DialogPrimitive.Title>
+						{lightbox && (
+							<VideoPlayer
+								url={url}
+								poster={poster}
+								videoRef={lightboxVideoRef}
+								mediaStyle={{ maxWidth: "92vw", maxHeight: "85vh", width: "auto", height: "auto", aspectRatio: `${displayWidth}/${displayHeight}` }}
+								displayWidth={displayWidth}
+								displayHeight={displayHeight}
+								autoPlay={lightbox.wasPlaying}
+								initialTime={lightbox.time}
+								expanded
+								onCollapse={closeLightbox}
+							/>
+						)}
+						<button
+							type="button"
+							onClick={closeLightbox}
+							aria-label="Close"
+							className="absolute rounded-full bg-white/10 p-2 text-white/90 backdrop-blur-md transition-colors hover:bg-white/20 hover:text-white"
+							style={{ top: "calc(env(safe-area-inset-top) + 12px)", right: "calc(env(safe-area-inset-right) + 12px)" }}
+						>
+							<X className="h-5 w-5" />
+						</button>
+					</DialogPrimitive.Content>
+				</DialogPrimitive.Portal>
+			</DialogPrimitive.Root>
 		</div>
 	);
 }

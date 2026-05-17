@@ -219,7 +219,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 					audio: {
 						echoCancellation: true,
 						noiseSupression: true,
-						autoGainControl: true,
+						autoGainControl: false,
 					},
 					screenshare: {
 						frameRate: { ideal: 30, max: 30 },
