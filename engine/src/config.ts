@@ -201,4 +201,14 @@ export const config = {
 	// unguessable URL.  Don't commit; rotate by re-running the
 	// webhook registration with a fresh value.
 	cfRealtimeWebhookSecret: process.env.CF_REALTIME_WEBHOOK_SECRET ?? "",
+
+	// ─── APNs (iOS push notifications) ─────────────────────────────
+	// Path to the .p8 private key file from the Apple Developer portal.
+	// Combined with the key ID and team ID to sign JWTs for the APNs
+	// provider API.  When all three are set, the notification fanout
+	// fires push notifications alongside bell-row inserts.
+	apnsKeyPath: process.env.APNS_KEY_PATH ?? "",
+	apnsKeyId: process.env.APNS_KEY_ID ?? "",
+	apnsTeamId: process.env.APNS_TEAM_ID ?? "",
+	apnsProduction: (process.env.APNS_PRODUCTION ?? "").toLowerCase() === "true",
 };

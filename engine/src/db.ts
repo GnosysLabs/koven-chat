@@ -555,7 +555,7 @@ db.exec(`
 		user_id     TEXT NOT NULL,         -- recipient (whose bell this lights up)
 		event_id    TEXT NOT NULL,         -- triggering Matrix event id
 		room_id     TEXT NOT NULL,
-		kind        TEXT NOT NULL CHECK(kind IN ('dm','mention','reply','invite','system')),
+		kind        TEXT NOT NULL CHECK(kind IN ('dm','mention','reply','invite','system','message')),
 		sender      TEXT NOT NULL,         -- who triggered the notification
 		snippet     TEXT,                  -- excerpt or placeholder; client also has live data
 		created_at  INTEGER NOT NULL,
@@ -629,6 +629,21 @@ db.exec(`
 	);
 	CREATE INDEX IF NOT EXISTS idx_room_call_participants_room
 		ON room_call_participants(room_id);
+
+	-- ─── Push tokens for APNs / FCM / Web Push ────────────────────
+	-- One row per (user, device).  The client registers on login and
+	-- clears on sign-out.  The notification fanout reads tokens for
+	-- each recipient and fires a push alongside the bell-row insert.
+	CREATE TABLE IF NOT EXISTS push_tokens (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id    TEXT NOT NULL,
+		token      TEXT NOT NULL,
+		platform   TEXT NOT NULL CHECK(platform IN ('ios','android','web')),
+		created_at INTEGER NOT NULL,
+		UNIQUE(user_id, token)
+	);
+	CREATE INDEX IF NOT EXISTS idx_push_tokens_user
+		ON push_tokens(user_id);
 `);
 
 // SQLite ships with foreign-key enforcement OFF by default; flip it
@@ -3163,6 +3178,50 @@ export function deleteNotification(opts: { id: number; userId: string }): boolea
 export function deleteAllNotifications(userId: string): number {
 	const r = deleteAllNotificationsStmt.run(userId);
 	return Number(r.changes);
+}
+
+// ─── Push tokens ─────────────────────────────────────────────────────
+
+const upsertPushTokenStmt = db.prepare(`
+	INSERT INTO push_tokens (user_id, token, platform, created_at)
+	VALUES (?, ?, ?, ?)
+	ON CONFLICT(user_id, token) DO UPDATE SET platform = excluded.platform
+`);
+
+const deletePushTokenStmt = db.prepare(`
+	DELETE FROM push_tokens WHERE user_id = ? AND token = ?
+`);
+
+const deleteAllPushTokensStmt = db.prepare(`
+	DELETE FROM push_tokens WHERE user_id = ?
+`);
+
+const listPushTokensStmt = db.prepare(`
+	SELECT token, platform FROM push_tokens WHERE user_id = ?
+`);
+
+export function upsertPushToken(userId: string, token: string, platform: "ios" | "android" | "web"): void {
+	upsertPushTokenStmt.run(userId, token, platform, Date.now());
+}
+
+export function deletePushToken(userId: string, token: string): void {
+	deletePushTokenStmt.run(userId, token);
+}
+
+export function deleteAllPushTokens(userId: string): void {
+	deleteAllPushTokensStmt.run(userId);
+}
+
+export function listPushTokens(userId: string): Array<{ token: string; platform: string }> {
+	return listPushTokensStmt.all(userId) as Array<{ token: string; platform: string }>;
+}
+
+export function listPushTokensForUsers(userIds: string[]): Array<{ user_id: string; token: string; platform: string }> {
+	if (userIds.length === 0) return [];
+	const placeholders = userIds.map(() => "?").join(",");
+	return db.prepare(
+		`SELECT user_id, token, platform FROM push_tokens WHERE user_id IN (${placeholders})`
+	).all(...userIds) as Array<{ user_id: string; token: string; platform: string }>;
 }
 
 // ─── Founders ────────────────────────────────────────────────────────

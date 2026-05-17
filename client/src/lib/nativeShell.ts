@@ -192,3 +192,79 @@ export async function applyNativeShellTweaks(): Promise<void> {
 		// Plugin not installed, silently no-op.
 	}
 }
+
+// ── Push notification registration ──────────────────────────────────
+
+interface PushNotificationsPlugin {
+	requestPermissions(): Promise<{ receive: string }>;
+	register(): Promise<void>;
+	addListener(
+		eventName: "registration",
+		listenerFunc: (token: { value: string }) => void,
+	): Promise<{ remove(): Promise<void> }> | { remove(): Promise<void> };
+	addListener(
+		eventName: "registrationError",
+		listenerFunc: (error: { error: string }) => void,
+	): Promise<{ remove(): Promise<void> }> | { remove(): Promise<void> };
+}
+
+function getPushPlugin(): PushNotificationsPlugin | null {
+	if (typeof window === "undefined") return null;
+	const bridge = (window as unknown as { Capacitor?: CapacitorBridge }).Capacitor;
+	return (bridge?.Plugins?.PushNotifications as PushNotificationsPlugin) ?? null;
+}
+
+let pushRegistered = false;
+
+/** Request push notification permission, register with APNs, and send
+ * the device token to the engine.  Call after login when an access
+ * token is available.  No-op outside Capacitor or on repeated calls. */
+export async function registerPushToken(accessToken: string): Promise<void> {
+	if (!isCapacitor() || pushRegistered) return;
+	const push = getPushPlugin();
+	if (!push) return;
+
+	try {
+		const perm = await push.requestPermissions();
+		if (perm.receive !== "granted") return;
+
+		push.addListener("registration", (token) => {
+			pushRegistered = true;
+			fetch("/api/push/register", {
+				method: "POST",
+				headers: {
+					"Authorization": `Bearer ${accessToken}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({ token: token.value, platform: "ios" }),
+			}).catch(err => console.warn("[push] token registration failed:", err));
+		});
+
+		push.addListener("registrationError", (err) => {
+			console.warn("[push] registration error:", err.error);
+		});
+
+		await push.register();
+	} catch (err) {
+		console.warn("[push] setup failed:", err);
+	}
+}
+
+/** Unregister the current device's push token from the engine.
+ * Call on sign-out. */
+export async function unregisterPushToken(accessToken: string, token: string): Promise<void> {
+	try {
+		await fetch("/api/push/unregister", {
+			method: "POST",
+			headers: {
+				"Authorization": `Bearer ${accessToken}`,
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ token }),
+		});
+	} catch {
+		// Best-effort; if the server is unreachable the token will
+		// just sit until the user signs in again.
+	}
+	pushRegistered = false;
+}

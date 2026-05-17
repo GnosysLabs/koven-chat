@@ -39,6 +39,8 @@ import {
 	type ModAction,
 	createBot,
 	deleteAllNotifications,
+	deletePushToken,
+	upsertPushToken,
 	deleteBio,
 	deleteBot,
 	deleteNotification,
@@ -1409,6 +1411,39 @@ export function startServer(): void {
 				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
 				const deleted = deleteAllNotifications(userId);
 				return json({ ok: true, deleted });
+			}
+
+			// POST /api/push/register { token, platform }
+			// Register a device push token for the authed user.
+			// Called by the client on login / app launch.
+			if (req.method === "POST" && path === "/api/push/register") {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				const body = await req.json() as { token?: string; platform?: string };
+				const token = body.token;
+				const platform = body.platform;
+				if (typeof token !== "string" || !token.trim()) {
+					return json({ errcode: "M_BAD_JSON", error: "missing token" }, { status: 400 });
+				}
+				if (platform !== "ios" && platform !== "android" && platform !== "web") {
+					return json({ errcode: "M_BAD_JSON", error: "platform must be ios, android, or web" }, { status: 400 });
+				}
+				upsertPushToken(userId, token.trim(), platform);
+				return json({ ok: true });
+			}
+
+			// POST /api/push/unregister { token }
+			// Remove a specific push token (sign-out on one device).
+			if (req.method === "POST" && path === "/api/push/unregister") {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				const body = await req.json() as { token?: string };
+				const token = body.token;
+				if (typeof token !== "string" || !token.trim()) {
+					return json({ errcode: "M_BAD_JSON", error: "missing token" }, { status: 400 });
+				}
+				deletePushToken(userId, token.trim());
+				return json({ ok: true });
 			}
 
 			// POST /api/calls/:roomId/join

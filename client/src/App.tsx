@@ -31,7 +31,7 @@ import { MobileProfileScreen } from "@/components/MobileProfileScreen";
 import { MobileSettingsScreen } from "@/components/MobileSettingsScreen";
 import { PushSlot } from "@/components/mobile/Chrome";
 import { isMobileShell } from "@/lib/mobile";
-import { applyNativeShellTweaks } from "@/lib/nativeShell";
+import { applyNativeShellTweaks, registerPushToken } from "@/lib/nativeShell";
 import { wipeLocalCacheAndRestart } from "@/lib/recovery";
 import { parseShareIntent, clearShareUrl, type ShareIntent } from "@/lib/inviteLink";
 import { ChatPane } from "@/components/ChatPane";
@@ -944,6 +944,7 @@ export default function App() {
 		// Fire-and-forget — failures fall through to "no
 		// notifications", which is the right graceful degrade.
 		void ensureNotificationPermission();
+		void registerPushToken(creds.access_token);
 		setEncState(null);
 		// Capture this transport instance so the .then/.catch below can
 		// confirm they belong to the still-current run.  React's

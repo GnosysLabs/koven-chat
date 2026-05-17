@@ -35,6 +35,7 @@ import {
 	recentUnreadFromSender,
 	upsertRoomMember,
 } from "./db";
+import { sendPushNotifications } from "./push";
 import { getJoinedMembers } from "./synapse";
 
 // Snippet character cap.  200 keeps the bell list compact while
@@ -279,6 +280,8 @@ export async function fanOutMessage(ev: MatrixEvent): Promise<void> {
 	const snippet = buildSnippet(ev);
 
 	let written = 0;
+	const pushRecipients: string[] = [];
+	let pushKind: string = "message";
 	console.log(`[fanout] room=${ev.room_id} memberCount=${memberCount} isDm=${isDm} mentioned=${[...mentioned]} replyTarget=${replyTargetId}`);
 	for (const recipient of members) {
 		// Don't notify the sender about their own message.
@@ -363,9 +366,21 @@ export async function fanOutMessage(ev: MatrixEvent): Promise<void> {
 			snippet,
 			createdAt: ev.origin_server_ts,
 		});
+		pushRecipients.push(recipient);
+		pushKind = kind;
 		written++;
 	}
 	console.log(`[fanout] ev=${ev.event_id} done: wrote ${written} notifications`);
+
+	if (pushRecipients.length > 0) {
+		void sendPushNotifications(pushRecipients, {
+			kind: pushKind,
+			sender: ev.sender,
+			snippet,
+			roomId: ev.room_id,
+			eventId: ev.event_id,
+		});
+	}
 }
 
 /** Compute notification for an m.room.member event with
@@ -407,11 +422,15 @@ export function fanOutMember(ev: MatrixEvent): void {
 		roomId: ev.room_id,
 		kind: "dm",
 		sender: ev.sender,
-		// Snippet is null: the client renders sender / room name it
-		// knows about live.  An engine-side room name lookup would
-		// be a per-event Synapse round-trip and the client already
-		// has it from /sync.
 		snippet: null,
 		createdAt: ev.origin_server_ts,
+	});
+
+	void sendPushNotifications([ev.state_key], {
+		kind: "dm",
+		sender: ev.sender,
+		snippet: null,
+		roomId: ev.room_id,
+		eventId: ev.event_id,
 	});
 }
