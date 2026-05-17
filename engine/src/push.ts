@@ -5,15 +5,19 @@
 // each registered device.  Uses the HTTP/2 APNs provider API with a
 // signed JWT (ES256, from the .p8 key file).
 //
+// Uses node:http2 directly because Bun's fetch produces
+// "Malformed_HTTP_Response" against Apple's HTTP/2-only APNs endpoint.
+//
 // The JWT is cached and rotated every 50 minutes (Apple allows up to
 // 60 minutes).  Token refresh is lazy: if a send gets a 403
 // ExpiredProviderToken, we regenerate and retry once.
 
+import http2 from "node:http2";
 import { SignJWT, importPKCS8 } from "jose";
 import { config } from "./config";
 import { listPushTokensForUsers } from "./db";
 
-const APNS_HOST = config.apnsProduction
+const APNS_ORIGIN = config.apnsProduction
 	? "https://api.push.apple.com"
 	: "https://api.sandbox.push.apple.com";
 
@@ -22,6 +26,18 @@ const BUNDLE_ID = "chat.koven.ios";
 let cachedJwt: string | null = null;
 let jwtIssuedAt = 0;
 const JWT_LIFETIME_MS = 50 * 60 * 1000;
+
+// Persistent HTTP/2 session to APNs.  Apple recommends keeping the
+// connection open and multiplexing requests over it.
+let h2Session: http2.ClientHttp2Session | null = null;
+
+function getH2Session(): http2.ClientHttp2Session {
+	if (h2Session && !h2Session.closed && !h2Session.destroyed) return h2Session;
+	h2Session = http2.connect(APNS_ORIGIN);
+	h2Session.on("error", () => { h2Session = null; });
+	h2Session.on("close", () => { h2Session = null; });
+	return h2Session;
+}
 
 async function getApnsJwt(): Promise<string> {
 	const now = Date.now();
@@ -57,10 +73,29 @@ interface PushPayload {
 	eventId: string;
 }
 
+function h2Post(session: http2.ClientHttp2Session, path: string, headers: Record<string, string>, body: Buffer): Promise<{ status: number; data: string }> {
+	return new Promise((resolve, reject) => {
+		const req = session.request({
+			":method": "POST",
+			":path": path,
+			...headers,
+		});
+		req.setEncoding("utf8");
+		let data = "";
+		let status = 0;
+		req.on("response", (h) => { status = h[":status"] as number; });
+		req.on("data", (chunk) => { data += chunk; });
+		req.on("end", () => resolve({ status, data }));
+		req.on("error", reject);
+		req.end(body);
+	});
+}
+
 async function sendToApns(token: string, payload: PushPayload): Promise<void> {
 	const jwt = await getApnsJwt();
+	const session = getH2Session();
 
-	const apnsPayload = {
+	const apnsPayload = Buffer.from(JSON.stringify({
 		aps: {
 			alert: {
 				title: payload.title,
@@ -72,19 +107,17 @@ async function sendToApns(token: string, payload: PushPayload): Promise<void> {
 		},
 		roomId: payload.roomId,
 		eventId: payload.eventId,
+	}));
+
+	const headers: Record<string, string> = {
+		"authorization": `bearer ${jwt}`,
+		"apns-topic": BUNDLE_ID,
+		"apns-push-type": "alert",
+		"apns-priority": "10",
+		"content-type": "application/json",
 	};
 
-	const res = await fetch(`${APNS_HOST}/3/device/${token}`, {
-		method: "POST",
-		headers: {
-			"authorization": `bearer ${jwt}`,
-			"apns-topic": BUNDLE_ID,
-			"apns-push-type": "alert",
-			"apns-priority": "10",
-			"content-type": "application/json",
-		},
-		body: JSON.stringify(apnsPayload),
-	});
+	const res = await h2Post(session, `/3/device/${token}`, headers, apnsPayload);
 
 	if (res.status === 200) return;
 
@@ -94,21 +127,12 @@ async function sendToApns(token: string, payload: PushPayload): Promise<void> {
 	}
 
 	if (res.status === 403) {
-		const body = await res.json().catch(() => ({})) as { reason?: string };
+		const body = JSON.parse(res.data || "{}") as { reason?: string };
 		if (body.reason === "ExpiredProviderToken") {
 			invalidateJwt();
 			const retryJwt = await getApnsJwt();
-			const retry = await fetch(`${APNS_HOST}/3/device/${token}`, {
-				method: "POST",
-				headers: {
-					"authorization": `bearer ${retryJwt}`,
-					"apns-topic": BUNDLE_ID,
-					"apns-push-type": "alert",
-					"apns-priority": "10",
-					"content-type": "application/json",
-				},
-				body: JSON.stringify(apnsPayload),
-			});
+			headers["authorization"] = `bearer ${retryJwt}`;
+			const retry = await h2Post(session, `/3/device/${token}`, headers, apnsPayload);
 			if (retry.status === 200) return;
 			console.warn(`[push] APNs retry failed (${retry.status}) for ${token.slice(0, 8)}...`);
 			return;
