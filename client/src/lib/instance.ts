@@ -668,3 +668,30 @@ export function uploadLoginBackground(accessToken: string, file: File): Promise<
 export function uploadLogo(accessToken: string, file: File): Promise<InstanceConfig> {
 	return uploadInstanceImage(accessToken, file, "logo");
 }
+
+// ─── People directory ──────────────────────────────────────────────
+
+export interface DirectoryUser {
+	user_id: string;
+	bio: string;
+	founder_number: number | null;
+	social_links: { platform: string; url: string }[];
+	banner_mxc: string | null;
+}
+
+export async function fetchUserDirectory(opts?: {
+	q?: string;
+	limit?: number;
+	offset?: number;
+}): Promise<{ users: DirectoryUser[]; total: number }> {
+	const params = new URLSearchParams();
+	if (opts?.q) params.set("q", opts.q);
+	if (opts?.limit) params.set("limit", String(opts.limit));
+	if (opts?.offset) params.set("offset", String(opts.offset));
+	const qs = params.toString();
+	const r = await fetch(`${ENGINE_URL}/api/users/directory${qs ? `?${qs}` : ""}`, {
+		credentials: "omit",
+	});
+	if (!r.ok) return { users: [], total: 0 };
+	return (await r.json()) as { users: DirectoryUser[]; total: number };
+}

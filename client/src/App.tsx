@@ -2578,6 +2578,14 @@ export default function App() {
 									dispatch({ type: "set_active_room", roomId });
 								}
 							}}
+							onStartDm={async (userId) => {
+								if (!transport) return;
+								try {
+									const roomId = await transport.startDm(userId);
+									dispatch({ type: "set_active_space", space: { kind: "dms" } });
+									dispatch({ type: "set_active_room", roomId });
+								} catch {}
+							}}
 						/>
 					</div>
 				) : null}
@@ -2728,13 +2736,19 @@ export default function App() {
 						accessToken={creds?.access_token ?? null}
 						showNsfw={!!settings.showNsfw}
 						onJoined={(roomId, isSpace) => {
-							// Joining a room → switch to Rooms view + open
-							// it.  Joining a space → switch to that space.
 							if (isSpace) {
 								dispatch({ type: "set_active_space", space: { kind: "space", id: roomId } });
 							} else {
 								dispatch({ type: "set_active_room", roomId });
 							}
+						}}
+						onStartDm={async (userId) => {
+							if (!transport) return;
+							try {
+								const roomId = await transport.startDm(userId);
+								dispatch({ type: "set_active_space", space: { kind: "dms" } });
+								dispatch({ type: "set_active_room", roomId });
+							} catch {}
 						}}
 					/>
 				) : !isMobileShell && state.activeSpace?.kind === "bots" ? (

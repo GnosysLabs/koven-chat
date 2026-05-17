@@ -27,6 +27,10 @@ export interface UserProfileResponse {
 	// unset.  The bytes live in the Matrix media repo; the engine
 	// only stores this pointer.
 	banner_mxc: string | null;
+	// Whether this user appears in the public People directory.
+	// Default true.  Absent from older engine responses, so treat
+	// missing as true.
+	discoverable?: boolean;
 }
 
 export async function fetchUserBio(userId: string): Promise<string> {
@@ -56,10 +60,10 @@ export async function fetchUserProfile(userId: string): Promise<UserProfileRespo
 	};
 }
 
-/** Update the current user's bio, social links and/or banner in one request. */
+/** Update the current user's bio, social links, banner and/or discoverability in one request. */
 export async function updateMyProfileData(
 	accessToken: string,
-	data: { bio?: string; social_links?: SocialLink[]; banner_mxc?: string | null },
+	data: { bio?: string; social_links?: SocialLink[]; banner_mxc?: string | null; discoverable?: boolean },
 ): Promise<void> {
 	const r = await fetch(`${ENGINE_URL}/api/profile/me`, {
 		method: "PUT",

@@ -16,8 +16,9 @@
 // admin-gated, and a HIG reskin is a separate pass.
 
 import { useEffect, useState } from "react";
-import { ChevronRight, Check, Palette, Shield, Monitor, Wrench, LogOut, Trash2 } from "lucide-react";
+import { ChevronRight, Check, Eye, Palette, Shield, Monitor, Wrench, LogOut, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Switch } from "@/components/ui/switch";
 import type { Settings, Theme } from "@/state/settings";
 import { THEMES } from "@/state/settings";
 import { MobileBlockedUsersScreen } from "@/components/MobileBlockedUsersScreen";
@@ -26,6 +27,7 @@ import { MobileDeleteAccountScreen } from "@/components/MobileDeleteAccountScree
 import { InstanceAdminSection } from "@/components/InstanceAdminSection";
 import { AdminManagementSection } from "@/components/AdminManagementSection";
 import { fetchAdminStatus } from "@/lib/instance";
+import { fetchUserProfile, updateMyProfileData } from "@/lib/profile";
 import { hapticImpact } from "@/lib/haptics";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
@@ -70,6 +72,7 @@ export function MobileSettingsScreen({
 }: MobileSettingsScreenProps) {
 	const [sub, setSub] = useState<SubScreen | null>(null);
 	const [isAdmin, setIsAdmin] = useState(false);
+	const [discoverable, setDiscoverable] = useState(true);
 
 	useEffect(() => {
 		if (!accessToken) { setIsAdmin(false); return; }
@@ -79,6 +82,15 @@ export function MobileSettingsScreen({
 			.catch(() => { if (!cancelled) setIsAdmin(false); });
 		return () => { cancelled = true; };
 	}, [accessToken]);
+
+	useEffect(() => {
+		if (!currentUserId) return;
+		let cancelled = false;
+		fetchUserProfile(currentUserId)
+			.then(p => { if (!cancelled) setDiscoverable(p.discoverable !== false); })
+			.catch(() => {});
+		return () => { cancelled = true; };
+	}, [currentUserId]);
 
 	function push(s: SubScreen) {
 		void hapticImpact("light");
@@ -130,6 +142,19 @@ export function MobileSettingsScreen({
 					<>
 						<GroupLabel>Privacy</GroupLabel>
 						<GroupCard>
+							<SwitchRow
+								icon={<Eye className="h-[20px] w-[20px]" strokeWidth={2.1} />}
+								iconBg="bg-green-500"
+								label="Discoverable"
+								checked={discoverable}
+								onCheckedChange={(checked) => {
+									setDiscoverable(checked);
+									if (accessToken) {
+										updateMyProfileData(accessToken, { discoverable: checked })
+											.catch(() => setDiscoverable(!checked));
+									}
+								}}
+							/>
 							<DisclosureRow
 								icon={<Shield className="h-[20px] w-[20px]" strokeWidth={2.1} />}
 								iconBg="bg-slate-500"
@@ -145,6 +170,9 @@ export function MobileSettingsScreen({
 								last
 							/>
 						</GroupCard>
+						<GroupFooter>
+							When on, other users can find you in the People directory on Explore.
+						</GroupFooter>
 					</>
 				)}
 
@@ -497,6 +525,38 @@ function ActionRow({
 				</div>
 			</div>
 		</button>
+	);
+}
+
+function SwitchRow({
+	icon,
+	iconBg,
+	label,
+	checked,
+	onCheckedChange,
+	last,
+}: {
+	icon: React.ReactNode;
+	iconBg: string;
+	label: string;
+	checked: boolean;
+	onCheckedChange(checked: boolean): void;
+	last?: boolean;
+}) {
+	return (
+		<div
+			className={cn(
+				"flex items-center gap-3 pl-3 pr-3.5 py-2.5",
+				"min-h-[52px]",
+				!last && "border-b border-foreground/10",
+			)}
+		>
+			<IconBadge bg={iconBg}>{icon}</IconBadge>
+			<div className="flex-1 min-w-0">
+				<div className="text-[17px] text-foreground truncate">{label}</div>
+			</div>
+			<Switch checked={checked} onCheckedChange={onCheckedChange} />
+		</div>
 	);
 }
 

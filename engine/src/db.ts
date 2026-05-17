@@ -796,6 +796,7 @@ ensureColumns("bot_mcp_servers", [
 ensureColumns("user_profiles", [
 	{ name: "social_links", ddl: "social_links TEXT NOT NULL DEFAULT '[]'" },
 	{ name: "banner_mxc",   ddl: "banner_mxc TEXT NOT NULL DEFAULT ''" },
+	{ name: "discoverable", ddl: "discoverable INTEGER NOT NULL DEFAULT 1" },
 ]);
 
 export type PostRow = {
@@ -1348,6 +1349,95 @@ const upsertBannerStmt = db.prepare(`
 `);
 export function writeBanner(userId: string, mxc: string): void {
 	upsertBannerStmt.run(userId, userId, userId, mxc, Date.now());
+}
+
+// ─── User discoverability ──────────────────────────────────────────
+//
+// Whether the user appears in the public People directory on Explore.
+// Default true (discoverable).  Users who have never touched profile
+// settings won't have a row in user_profiles, so reads fall back to
+// true.
+
+const readDiscoverableStmt = db.prepare(
+	`SELECT discoverable FROM user_profiles WHERE user_id = ?`,
+);
+export function readDiscoverable(userId: string): boolean {
+	const row = readDiscoverableStmt.get(userId) as { discoverable: number } | undefined;
+	return (row?.discoverable ?? 1) === 1;
+}
+
+const upsertDiscoverableStmt = db.prepare(`
+	INSERT INTO user_profiles (user_id, bio, social_links, banner_mxc, discoverable, updated_at)
+	VALUES (
+		?,
+		COALESCE((SELECT bio          FROM user_profiles WHERE user_id = ?), ''),
+		COALESCE((SELECT social_links FROM user_profiles WHERE user_id = ?), '[]'),
+		COALESCE((SELECT banner_mxc   FROM user_profiles WHERE user_id = ?), ''),
+		?, ?
+	)
+	ON CONFLICT(user_id) DO UPDATE SET
+		discoverable = excluded.discoverable,
+		updated_at   = excluded.updated_at
+`);
+export function writeDiscoverable(userId: string, discoverable: boolean): void {
+	upsertDiscoverableStmt.run(userId, userId, userId, userId, discoverable ? 1 : 0, Date.now());
+}
+
+// ─── People directory listing ──────────────────────────────────────
+
+export interface DirectoryUserRow {
+	user_id: string;
+	bio: string;
+	founder_number: number | null;
+	social_links: string;
+	banner_mxc: string;
+}
+
+export function listDiscoverableUsers(opts: {
+	query?: string;
+	limit: number;
+	offset: number;
+}): DirectoryUserRow[] {
+	const conditions = [
+		`COALESCE(up.discoverable, 1) = 1`,
+		`u.user_id NOT IN (SELECT mxid FROM bots)`,
+	];
+	const params: (string | number)[] = [];
+
+	if (opts.query) {
+		conditions.push(`(u.user_id LIKE ? OR COALESCE(up.bio, '') LIKE ?)`);
+		const pattern = `%${opts.query}%`;
+		params.push(pattern, pattern);
+	}
+
+	params.push(opts.limit, opts.offset);
+
+	const sql = `
+		SELECT
+			u.user_id,
+			COALESCE(up.bio, '')          AS bio,
+			f.founder_number,
+			COALESCE(up.social_links, '[]') AS social_links,
+			COALESCE(up.banner_mxc, '')   AS banner_mxc
+		FROM users u
+		LEFT JOIN user_profiles up ON up.user_id = u.user_id
+		LEFT JOIN founders f       ON f.user_id  = u.user_id
+		WHERE ${conditions.join(" AND ")}
+		ORDER BY u.first_seen_ts DESC
+		LIMIT ? OFFSET ?
+	`;
+	return db.prepare(sql).all(...params) as DirectoryUserRow[];
+}
+
+export function countDiscoverableUsers(): number {
+	const row = db.prepare(`
+		SELECT COUNT(*) AS n
+		FROM users u
+		LEFT JOIN user_profiles up ON up.user_id = u.user_id
+		WHERE COALESCE(up.discoverable, 1) = 1
+		  AND u.user_id NOT IN (SELECT mxid FROM bots)
+	`).get() as { n: number };
+	return row.n;
 }
 
 // ─── Per-user integration secrets ───────────────────────────────────

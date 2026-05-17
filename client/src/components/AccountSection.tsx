@@ -33,6 +33,7 @@ import type { MatrixTransport } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
 import type { Settings } from "@/state/settings";
 import { fetchAdminStatus, purgeMyEngineState } from "@/lib/instance";
+import { fetchUserProfile, updateMyProfileData } from "@/lib/profile";
 import { fetchUiaPassword } from "@/lib/auth";
 
 export interface AccountSectionProps {
@@ -52,9 +53,12 @@ export interface AccountSectionProps {
 
 export function AccountSection({ accessToken, transport, ignoredUsers, onSignedOut, settings, onSettingsChange }: AccountSectionProps) {
 	const serverName = serverOf(transport?.currentUserId ?? null) ?? "koven.chat";
+	const currentUserId = transport?.currentUserId ?? null;
 	const blocked = useMemo(() => Array.from(ignoredUsers), [ignoredUsers]);
 	const [unblockingUser, setUnblockingUser] = useState<UserId | null>(null);
 	const [unblockError, setUnblockError] = useState<string | null>(null);
+
+	const [discoverable, setDiscoverable] = useState(true);
 
 	// Deletion flow.  Three distinct UI states:
 	//   "idle":       just a "Delete account" button
@@ -76,6 +80,15 @@ export function AccountSection({ accessToken, transport, ignoredUsers, onSignedO
 			.catch(() => { if (!cancelled) setIsOnlyAdmin(false); });
 		return () => { cancelled = true; };
 	}, [accessToken]);
+
+	useEffect(() => {
+		if (!currentUserId) return;
+		let cancelled = false;
+		fetchUserProfile(currentUserId)
+			.then(p => { if (!cancelled) setDiscoverable(p.discoverable !== false); })
+			.catch(() => {});
+		return () => { cancelled = true; };
+	}, [currentUserId]);
 
 	async function unblock(userId: UserId) {
 		if (!transport) return;
@@ -147,6 +160,22 @@ export function AccountSection({ accessToken, transport, ignoredUsers, onSignedO
 					<Switch
 						checked={!!settings.showNsfw}
 						onCheckedChange={(checked) => onSettingsChange({ ...settings, showNsfw: checked })}
+					/>
+				</div>
+				<div className="flex items-start justify-between gap-4 px-3 py-3 rounded-md border border-border bg-muted/30">
+					<div className="flex-1 min-w-0">
+						<div className="text-sm font-medium">Show me in People directory</div>
+						<p className="text-xs text-muted-foreground leading-snug mt-0.5">
+							When on, other users can find you via the Explore People tab. Turn off to hide yourself from discovery.
+						</p>
+					</div>
+					<Switch
+						checked={discoverable}
+						onCheckedChange={(checked) => {
+							setDiscoverable(checked);
+							updateMyProfileData(accessToken, { discoverable: checked })
+								.catch(() => setDiscoverable(!checked));
+						}}
 					/>
 				</div>
 			</section>

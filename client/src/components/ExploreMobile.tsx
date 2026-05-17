@@ -1,30 +1,19 @@
 // ExploreMobile — iOS HIG version of the public-directory browser.
-// Rendered on the Explore tab when `isMobileShell` is true.  Same
-// data model as the desktop ExplorePane (PublicEntry rows fetched
-// via transport.discoverDirectory + engine icon backfill) — just
-// laid out per Apple's Human Interface Guidelines.
-//
-// HIG calibration:
-//   - 34pt Large Title "Explore" at the top.
-//   - iOS UISearchBar-style search field: 36pt tall, rounded, subtle
-//     fill, leading magnifying glass.  No autofocus on tab landings
-//     (iOS Mail / App Store don't pop the keyboard either).
-//   - Result rows: 48pt rounded-square avatars (spaces look like
-//     "apps"), 17pt name + 13pt meta line, iOS App Store-style "GET"
-//     pill on the trailing edge — `bg-primary/15 text-primary`,
-//     respects the user's theme tint.
-//   - Inset-grouped result card with hairline dividers.
-//   - Flag button: small icon button inline before the Join pill.
-//   - Empty / loading / error states mirror the iOS list conventions.
+// Rendered on the Explore tab when `isMobileShell` is true.  Two
+// tabs: Spaces and People, via an iOS-style segmented control.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, Compass, Flag, Search } from "lucide-react";
+import { Check, Compass, Flag, MessageCircle, Search } from "lucide-react";
 import type { MatrixTransport } from "@/lib/matrix";
-import type { FlagCategory, Room, RoomId, Space } from "@koven/shared";
+import type { FlagCategory, Room, RoomId, Space, UserId } from "@koven/shared";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
+import { FounderBadge } from "@/components/FounderBadge";
 import { FlagDialog } from "@/components/FlagDialog";
 import { hapticImpact, hapticNotification } from "@/lib/haptics";
-import { fetchRoomIcons, flagRoom } from "@/lib/instance";
+import { fetchRoomIcons, fetchUserDirectory, flagRoom } from "@/lib/instance";
+import type { DirectoryUser } from "@/lib/instance";
+import { useResolvedUser } from "@/lib/useResolvedUser";
+import { formatMxid, serverOf } from "@/lib/mxid";
 import { cn } from "@/lib/utils";
 
 interface PublicEntry {
@@ -40,6 +29,8 @@ interface PublicEntry {
 	nsfw?: boolean;
 }
 
+type ExploreTab = "spaces" | "people";
+
 export interface ExploreMobileProps {
 	transport: MatrixTransport | null;
 	rooms: Room[];
@@ -47,11 +38,13 @@ export interface ExploreMobileProps {
 	onJoined(roomId: RoomId, isSpace: boolean): void;
 	accessToken: string | null;
 	showNsfw: boolean;
+	onStartDm?(userId: UserId): void;
 }
 
 export function ExploreMobile({
-	transport, rooms, spaces, onJoined, accessToken, showNsfw,
+	transport, rooms, spaces, onJoined, accessToken, showNsfw, onStartDm,
 }: ExploreMobileProps) {
+	const [tab, setTab] = useState<ExploreTab>("spaces");
 	const [query, setQuery] = useState("");
 	const [results, setResults] = useState<PublicEntry[]>([]);
 	const [loading, setLoading] = useState(true);
@@ -60,10 +53,15 @@ export function ExploreMobile({
 	const [flagDialog, setFlagDialog] = useState<PublicEntry | null>(null);
 	const searchDebounceRef = useRef<number | null>(null);
 
-	// Same fetch flow as the desktop ExplorePane.  See that file for
-	// the full rationale on the two-step directory + icons backfill.
+	const [people, setPeople] = useState<DirectoryUser[]>([]);
+	const [peopleLoading, setPeopleLoading] = useState(false);
+	const peopleDebounceRef = useRef<number | null>(null);
+
+	const currentUserId = transport?.currentUserId ?? null;
+	const serverName = serverOf(currentUserId) ?? undefined;
+
 	useEffect(() => {
-		if (!transport) return;
+		if (tab !== "spaces" || !transport) return;
 		if (searchDebounceRef.current) window.clearTimeout(searchDebounceRef.current);
 		searchDebounceRef.current = window.setTimeout(async () => {
 			setLoading(true);
@@ -96,7 +94,27 @@ export function ExploreMobile({
 		return () => {
 			if (searchDebounceRef.current) window.clearTimeout(searchDebounceRef.current);
 		};
-	}, [query, transport]);
+	}, [query, transport, tab]);
+
+	useEffect(() => {
+		if (tab !== "people") return;
+		if (peopleDebounceRef.current) window.clearTimeout(peopleDebounceRef.current);
+		peopleDebounceRef.current = window.setTimeout(async () => {
+			setPeopleLoading(true);
+			setError(null);
+			try {
+				const r = await fetchUserDirectory({ q: query.trim() || undefined, limit: 50 });
+				setPeople(r.users);
+			} catch (err) {
+				setError(err instanceof Error ? err.message : String(err));
+			} finally {
+				setPeopleLoading(false);
+			}
+		}, query ? 250 : 0);
+		return () => {
+			if (peopleDebounceRef.current) window.clearTimeout(peopleDebounceRef.current);
+		};
+	}, [query, tab]);
 
 	const joinedIds = useMemo(() => {
 		const set = new Set<string>();
@@ -105,24 +123,20 @@ export function ExploreMobile({
 		return set;
 	}, [rooms, spaces]);
 
-	// Two-stage filter so the empty-state copy can distinguish
-	// "nothing public on this server yet" from "you've joined every
-	// available space."
 	const publicSpaces = useMemo(() => {
 		let live = results;
 		if (!showNsfw) live = live.filter(r => !r.nsfw);
-		// Discord-style: Explore only surfaces SPACES.  Rooms live
-		// inside their parent space.
 		return live.filter(r => r.isSpace);
 	}, [results, showNsfw]);
 
 	const visible = useMemo(
-		// Hide spaces the user has already joined — a discovery
-		// surface that keeps showing joined rows is just confusing.
-		// Stage two (after NSFW + isSpace) so the empty-state copy
-		// can still tell the user when they've cleared the directory.
 		() => publicSpaces.filter(r => !joinedIds.has(r.roomId)),
 		[publicSpaces, joinedIds],
+	);
+
+	const visiblePeople = useMemo(
+		() => people.filter(u => u.user_id !== currentUserId),
+		[people, currentUserId],
 	);
 
 	async function handleJoin(entry: PublicEntry) {
@@ -152,21 +166,43 @@ export function ExploreMobile({
 		<div className="flex-1 min-h-0 overflow-y-auto">
 			<div
 				className="px-4 pt-3"
-				// `--keyboard-inset` extends the scroll runway so the
-				// last results can clear the soft keyboard when the
-				// search field is focused (0 when the keyboard is down).
 				style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 80px + var(--keyboard-inset, 0px))" }}
 			>
 				<h1 className="text-[34px] font-bold tracking-[-0.022em] leading-[1.1] text-foreground py-3">
 					Explore
 				</h1>
 
-				{/* iOS UISearchBar.  Flex container with icon + input
-				    as siblings — keeps icon centered with the input's
-				    text baseline without any positioning math.  36pt
-				    tall, subtle fill, leading magnifying glass.  No
-				    autofocus — tab landings on iOS don't pop the
-				    keyboard. */}
+				{/* iOS-style segmented control */}
+				<div className="pb-3">
+					<div className="relative flex h-8 rounded-[8px] bg-foreground/[0.08] p-[2px]">
+						<button
+							type="button"
+							onClick={() => { void hapticImpact("light"); setTab("spaces"); }}
+							className={cn(
+								"flex-1 rounded-[7px] text-[13px] font-semibold transition-all duration-200 z-10",
+								tab === "spaces"
+									? "bg-card text-foreground shadow-sm"
+									: "text-muted-foreground",
+							)}
+						>
+							Spaces
+						</button>
+						<button
+							type="button"
+							onClick={() => { void hapticImpact("light"); setTab("people"); }}
+							className={cn(
+								"flex-1 rounded-[7px] text-[13px] font-semibold transition-all duration-200 z-10",
+								tab === "people"
+									? "bg-card text-foreground shadow-sm"
+									: "text-muted-foreground",
+							)}
+						>
+							People
+						</button>
+					</div>
+				</div>
+
+				{/* Search bar */}
 				<div className="pb-4">
 					<div
 						className={cn(
@@ -183,7 +219,7 @@ export function ExploreMobile({
 							type="search"
 							value={query}
 							onChange={(e) => setQuery(e.target.value)}
-							placeholder="Search spaces"
+							placeholder={tab === "spaces" ? "Search spaces" : "Search people"}
 							enterKeyHint="search"
 							className={cn(
 								"flex-1 min-w-0 h-full pl-2 pr-3 bg-transparent",
@@ -201,27 +237,49 @@ export function ExploreMobile({
 					</div>
 				)}
 
-				{loading && results.length === 0 ? (
-					<LoadingState />
-				) : visible.length === 0 ? (
-					<EmptyState
-						query={query}
-						everythingJoined={publicSpaces.length > 0 && !query}
-					/>
+				{tab === "spaces" ? (
+					loading && results.length === 0 ? (
+						<LoadingState />
+					) : visible.length === 0 ? (
+						<EmptyState
+							query={query}
+							everythingJoined={publicSpaces.length > 0 && !query}
+							kind="spaces"
+						/>
+					) : (
+						<div className="rounded-2xl bg-card/60 backdrop-blur-xl border border-foreground/10 overflow-hidden">
+							{visible.map((entry, idx) => (
+								<SpaceRow
+									key={entry.roomId}
+									entry={entry}
+									joined={joinedIds.has(entry.roomId)}
+									joining={joining === entry.roomId}
+									onJoin={() => handleJoin(entry)}
+									onFlag={accessToken ? () => setFlagDialog(entry) : undefined}
+									showDivider={idx > 0}
+								/>
+							))}
+						</div>
+					)
 				) : (
-					<div className="rounded-2xl bg-card/60 backdrop-blur-xl border border-foreground/10 overflow-hidden">
-						{visible.map((entry, idx) => (
-							<EntryRow
-								key={entry.roomId}
-								entry={entry}
-								joined={joinedIds.has(entry.roomId)}
-								joining={joining === entry.roomId}
-								onJoin={() => handleJoin(entry)}
-								onFlag={accessToken ? () => setFlagDialog(entry) : undefined}
-								showDivider={idx > 0}
-							/>
-						))}
-					</div>
+					peopleLoading && people.length === 0 ? (
+						<LoadingState />
+					) : visiblePeople.length === 0 ? (
+						<EmptyState query={query} everythingJoined={false} kind="people" />
+					) : (
+						<div className="rounded-2xl bg-card/60 backdrop-blur-xl border border-foreground/10 overflow-hidden">
+							{visiblePeople.map((user, idx) => (
+								<PersonRow
+									key={user.user_id}
+									user={user}
+									transport={transport}
+									serverName={serverName}
+									onMessage={onStartDm ? () => onStartDm(user.user_id as UserId) : undefined}
+									showDivider={idx > 0}
+								/>
+							))}
+						</div>
+					)
 				)}
 			</div>
 
@@ -240,7 +298,7 @@ export function ExploreMobile({
 	);
 }
 
-function EntryRow({
+function SpaceRow({
 	entry, joined, joining, onJoin, onFlag, showDivider,
 }: {
 	entry: PublicEntry;
@@ -259,8 +317,6 @@ function EntryRow({
 		<>
 			{showDivider && <div className="h-px bg-foreground/[0.08]" aria-hidden />}
 			<div className="px-4 py-3.5">
-				{/* Top section: avatar (top-aligned, doesn't grow
-				    with topic wrap) + stacked title block. */}
 				<div className="flex items-start gap-3">
 					<MatrixAvatar
 						mxc={entry.avatarUrl}
@@ -284,9 +340,6 @@ function EntryRow({
 					</div>
 				</div>
 
-				{/* Action row.  Pills on the leading side, Join +
-				    flag on the trailing.  Always rendered so rows
-				    have a consistent footer even with no pills. */}
 				<div className="flex items-center justify-between gap-2 mt-3">
 					<div className="flex items-center gap-1.5 min-w-0 flex-wrap">
 						{entry.nsfw && (
@@ -309,9 +362,6 @@ function EntryRow({
 								<Check className="size-[14px]" strokeWidth={2.75} /> Joined
 							</span>
 						) : (
-							// iOS App Store "GET" pill — subtle primary-
-							// tinted fill with primary text.  Respects
-							// the user's theme.
 							<button
 								type="button"
 								onClick={onJoin}
@@ -332,6 +382,67 @@ function EntryRow({
 		</>
 	);
 }
+
+
+function PersonRow({
+	user, transport, serverName, onMessage, showDivider,
+}: {
+	user: DirectoryUser;
+	transport: MatrixTransport | null;
+	serverName?: string;
+	onMessage?(): void;
+	showDivider: boolean;
+}) {
+	const resolved = useResolvedUser(transport, user.user_id);
+	const displayName = resolved?.displayName ?? user.user_id.slice(1, user.user_id.indexOf(":"));
+	const handle = formatMxid(user.user_id, serverName);
+
+	return (
+		<>
+			{showDivider && <div className="h-px bg-foreground/[0.08]" aria-hidden />}
+			<div className="px-4 py-3.5">
+				<div className="flex items-center gap-3">
+					<MatrixAvatar
+						mxc={resolved?.avatarMxc}
+						seed={user.user_id}
+						kind="user"
+						className="h-12 w-12 rounded-full shrink-0"
+					/>
+					<div className="flex-1 min-w-0">
+						<div className="flex items-center gap-1.5">
+							<span className="text-[17px] font-semibold text-foreground truncate">{displayName}</span>
+							{user.founder_number != null && (
+								<FounderBadge number={user.founder_number} />
+							)}
+						</div>
+						<div className="text-[13px] text-muted-foreground leading-snug mt-0.5 truncate">
+							{handle}
+						</div>
+						{user.bio && (
+							<div className="text-[14px] text-foreground/80 leading-snug mt-1 line-clamp-2">
+								{user.bio}
+							</div>
+						)}
+					</div>
+					{onMessage && (
+						<button
+							type="button"
+							onClick={() => { void hapticImpact("light"); onMessage(); }}
+							className={cn(
+								"shrink-0 px-4 h-7 rounded-full",
+								"bg-primary/15 text-primary text-[13px] font-semibold tracking-tight",
+								"active:opacity-70 transition-opacity",
+							)}
+						>
+							Message
+						</button>
+					)}
+				</div>
+			</div>
+		</>
+	);
+}
+
 
 function MetaPill({
 	tone, children,
@@ -364,17 +475,21 @@ function LoadingState() {
 	);
 }
 
-function EmptyState({ query, everythingJoined }: { query: string; everythingJoined: boolean }) {
+function EmptyState({ query, everythingJoined, kind }: { query: string; everythingJoined: boolean; kind: "spaces" | "people" }) {
 	const heading = query
 		? "No matches"
 		: everythingJoined
 			? "You're all caught up"
-			: "Nothing public yet";
+			: kind === "spaces"
+				? "Nothing public yet"
+				: "No discoverable users yet";
 	const body = query
-		? "Try a different search term, or check back later as new spaces appear."
+		? "Try a different search term, or check back later."
 		: everythingJoined
-			? "You've joined every public space on this server.  New ones will show up here as they appear."
-			: "When the operator publishes a space to this server, it'll show up here.";
+			? "You've joined every public space on this server. New ones will show up here as they appear."
+			: kind === "spaces"
+				? "When the operator publishes a space to this server, it'll show up here."
+				: "When users join this server, they'll appear here.";
 	return (
 		<div className="flex flex-col items-center justify-center gap-3 py-16 px-6 text-center">
 			<div className="size-16 rounded-2xl bg-foreground/[0.06] flex items-center justify-center">

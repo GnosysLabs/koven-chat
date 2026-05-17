@@ -115,6 +115,10 @@ import {
 	FOUNDER_CAP_PUBLIC,
 	rememberCallParticipant,
 	forgetCallParticipantsByUserInRoom,
+	readDiscoverable,
+	writeDiscoverable,
+	listDiscoverableUsers,
+	countDiscoverableUsers,
 } from "./db";
 import { deliverWebhook } from "./webhooks";
 import {
@@ -4986,6 +4990,26 @@ export function startServer(): void {
 				}
 			}
 
+			// ─── People directory ────────────────────────────────────
+			// Public listing of discoverable users for the Explore
+			// People tab.  Returns engine-side profile data; the
+			// client resolves Matrix display names + avatars.
+			if (req.method === "GET" && path === "/api/users/directory") {
+				const params = url.searchParams;
+				const q = params.get("q")?.trim() || undefined;
+				const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "50", 10) || 50, 1), 100);
+				const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
+				const rows = listDiscoverableUsers({ query: q, limit, offset });
+				const users = rows.map(r => ({
+					user_id: r.user_id,
+					bio: r.bio,
+					founder_number: r.founder_number ?? null,
+					social_links: (() => { try { return JSON.parse(r.social_links); } catch { return []; } })(),
+					banner_mxc: r.banner_mxc || null,
+				}));
+				return json({ users, total: countDiscoverableUsers() });
+			}
+
 			// ─── User profiles (bios) ────────────────────────────────
 			// Bios live in a public engine table because Matrix's profile
 			// API doesn't include a public bio field — account_data is
@@ -5006,6 +5030,7 @@ export function startServer(): void {
 					founder_number: getFounderNumber(userId),
 					social_links: readSocialLinks(userId),
 					banner_mxc: readBanner(userId),
+					discoverable: readDiscoverable(userId),
 				});
 			}
 
@@ -5033,9 +5058,9 @@ export function startServer(): void {
 				const userId = await whoami(token);
 				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
 				const body = (await req.json().catch(() => null)) as
-					{ bio?: string; social_links?: unknown; banner_mxc?: unknown } | null;
-				if (!body || (typeof body.bio !== "string" && !Array.isArray(body.social_links) && typeof body.banner_mxc !== "string")) {
-					return json({ errcode: "M_BAD_JSON", error: "bio, social_links or banner_mxc required" }, { status: 400 });
+					{ bio?: string; social_links?: unknown; banner_mxc?: unknown; discoverable?: unknown } | null;
+				if (!body || (typeof body.bio !== "string" && !Array.isArray(body.social_links) && typeof body.banner_mxc !== "string" && typeof body.discoverable !== "boolean")) {
+					return json({ errcode: "M_BAD_JSON", error: "bio, social_links, banner_mxc or discoverable required" }, { status: 400 });
 				}
 				// Clearing the bio writes an empty string rather than
 				// deleting the row — the row also carries social_links
@@ -5070,11 +5095,15 @@ export function startServer(): void {
 					}
 					writeBanner(userId, banner);
 				}
+				if (typeof body.discoverable === "boolean") {
+					writeDiscoverable(userId, body.discoverable);
+				}
 				return json({
 					user_id: userId,
 					bio: readBio(userId) ?? "",
 					social_links: readSocialLinks(userId),
 					banner_mxc: readBanner(userId),
+					discoverable: readDiscoverable(userId),
 				});
 			}
 
