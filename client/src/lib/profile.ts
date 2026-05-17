@@ -57,6 +57,7 @@ export async function fetchUserProfile(userId: string): Promise<UserProfileRespo
 		founder_number: typeof body.founder_number === "number" ? body.founder_number : null,
 		social_links: Array.isArray(body.social_links) ? body.social_links : [],
 		banner_mxc: typeof body.banner_mxc === "string" ? body.banner_mxc : null,
+		discoverable: typeof body.discoverable === "boolean" ? body.discoverable : undefined,
 	};
 }
 
