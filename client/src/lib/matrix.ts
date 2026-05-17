@@ -4350,8 +4350,11 @@ export class MatrixTransport {
 	 */
 	async leaveRoom(roomId: RoomId): Promise<void> {
 		const c = this.requireClient();
-		await c.leave(roomId);
-		await c.forget(roomId).catch(() => {/* ok if not supported */});
+		// Strip from m.direct first so ghost DMs vanish even if the
+		// server call fails (room already purged / doesn't exist).
+		await this.removeDmFromAccountData(c, roomId);
+		await c.leave(roomId).catch(() => {});
+		await c.forget(roomId).catch(() => {});
 		this.emitRoomList();
 	}
 
