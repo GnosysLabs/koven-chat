@@ -140,6 +140,7 @@ import {
 	adminResetPassword,
 	adminSetUserEmail,
 	deactivateUser,
+	kickUserFromAllRooms,
 	lockUser,
 	unlockUser,
 	getEventSender,
@@ -4350,6 +4351,10 @@ export function startServer(): void {
 							error: "synapse lock refused (user may not exist on this homeserver)",
 						}, { status: 502 });
 					}
+					// Kick from every room so the user vanishes from all
+					// member lists.  Best-effort; lock already prevents
+					// any further activity regardless.
+					await kickUserFromAllRooms(targetUserId, "Platform ban");
 					insertPlatformBan(targetUserId, reason, auth.userId, relatedFlag);
 					const rec = recordInstanceAdminAction({
 						actor: auth.userId,

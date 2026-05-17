@@ -157,6 +157,45 @@ export async function unlockUser(userId: string): Promise<boolean> {
 	return true;
 }
 
+/**
+ * Kick a user from every room they're currently joined to.  Used at
+ * platform-ban time so the user vanishes from all member lists.
+ * Best-effort: individual kick failures are logged but don't abort
+ * the sweep.  Returns the count of rooms successfully kicked from.
+ */
+export async function kickUserFromAllRooms(
+	userId: string,
+	reason: string = "Platform ban",
+): Promise<number> {
+	const listPath = `/_synapse/admin/v1/users/${encodeURIComponent(userId)}/joined_rooms`;
+	const listRes = await adminFetch(listPath);
+	if (!listRes.ok) {
+		const txt = await listRes.text().catch(() => "");
+		console.warn(`engine: kickUserFromAllRooms list ${userId} → ${listRes.status} ${txt.slice(0, 200)}`);
+		return 0;
+	}
+	const body = await listRes.json().catch(() => null) as { joined_rooms?: string[] } | null;
+	const rooms = body?.joined_rooms ?? [];
+	if (rooms.length === 0) return 0;
+
+	let kicked = 0;
+	await Promise.all(rooms.map(async (roomId) => {
+		const kickPath = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/kick`;
+		const r = await adminFetch(kickPath, {
+			method: "POST",
+			body: JSON.stringify({ user_id: userId, reason }),
+		});
+		if (r.ok) {
+			kicked++;
+		} else {
+			const txt = await r.text().catch(() => "");
+			console.warn(`engine: kickUserFromAllRooms ${userId} from ${roomId} → ${r.status} ${txt.slice(0, 80)}`);
+		}
+	}));
+	console.log(`engine: kicked ${userId} from ${kicked}/${rooms.length} rooms`);
+	return kicked;
+}
+
 // ─── Admin user-token (real admin, not the appservice) ──────────────
 //
 // /_synapse/admin/v2/users (PUT) and /_synapse/admin/v1/users/<id>/login
