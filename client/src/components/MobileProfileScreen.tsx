@@ -281,14 +281,14 @@ export function MobileProfileScreen({
 				) : !editing ? (
 					/* ─── Read mode ─────────────────────────────────── */
 					<div>
-						<ProfileBanner mxc={bannerMxc} className="h-40" />
-						{/* relative z-10 lifts the avatar block above the
-						    banner: the banner's mask makes it a stacking
-						    context that would otherwise paint over (and
-						    fade into) the avatar where the block overlaps. */}
+						<ProfileBanner
+							mxc={bannerMxc}
+							previewSrc={bannerMxc ? undefined : "/default-banner.png"}
+							className="h-40"
+						/>
 						<div className={cn(
 							"relative z-10 flex items-center gap-4 px-5 pb-4",
-							bannerMxc ? "-mt-14 pt-4" : "pt-6",
+							"-mt-14 pt-4",
 						)}>
 							<MatrixAvatar
 								mxc={profile.avatarUrl}
@@ -296,7 +296,7 @@ export function MobileProfileScreen({
 								kind="user"
 								className={cn(
 									"h-20 w-20 shrink-0 rounded-full",
-									bannerMxc ? "ring-4 ring-background" : "ring-1 ring-foreground/10",
+									"ring-4 ring-background",
 								)}
 							/>
 							<div className="flex-1 min-w-0">
@@ -318,38 +318,40 @@ export function MobileProfileScreen({
 							)}
 						</div>
 
-						{bio.trim() ? (
-							<>
-								<GroupLabel>Bio</GroupLabel>
-								<GroupCard>
-									<div className="px-4 py-3 text-[15px] leading-relaxed text-foreground whitespace-pre-wrap">
-										{bio}
-									</div>
-								</GroupCard>
-							</>
-						) : null}
+						<GroupLabel>Bio</GroupLabel>
+						<GroupCard>
+							<div className="px-4 py-3 text-[15px] leading-relaxed whitespace-pre-wrap">
+								{bio.trim() ? (
+									<span className="text-foreground">{bio}</span>
+								) : (
+									<span className="text-muted-foreground/60 italic">You haven't added a bio yet.</span>
+								)}
+							</div>
+						</GroupCard>
 
-						{socialLinks.length > 0 && (
-							<>
-								<GroupLabel>Links</GroupLabel>
-								<GroupCard>
-									<div className="flex flex-wrap gap-2 px-4 py-3">
-										{socialLinks.map((link) => (
-											<a
-												key={link.platform}
-												href={link.platform === "email" ? `mailto:${link.url}` : link.url}
-												target={link.platform === "email" ? undefined : "_blank"}
-												rel="noopener noreferrer"
-												className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-												title={SOCIAL_PLATFORMS.find(p => p.id === link.platform)?.label ?? link.platform}
-											>
-												<SocialIcon platform={link.platform} className="h-5 w-5" />
-											</a>
-										))}
-									</div>
-								</GroupCard>
-							</>
-						)}
+						<GroupLabel>Links</GroupLabel>
+						<GroupCard>
+							{socialLinks.length > 0 ? (
+								<div className="flex flex-wrap gap-2 px-4 py-3">
+									{socialLinks.map((link) => (
+										<a
+											key={link.platform}
+											href={link.platform === "email" ? `mailto:${link.url}` : link.url}
+											target={link.platform === "email" ? undefined : "_blank"}
+											rel="noopener noreferrer"
+											className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+											title={SOCIAL_PLATFORMS.find(p => p.id === link.platform)?.label ?? link.platform}
+										>
+											<SocialIcon platform={link.platform} className="h-5 w-5" />
+										</a>
+									))}
+								</div>
+							) : (
+								<div className="px-4 py-3 text-[15px] text-muted-foreground/60 italic">
+									No links added yet.
+								</div>
+							)}
+						</GroupCard>
 
 					</div>
 				) : (
