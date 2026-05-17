@@ -857,7 +857,7 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 					// Compact single-column — there's no editing surface
 					// here, so the layout stays narrow and quick to scan.
 					<div>
-						<ProfileBanner mxc={bannerMxc} previewSrc={bannerMxc ? undefined : "/default-banner.png"} className="h-40" />
+						<ProfileBanner mxc={bannerMxc} previewSrc={bannerMxc ? undefined : "/default-banner.png"} className="h-40 rounded-t-lg" />
 						<div className={cn(
 							"relative z-10 flex items-center gap-4 px-5 pb-4",
 							bannerMxc ? "-mt-14 pt-4" : "-mt-14 pt-4",
