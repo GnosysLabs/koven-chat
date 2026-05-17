@@ -3064,7 +3064,7 @@ function AttachmentImage({ message }: { message: Message }) {
 		return (
 			<div
 				className="rounded-lg bg-muted-foreground/10 animate-pulse"
-				style={{ width: displayWidth, height: displayHeight }}
+				style={{ width: displayWidth, height: displayHeight, maxWidth: "100%", aspectRatio: `${displayWidth}/${displayHeight}` }}
 			/>
 		);
 	}
@@ -3076,7 +3076,7 @@ function AttachmentImage({ message }: { message: Message }) {
 				width={displayWidth}
 				height={displayHeight}
 				className="rounded-lg block"
-				style={{ width: displayWidth, height: displayHeight }}
+				style={{ maxWidth: "100%", height: "auto", aspectRatio: `${displayWidth}/${displayHeight}` }}
 				onContextMenu={onContextMenu}
 			/>
 			{menu}
@@ -3127,11 +3127,8 @@ function AttachmentVideo({ message }: { message: Message }) {
 		}
 	}
 
+	const mediaStyle = { maxWidth: "100%" as const, height: "auto" as const, aspectRatio: `${displayWidth}/${displayHeight}` };
 	if (!url) {
-		// While the main video URL is loading: if we already have the
-		// poster, show it instead of the dead grey skeleton.  The
-		// poster fetches FAR faster than the video (KB vs MB), so
-		// this dramatically reduces perceived load time.
 		if (poster) {
 			return (
 				<img
@@ -3140,19 +3137,19 @@ function AttachmentVideo({ message }: { message: Message }) {
 					width={displayWidth}
 					height={displayHeight}
 					className="rounded-lg block"
-					style={{ width: displayWidth, height: displayHeight }}
+					style={mediaStyle}
 				/>
 			);
 		}
 		return (
 			<div
 				className="rounded-lg bg-muted-foreground/10 animate-pulse"
-				style={{ width: displayWidth, height: displayHeight }}
+				style={{ width: displayWidth, height: displayHeight, maxWidth: "100%", aspectRatio: `${displayWidth}/${displayHeight}` }}
 			/>
 		);
 	}
 	return (
-		<div className="relative inline-block group/video" onContextMenu={onContextMenu}>
+		<div className="relative inline-block group/video" style={{ maxWidth: "100%" }} onContextMenu={onContextMenu}>
 			<video
 				ref={videoRef}
 				src={url}
@@ -3160,13 +3157,8 @@ function AttachmentVideo({ message }: { message: Message }) {
 				preload="metadata"
 				width={displayWidth}
 				height={displayHeight}
-				// Drop native controls entirely.  The glass play
-				// overlay below + click-to-toggle on the element
-				// itself is the whole UI; users who want scrubbing
-				// / time / volume can right-click → Open in new
-				// tab (or use the context menu's Save action).
 				className="rounded-lg block cursor-pointer"
-				style={{ width: displayWidth, height: displayHeight }}
+				style={mediaStyle}
 				onClick={togglePlay}
 				onPlay={() => setPlaying(true)}
 				onPause={() => setPlaying(false)}
