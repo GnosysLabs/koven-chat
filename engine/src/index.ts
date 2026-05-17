@@ -11,6 +11,7 @@ import { config } from "./config";
 import "./db";
 import { startServer } from "./server";
 import { gcMcpScratchDirs } from "./mcp/janitor";
+import { reapStaleCallParticipants } from "./db";
 import { bootstrapAdminIfNeeded } from "./admins";
 import { startAllBots, stopAllBots } from "./bot_manager";
 import { adminListLocalUsersByRegistration, registerAppserviceUser } from "./synapse";
@@ -115,6 +116,8 @@ async function fullTick(): Promise<void> {
 	// ran weight recomputation + the consensus-collapse evaluator;
 	// both went away when Koven switched to admin-driven moderation.
 	bootstrapAdminIfNeeded();
+	const reaped = reapStaleCallParticipants();
+	if (reaped > 0) console.log(`engine: reaped ${reaped} stale call participant(s)`);
 	// MCP scratch-dir janitor.  Cheap (just stat + readdir) but no
 	// reason to run every minute — once an hour is plenty for a
 	// 30-day idle window.

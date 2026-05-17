@@ -2069,6 +2069,21 @@ export function listRoomCallParticipants(roomId: string): CallParticipantRow[] {
 	return listRoomCallParticipantsStmt.all(roomId) as CallParticipantRow[];
 }
 
+const CALL_PARTICIPANT_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
+
+const reapStaleCallParticipantsStmt = db.prepare(
+	`DELETE FROM room_call_participants WHERE joined_at < ?`
+);
+
+/** Remove call participants whose joined_at is older than the TTL.
+ * No real call lasts 4 hours on this platform; anything older is a
+ * ghost from a missed webhook or crashed client. */
+export function reapStaleCallParticipants(): number {
+	const cutoff = Date.now() - CALL_PARTICIPANT_TTL_MS;
+	const result = reapStaleCallParticipantsStmt.run(cutoff);
+	return result.changes;
+}
+
 /** Distinct room ids with at least one participant in voice.  Used
  * to drive the sidebar social-signal indicator (avatars next to
  * room names in the room list). */
