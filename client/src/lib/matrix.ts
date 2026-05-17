@@ -4764,7 +4764,7 @@ export class MatrixTransport {
 	}
 
 	// Strip a room from m.direct account data.  Idempotent.
-	private async removeDmFromAccountData(c: MatrixClient, roomId: string): Promise<void> {
+	private async removeDmFromAccountData(c: sdk.MatrixClient, roomId: string): Promise<void> {
 		const directContent = (c.getAccountData("m.direct")?.getContent() ?? {}) as Record<string, string[]>;
 		const next: Record<string, string[]> = {};
 		let mutated = false;
@@ -4774,8 +4774,8 @@ export class MatrixTransport {
 			if (filtered.length > 0) next[user] = filtered;
 		}
 		if (mutated) {
-			await c.setAccountData("m.direct" as any, next as any).catch(err => {
-				console.warn("deleteDm: setAccountData(m.direct) failed", err);
+			await c.setAccountData("m.direct" as any, next as any).catch(() => {
+				console.warn("deleteDm: setAccountData(m.direct) failed");
 			});
 		}
 	}
