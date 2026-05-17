@@ -1046,6 +1046,9 @@ export class MatrixTransport {
 				void this.client?.getCrypto()?.checkKeyBackupAndEnable().catch(err => {
 					console.warn("matrix: post-sync checkKeyBackupAndEnable failed", err);
 				});
+				void this.pruneStaleDirectRooms().catch(err =>
+					console.warn("matrix: m.direct prune failed", err),
+				);
 			}
 		});
 
@@ -4711,11 +4714,18 @@ export class MatrixTransport {
 		const token = this.creds?.access_token;
 		if (!token) throw new Error("deleteDm: no access token");
 
-		// Phase 1: server-side purge.  One round-trip; the engine
-		// validates DM-shape and then asks Synapse to purge the room
-		// entirely.  Reusing the old "redacting" phase tag for the
-		// progress callback so the modal's existing copy still
-		// makes sense ("Deleting messages…") without UI changes.
+		// Always strip the room from m.direct FIRST, before the
+		// server call.  If the server-side purge fails (room already
+		// gone, membership check fails, network error), the ghost
+		// entry in m.direct is what keeps the DM visible.  Cleaning
+		// it up front guarantees the room disappears from the
+		// conversation list regardless of server outcome.
+		onProgress?.("cleanup", 0, 1);
+		await this.removeDmFromAccountData(c, roomId);
+		onProgress?.("cleanup", 1, 1);
+
+		// Server-side purge.  One round-trip; the engine validates
+		// DM-shape and then asks Synapse to purge the room entirely.
 		onProgress?.("redacting", 0, 1);
 		const res = await fetch(`${ENGINE_URL}/api/dm/delete`, {
 			method: "POST",
@@ -4726,6 +4736,11 @@ export class MatrixTransport {
 			body: JSON.stringify({ room_id: roomId }),
 		});
 		if (!res.ok) {
+			// Best-effort: even if the server rejects (room already
+			// purged, not a member, etc.) the m.direct cleanup above
+			// already ran, so the ghost is gone from the UI.  Only
+			// throw if the room genuinely still exists and something
+			// unexpected went wrong.
 			let detail = "";
 			try {
 				const body = await res.json() as { error?: string; detail?: string };
@@ -4733,16 +4748,23 @@ export class MatrixTransport {
 			} catch {
 				// fall through with generic message
 			}
-			throw new Error(`Server-side delete failed (HTTP ${res.status})${detail}`);
+			// If the room is already gone server-side, treat as
+			// success (the whole point was to make it vanish).
+			const alreadyGone = res.status === 502 || res.status === 403;
+			if (!alreadyGone) {
+				throw new Error(`Server-side delete failed (HTTP ${res.status})${detail}`);
+			}
 		}
 		onProgress?.("redacting", 1, 1);
 
-		// Phase 2: local cleanup.  The room is gone server-side, so
-		// these calls just nudge matrix-js-sdk's local cache to drop
-		// it without waiting for the next /sync to settle.  All
-		// best-effort; the server-side delete is the authoritative
-		// step.
-		onProgress?.("cleanup", 0, 1);
+		// Nudge the local SDK cache.
+		await c.leave(roomId).catch(() => {});
+		await c.forget(roomId).catch(() => {});
+		this.emitRoomList();
+	}
+
+	// Strip a room from m.direct account data.  Idempotent.
+	private async removeDmFromAccountData(c: MatrixClient, roomId: string): Promise<void> {
 		const directContent = (c.getAccountData("m.direct")?.getContent() ?? {}) as Record<string, string[]>;
 		const next: Record<string, string[]> = {};
 		let mutated = false;
@@ -4753,13 +4775,31 @@ export class MatrixTransport {
 		}
 		if (mutated) {
 			await c.setAccountData("m.direct" as any, next as any).catch(err => {
-				console.warn("deleteDm: setAccountData failed", err);
+				console.warn("deleteDm: setAccountData(m.direct) failed", err);
 			});
 		}
-		await c.leave(roomId).catch(() => {/* already gone server-side */});
-		await c.forget(roomId).catch(() => {/* ok if not supported */});
-		onProgress?.("cleanup", 1, 1);
-		this.emitRoomList();
+	}
+
+	// Prune m.direct entries that reference rooms the user is no
+	// longer joined to.  Runs once at "ready" to sweep ghost DMs
+	// left behind by partial deletes or server-side purges that
+	// completed without the client updating its account data.
+	private async pruneStaleDirectRooms(): Promise<void> {
+		const c = this.client;
+		if (!c) return;
+		const directContent = (c.getAccountData("m.direct")?.getContent() ?? {}) as Record<string, string[]>;
+		const joinedRoomIds = new Set(c.getRooms().map(r => r.roomId));
+		const next: Record<string, string[]> = {};
+		let mutated = false;
+		for (const [user, rooms] of Object.entries(directContent)) {
+			const filtered = (Array.isArray(rooms) ? rooms : []).filter(rid => joinedRoomIds.has(rid));
+			if (filtered.length !== (rooms?.length ?? 0)) mutated = true;
+			if (filtered.length > 0) next[user] = filtered;
+		}
+		if (mutated) {
+			await c.setAccountData("m.direct" as any, next as any);
+			this.emitRoomList();
+		}
 	}
 
 	/**
