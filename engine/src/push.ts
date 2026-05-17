@@ -68,7 +68,7 @@ function invalidateJwt(): void {
 
 interface PushPayload {
 	title: string;
-	body: string | null;
+	body: string;
 	roomId: string;
 	eventId: string;
 }
@@ -99,7 +99,7 @@ async function sendToApns(token: string, payload: PushPayload): Promise<void> {
 		aps: {
 			alert: {
 				title: payload.title,
-				...(payload.body ? { body: payload.body } : {}),
+				body: payload.body,
 			},
 			sound: "default",
 			"thread-id": payload.roomId,
@@ -148,10 +148,22 @@ function buildTitle(kind: string, senderLocalpart: string): string {
 	switch (kind) {
 		case "dm": return senderLocalpart;
 		case "mention": return `${senderLocalpart} mentioned you`;
-		case "reply": return `${senderLocalpart} replied`;
+		case "reply": return `${senderLocalpart} replied to you`;
 		case "invite": return `${senderLocalpart} invited you`;
 		case "message": return senderLocalpart;
 		default: return senderLocalpart;
+	}
+}
+
+function buildBody(kind: string, snippet: string | null): string {
+	if (snippet) return snippet;
+	switch (kind) {
+		case "dm": return "Sent you a message";
+		case "mention": return "Mentioned you in a message";
+		case "reply": return "Replied to your message";
+		case "invite": return "Invited you to a conversation";
+		case "message": return "Sent a message";
+		default: return "Sent a message";
 	}
 }
 
@@ -179,6 +191,7 @@ export async function sendPushNotifications(
 		: opts.sender;
 
 	const title = buildTitle(opts.kind, senderLocalpart);
+	const body = buildBody(opts.kind, opts.snippet);
 
 	const promises: Promise<void>[] = [];
 	for (const t of tokens) {
@@ -186,7 +199,7 @@ export async function sendPushNotifications(
 			promises.push(
 				sendToApns(t.token, {
 					title,
-					body: opts.snippet,
+					body,
 					roomId: opts.roomId,
 					eventId: opts.eventId,
 				}).catch(err => {
