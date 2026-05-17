@@ -111,14 +111,6 @@ export function MobileSettingsScreen({
 			/>
 
 			<div className="flex-1 overflow-y-auto pb-10">
-				{/* Large title — collapses to compact title on scroll
-				    via the static nav bar above.  Sits flush left at
-				    16pt screen margin. */}
-				<div className="px-5 pt-3 pb-5">
-					<h1 className="text-[34px] font-bold tracking-[-0.022em] leading-none text-foreground">
-						Settings
-					</h1>
-				</div>
 
 				{/* ─── Preferences ─────────────────────────────────── */}
 				<GroupLabel>Preferences</GroupLabel>

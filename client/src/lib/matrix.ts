@@ -6232,9 +6232,22 @@ export class MatrixTransport {
 			}
 		}
 
+		// DM name: prefer the other party's display name over the SDK's
+		// r.name (which sometimes resolves to the raw mxid when member
+		// state hasn't fully loaded or the hero list is stale).
+		let roomName = r.name || dmUserId || r.roomId;
+		if (isDm && dmUserId) {
+			const otherMember = r.getMember(dmUserId);
+			const liveUser = this.client?.getUser(dmUserId);
+			const resolved = otherMember?.name ?? liveUser?.displayName;
+			if (resolved && resolved !== dmUserId) {
+				roomName = resolved;
+			}
+		}
+
 		return {
 			id: r.roomId as RoomId,
-			name: r.name || dmUserId || r.roomId,
+			name: roomName,
 			topic: r.currentState.getStateEvents("m.room.topic", "")?.getContent().topic,
 			// Raw mxc:// — UI components fetch via getMxcBlobUrl().
 			avatarUrl,
@@ -6590,7 +6603,11 @@ export class MatrixTransport {
 		if (!sender) return null;
 
 		const member = room.getMember(sender);
-		const displayName = member?.name ?? sender;
+		const liveUserProfile = this.client?.getUser(sender);
+		const displayName = (member?.name && member.name !== sender ? member.name : null)
+			?? liveUserProfile?.displayName
+			?? member?.name
+			?? sender;
 
 		// Decryption failures: matrix-js-sdk leaves the event in the
 		// timeline with content.body set to a raw error string like

@@ -26,7 +26,7 @@ export function ReactionPills({ reactions, onToggle }: ReactionPillsProps) {
 							? r.reactors.join(", ")
 							: `${r.reactors.slice(0, 4).join(", ")} and ${r.reactors.length - 4} more`}
 						className={cn(
-							"inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-xs leading-none transition-colors",
+							"inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs leading-none transition-colors",
 							reacted
 								? "bg-primary/10 border-primary/40 text-foreground"
 								: "bg-secondary border-border text-muted-foreground hover:bg-accent hover:text-foreground"

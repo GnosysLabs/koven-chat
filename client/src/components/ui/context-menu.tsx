@@ -115,24 +115,36 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
 	// attempts).
 	useEffect(() => {
 		mountedAtRef.current = Date.now();
+		function isOutside(target: HTMLElement | null) {
+			if (!ref.current || !target) return false;
+			if (ref.current.contains(target)) return false;
+			if (target.closest("[data-submenu-portal]")) return false;
+			return true;
+		}
 		const onDown = (e: MouseEvent) => {
-			// Grace period: on mobile, lifting the finger after a long
-			// press generates a synthetic mousedown.  Without this guard
-			// the menu opens then immediately closes from that event.
 			if (Date.now() - mountedAtRef.current < 300) return;
-			const target = e.target as HTMLElement | null;
-			if (!ref.current || !target) return;
-			if (ref.current.contains(target)) return;
-			if (target.closest("[data-submenu-portal]")) return;
+			if (!isOutside(e.target as HTMLElement | null)) return;
+			e.preventDefault();
+			e.stopPropagation();
+			onClose();
+		};
+		const onTouch = (e: TouchEvent) => {
+			if (Date.now() - mountedAtRef.current < 300) return;
+			if (!isOutside(e.target as HTMLElement | null)) return;
+			e.preventDefault();
+			e.stopPropagation();
 			onClose();
 		};
 		const onKey = (e: KeyboardEvent) => {
 			if (e.key === "Escape") onClose();
 		};
-		document.addEventListener("mousedown", onDown);
+		const captureNonPassive = { capture: true, passive: false } as const;
+		document.addEventListener("mousedown", onDown, true);
+		document.addEventListener("touchstart", onTouch, captureNonPassive);
 		document.addEventListener("keydown", onKey);
 		return () => {
-			document.removeEventListener("mousedown", onDown);
+			document.removeEventListener("mousedown", onDown, true);
+			document.removeEventListener("touchstart", onTouch, captureNonPassive);
 			document.removeEventListener("keydown", onKey);
 		};
 	}, [onClose]);

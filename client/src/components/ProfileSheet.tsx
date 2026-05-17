@@ -32,6 +32,7 @@ import { getFounderCap } from "@/lib/founders-cache";
 import { formatMxid, serverOf } from "@/lib/mxid";
 import { getPublicBotInfo } from "@/lib/bots";
 import type { UserId } from "@koven/shared";
+import { cn } from "@/lib/utils";
 
 export interface ProfileSheetProps {
 	// User whose profile is being shown.  `null` keeps the dialog closed.
@@ -855,39 +856,32 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 					// ─── Read-only member view ────────────────────────────
 					// Compact single-column — there's no editing surface
 					// here, so the layout stays narrow and quick to scan.
-					<div className="space-y-4">
-						<ProfileBanner mxc={bannerMxc} className="h-28 rounded-lg" />
-						{/* relative z-10 lifts the row above the banner: the
-						    banner's mask makes it a stacking context, which
-						    would otherwise paint over (and fade into) the
-						    avatar + badge where the row overlaps it. */}
-						<div
-							className="relative z-10 flex items-center gap-4"
-							style={bannerMxc ? { marginTop: "-2.5rem" } : undefined}
-						>
+					<div>
+						<ProfileBanner mxc={bannerMxc} previewSrc={bannerMxc ? undefined : "/default-banner.png"} className="h-40" />
+						<div className={cn(
+							"relative z-10 flex items-center gap-4 px-5 pb-4",
+							bannerMxc ? "-mt-14 pt-4" : "-mt-14 pt-4",
+						)}>
 							<MatrixAvatar
 								mxc={profile.avatarUrl}
 								seed={profile.userId}
 								kind={isBot ? "bot" : "user"}
-								className={`h-16 w-16${bannerMxc ? " ring-4 ring-background" : ""}`}
+								className={cn(
+									"h-20 w-20 shrink-0 rounded-full",
+									"ring-4 ring-background",
+								)}
 							/>
-							<div className="min-w-0 flex-1">
-								<div className="text-base font-semibold truncate flex items-center gap-1.5">
-									<span className="truncate">{profile.displayName}</span>
+							<div className="flex-1 min-w-0">
+								<div className="text-[22px] font-semibold tracking-[-0.01em] text-foreground leading-tight break-words">
+									{profile.displayName}
 									{isBot && <BotBadge compact={false} />}
 								</div>
-								<div className="text-xs text-muted-foreground font-mono truncate">
-									{formatMxid(profile.userId, serverOf(transport?.currentUserId ?? null))}
+								<div className="text-[14px] text-muted-foreground leading-snug truncate">
+									{profile.userId.includes(":") ? `@${profile.userId.slice(1, profile.userId.indexOf(":"))}` : profile.userId}
 								</div>
 							</div>
-							{/* Holograph chip lives in the header row,
-							    right-aligned next to the name.
-							    `flex-1` on the middle column pushes the
-							    badge to the right edge automatically;
-							    `shrink-0` keeps it intact when the
-							    display name truncates. */}
 							{founderNumber !== null && (
-								<div className="shrink-0">
+								<div className="shrink-0 self-center">
 									<FounderBadge
 										number={founderNumber}
 										cap={getFounderCap()}
@@ -897,28 +891,38 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 							)}
 						</div>
 
-						{bio.trim() && (
-							<p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap">
-								{bio}
-							</p>
-						)}
+						<div className="px-5 space-y-4">
+							{bio.trim() ? (
+								<p className="text-[15px] leading-relaxed text-foreground whitespace-pre-wrap">
+									{bio}
+								</p>
+							) : (
+								<p className="text-[15px] text-muted-foreground/60 italic">
+									This user hasn't added a bio yet.
+								</p>
+							)}
 
-						{socialLinks.length > 0 && (
-							<div className="flex flex-wrap gap-1.5">
-								{socialLinks.map((link) => (
-									<a
-										key={link.platform}
-										href={link.platform === "email" ? `mailto:${link.url}` : link.url}
-										target={link.platform === "email" ? undefined : "_blank"}
-										rel="noopener noreferrer"
-										className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-										title={SOCIAL_PLATFORMS.find(p => p.id === link.platform)?.label ?? link.platform}
-									>
-										<SocialIcon platform={link.platform} className="h-4 w-4" />
-									</a>
-								))}
-							</div>
-						)}
+							{socialLinks.length > 0 ? (
+								<div className="flex flex-wrap gap-2">
+									{socialLinks.map((link) => (
+										<a
+											key={link.platform}
+											href={link.platform === "email" ? `mailto:${link.url}` : link.url}
+											target={link.platform === "email" ? undefined : "_blank"}
+											rel="noopener noreferrer"
+											className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+											title={SOCIAL_PLATFORMS.find(p => p.id === link.platform)?.label ?? link.platform}
+										>
+											<SocialIcon platform={link.platform} className="h-5 w-5" />
+										</a>
+									))}
+								</div>
+							) : (
+								<p className="text-[15px] text-muted-foreground/60 italic">
+									No links added yet.
+								</p>
+							)}
+						</div>
 
 						{isBot && creator && (
 							// "Created by" credit row.  Renders the

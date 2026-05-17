@@ -2059,7 +2059,14 @@ function MessageRowComponent({
 	const swipeRepliedRef = useRef(false);
 	const SWIPE_REPLY_THRESHOLD = 56;
 	const SWIPE_SOFT_CAP = 96;
-	const dragBind = useDrag(({ first, last, active, movement: [mx, my], xy, tap }) => {
+	const dragBind = useDrag(({ first, last, active, movement: [mx, my], xy, tap, cancel }) => {
+		// Touches near the left edge belong to the PushSlot back-swipe.
+		// Cancel immediately so use-gesture releases the pointer and the
+		// parent slot can capture it.
+		if (first && isMobileShell && xy[0] < 44) {
+			cancel();
+			return;
+		}
 		// Touchdown: arm the long-press timer at the press anchor.
 		// 500ms threshold matches iOS Messages.
 		if (first) {
@@ -2208,7 +2215,7 @@ function MessageRowComponent({
 	// for reactions.  New-group top is also pulled in from 16px →
 	// 8px since mobile viewports waste vertical space fast.
 	const rowPadding = isMobileShell
-		? cn(continuesGroup ? "pt-0" : "pt-2", "pb-0.5")
+		? cn(continuesGroup ? "pt-0" : "pt-2", hasReactions ? "pb-2" : "pb-0.5")
 		: cn(
 			continuesGroup ? "pt-0" : "pt-4",
 			hasReactions ? "pb-7" : "pb-0.5",
@@ -2480,7 +2487,7 @@ function MessageRowComponent({
 									// Always left-aligned beneath the
 									// bubble to match Koven's left-
 									// aligned bubble column.
-									? "mt-1 flex-wrap justify-start"
+									? "mt-0.5 flex-wrap justify-start"
 									: "absolute top-0 left-full ml-2 shrink-0 whitespace-nowrap",
 							)}
 						>

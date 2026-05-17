@@ -997,6 +997,11 @@ export function startServer(): void {
 						);
 					}
 				}
+				// Apple review account: skip sending a real code.
+				if (email === "christomatt.89+apple@gmail.com") {
+					const isNew = lookupUserByEmail(email) === null;
+					return json({ ok: true, is_new_account: isNew });
+				}
 				const issued = issueAuthCode(email, config.emailCodeTtlMs);
 				if ("error" in issued) {
 					return json({ error: issued.error }, { status: 429 });
@@ -1033,15 +1038,17 @@ export function startServer(): void {
 					return json({ error: "invalid_request" }, { status: 400 });
 				}
 
-				const verify = verifyAuthCode(email, code);
-				if ("error" in verify) {
+				// Apple review account: accept fixed code "000000".
+				const isAppleReview = email === "christomatt.89+apple@gmail.com" && code === "000000";
+				const verify = isAppleReview ? null : verifyAuthCode(email, code);
+				if (verify && "error" in verify) {
 					return json({ error: verify.error }, { status: 401 });
 				}
 				// Code is valid but NOT yet consumed; we'll mark it used
 				// at the very end of this handler so any retryable
 				// failure mid-flow (taken username, etc.) leaves the
 				// code valid for another attempt.
-				const codeId = verify.codeId;
+				const codeId = verify?.codeId ?? null;
 
 				let userId = lookupUserByEmail(email);
 				if (!userId) {
@@ -1161,7 +1168,7 @@ export function startServer(): void {
 				// Everything succeeded.  Burn the code now so it can't
 				// be replayed; up to this point any error returned
 				// above left it valid for a retry.
-				markAuthCodeUsed(codeId);
+				if (codeId) markAuthCodeUsed(codeId);
 				touchEmailLogin(email);
 				return json({
 					ok: true,

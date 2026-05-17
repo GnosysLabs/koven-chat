@@ -22,6 +22,7 @@
 import { Gem } from "lucide-react";
 import confetti from "canvas-confetti";
 import { cn } from "@/lib/utils";
+import { hapticNotification } from "@/lib/haptics";
 
 /** Fire a small holograph-coloured confetti burst from a viewport
  * coordinate.  Used by the inline + profile Founder chips on click —
@@ -87,6 +88,7 @@ export function FounderBadge({
 	// dedicated affordance, not a passthrough.
 	const onClick = (e: React.MouseEvent<HTMLElement>) => {
 		e.stopPropagation();
+		void hapticNotification("success");
 		const rect = e.currentTarget.getBoundingClientRect();
 		pop(rect.left + rect.width / 2, rect.top + rect.height / 2);
 	};

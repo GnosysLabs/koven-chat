@@ -287,32 +287,35 @@ export function MobileProfileScreen({
 						    context that would otherwise paint over (and
 						    fade into) the avatar where the block overlaps. */}
 						<div className={cn(
-							"relative z-10 flex flex-col items-center px-5 pb-7 gap-3",
-							bannerMxc ? "-mt-14" : "pt-6",
+							"relative z-10 flex items-center gap-4 px-5 pb-4",
+							bannerMxc ? "-mt-14 pt-4" : "pt-6",
 						)}>
 							<MatrixAvatar
 								mxc={profile.avatarUrl}
 								seed={profile.userId}
 								kind="user"
 								className={cn(
-									"h-28 w-28 rounded-full",
+									"h-20 w-20 shrink-0 rounded-full",
 									bannerMxc ? "ring-4 ring-background" : "ring-1 ring-foreground/10",
 								)}
 							/>
-							<div className="flex flex-col items-center gap-1 max-w-full">
-								<div className="text-[22px] font-semibold tracking-[-0.01em] text-foreground leading-tight text-center px-4 max-w-[320px] break-words">
+							<div className="flex-1 min-w-0">
+								<div className="text-[22px] font-semibold tracking-[-0.01em] text-foreground leading-tight break-words">
 									{profile.displayName}
 								</div>
-								{founderNumber !== null && (
-									<div className="mt-1.5">
-										<FounderBadge
-											number={founderNumber}
-											cap={getFounderCap()}
-											variant="profile"
-										/>
-									</div>
-								)}
+								<div className="text-[14px] text-muted-foreground leading-snug truncate">
+									{userId.includes(":") ? `@${userId.slice(1, userId.indexOf(":"))}` : userId}
+								</div>
 							</div>
+							{founderNumber !== null && (
+								<div className="shrink-0 self-center">
+									<FounderBadge
+										number={founderNumber}
+										cap={getFounderCap()}
+										variant="profile"
+									/>
+								</div>
+							)}
 						</div>
 
 						{bio.trim() ? (

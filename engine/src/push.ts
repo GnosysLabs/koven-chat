@@ -122,7 +122,7 @@ async function sendToApns(token: string, payload: PushPayload): Promise<void> {
 	if (res.status === 200) return;
 
 	if (res.status === 410 || res.status === 400) {
-		console.warn(`[push] APNs rejected token (${res.status}), should be pruned: ${token.slice(0, 8)}...`);
+		console.warn(`[push] APNs rejected token (${res.status}): ${res.data} — token=${token.slice(0, 16)}... topic=${BUNDLE_ID}`);
 		return;
 	}
 

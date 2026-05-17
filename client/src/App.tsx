@@ -28,6 +28,7 @@ import { MobileTopBar } from "@/components/MobileTopBar";
 import { MobileTabBar, type MobileTab } from "@/components/MobileTabBar";
 import { MobileMeScreen } from "@/components/MobileMeScreen";
 import { MobileProfileScreen } from "@/components/MobileProfileScreen";
+import { MobileOtherProfileScreen } from "@/components/MobileOtherProfileScreen";
 import { MobileSettingsScreen } from "@/components/MobileSettingsScreen";
 import { PushSlot } from "@/components/mobile/Chrome";
 import { isMobileShell } from "@/lib/mobile";
@@ -3663,16 +3664,20 @@ export default function App() {
 									: "chats"
 					}
 					onChange={(tab: MobileTab) => {
-						// Switching tabs always clears the Me/Spaces
-						// overlays + drops any open chat so the user
-						// sees the tab's landing screen on first tap.
+						const alreadyActive =
+							(tab === "me" && mobileMeOpen)
+							|| (tab === "spaces" && mobileSpacesOpen)
+							|| (tab === "chats" && !mobileMeOpen && !mobileSpacesOpen && state.activeSpace?.kind !== "explore")
+							|| (tab === "explore" && !mobileMeOpen && !mobileSpacesOpen && state.activeSpace?.kind === "explore");
+
+						if (alreadyActive) {
+							if (tab === "me") setMeStack("root");
+							if (tab === "spaces") setMobileSelectedSpaceId(null);
+							return;
+						}
+
 						setMobileMeOpen(tab === "me");
 						setMobileSpacesOpen(tab === "spaces");
-						// Reset the Me-tab push stack so re-entry lands
-						// on the root (avatar list), not whatever push
-						// the user was in last.  iOS Settings/Mail
-						// behave the same — tabs are roots, not deep
-						// state.
 						if (tab !== "me") setMeStack("root");
 						if (tab !== "spaces") setMobileSelectedSpaceId(null);
 						if (tab === "me" || tab === "spaces") return;
@@ -3895,8 +3900,52 @@ export default function App() {
 				}
 				isSpace={!!invitingRoomId && state.spaces.some(s => s.id === invitingRoomId)}
 			/>
+			{isMobileShell && viewedUserId && viewedUserId !== creds.user_id && (
+				<div className="fixed inset-0 z-50 bg-background">
+					<MobileOtherProfileScreen
+						transport={transport}
+						accessToken={creds.access_token ?? null}
+						userId={viewedUserId}
+						onBack={() => setViewedUserId(null)}
+						ignoredUsers={ignoredUsers}
+						isBot={botMxids.has(viewedUserId)}
+						onStartDm={async (uid) => {
+							setViewedUserId(null);
+							if (!transport) return;
+							try {
+								const roomId = await transport.startDm(uid);
+								dispatch({ type: "set_active_space", space: { kind: "dms" } });
+								dispatch({ type: "set_active_room", roomId });
+							} catch (e) {
+								dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+							}
+						}}
+						canKickBanBots={(() => {
+							if (!creds.user_id || !activeRoom) return false;
+							const parentSpaceId = activeRoom.parentSpaceIds[0];
+							if (!parentSpaceId) return false;
+							const parentSpace = state.spaces.find(s => s.id === parentSpaceId);
+							return !!parentSpace?.creatorId && parentSpace.creatorId === creds.user_id;
+						})()}
+						isMyBot={myOwnedBotMxids.has(viewedUserId)}
+						canRemoveOwnBot={!!activeRoom?.parentSpaceIds[0]}
+						onBotMembership={async (action, botMxid) => {
+							if (!creds?.access_token || !activeRoom) return;
+							const parentSpaceId = activeRoom.parentSpaceIds[0];
+							if (!parentSpaceId) return;
+							try {
+								await botKickBanFromSpace(creds.access_token, parentSpaceId, botMxid, action);
+							} catch (e) {
+								dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+								throw e;
+							}
+						}}
+						onViewProfile={(uid) => setViewedUserId(uid)}
+					/>
+				</div>
+			)}
 			<ProfileSheet
-				viewedUserId={viewedUserId}
+				viewedUserId={isMobileShell && viewedUserId !== creds.user_id ? null : viewedUserId}
 				onClose={() => setViewedUserId(null)}
 				transport={transport}
 				accessToken={creds.access_token}

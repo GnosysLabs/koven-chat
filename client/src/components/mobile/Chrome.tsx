@@ -171,14 +171,11 @@ export function ErrorBanner({ message }: { message: string }) {
  *     <MobileProfileScreen ... />
  *   </PushSlot>
  */
-const EDGE_ZONE_PX = 24;
-const POP_DISTANCE_THRESHOLD = 0.4; // 40% of width
-const POP_VELOCITY_THRESHOLD = 0.5; // px/ms
+const EDGE_ZONE_PX = 44;
+const POP_DISTANCE_THRESHOLD = 0.3; // 30% of width
+const POP_VELOCITY_THRESHOLD = 0.4; // px/ms
 // Keep in sync with the `.push-slot` transition duration in index.css.
 const PUSH_TRANSITION_MS = 280;
-// Scale travels 0.97 (entering / leaving) → 1 (docked).  The CSS class
-// owns the resting values; this constant drives the live drag only.
-const SCALE_TRAVEL = 0.03;
 
 function prefersReducedMotion(): boolean {
 	if (typeof window === "undefined") return false;
@@ -273,55 +270,32 @@ export function PushSlot({
 	}, []);
 
 	const dragBind = useDrag(({
-		first, last, active, movement: [mx], velocity: [vx], xy, cancel,
+		first, movement: [mx], velocity: [vx], xy, cancel,
 	}) => {
-		const slot = slotRef.current;
-		if (!slot) return;
 		if (first) {
 			if (!onPop || !visible) {
 				cancel();
 				return;
 			}
-			const rect = slot.getBoundingClientRect();
-			if (xy[0] - rect.left > EDGE_ZONE_PX) {
+			const slot = slotRef.current;
+			const rect = slot?.getBoundingClientRect();
+			if (!rect || xy[0] - rect.left > EDGE_ZONE_PX) {
 				cancel();
 				return;
 			}
 			activeRef.current = true;
+			return;
 		}
 		if (!activeRef.current) return;
 
-		const width = getWidth();
 		const dx = Math.max(0, mx);
-		const p = Math.min(1, dx / width);
-
-		if (active) {
-			// Track the finger straight on the DOM node — no React
-			// re-render per pointer move.  `transition: none` keeps it
-			// 1:1 with the drag.
-			slot.style.transition = "none";
-			slot.style.opacity = String(1 - p);
-			slot.style.transform = `scale(${1 - SCALE_TRAVEL * p})`;
-			return;
-		}
-		if (last) {
+		const width = getWidth();
+		const past = dx > width * POP_DISTANCE_THRESHOLD;
+		const flick = vx > POP_VELOCITY_THRESHOLD && dx > 24;
+		if (past || flick) {
 			activeRef.current = false;
-			const past = dx > width * POP_DISTANCE_THRESHOLD;
-			const flick = vx > POP_VELOCITY_THRESHOLD && dx > 24;
-			// Restore the class-owned transition for the settle.
-			slot.style.transition = "";
-			if ((past || flick) && onPop) {
-				// Carry the fade-out on from where the finger left it,
-				// then let the parent flip `visible` (→ exit effect).
-				slot.style.opacity = "0";
-				slot.style.transform = `scale(${1 - SCALE_TRAVEL})`;
-				onPop();
-			} else {
-				// Snap back: clear the inline overrides so the docked
-				// `.push-slot--shown` class transitions it home.
-				slot.style.opacity = "";
-				slot.style.transform = "";
-			}
+			cancel();
+			onPop!();
 		}
 	}, {
 		pointer: { touch: true, mouse: true },
@@ -369,7 +343,6 @@ export function PushSlot({
 				className="absolute inset-0 -z-10 bg-background pointer-events-none"
 				style={{
 					backgroundImage: "var(--bg-gradient)",
-					backgroundAttachment: "fixed",
 					backgroundRepeat: "no-repeat",
 					backgroundSize: "cover",
 				}}

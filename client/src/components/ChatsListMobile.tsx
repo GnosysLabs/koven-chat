@@ -24,8 +24,7 @@
 // `transport.getRoomMessages` (in-memory; no network call).
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useDrag } from "@use-gesture/react";
-import { MessageSquare, Lock, BellOff, PenSquare, ChevronRight } from "lucide-react";
+import { MessageSquare, Lock, BellOff, PenSquare, ChevronRight, Check, CheckCheck } from "lucide-react";
 import type { Message, Room, RoomId, UserId } from "@koven/shared";
 import type { MatrixTransport } from "@/lib/matrix";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
@@ -263,6 +262,12 @@ function ChatRow({
 	const preview = formatPreview(last, currentUserId);
 	const time = formatRelativeTime(last?.timestamp ?? room.lastActiveTs);
 
+	// Read receipt checkmark for self-sent messages (iMessage/WhatsApp style)
+	const lastIsSelf = last?.sender === currentUserId;
+	const isRead = lastIsSelf && last && transport
+		? transport.getMessageSeenBy(room.id, last.id).length > 0
+		: false;
+
 	const unread = room.unreadCount ?? 0;
 	const hasHighlight = (room.highlightCount ?? 0) > 0;
 	const isMuted = false; // notify-level isn't on the Room type; future hook
@@ -270,10 +275,13 @@ function ChatRow({
 	const cardRef = useRef<HTMLButtonElement | null>(null);
 	const deleteRef = useRef<HTMLButtonElement | null>(null);
 
-	// Long-press gesture (integrated into useDrag to avoid touch/pointer conflicts)
+	const openRef = useRef(open);
+	openRef.current = open;
+	const movedRef = useRef(false);
 	const lpTimerRef = useRef<number | null>(null);
-	const lpStartRef = useRef<{ x: number; y: number } | null>(null);
 	const lpFiredRef = useRef(false);
+	const startRef = useRef<{ x: number; y: number } | null>(null);
+	const [deleting, setDeleting] = useState(false);
 
 	function cancelLongPress() {
 		if (lpTimerRef.current !== null) {
@@ -282,18 +290,6 @@ function ChatRow({
 		}
 	}
 
-	// `open` mirrored into a ref so the drag handler reads the latest
-	// value without re-binding useDrag every render.
-	const openRef = useRef(open);
-	openRef.current = open;
-	// Set true once a drag travels far enough to count as a swipe, so
-	// the click that fires on release doesn't also open the chat.
-	const movedRef = useRef(false);
-	const [deleting, setDeleting] = useState(false);
-
-	// Slide the row to `x` (<= 0) and grow the Delete action to fill
-	// the gap it opens.  Written straight to the DOM so the drag stays
-	// 1:1 with the finger — no React re-render per pointer move.
 	function setX(x: number, animate: boolean) {
 		const card = cardRef.current;
 		const del = deleteRef.current;
@@ -308,8 +304,6 @@ function ChatRow({
 		}
 	}
 
-	// React to external open / close: a sibling row opening or the
-	// list scrolling flips `open` false and slides this row home.
 	useEffect(() => {
 		setX(open ? -DELETE_ACTION_WIDTH : 0, true);
 	}, [open]);
@@ -320,63 +314,79 @@ function ChatRow({
 		void hapticNotification("warning");
 		try {
 			await onDelete();
-			// Row unmounts once the room leaves state.rooms.
 		} catch {
 			setDeleting(false);
 			onOpenChange(false);
 		}
 	}
 
-	const dragBind = useDrag(({ first, active, last: released, movement: [mx], tap, xy }) => {
-		if (first) {
-			movedRef.current = false;
-			lpFiredRef.current = false;
-			lpStartRef.current = { x: xy[0], y: xy[1] };
-			lpTimerRef.current = window.setTimeout(() => {
-				lpTimerRef.current = null;
-				lpFiredRef.current = true;
-				void hapticImpact("medium");
-				onLongPress(lpStartRef.current!);
-			}, 500);
+	function handleTouchStart(e: React.TouchEvent) {
+		const t = e.touches[0];
+		if (!t) return;
+		startRef.current = { x: t.clientX, y: t.clientY };
+		movedRef.current = false;
+		lpFiredRef.current = false;
+		lpTimerRef.current = window.setTimeout(() => {
+			lpTimerRef.current = null;
+			lpFiredRef.current = true;
+			void hapticImpact("medium");
+			onLongPress(startRef.current!);
+		}, 500);
+	}
+
+	function handleTouchMove(e: React.TouchEvent) {
+		const t = e.touches[0];
+		if (!t || !startRef.current) return;
+		const dx = t.clientX - startRef.current.x;
+		const dy = t.clientY - startRef.current.y;
+
+		// Vertical movement cancels long-press and lets the browser scroll
+		if (Math.abs(dy) > 8) {
+			cancelLongPress();
+			return;
 		}
-		if (Math.abs(mx) > 6) {
+
+		// Horizontal movement: cancel long-press and drive swipe
+		if (Math.abs(dx) > 6) {
+			cancelLongPress();
 			movedRef.current = true;
-			cancelLongPress();
-		}
-		if (tap) {
-			cancelLongPress();
-			return;
-		}
-		if (released) cancelLongPress();
-		const card = cardRef.current;
-		if (!card) return;
-		if (lpFiredRef.current) return;
-		// Anchor the drag to wherever the row was resting.
-		const base = openRef.current ? -DELETE_ACTION_WIDTH : 0;
-		let x = base + mx;
-		// No travel past the closed position — resist a rightward pull.
-		if (x > 0) x = x * 0.16;
-		const width = card.offsetWidth || window.innerWidth;
-		if (active) {
+
+			if (lpFiredRef.current) return;
+			const base = openRef.current ? -DELETE_ACTION_WIDTH : 0;
+			let x = base + dx;
+			if (x > 0) x = 0;
 			setX(x, false);
+		}
+	}
+
+	function handleTouchEnd() {
+		cancelLongPress();
+		if (!movedRef.current || lpFiredRef.current) {
+			startRef.current = null;
 			return;
 		}
-		if (released) {
-			if (-x > width * SWIPE_DELETE_COMMIT) {
-				// Full swipe past the commit line: slide off and leave.
-				setX(-width, true);
-				void hapticImpact("medium");
-				void commitDelete();
-				return;
-			}
-			const shouldOpen = -x > DELETE_ACTION_WIDTH * 0.5;
+		const card = cardRef.current;
+		if (!card || !startRef.current) { startRef.current = null; return; }
+
+		const lastTouch = card.style.transform;
+		const match = lastTouch.match(/translateX\(([^)]+)px\)/);
+		const currentX = match?.[1] ? parseFloat(match[1]) : 0;
+		const width = card.offsetWidth || window.innerWidth;
+
+		if (-currentX > width * SWIPE_DELETE_COMMIT) {
+			setX(-width, true);
+			void hapticImpact("medium");
+			void commitDelete();
+		} else {
+			const shouldOpen = -currentX > DELETE_ACTION_WIDTH * 0.5;
 			setX(shouldOpen ? -DELETE_ACTION_WIDTH : 0, true);
 			if (shouldOpen !== openRef.current) {
 				if (shouldOpen) void hapticImpact("light");
 				onOpenChange(shouldOpen);
 			}
 		}
-	}, { axis: "x", pointer: { touch: true }, filterTaps: true });
+		startRef.current = null;
+	}
 
 	return (
 		<>
@@ -401,16 +411,17 @@ function ChatRow({
 				<button
 					ref={cardRef}
 					type="button"
-					{...dragBind()}
+					onTouchStart={handleTouchStart}
+					onTouchMove={handleTouchMove}
+					onTouchEnd={handleTouchEnd}
+					onTouchCancel={handleTouchEnd}
 					onClick={() => {
-						// A swipe that ended in a stray click must not
-						// also open the chat; an open row taps closed.
 						if (lpFiredRef.current) { lpFiredRef.current = false; return; }
 						if (movedRef.current) { movedRef.current = false; return; }
 						if (openRef.current) { onOpenChange(false); return; }
 						onClick();
 					}}
-					className="relative w-full flex items-stretch gap-3 pl-4 pr-3 py-2.5 active:bg-foreground/[0.06] transition-colors touch-pan-y [-webkit-touch-callout:none]"
+					className="relative w-full flex items-stretch gap-3 pl-4 pr-3 py-2.5 active:bg-foreground/[0.06] transition-colors touch-pan-y [-webkit-touch-callout:none] select-none"
 				>
 					{/* Leading unread dot.  Absolutely positioned in the
 					    row's leading padding so it overlays without
@@ -477,6 +488,11 @@ function ChatRow({
 							</span>
 						</div>
 						<div className="text-[15px] leading-snug text-muted-foreground line-clamp-2">
+							{lastIsSelf && (
+								isRead
+									? <CheckCheck className="inline size-[14px] text-emerald-500 mr-0.5 -mt-px" strokeWidth={2.5} />
+									: <Check className="inline size-[14px] text-muted-foreground/60 mr-0.5 -mt-px" strokeWidth={2.5} />
+							)}
 							{preview}
 						</div>
 					</div>
