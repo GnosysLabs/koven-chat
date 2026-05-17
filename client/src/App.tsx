@@ -3537,7 +3537,7 @@ export default function App() {
 				<div className="fixed inset-x-0 z-30 flex flex-col bg-background border-b border-foreground/10"
 				     data-push-host
 				     style={{
-				         top: "calc(env(safe-area-inset-top) + 48px)",
+				         top: "calc(env(safe-area-inset-top) + 44px)",
 				         bottom: "calc(env(safe-area-inset-bottom) + 49px)",
 				         backgroundImage: "var(--bg-gradient)",
 				         backgroundAttachment: "fixed",
@@ -3579,6 +3579,7 @@ export default function App() {
 									dispatch({ type: "error", message: err instanceof Error ? err.message : String(err) });
 								});
 							}}
+							onCreateSpace={() => setCreateSpaceOpen(true)}
 							onDeleteSpace={(id) => {
 								if (state.activeSpace?.kind === "space" && state.activeSpace.id === id) {
 									dispatch({ type: "set_active_space", space: { kind: "dms" } });

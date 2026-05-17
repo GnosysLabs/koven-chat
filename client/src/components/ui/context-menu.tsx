@@ -18,10 +18,29 @@
 // Disabled items render in muted text, no hover highlight, no click.
 
 import { createPortal } from "react-dom";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { isMobileShell } from "@/lib/mobile";
 import { Check, ChevronRight } from "lucide-react";
+
+// Module-level singleton: only one context menu can be open at a time.
+// When a new ContextMenu mounts, it closes the previous one directly
+// (no events, no effect-timing races with React's batched rendering).
+let activeMenuClose: (() => void) | null = null;
+
+// Module-level one-shot click suppressor.  Installed by the dismiss
+// handler BEFORE React can unmount the menu (and its listeners).
+// Survives component unmount because it lives on `document`, not on
+// any React-managed DOM node.  Exported so hand-rolled menus (e.g.
+// MemberList) can reuse the same pattern.
+export function suppressNextClick() {
+	const handler = (e: MouseEvent) => {
+		e.preventDefault();
+		e.stopPropagation();
+		document.removeEventListener("click", handler, true);
+	};
+	document.addEventListener("click", handler, true);
+}
 
 // ───────────────────── Item shape ─────────────────────
 
@@ -97,22 +116,37 @@ export interface ContextMenuProps {
 export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
 	const ref = useRef<HTMLDivElement | null>(null);
 	const mountedAtRef = useRef(Date.now());
+	// Stable ref for onClose so the listener effect never re-runs due
+	// to the parent passing a new function identity (inline arrows).
+	// Without this, the effect re-ran every render, resetting the
+	// 300ms mount guard and making outside-click dismiss unreliable.
+	const onCloseRef = useRef(onClose);
+	onCloseRef.current = onClose;
+
+	// Singleton registration: close any previously open menu before
+	// this one paints.  useLayoutEffect runs synchronously after
+	// render, before the browser paints, so no flash of two menus.
+	// The stable `closer` wrapper lets us track ownership correctly
+	// even when `onCloseRef.current` changes identity between renders.
+	useLayoutEffect(() => {
+		if (activeMenuClose) activeMenuClose();
+		const closer = () => onCloseRef.current();
+		activeMenuClose = closer;
+		return () => {
+			if (activeMenuClose === closer) activeMenuClose = null;
+		};
+	}, []);
 
 	// Outside-mousedown / Escape dismissal.  mousedown (not click) so
 	// a fresh right-click on another row closes us BEFORE that row's
-	// onContextMenu handler fires — otherwise the second open would
-	// race the first close and the menu would flicker shut.
+	// onContextMenu handler fires.
 	//
 	// Critical exclusion: submenus are rendered via createPortal to
 	// document.body so they're NOT a DOM descendant of the parent
 	// menu's ref.  Without the `[data-submenu-portal]` ancestor
 	// check, a mousedown on a submenu item is treated as outside-the-
-	// menu — the entire context menu closes BEFORE the click event
+	// menu and the entire context menu closes BEFORE the click event
 	// can fire, so the submenu item's onClick handler never runs.
-	// That manifested as "every submenu action does nothing" and was
-	// the actual root cause of the bulk-notify failure (verified by
-	// nginx logs showing zero PUTs from the user despite repeated
-	// attempts).
 	useEffect(() => {
 		mountedAtRef.current = Date.now();
 		function isOutside(target: HTMLElement | null) {
@@ -126,17 +160,18 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
 			if (!isOutside(e.target as HTMLElement | null)) return;
 			e.preventDefault();
 			e.stopPropagation();
-			onClose();
+			suppressNextClick();
+			onCloseRef.current();
 		};
 		const onTouch = (e: TouchEvent) => {
 			if (Date.now() - mountedAtRef.current < 300) return;
 			if (!isOutside(e.target as HTMLElement | null)) return;
 			e.preventDefault();
 			e.stopPropagation();
-			onClose();
+			onCloseRef.current();
 		};
 		const onKey = (e: KeyboardEvent) => {
-			if (e.key === "Escape") onClose();
+			if (e.key === "Escape") onCloseRef.current();
 		};
 		const captureNonPassive = { capture: true, passive: false } as const;
 		document.addEventListener("mousedown", onDown, true);
@@ -147,7 +182,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
 			document.removeEventListener("touchstart", onTouch, captureNonPassive);
 			document.removeEventListener("keydown", onKey);
 		};
-	}, [onClose]);
+	}, []);
 
 	if (typeof document === "undefined") return null;
 

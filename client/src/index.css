@@ -705,6 +705,22 @@
 		user-select: auto;
 		-webkit-touch-callout: default;
 	}
+	/* Kill text selection on desktop too.  Right-clicking rooms in
+	 * the sidebar triggers an OS text-selection highlight that looks
+	 * broken.  Same pattern as mobile: disable globally, opt back in
+	 * for text surfaces that need it. */
+	:not(.mobile-shell) #root {
+		-webkit-user-select: none;
+		user-select: none;
+	}
+	:not(.mobile-shell) input,
+	:not(.mobile-shell) textarea,
+	:not(.mobile-shell) [contenteditable="true"],
+	:not(.mobile-shell) .select-text,
+	:not(.mobile-shell) .select-text * {
+		-webkit-user-select: auto;
+		user-select: auto;
+	}
 	.mobile-shell body {
 		/* Disable iOS rubber-band overscroll at the document
 		 * level.  Individual scroll containers (chat pane, room

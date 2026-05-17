@@ -660,6 +660,13 @@ export class MatrixTransport {
 	// back through sync — at that point the SDK's own cache has the
 	// truth and we don't need our shim anymore.
 	private pendingDmMappings: Map<string, string> = new Map();
+	// Serializes all read-modify-write cycles on m.direct account data.
+	// Without this, concurrent callers (pruneStaleDirectRooms at startup
+	// vs acceptInvite from user interaction) can race: both read the same
+	// snapshot, both write back their modified copy, and the last writer
+	// silently drops the first writer's changes.  This was the root cause
+	// of DM conversations vanishing from the recipient's list.
+	private directMutex: Promise<void> = Promise.resolve();
 	// Set of userIds for whom we've fired a one-shot profile fetch
 	// (DM avatar fallback path).
 	private peerProfileFetched: Set<string> = new Set();
@@ -3143,14 +3150,16 @@ export class MatrixTransport {
 			stale.push(candidateId as RoomId);
 		}
 		// Drop dead entries from our own m.direct so subsequent lookups
-		// don't keep hitting them.  Best-effort — if account_data write
+		// don't keep hitting them.  Best-effort; if account_data write
 		// fails we still fall through to creating a fresh DM.
 		if (stale.length > 0) {
-			const next: Record<string, string[]> = { ...direct };
-			const filtered = candidates.filter(id => !stale.includes(id as RoomId));
-			if (filtered.length > 0) next[targetUserId] = filtered;
-			else delete next[targetUserId];
-			await c.setAccountData("m.direct" as any, next as any).catch(err => {
+			await this.mutateDirectData(cur => {
+				const next = { ...cur };
+				const filtered = (next[targetUserId] ?? []).filter(id => !stale.includes(id as RoomId));
+				if (filtered.length > 0) next[targetUserId] = filtered;
+				else delete next[targetUserId];
+				return next;
+			}).catch(err => {
 				console.warn("startDm: failed to prune stale m.direct entries", err);
 			});
 		}
@@ -3173,9 +3182,11 @@ export class MatrixTransport {
 		const roomId = res.room_id as RoomId;
 
 		// Update m.direct so this room is recognized as a DM by clients.
-		const updated: Record<string, string[]> = { ...direct };
-		updated[targetUserId] = [...(updated[targetUserId] ?? []), roomId];
-		await c.setAccountData("m.direct" as any, updated as any).catch(err => {
+		await this.mutateDirectData(cur => {
+			const next = { ...cur };
+			next[targetUserId] = [...(next[targetUserId] ?? []), roomId];
+			return next;
+		}).catch(err => {
 			console.warn("startDm: setAccountData failed", err);
 		});
 		// Optimistic local mirror — see pendingDmMappings docstring.
@@ -3945,14 +3956,13 @@ export class MatrixTransport {
 		}
 
 		if (dmInviter) {
-			const direct = (c.getAccountData("m.direct")?.getContent() ?? {}) as Record<string, string[]>;
-			const existing = direct[dmInviter] ?? [];
-			if (!existing.includes(roomId)) {
-				const next = { ...direct, [dmInviter]: [...existing, roomId] };
-				await c.setAccountData("m.direct" as any, next as any).catch(err => {
-					console.warn("acceptInvite: setAccountData failed", err);
-				});
-			}
+			await this.mutateDirectData(cur => {
+				const existing = cur[dmInviter] ?? [];
+				if (existing.includes(roomId)) return null;
+				return { ...cur, [dmInviter]: [...existing, roomId] };
+			}).catch(err => {
+				console.warn("acceptInvite: setAccountData failed", err);
+			});
 			// Optimistic mirror so the next emitRoomList classifies
 			// this room as a DM even though the SDK's local m.direct
 			// hasn't echoed yet.  Cleared by the m.direct AccountData
@@ -4769,21 +4779,41 @@ export class MatrixTransport {
 		this.emitRoomList();
 	}
 
+	// Serialize a read-modify-write on m.direct through the mutex.
+	// The callback receives the current map and returns the new one
+	// (or null to skip the write).  Every m.direct mutation MUST go
+	// through this to prevent concurrent callers from clobbering each
+	// other's changes.
+	private mutateDirectData(
+		fn: (current: Record<string, string[]>) => Record<string, string[]> | null,
+	): Promise<void> {
+		const run = async () => {
+			const c = this.client;
+			if (!c) return;
+			const current = (c.getAccountData("m.direct")?.getContent() ?? {}) as Record<string, string[]>;
+			const next = fn(current);
+			if (next) {
+				await c.setAccountData("m.direct" as any, next as any);
+			}
+		};
+		this.directMutex = this.directMutex.then(run, run);
+		return this.directMutex;
+	}
+
 	// Strip a room from m.direct account data.  Idempotent.
-	private async removeDmFromAccountData(c: sdk.MatrixClient, roomId: string): Promise<void> {
-		const directContent = (c.getAccountData("m.direct")?.getContent() ?? {}) as Record<string, string[]>;
-		const next: Record<string, string[]> = {};
-		let mutated = false;
-		for (const [user, rooms] of Object.entries(directContent)) {
-			const filtered = (Array.isArray(rooms) ? rooms : []).filter(rid => rid !== roomId);
-			if (filtered.length !== (rooms?.length ?? 0)) mutated = true;
-			if (filtered.length > 0) next[user] = filtered;
-		}
-		if (mutated) {
-			await c.setAccountData("m.direct" as any, next as any).catch(() => {
-				console.warn("deleteDm: setAccountData(m.direct) failed");
-			});
-		}
+	private async removeDmFromAccountData(_c: sdk.MatrixClient, roomId: string): Promise<void> {
+		await this.mutateDirectData(current => {
+			const next: Record<string, string[]> = {};
+			let mutated = false;
+			for (const [user, rooms] of Object.entries(current)) {
+				const filtered = (Array.isArray(rooms) ? rooms : []).filter(rid => rid !== roomId);
+				if (filtered.length !== (rooms?.length ?? 0)) mutated = true;
+				if (filtered.length > 0) next[user] = filtered;
+			}
+			return mutated ? next : null;
+		}).catch(() => {
+			console.warn("deleteDm: setAccountData(m.direct) failed");
+		});
 	}
 
 	// Prune m.direct entries that reference rooms the user is no
@@ -4793,19 +4823,18 @@ export class MatrixTransport {
 	private async pruneStaleDirectRooms(): Promise<void> {
 		const c = this.client;
 		if (!c) return;
-		const directContent = (c.getAccountData("m.direct")?.getContent() ?? {}) as Record<string, string[]>;
 		const joinedRoomIds = new Set(c.getRooms().map(r => r.roomId));
-		const next: Record<string, string[]> = {};
-		let mutated = false;
-		for (const [user, rooms] of Object.entries(directContent)) {
-			const filtered = (Array.isArray(rooms) ? rooms : []).filter(rid => joinedRoomIds.has(rid));
-			if (filtered.length !== (rooms?.length ?? 0)) mutated = true;
-			if (filtered.length > 0) next[user] = filtered;
-		}
-		if (mutated) {
-			await c.setAccountData("m.direct" as any, next as any);
-			this.emitRoomList();
-		}
+		await this.mutateDirectData(current => {
+			const next: Record<string, string[]> = {};
+			let mutated = false;
+			for (const [user, rooms] of Object.entries(current)) {
+				const filtered = (Array.isArray(rooms) ? rooms : []).filter(rid => joinedRoomIds.has(rid));
+				if (filtered.length !== (rooms?.length ?? 0)) mutated = true;
+				if (filtered.length > 0) next[user] = filtered;
+			}
+			return mutated ? next : null;
+		});
+		this.emitRoomList();
 	}
 
 	// Reconcile locally-cached "joined" rooms against what the

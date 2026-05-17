@@ -1169,14 +1169,19 @@ export function ChatPane({
 							room.kind === "dm" ? "rounded-full" : "rounded-md",
 						)}
 					/>
-					<span className="text-sm font-semibold truncate flex items-center gap-1.5 min-w-0">
-						<span className="truncate">{room.name}</span>
-						{room.kind === "dm" && room.dmUserId && botMxids?.has(room.dmUserId) && (
-							<BotBadge />
+					<div className="flex flex-col min-w-0">
+						<span className="text-sm font-semibold truncate flex items-center gap-1.5">
+							<span className="truncate">{room.name}</span>
+							{room.kind === "dm" && room.dmUserId && botMxids?.has(room.dmUserId) && (
+								<BotBadge />
+							)}
+						</span>
+						{!isMobileShell && room.topic && (
+							<span className="text-xs text-muted-foreground truncate max-w-[60ch]">{room.topic}</span>
 						)}
-					</span>
+					</div>
 				</div>
-				<div className="flex items-center gap-1 shrink-0">
+				<div className={cn("flex items-center shrink-0", isMobileShell ? "gap-1" : "gap-2")}>
 					{room.kind === "private" && !isMobileShell && (
 						<RoomBadge
 							icon={<EyeOff className="h-3 w-3" />}
@@ -1224,11 +1229,14 @@ export function ChatPane({
 						<button
 							type="button"
 							onClick={() => setGalleryOpen(true)}
-							className="size-11 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+							className={cn(
+									isMobileShell ? "size-11 flex items-center justify-center" : "p-1",
+									"rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors",
+								)}
 							title="Shared media"
 							aria-label="Shared media"
 						>
-							<Images className="h-5 w-5" />
+							<Images className={isMobileShell ? "h-5 w-5" : "h-4 w-4"} />
 						</button>
 					)}
 					{room.kind !== "dm" && !room.isInvite && !room.encrypted && (
@@ -1239,11 +1247,14 @@ export function ChatPane({
 						<button
 							type="button"
 							onClick={() => onOpenModLog(room.id as EventId)}
-							className="size-11 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+							className={cn(
+									isMobileShell ? "size-11 flex items-center justify-center" : "p-1",
+									"rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors",
+								)}
 							title="Public mod log"
 							aria-label="Public mod log"
 						>
-							<Scale className="h-5 w-5" />
+							<Scale className={isMobileShell ? "h-5 w-5" : "h-4 w-4"} />
 						</button>
 					)}
 					{onFlagRoom && room.kind !== "dm" && !room.isInvite && !room.encrypted && (
@@ -1254,22 +1265,28 @@ export function ChatPane({
 						<button
 							type="button"
 							onClick={() => setRoomFlagOpen(true)}
-							className="size-11 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+							className={cn(
+									isMobileShell ? "size-11 flex items-center justify-center" : "p-1",
+									"rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors",
+								)}
 							title="Report this room"
 							aria-label="Report this room"
 						>
-							<Flag className="h-5 w-5" />
+							<Flag className={isMobileShell ? "h-5 w-5" : "h-4 w-4"} />
 						</button>
 					)}
 					{room.kind !== "dm" && !room.isInvite && (room.myPowerLevel ?? 0) >= 50 && (
 						<button
 							type="button"
 							onClick={() => onEditRoom(room.id as EventId)}
-							className="size-11 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+							className={cn(
+									isMobileShell ? "size-11 flex items-center justify-center" : "p-1",
+									"rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors",
+								)}
 							title="Room settings"
 							aria-label="Room settings"
 						>
-							<Settings className="h-5 w-5" />
+							<Settings className={isMobileShell ? "h-5 w-5" : "h-4 w-4"} />
 						</button>
 					)}
 				</div>
@@ -2502,13 +2519,10 @@ function MessageRowComponent({
 							/>
 						)}
 						{/* Seen-by indicator on YOUR sent messages.
-						    DM rooms get a "Read · time" line; group
-						    rooms get an avatar stack + count that
-						    opens a modal listing every reader.
-						    Suppressed on mobile to reduce clutter —
-						    expected to surface via long-press menu
-						    once that's wired. */}
-						{message.isSelf && !message.pending && !isMobileShell && !isBotDm && (
+						    DM checks rendered separately on mobile
+						    (as a bubble sibling, to the right).
+						    Group receipts: desktop only. */}
+						{message.isSelf && !message.pending && !isBotDm && !isMobileShell && (
 							<SeenIndicator
 								roomId={message.roomId}
 								eventId={message.id}
@@ -2555,6 +2569,20 @@ function MessageRowComponent({
 						)}
 					</div>
 				</div>
+				{isMobileShell && isDm && message.isSelf && !message.pending && !isBotDm && (
+					<div className="self-end pb-1">
+						<SeenIndicator
+							roomId={message.roomId}
+							eventId={message.id}
+							isDm={isDm}
+							receiptsVersion={receiptsVersion}
+							memberAvatars={memberAvatars}
+							memberNames={memberNames}
+							botMxids={botMxids}
+							serviceMxids={serviceMxids}
+						/>
+					</div>
+				)}
 			</div>
 			</div>
 			{canFlag && (

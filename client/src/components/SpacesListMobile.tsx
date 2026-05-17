@@ -4,7 +4,7 @@
 // same context menu the desktop SpaceBar offers on right-click.
 
 import { useRef, useMemo, useState } from "react";
-import { ChevronRight, LayoutGrid } from "lucide-react";
+import { ChevronRight, LayoutGrid, Plus } from "lucide-react";
 import type { Space, Room, UserId } from "@koven/shared";
 import type { MatrixTransport } from "@/lib/matrix";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
@@ -25,12 +25,13 @@ interface SpacesListMobileProps {
 	onLeaveSpace?(spaceId: string): void;
 	onDeleteSpace?(spaceId: string): void;
 	onMarkAllReadInSpace?(spaceId: string): void;
+	onCreateSpace?(): void;
 }
 
 export function SpacesListMobile({
 	spaces, rooms, currentUserId, accessToken, transport,
 	onOpenSpace, onEditSpace, onManageCategories, onAddRoom,
-	onLeaveSpace, onDeleteSpace, onMarkAllReadInSpace,
+	onLeaveSpace, onDeleteSpace, onMarkAllReadInSpace, onCreateSpace,
 }: SpacesListMobileProps) {
 	const sorted = useMemo(
 		() => [...spaces].sort((a, b) => a.name.localeCompare(b.name)),
@@ -66,12 +67,24 @@ export function SpacesListMobile({
 				className="pt-2"
 				style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 80px)" }}
 			>
-				<h1 className="text-[34px] font-bold tracking-[-0.022em] leading-[1.1] text-foreground py-3 px-4">
-					Spaces
-				</h1>
+				<div className="flex items-center justify-between py-3 px-4">
+					<h1 className="text-[34px] font-bold tracking-[-0.022em] leading-[1.1] text-foreground">
+						Spaces
+					</h1>
+					{onCreateSpace && (
+						<button
+							type="button"
+							onClick={() => { void hapticImpact("light"); onCreateSpace(); }}
+							className="size-10 rounded-full bg-primary flex items-center justify-center active:opacity-80 transition-opacity"
+							aria-label="Create a space"
+						>
+							<Plus className="size-5 text-primary-foreground" strokeWidth={2.5} />
+						</button>
+					)}
+				</div>
 
 				{sorted.length === 0 ? (
-					<EmptyState />
+					<EmptyState onCreateSpace={onCreateSpace} />
 				) : (
 					<div>
 						{sorted.map((s, idx) => (
@@ -214,7 +227,7 @@ function SpaceRow({
 	);
 }
 
-function EmptyState() {
+function EmptyState({ onCreateSpace }: { onCreateSpace?(): void }) {
 	return (
 		<div className="flex flex-col items-center justify-center gap-3 py-20 px-6 text-center">
 			<div className="size-16 rounded-2xl bg-foreground/[0.06] flex items-center justify-center">
@@ -222,8 +235,17 @@ function EmptyState() {
 			</div>
 			<div className="text-[17px] font-medium text-foreground">No spaces yet</div>
 			<p className="text-[15px] text-muted-foreground max-w-[260px] leading-snug">
-				Spaces group rooms by community. Join one from Explore or wait for an invite.
+				Spaces group rooms by community. Create one or wait for an invite.
 			</p>
+			{onCreateSpace && (
+				<button
+					type="button"
+					onClick={() => { void hapticImpact("light"); onCreateSpace(); }}
+					className="mt-2 px-5 py-2.5 rounded-full bg-primary text-primary-foreground text-[15px] font-medium active:opacity-80 transition-opacity"
+				>
+					Create a space
+				</button>
+			)}
 		</div>
 	);
 }

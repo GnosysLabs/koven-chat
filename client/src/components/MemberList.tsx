@@ -15,6 +15,7 @@ import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { BotBadge } from "@/components/BotBadge";
+import { suppressNextClick } from "@/components/ui/context-menu";
 import { Ban, Copy, Crown, MessageSquare, Shield, ShieldOff, User, UserX } from "lucide-react";
 import type { Member } from "@koven/shared";
 
@@ -482,15 +483,18 @@ function MemberContextMenu({
 		const onDown = (e: MouseEvent) => {
 			if (!ref.current) return;
 			if (ref.current.contains(e.target as Node)) return;
+			e.preventDefault();
+			e.stopPropagation();
+			suppressNextClick();
 			onClose();
 		};
 		const onKey = (e: KeyboardEvent) => {
 			if (e.key === "Escape") onClose();
 		};
-		document.addEventListener("mousedown", onDown);
+		document.addEventListener("mousedown", onDown, true);
 		document.addEventListener("keydown", onKey);
 		return () => {
-			document.removeEventListener("mousedown", onDown);
+			document.removeEventListener("mousedown", onDown, true);
 			document.removeEventListener("keydown", onKey);
 		};
 	}, [onClose]);
