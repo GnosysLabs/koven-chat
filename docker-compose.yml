@@ -159,6 +159,14 @@ services:
       CF_REALTIME_WEBHOOK_SECRET: ${CF_REALTIME_WEBHOOK_SECRET:-}
       CF_REALTIME_PRESET:        ${CF_REALTIME_PRESET:-group_call_participant}
       PUBLIC_ENGINE_URL:         ${PUBLIC_ENGINE_URL:-}
+      # APNs (iOS push notifications).  When all three key vars are
+      # set, the notification fanout fires push alongside bell-row
+      # inserts.  APNS_KEY_PATH is relative to the container's /data
+      # volume mount.
+      APNS_KEY_PATH:             ${APNS_KEY_PATH:-}
+      APNS_KEY_ID:               ${APNS_KEY_ID:-}
+      APNS_TEAM_ID:              ${APNS_TEAM_ID:-}
+      APNS_PRODUCTION:           ${APNS_PRODUCTION:-false}
     depends_on:
       - synapse
 
