@@ -164,7 +164,7 @@ export function MobileBlockedUsersScreen({
 											onClick={() => unblock(id)}
 											disabled={unblocking === id}
 											className={cn(
-												"shrink-0 inline-flex items-center gap-1 px-3 h-8",
+												"shrink-0 inline-flex items-center gap-1 px-3 h-10",
 												"rounded-full bg-primary/10 text-primary text-[14px] font-medium",
 												"active:bg-primary/20 transition-colors",
 												"disabled:opacity-50",

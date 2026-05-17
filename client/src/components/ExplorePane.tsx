@@ -9,7 +9,7 @@ import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { FounderBadge } from "@/components/FounderBadge";
 import { FlagDialog } from "@/components/FlagDialog";
 import { cn } from "@/lib/utils";
-import { Check, Compass, Flag, Hash, MessageCircle, Search, Users } from "lucide-react";
+import { Check, Compass, Flag, Hash, Mail, Search, Users } from "lucide-react";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { FlagCategory, Room, RoomId, Space, UserId } from "@koven/shared";
 import { fetchRoomIcons, fetchUserDirectory, flagRoom } from "@/lib/instance";
@@ -41,6 +41,7 @@ export interface ExplorePaneProps {
 	accessToken: string | null;
 	showNsfw: boolean;
 	onStartDm?(userId: UserId): void;
+	onViewProfile?(userId: UserId): void;
 }
 
 export function ExplorePane({
@@ -48,6 +49,7 @@ export function ExplorePane({
 	accessToken,
 	showNsfw,
 	onStartDm,
+	onViewProfile,
 }: ExplorePaneProps) {
 	const [tab, setTab] = useState<ExploreTab>("spaces");
 	const [query, setQuery] = useState("");
@@ -260,6 +262,7 @@ export function ExplorePane({
 									transport={transport}
 									serverName={serverName}
 									onMessage={onStartDm ? () => onStartDm(user.user_id as UserId) : undefined}
+									onViewProfile={onViewProfile ? () => onViewProfile(user.user_id as UserId) : undefined}
 								/>
 							))}
 						</div>
@@ -371,19 +374,29 @@ function SpaceRow({
 
 
 function PersonRow({
-	user, transport, serverName, onMessage,
+	user, transport, serverName, onMessage, onViewProfile,
 }: {
 	user: DirectoryUser;
 	transport: MatrixTransport | null;
 	serverName?: string;
 	onMessage?(): void;
+	onViewProfile?(): void;
 }) {
 	const resolved = useResolvedUser(transport, user.user_id);
 	const displayName = resolved?.displayName ?? user.user_id.slice(1, user.user_id.indexOf(":"));
 	const handle = formatMxid(user.user_id, serverName);
 
 	return (
-		<div className="flex items-center gap-3 px-3 py-3">
+		<div
+			className={cn(
+				"flex items-center gap-3 px-3 py-3",
+				onViewProfile && "cursor-pointer hover:bg-accent/50 transition-colors",
+			)}
+			onClick={onViewProfile}
+			role={onViewProfile ? "button" : undefined}
+			tabIndex={onViewProfile ? 0 : undefined}
+			onKeyDown={onViewProfile ? (e) => { if (e.key === "Enter") onViewProfile(); } : undefined}
+		>
 			<MatrixAvatar
 				mxc={resolved?.avatarMxc}
 				seed={user.user_id}
@@ -403,9 +416,8 @@ function PersonRow({
 				</div>
 			</div>
 			{onMessage && (
-				<Button type="button" size="sm" variant="ghost" onClick={onMessage} className="shrink-0">
-					<MessageCircle className="h-3.5 w-3.5 mr-1.5" />
-					Message
+				<Button type="button" size="icon" variant="ghost" onClick={(e) => { e.stopPropagation(); onMessage(); }} className="shrink-0 h-8 w-8 rounded-full">
+					<Mail className="h-4 w-4" />
 				</Button>
 			)}
 		</div>

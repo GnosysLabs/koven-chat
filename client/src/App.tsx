@@ -2586,6 +2586,7 @@ export default function App() {
 									dispatch({ type: "set_active_room", roomId });
 								} catch {}
 							}}
+							onViewProfile={(userId) => setViewedUserId(userId)}
 						/>
 					</div>
 				) : null}
@@ -2750,6 +2751,7 @@ export default function App() {
 								dispatch({ type: "set_active_room", roomId });
 							} catch {}
 						}}
+						onViewProfile={(userId) => setViewedUserId(userId)}
 					/>
 				) : !isMobileShell && state.activeSpace?.kind === "bots" ? (
 					<BotsPane

@@ -339,7 +339,7 @@ export function MobileProfileScreen({
 											href={link.platform === "email" ? `mailto:${link.url}` : link.url}
 											target={link.platform === "email" ? undefined : "_blank"}
 											rel="noopener noreferrer"
-											className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+											className="p-3 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
 											title={SOCIAL_PLATFORMS.find(p => p.id === link.platform)?.label ?? link.platform}
 										>
 											<SocialIcon platform={link.platform} className="h-5 w-5" />

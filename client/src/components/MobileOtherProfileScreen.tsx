@@ -200,7 +200,7 @@ export function MobileOtherProfileScreen({
 											href={link.platform === "email" ? `mailto:${link.url}` : link.url}
 											target={link.platform === "email" ? undefined : "_blank"}
 											rel="noopener noreferrer"
-											className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+											className="p-3 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
 											title={SOCIAL_PLATFORMS.find(p => p.id === link.platform)?.label ?? link.platform}
 										>
 											<SocialIcon platform={link.platform} className="h-5 w-5" />
@@ -229,7 +229,7 @@ export function MobileOtherProfileScreen({
 											type="button"
 											onClick={() => handleBotAction("kick")}
 											disabled={!!botActionPending || loading}
-											className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-md text-[15px] font-medium text-amber-500 active:opacity-60 transition-opacity disabled:opacity-40"
+											className="flex-1 flex items-center justify-center gap-1.5 min-h-[44px] rounded-md text-[15px] font-medium text-amber-500 active:opacity-60 transition-opacity disabled:opacity-40"
 										>
 											<UserX className="h-4 w-4" />
 											{botActionPending === "kick" ? "Kicking…" : "Kick from space"}
@@ -238,7 +238,7 @@ export function MobileOtherProfileScreen({
 											type="button"
 											onClick={() => handleBotAction("ban")}
 											disabled={!!botActionPending || loading}
-											className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-md text-[15px] font-medium text-destructive active:opacity-60 transition-opacity disabled:opacity-40"
+											className="flex-1 flex items-center justify-center gap-1.5 min-h-[44px] rounded-md text-[15px] font-medium text-destructive active:opacity-60 transition-opacity disabled:opacity-40"
 										>
 											<Ban className="h-4 w-4" />
 											{botActionPending === "ban" ? "Banning…" : "Ban from space"}
@@ -256,7 +256,7 @@ export function MobileOtherProfileScreen({
 										type="button"
 										onClick={() => handleBotAction("kick")}
 										disabled={!!botActionPending || loading}
-										className="flex items-center justify-center gap-1.5 w-full px-4 py-3 text-[15px] font-medium text-amber-500 active:opacity-60 transition-opacity disabled:opacity-40"
+										className="flex items-center justify-center gap-1.5 w-full px-4 min-h-[44px] text-[15px] font-medium text-amber-500 active:opacity-60 transition-opacity disabled:opacity-40"
 									>
 										<UserX className="h-4 w-4" />
 										{botActionPending === "kick" ? "Removing…" : "Remove from space"}
@@ -271,7 +271,7 @@ export function MobileOtherProfileScreen({
 									type="button"
 									onClick={() => onStartDm(userId)}
 									disabled={loading}
-									className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-foreground text-background text-[15px] font-semibold active:opacity-80 transition-opacity disabled:opacity-40"
+									className="flex items-center justify-center gap-2 w-full min-h-[48px] rounded-xl bg-foreground text-background text-[15px] font-semibold active:opacity-80 transition-opacity disabled:opacity-40"
 								>
 									<MessageSquare className="h-4 w-4" />
 									Message
@@ -283,7 +283,7 @@ export function MobileOtherProfileScreen({
 									onClick={toggleBlock}
 									disabled={blocking || loading}
 									className={cn(
-										"flex items-center justify-center gap-2 w-full py-3 rounded-xl text-[15px] font-semibold active:opacity-80 transition-opacity disabled:opacity-40",
+										"flex items-center justify-center gap-2 w-full min-h-[48px] rounded-xl text-[15px] font-semibold active:opacity-80 transition-opacity disabled:opacity-40",
 										isBlocked ? "text-muted-foreground" : "text-destructive",
 									)}
 								>

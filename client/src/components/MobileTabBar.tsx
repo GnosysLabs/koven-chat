@@ -24,7 +24,7 @@
 //     active, medium when not.
 
 import type { ReactNode } from "react";
-import { MessageSquare, Compass, LayoutGrid, User } from "lucide-react";
+import { Mail, Compass, LayoutGrid, User } from "lucide-react";
 import { hapticImpact } from "@/lib/haptics";
 import { cn } from "@/lib/utils";
 
@@ -47,7 +47,7 @@ interface TabDef {
 const ICON_SIZE_ACTIVE = 27;
 const ICON_SIZE_INACTIVE = 25;
 
-function tabIcon(Comp: typeof MessageSquare, active: boolean): ReactNode {
+function tabIcon(Comp: typeof Mail, active: boolean): ReactNode {
 	return (
 		<Comp
 			width={active ? ICON_SIZE_ACTIVE : ICON_SIZE_INACTIVE}
@@ -59,7 +59,7 @@ function tabIcon(Comp: typeof MessageSquare, active: boolean): ReactNode {
 }
 
 const TABS: TabDef[] = [
-	{ key: "chats",   label: "Chats",   render: (a) => tabIcon(MessageSquare, a) },
+	{ key: "chats",   label: "DMs",     render: (a) => tabIcon(Mail,          a) },
 	{ key: "spaces",  label: "Spaces",  render: (a) => tabIcon(LayoutGrid,    a) },
 	{ key: "explore", label: "Explore", render: (a) => tabIcon(Compass,       a) },
 	{ key: "me",      label: "Me",      render: (a) => tabIcon(User,          a) },

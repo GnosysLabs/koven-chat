@@ -6,7 +6,7 @@
 import { forwardRef, useEffect, useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
 import type { Room, Space, SpaceId, UserId } from "@koven/shared";
-import { Bot, Compass, EyeOff, Globe, Plus, Settings, Shield, User } from "lucide-react";
+import { Bot, Compass, EyeOff, Globe, Mail, Plus, Settings, Shield } from "lucide-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { AccountSwitcher } from "@/components/AccountSwitcher";
 import { SpaceTileContextMenu } from "@/components/SpaceTileContextMenu";
@@ -266,7 +266,7 @@ export function SpaceBar({
 				ariaLabel="Direct messages"
 				dot={dmAttention}
 			>
-				<User className="h-5 w-5" />
+				<Mail className="h-5 w-5" />
 			</TileButton>
 
 			<TileButton

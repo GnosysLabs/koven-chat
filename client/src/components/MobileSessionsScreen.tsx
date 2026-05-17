@@ -167,7 +167,7 @@ export function MobileSessionsScreen({
 															type="button"
 															onClick={() => { void hapticImpact("light"); setConfirmId(null); }}
 															disabled={revokingId === s.deviceId}
-															className="text-[15px] text-muted-foreground font-medium px-2 py-1 active:opacity-60 disabled:opacity-50"
+															className="text-[15px] text-muted-foreground font-medium px-3 min-h-[44px] flex items-center active:opacity-60 disabled:opacity-50"
 														>
 															Cancel
 														</button>
@@ -175,7 +175,7 @@ export function MobileSessionsScreen({
 															type="button"
 															onClick={() => doRevokeOne(s.deviceId)}
 															disabled={revokingId === s.deviceId}
-															className="text-[15px] text-destructive font-semibold px-2 py-1 active:opacity-60 disabled:opacity-60"
+															className="text-[15px] text-destructive font-semibold px-3 min-h-[44px] flex items-center active:opacity-60 disabled:opacity-60"
 														>
 															{revokingId === s.deviceId ? "…" : "Confirm"}
 														</button>
@@ -185,7 +185,7 @@ export function MobileSessionsScreen({
 														type="button"
 														onClick={() => { void hapticImpact("light"); setError(null); setConfirmId(s.deviceId); }}
 														disabled={revoking || revokingId !== null}
-														className="text-[15px] text-destructive font-medium px-2 py-1 active:opacity-60 disabled:opacity-40"
+														className="text-[15px] text-destructive font-medium px-3 min-h-[44px] flex items-center active:opacity-60 disabled:opacity-40"
 													>
 														Sign Out
 													</button>

@@ -153,7 +153,7 @@ function CategoryRow({
 			type="button"
 			onClick={onClick}
 			className={cn(
-				"w-full text-left px-3 py-2 rounded-md border transition-colors",
+				"w-full text-left px-3 py-3 rounded-md border transition-colors min-h-[44px]",
 				selected
 					? destructive
 						// Construction-orange instead of destructive red.

@@ -3,7 +3,7 @@
 // tabs: Spaces and People, via an iOS-style segmented control.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, Compass, Flag, MessageCircle, Search } from "lucide-react";
+import { Check, Compass, Flag, Mail, Search } from "lucide-react";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { FlagCategory, Room, RoomId, Space, UserId } from "@koven/shared";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
@@ -40,10 +40,11 @@ export interface ExploreMobileProps {
 	accessToken: string | null;
 	showNsfw: boolean;
 	onStartDm?(userId: UserId): void;
+	onViewProfile?(userId: UserId): void;
 }
 
 export function ExploreMobile({
-	transport, rooms, spaces, onJoined, accessToken, showNsfw, onStartDm,
+	transport, rooms, spaces, onJoined, accessToken, showNsfw, onStartDm, onViewProfile,
 }: ExploreMobileProps) {
 	const [tab, setTab] = useState<ExploreTab>("spaces");
 	const [query, setQuery] = useState("");
@@ -278,6 +279,7 @@ export function ExploreMobile({
 									transport={transport}
 									serverName={serverName}
 									onMessage={onStartDm ? () => onStartDm(user.user_id as UserId) : undefined}
+									onViewProfile={onViewProfile ? () => onViewProfile(user.user_id as UserId) : undefined}
 									showDivider={idx > 0}
 								/>
 							))}
@@ -352,7 +354,7 @@ function SpaceRow({
 								type="button"
 								onClick={() => { void hapticImpact("light"); onFlag(); }}
 								aria-label="Flag this space"
-								className="size-8 rounded-full flex items-center justify-center text-muted-foreground/70 active:bg-foreground/[0.08] transition-colors"
+								className="size-11 rounded-full flex items-center justify-center text-muted-foreground/70 active:bg-foreground/[0.08] transition-colors"
 							>
 								<Flag className="size-[15px]" strokeWidth={2.25} />
 							</button>
@@ -380,7 +382,7 @@ function SpaceRow({
 
 					<div className="shrink-0">
 						{joined ? (
-							<span className="inline-flex items-center gap-1 px-3 h-7 rounded-full bg-foreground/[0.08] text-[13px] font-semibold text-muted-foreground">
+							<span className="inline-flex items-center gap-1 px-3 h-10 rounded-full bg-foreground/[0.08] text-[13px] font-semibold text-muted-foreground">
 								<Check className="size-[14px]" strokeWidth={2.75} /> Joined
 							</span>
 						) : (
@@ -389,7 +391,7 @@ function SpaceRow({
 								onClick={onJoin}
 								disabled={joining}
 								className={cn(
-									"px-4 h-7 rounded-full",
+									"px-4 h-10 rounded-full",
 									"bg-primary/15 text-primary text-[13px] font-semibold tracking-tight",
 									"active:opacity-70 transition-opacity",
 									"disabled:opacity-50",
@@ -407,12 +409,13 @@ function SpaceRow({
 
 
 function PersonRow({
-	user, transport, serverName, onMessage, showDivider,
+	user, transport, serverName, onMessage, onViewProfile, showDivider,
 }: {
 	user: DirectoryUser;
 	transport: MatrixTransport | null;
 	serverName?: string;
 	onMessage?(): void;
+	onViewProfile?(): void;
 	showDivider: boolean;
 }) {
 	const resolved = useResolvedUser(transport, user.user_id);
@@ -422,7 +425,12 @@ function PersonRow({
 	return (
 		<>
 			{showDivider && <div className="h-px bg-foreground/[0.08]" aria-hidden />}
-			<div className="px-4 py-3.5">
+			<button
+				type="button"
+				onClick={() => { if (onViewProfile) { void hapticImpact("light"); onViewProfile(); } }}
+				disabled={!onViewProfile}
+				className="w-full text-left px-4 py-3.5 active:bg-foreground/5 transition-colors disabled:opacity-100"
+			>
 				<div className="flex items-center gap-3">
 					<MatrixAvatar
 						mxc={resolved?.avatarMxc}
@@ -447,20 +455,22 @@ function PersonRow({
 						)}
 					</div>
 					{onMessage && (
-						<button
-							type="button"
-							onClick={() => { void hapticImpact("light"); onMessage(); }}
+						<span
+							role="button"
+							tabIndex={0}
+							onClick={(e) => { e.stopPropagation(); void hapticImpact("light"); onMessage(); }}
+							onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); onMessage(); } }}
 							className={cn(
-								"shrink-0 px-4 h-7 rounded-full",
-								"bg-primary/15 text-primary text-[13px] font-semibold tracking-tight",
+								"shrink-0 size-10 rounded-full inline-flex items-center justify-center",
+								"bg-primary/15 text-primary",
 								"active:opacity-70 transition-opacity",
 							)}
 						>
-							Message
-						</button>
+							<Mail className="h-[18px] w-[18px]" />
+						</span>
 					)}
 				</div>
-			</div>
+			</button>
 		</>
 	);
 }
