@@ -452,64 +452,53 @@ export function SpaceEditSheet({ space, currentUserId, onClose, onSave, onLeave,
 						</div>
 					)}
 
-					<DialogFooter className="sm:justify-between">
-						<div className="flex items-center gap-2 flex-wrap">
-							{showLeave && !confirmingLeave && !confirmingDelete && (
+					{(showLeave || showDelete) && !confirmingLeave && !confirmingDelete && (
+						<div className="flex flex-col gap-2 pt-4 mt-2 border-t border-destructive/20">
+							{showLeave && (
 								<Button
 									type="button"
-									variant="ghost"
-									size="sm"
+									variant="outline"
 									onClick={() => setConfirmingLeave(true)}
 									disabled={pending}
-									className="text-muted-foreground hover:text-destructive hover:bg-destructive/10 gap-1.5"
+									className="w-full border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive gap-1.5"
 								>
-									<DoorOpen className="h-3.5 w-3.5" />
-									Leave
+									<DoorOpen className="h-4 w-4" />
+									Leave space
 								</Button>
 							)}
-							{showDelete && !confirmingLeave && !confirmingDelete && (
+							{showDelete && (
 								<Button
 									type="button"
-									variant="ghost"
-									size="sm"
+									variant="outline"
 									onClick={() => setConfirmingDelete(true)}
 									disabled={pending}
-									className="text-muted-foreground hover:text-destructive hover:bg-destructive/10 gap-1.5"
+									className="w-full border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive gap-1.5"
 								>
-									<Trash2 className="h-3.5 w-3.5" />
-									Delete
+									<Trash2 className="h-4 w-4" />
+									Delete space
 								</Button>
 							)}
-							{confirmingLeave && (
-								<>
-									{/* Copy spells out the cascade because users
-									    coming from Discord/Slack already expect it
-									    but Matrix-native users (who'd expect the
-									    space-only leave) need the heads-up.  Phrase
-									    it positively — "and its rooms" — rather
-									    than burying the cascade in a footnote. */}
-									<span className="text-xs text-muted-foreground">Leave this space and its rooms?</span>
-									<Button type="button" variant="ghost" size="sm" onClick={() => setConfirmingLeave(false)} disabled={pending}>
-										Cancel
-									</Button>
-									<Button type="button" variant="destructive" size="sm" onClick={doLeave} disabled={pending}>
-										{pending ? "Leaving…" : "Confirm leave"}
-									</Button>
-								</>
-							)}
-							{/* Delete uses a full-body confirmation view (see
-							    the early-return above) so we can list every
-							    child room about to be destroyed.  No inline
-							    confirm here. */}
 						</div>
-						<div className="flex items-center gap-2">
-							<Button type="button" variant="ghost" onClick={onClose} disabled={pending}>
+					)}
+					{confirmingLeave && (
+						<div className="flex items-center gap-2 flex-wrap pt-4 mt-2 border-t border-destructive/20">
+							<span className="text-xs text-muted-foreground">Leave this space and its rooms?</span>
+							<Button type="button" variant="ghost" size="sm" onClick={() => setConfirmingLeave(false)} disabled={pending}>
 								Cancel
 							</Button>
-							<Button type="submit" disabled={!name.trim() || pending}>
-								{pending ? "Saving…" : "Save"}
+							<Button type="button" variant="destructive" size="sm" onClick={doLeave} disabled={pending}>
+								{pending ? "Leaving…" : "Confirm leave"}
 							</Button>
 						</div>
+					)}
+
+					<DialogFooter>
+						<Button type="button" variant="ghost" onClick={onClose} disabled={pending}>
+							Cancel
+						</Button>
+						<Button type="submit" disabled={!name.trim() || pending}>
+							{pending ? "Saving…" : "Save"}
+						</Button>
 					</DialogFooter>
 				</form>
 			</DialogContent>

@@ -446,56 +446,42 @@ export function RoomEditSheet({ room, currentUserId, onClose, onSave, onLeave, o
 						</div>
 					)}
 
-					<DialogFooter className="flex-col sm:flex-row sm:justify-between gap-3 sm:gap-2">
-						{/* Cancel + Save pair.  On mobile this comes
-						    first (flex-col reverses the default desktop
-						    "destructive-left" layout) so the primary
-						    actions stay closest to the form fields and
-						    the destructive ones get their own row at
-						    the bottom — iOS convention. */}
-						<div className="flex items-center gap-2 sm:order-2">
-							<Button type="button" variant="ghost" onClick={onClose} disabled={pending}>
-								Cancel
-							</Button>
-							<Button type="submit" disabled={!name.trim() || pending}>
-								{pending ? "Saving…" : "Save"}
-							</Button>
+					{(showLeave || showDelete) && !confirmingLeave && !confirmingDelete && (
+						<div className="flex flex-col gap-2 pt-4 mt-2 border-t border-destructive/20">
+							{showLeave && (
+								<Button
+									type="button"
+									variant="outline"
+									onClick={() => setConfirmingLeave(true)}
+									disabled={pending}
+									className="w-full border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive gap-1.5"
+								>
+									<DoorOpen className="h-4 w-4" />
+									Leave room
+								</Button>
+							)}
+							{showDelete && (
+								<Button
+									type="button"
+									variant="outline"
+									onClick={() => setConfirmingDelete(true)}
+									disabled={pending}
+									className="w-full border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive gap-1.5"
+								>
+									<Trash2 className="h-4 w-4" />
+									Delete room
+								</Button>
+							)}
 						</div>
-						{/* Destructive actions get their own row on
-						    mobile (sm:order-1 to swap them back to the
-						    left on desktop).  Outlined destructive
-						    buttons read as proper actions, not muted
-						    text links. */}
-						{(showLeave || showDelete) && !confirmingLeave && !confirmingDelete && (
-							<div className="flex items-center gap-2 flex-wrap sm:order-1">
-								{showLeave && (
-									<Button
-										type="button"
-										variant="outline"
-										size="sm"
-										onClick={() => setConfirmingLeave(true)}
-										disabled={pending}
-										className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive gap-1.5"
-									>
-										<DoorOpen className="h-4 w-4" />
-										Leave
-									</Button>
-								)}
-								{showDelete && (
-									<Button
-										type="button"
-										variant="outline"
-										size="sm"
-										onClick={() => setConfirmingDelete(true)}
-										disabled={pending}
-										className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive gap-1.5"
-									>
-										<Trash2 className="h-4 w-4" />
-										Delete
-									</Button>
-								)}
-							</div>
-						)}
+					)}
+
+					<DialogFooter>
+						<Button type="button" variant="ghost" onClick={onClose} disabled={pending}>
+							Cancel
+						</Button>
+						<Button type="submit" disabled={!name.trim() || pending}>
+							{pending ? "Saving…" : "Save"}
+						</Button>
 					</DialogFooter>
 				</form>
 			</DialogContent>
