@@ -77,7 +77,8 @@ import {
 	recordModAction,
 	type AdminReport,
 } from "@/lib/instance";
-import { AdminReportsSheet } from "@/components/AdminReportsSheet";
+import { AdminList, type AdminSelection } from "@/components/AdminList";
+import { AdminPane } from "@/components/AdminPane";
 import { fetchIntegrationsStatus } from "@/lib/klipy";
 import { ENGINE_URL } from "@/lib/urls";
 import { setAppBadge } from "@/lib/appBadge";
@@ -453,16 +454,9 @@ export default function App() {
 	const [isAdmin, setIsAdmin] = useState(false);
 	// Admin reports queue (replaces the retired floor-review queue).
 	// Sheet open + open-count badge on the SpaceBar shield button.
-	const [adminReportsOpen, setAdminReportsOpen] = useState(false);
 	const [pendingReviewCount, setPendingReviewCount] = useState(0);
-	// Reports data is held by the PARENT (not by AdminReportsSheet) so
-	// the sheet's Dialog only ever mounts with data already in hand —
-	// no "open → empty header → fetch → fill body" flash.  The shield
-	// click runs an async fetch first, populates this state, then
-	// flips `adminReportsOpen` to true.  When the sheet closes, we
-	// clear it so the next open re-fetches fresh.
 	const [pendingReports, setPendingReports] = useState<AdminReport[] | null>(null);
-	const [isOpeningAdminReports, setIsOpeningAdminReports] = useState(false);
+	const [adminSelection, setAdminSelection] = useState<AdminSelection>(null);
 	// Instance-wide third-party integrations.  Polled once on sign-in
 	// (admin re-saves invalidate it via a refresh — see InstanceAdmin
 	// section).  Drives the GIF picker visibility in the composer.
@@ -536,8 +530,23 @@ export default function App() {
 	// quietly bounce back to DMs so the user isn't stuck in a
 	// sub-par view with no entry point in the drawer.
 	useEffect(() => {
-		if (isMobileShell && state.activeSpace?.kind === "bots") {
+		if (isMobileShell && (state.activeSpace?.kind === "bots" || state.activeSpace?.kind === "admin")) {
 			dispatch({ type: "set_active_space", space: { kind: "dms" } });
+		}
+	}, [state.activeSpace?.kind]);
+
+	// Admin page: fetch reports when entering the admin view and
+	// auto-select the first sidebar item.
+	useEffect(() => {
+		if (state.activeSpace?.kind !== "admin") {
+			setAdminSelection(null);
+			return;
+		}
+		if (creds?.access_token && canAccessAdminReports) {
+			fetchAdminReports(creds.access_token).then(list => {
+				setPendingReports(list);
+				setPendingReviewCount(list.filter(r => r.status === "open").length);
+			}).catch(() => {});
 		}
 	}, [state.activeSpace?.kind]);
 
@@ -2042,6 +2051,7 @@ export default function App() {
 		if (!state.activeSpace) return null;
 		if (state.activeSpace.kind === "explore") return null;
 		if (state.activeSpace.kind === "bots") return null;
+		if (state.activeSpace.kind === "admin") return null;
 		if (state.activeSpace.kind === "dms") {
 			return {
 				id: "__dms__",
@@ -2061,6 +2071,7 @@ export default function App() {
 		if (!state.activeSpace) return [];
 		if (state.activeSpace.kind === "explore") return [];
 		if (state.activeSpace.kind === "bots") return [];
+		if (state.activeSpace.kind === "admin") return [];
 		if (state.activeSpace.kind === "dms") return state.rooms.filter(r => r.kind === "dm");
 		const id = state.activeSpace.id;
 		return state.rooms.filter(r => r.parentSpaceIds.includes(id));
@@ -2453,23 +2464,8 @@ export default function App() {
 					onOpenSettings={() => setSettingsOpen(true)}
 					canOpenAdminReports={canAccessAdminReports}
 					adminReportsBadge={pendingReviewCount}
-					onOpenAdminReports={async () => {
-						// Fetch BEFORE opening so the Dialog never paints
-						// against an empty list — no jarring "open then
-						// fill" flash.  Click is short-circuited if a
-						// previous fetch is still in flight.
-						if (isOpeningAdminReports || !creds?.access_token) return;
-						setIsOpeningAdminReports(true);
-						try {
-							const list = await fetchAdminReports(creds.access_token);
-							setPendingReports(list);
-							setPendingReviewCount(list.filter(r => r.status === "open").length);
-							setAdminReportsOpen(true);
-						} catch (e) {
-							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
-						} finally {
-							setIsOpeningAdminReports(false);
-						}
+					onOpenAdminReports={() => {
+						dispatch({ type: "set_active_space", space: { kind: "admin" } });
 					}}
 					accounts={accounts}
 					onSwitchAccount={switchAccount}
@@ -2558,6 +2554,16 @@ export default function App() {
 						onViewBotProfile={(mxid) => setViewedUserId(mxid as UserId)}
 					/>
 					</div>
+				) : state.activeSpace?.kind === "admin" ? (
+					<div className="contents" data-mobile-pane="list">
+					<AdminList
+						spaces={state.spaces}
+						rooms={state.rooms}
+						isAdmin={isAdmin}
+						selected={adminSelection}
+						onSelect={setAdminSelection}
+					/>
+					</div>
 				) : null}
 				{/* Explore on mobile.  The main pane is hidden in
 				    mobile-view="rooms" (no active room) so we render
@@ -2591,7 +2597,8 @@ export default function App() {
 					</div>
 				) : null}
 				{state.activeSpace?.kind !== "explore"
-					&& state.activeSpace?.kind !== "bots" && (
+					&& state.activeSpace?.kind !== "bots"
+					&& state.activeSpace?.kind !== "admin" && (
 				<div className="contents" data-mobile-pane="list">
 				{/* Mobile DM list gets the iOS Messages-style
 				    ChatsListMobile (large title, full-width rows
@@ -2784,6 +2791,31 @@ export default function App() {
 							await refreshMyBots();
 							void fetchAllBotMxids().then(setBotMxids);
 						}}
+					/>
+				) : !isMobileShell && state.activeSpace?.kind === "admin" ? (
+					<AdminPane
+						accessToken={creds?.access_token ?? ""}
+						selection={adminSelection}
+						reports={pendingReports ?? []}
+						onReportsChange={setPendingReports}
+						rooms={state.rooms}
+						spaces={state.spaces}
+						isAdmin={isAdmin}
+						transport={transport}
+						onOpenTarget={(roomId, eventId) => {
+							const room = state.rooms.find(r => r.id === roomId);
+							const parentSpaceId = room?.parentSpaceIds[0];
+							if (parentSpaceId) {
+								dispatch({ type: "set_active_space", space: { kind: "space", id: parentSpaceId } });
+							} else {
+								dispatch({ type: "set_active_space", space: { kind: "dms" } });
+							}
+							dispatch({ type: "set_active_room", roomId: roomId as RoomId });
+							if (eventId) {
+								setPendingScrollEvent({ roomId: roomId as RoomId, eventId: eventId as EventId });
+							}
+						}}
+						onCountChanged={setPendingReviewCount}
 					/>
 				) : !isMobileShell && showSpaceLanding && activeSpaceObj ? (
 					<SpaceLanding
@@ -4192,42 +4224,6 @@ export default function App() {
 					onOpenChange={(o) => { if (!o) setModLogRoomId(null); }}
 					roomId={modLogRoomId}
 					transport={transport}
-				/>
-			)}
-			{canAccessAdminReports && creds && (
-				<AdminReportsSheet
-					open={adminReportsOpen}
-					onOpenChange={setAdminReportsOpen}
-					accessToken={creds.access_token}
-					// `pendingReports` is null only on first mount before
-					// any open click has run.  Dialog is closed in that
-					// state so the empty-array fallback is never visible
-					// to the user; the next open click fetches fresh and
-					// populates real data before flipping open to true.
-					// Keeping the component mounted across close events
-					// preserves the Dialog's close animation (a mount
-					// gate on `pendingReports !== null` would yank the
-					// portal mid-animation).
-					reports={pendingReports ?? []}
-					onReportsChange={setPendingReports}
-					// Per-row routing pill ("space mod" vs "FLOOR ·
-					// instance") needs the local room + space lookups
-					// to render correctly — see AdminReportsSheet's
-					// own doc-block for the rule.
-					rooms={state.rooms}
-					spaces={state.spaces}
-					// Jump to the targeted room (and message, when the
-					// report is message-scoped) so the admin can review
-					// context before deciding what primitive to apply.
-					// Same plumbing the permalink path uses.
-					onOpenTarget={(roomId, eventId) => {
-						dispatch({ type: "set_active_room", roomId: roomId as RoomId });
-						if (eventId) {
-							setPendingScrollEvent({ roomId: roomId as RoomId, eventId: eventId as EventId });
-						}
-						setAdminReportsOpen(false);
-					}}
-					onCountChanged={setPendingReviewCount}
 				/>
 			)}
 		</div>

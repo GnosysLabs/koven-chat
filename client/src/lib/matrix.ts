@@ -21,6 +21,7 @@ import type {
 } from "matrix-js-sdk";
 import type {
 	Room,
+	Member,
 	Message,
 	MessageKind,
 	Space,
@@ -2666,6 +2667,17 @@ export class MatrixTransport {
 			}
 		}
 		return { ok, failed };
+	}
+
+	getSpaceBannedMembers(spaceId: SpaceId): Member[] {
+		const room = this.client?.getRoom(spaceId);
+		if (!room) return [];
+		return room.getMembersWithMembership("ban").map(m => ({
+			userId: m.userId as UserId,
+			displayName: m.name || m.userId,
+			avatarUrl: m.getMxcAvatarUrl() ?? undefined,
+			powerLevel: m.powerLevel ?? 0,
+		}));
 	}
 
 	/** Set a user's power level across an ENTIRE space — fanned out

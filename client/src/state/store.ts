@@ -67,6 +67,7 @@ export type ActiveSpace =
 	| { kind: "explore" }
 	| { kind: "dms" }
 	| { kind: "bots" }
+	| { kind: "admin" }
 	| { kind: "space"; id: SpaceId }
 	| null;
 

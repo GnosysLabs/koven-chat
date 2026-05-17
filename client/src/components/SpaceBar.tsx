@@ -315,6 +315,7 @@ export function SpaceBar({
 						}
 						ariaLabel="Reports"
 						badge={adminReportsBadge}
+						active={activeSpace?.kind === "admin"}
 					>
 						<Shield className="h-4 w-4" />
 					</IconButton>
@@ -476,19 +477,16 @@ function SortableSpaceTile({
 }
 
 function IconButton({
-	children, onClick, title, ariaLabel, dot, dotClass, badge,
+	children, onClick, title, ariaLabel, dot, dotClass, badge, active,
 }: {
 	children: React.ReactNode;
 	onClick(): void;
 	title: string;
 	ariaLabel: string;
-	// Optional attention dot in the top-right corner.  Used by the
-	// admin shield to flag a non-empty review queue.
 	dot?: boolean;
 	dotClass?: string;
-	// Numeric badge — wins over `dot` when both are set.  Used for the
-	// admin-reports open count.  Hidden when 0/undefined.
 	badge?: number;
+	active?: boolean;
 }) {
 	const showBadge = typeof badge === "number" && badge > 0;
 	return (
@@ -497,7 +495,12 @@ function IconButton({
 			onClick={onClick}
 			title={title}
 			aria-label={ariaLabel}
-			className="relative h-8 w-8 rounded-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+			className={cn(
+				"relative h-8 w-8 rounded-md flex items-center justify-center transition-colors",
+				active
+					? "text-foreground bg-primary/15"
+					: "text-muted-foreground hover:text-foreground hover:bg-accent",
+			)}
 		>
 			{children}
 			{showBadge ? (

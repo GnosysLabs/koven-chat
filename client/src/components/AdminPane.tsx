@@ -1,35 +1,17 @@
-// Reports queue.  Lists member-submitted flags (from the `flags`
-// table on the engine) for the people empowered to act on them.
-// The visibility rule is two-path (enforced server-side; this UI
-// just renders what the engine returns):
-//
-//   - space-mod path: viewers with PL ≥ 50 in the reported room see
-//     reports for that room.
-//   - instance-floor backstop: server admins additionally see
-//     `floor_violation` reports across every space (their legal duty
-//     for CSAM / credible threats / doxxing, even when the report is
-//     in a space they don't moderate).
-//
-// Each row shows reporter + category + rationale + target (message
-// id or room id) plus a routing pill telling the viewer WHY they're
-// seeing it — either the space's name (mod path) or a "FLOOR ·
-// instance" badge (floor backstop).  Two actions per row:
-//
-//   - Mark resolved  → POST /api/admin/reports/:id/action
-//   - Dismiss        → POST /api/admin/reports/:id/dismiss
-//
-// The actor already performed the underlying mutation (kick / ban /
-// redact / role change) via the room's member list or message
-// toolbar; closing a report here is purely the triage side.
+// Content pane for the admin page. Shows a tab strip (Reports / Bans)
+// and renders the appropriate content based on the sidebar selection
+// (a specific space or the whole instance). Report row rendering and
+// floor toolkit actions are moved here from AdminReportsSheet.
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-	Dialog,
-	DialogContent,
-	DialogDescription,
-	DialogHeader,
-	DialogTitle,
-} from "@/components/ui/dialog";
+	AlertTriangle, Ban, Check, ExternalLink, Flag,
+	Shield, ShieldAlert, Trash2, UserX, X,
+} from "lucide-react";
+import { cn } from "@/lib/utils";
+import { MatrixAvatar } from "@/components/MatrixAvatar";
+import { BannedUsersSection } from "@/components/BannedUsersSection";
+import type { AdminSelection } from "@/components/AdminList";
 import {
 	adminBanUser,
 	adminDeactivateUser,
@@ -39,52 +21,135 @@ import {
 	markReportActioned,
 	type AdminReport,
 } from "@/lib/instance";
-import { AlertTriangle, Ban, Check, ExternalLink, Flag, Shield, Trash2, UserX, X } from "lucide-react";
-import { cn } from "@/lib/utils";
-import type { Room, Space } from "@koven/shared";
+import type { MatrixTransport } from "@/lib/matrix";
+import type { Member, Room, Space, SpaceId, UserId } from "@koven/shared";
 
-export interface AdminReportsSheetProps {
-	open: boolean;
-	onOpenChange(open: boolean): void;
+type AdminTab = "reports" | "bans";
+
+export interface AdminPaneProps {
 	accessToken: string;
-	// Reports list, pre-fetched by the parent BEFORE this sheet is
-	// mounted.  No internal `null` state inside the sheet — by the
-	// time we render, the data is in hand and the Dialog opens
-	// already populated.  This is the no-flash render gate per the
-	// "jarring" rule: the parent's open-handler fetches first, then
-	// flips `open` to true with `reports` already set.  The sheet
-	// has no mounted-but-empty frame to flash through.
+	selection: AdminSelection;
 	reports: AdminReport[];
-	// Bubble local optimistic mutations (dismiss / action) back up to
-	// the parent so the open-count badge + any subsequent re-opens
-	// reflect the new state.  Called with the new reports array.
 	onReportsChange(reports: AdminReport[]): void;
-	// Local rooms + spaces — used to render the per-row routing pill.
-	// If the report's room is one the viewer has PL ≥ 50 in, the pill
-	// names that room's space; otherwise the row is only visible via
-	// the floor backstop and the pill reads "FLOOR · instance".
 	rooms: Room[];
 	spaces: Space[];
-	// "Open in room" — wired to App's navigateToRoom + scroll-to-event
-	// plumbing.  When the report targets a message we pass the event
-	// id too so the sheet caller can jump straight to it.  Optional:
-	// when omitted the row just doesn't surface the link.
+	isAdmin: boolean;
+	transport: MatrixTransport | null;
 	onOpenTarget?(roomId: string, eventId?: string): void;
-	// Notify the parent that the open-count may have changed (after a
-	// successful dismiss / action).  Parent re-polls or decrements its
-	// cached badge.  Optional.
 	onCountChanged?(openCount: number): void;
 }
 
-export function AdminReportsSheet({
-	open, onOpenChange, accessToken, reports, onReportsChange,
+export function AdminPane({
+	accessToken, selection, reports, onReportsChange,
+	rooms, spaces, isAdmin, transport, onOpenTarget, onCountChanged,
+}: AdminPaneProps) {
+	const [activeTab, setActiveTab] = useState<AdminTab>("reports");
+
+	useEffect(() => {
+		setActiveTab("reports");
+	}, [selection?.kind, selection?.kind === "space" ? (selection as any).spaceId : null]);
+
+	if (!selection) {
+		return (
+			<div className="flex-1 min-w-0 flex items-center justify-center bg-background">
+				<div className="text-center space-y-2">
+					<div className="h-16 w-16 rounded-2xl bg-muted/50 flex items-center justify-center mx-auto">
+						<ShieldAlert className="h-8 w-8 text-muted-foreground" />
+					</div>
+					<p className="text-sm text-muted-foreground">Select a space or instance to manage</p>
+				</div>
+			</div>
+		);
+	}
+
+	const selectionLabel = selection.kind === "instance"
+		? "Instance"
+		: spaces.find(s => s.id === (selection as any).spaceId)?.name ?? "Space";
+
+	return (
+		<div className="flex-1 min-w-0 flex flex-col bg-background">
+			{/* Header */}
+			<div className="h-12 px-6 flex items-center border-b border-border">
+				<h2 className="text-sm font-semibold truncate">{selectionLabel}</h2>
+			</div>
+
+			{/* Tab strip */}
+			<div className="px-6 border-b border-border bg-card/30">
+				<div className="flex items-center gap-1 -mb-px">
+					{(["reports", "bans"] as const).map(tab => (
+						<button
+							key={tab}
+							type="button"
+							onClick={() => setActiveTab(tab)}
+							className={cn(
+								"relative px-3 py-2.5 text-sm whitespace-nowrap transition-colors border-b-2",
+								activeTab === tab
+									? "text-foreground border-primary font-medium"
+									: "text-muted-foreground border-transparent hover:text-foreground hover:border-border",
+							)}
+						>
+							{tab === "reports" ? "Reports" : "Bans"}
+						</button>
+					))}
+				</div>
+			</div>
+
+			{/* Tab content */}
+			<div className="flex-1 overflow-y-auto">
+				{activeTab === "reports" ? (
+					<ReportsTab
+						accessToken={accessToken}
+						selection={selection}
+						reports={reports}
+						onReportsChange={onReportsChange}
+						rooms={rooms}
+						spaces={spaces}
+						onOpenTarget={onOpenTarget}
+						onCountChanged={onCountChanged}
+					/>
+				) : (
+					<BansTab
+						accessToken={accessToken}
+						selection={selection}
+						transport={transport}
+						isAdmin={isAdmin}
+					/>
+				)}
+			</div>
+		</div>
+	);
+}
+
+// ─── Reports tab ─────────────────────────────────────────────────
+
+function ReportsTab({
+	accessToken, selection, reports, onReportsChange,
 	rooms, spaces, onOpenTarget, onCountChanged,
-}: AdminReportsSheetProps) {
+}: {
+	accessToken: string;
+	selection: NonNullable<AdminSelection>;
+	reports: AdminReport[];
+	onReportsChange(reports: AdminReport[]): void;
+	rooms: Room[];
+	spaces: Space[];
+	onOpenTarget?(roomId: string, eventId?: string): void;
+	onCountChanged?(openCount: number): void;
+}) {
 	const [busyId, setBusyId] = useState<string | null>(null);
-	// Local "filter to open only" toggle.  Default true — admins
-	// almost always want the queue (the closed-set view is occasional
-	// auditing).  Cheap client-side filter over the props.
 	const [showOpenOnly, setShowOpenOnly] = useState(true);
+
+	const filtered = useMemo(() => {
+		if (selection.kind === "instance") return reports;
+		const spaceId = selection.spaceId;
+		return reports.filter(r => {
+			const reportedRoomId = r.target_kind === "room"
+				? (r.target_room_id ?? r.room_id)
+				: r.room_id;
+			if (reportedRoomId === spaceId) return true;
+			const room = rooms.find(rr => rr.id === reportedRoomId);
+			return room?.parentSpaceIds.includes(spaceId as SpaceId) ?? false;
+		});
+	}, [reports, rooms, selection]);
 
 	async function applyStatus(eventId: string, kind: "dismiss" | "action") {
 		if (busyId) return;
@@ -92,10 +157,6 @@ export function AdminReportsSheet({
 		try {
 			if (kind === "dismiss") await dismissReport(accessToken, eventId);
 			else await markReportActioned(accessToken, eventId);
-			// Optimistic update — flip the row's status so the
-			// "show open only" filter immediately hides it without a
-			// full refetch.  Bubble the new list up to the parent so
-			// the badge count and subsequent re-opens see it too.
 			const next = reports.map(r =>
 				r.event_id === eventId
 					? { ...r, status: kind === "dismiss" ? ("dismissed" as const) : ("actioned" as const) }
@@ -111,13 +172,6 @@ export function AdminReportsSheet({
 		}
 	}
 
-	// Server-admin floor-toolkit actions for room-target reports.
-	// Each does the destructive Synapse-admin operation, then marks
-	// the triggering report as actioned (one click handles both
-	// audit sides).  Wraps applyStatus's optimistic-update +
-	// bubbling pattern so the row visually flips to "actioned"
-	// without a re-fetch.  Caller is expected to have run a confirm
-	// dialog BEFORE invoking; this fn does no confirm of its own.
 	async function applyDestructive(
 		eventId: string,
 		kind: "delete_room" | "delete_space" | "deactivate_user" | "ban_user",
@@ -131,13 +185,7 @@ export function AdminReportsSheet({
 			else if (kind === "delete_space") await adminDeleteSpace(accessToken, target, body);
 			else if (kind === "ban_user") await adminBanUser(accessToken, target, body);
 			else await adminDeactivateUser(accessToken, target, body);
-			// Mark the report actioned now that the underlying
-			// remediation succeeded — saves the operator a click.
-			await markReportActioned(accessToken, eventId).catch(() => {
-				/* destructive op already landed; audit-row failure is
-				 * non-fatal.  Leaving the row in "open" status is the
-				 * worst case and a manual click fixes it. */
-			});
+			await markReportActioned(accessToken, eventId).catch(() => {});
 			const next = reports.map(r =>
 				r.event_id === eventId
 					? { ...r, status: "actioned" as const }
@@ -147,9 +195,6 @@ export function AdminReportsSheet({
 			const remaining = next.filter(r => r.status === "open").length;
 			onCountChanged?.(remaining);
 		} catch (err) {
-			// Surface the error so the operator sees that the
-			// destructive op DIDN'T run — important because the row
-			// stays open and the action wasn't taken.
 			window.alert(`Action failed: ${err instanceof Error ? err.message : String(err)}`);
 			console.warn("admin reports: applyDestructive failed", err);
 		} finally {
@@ -157,73 +202,172 @@ export function AdminReportsSheet({
 		}
 	}
 
-	const visible = reports.filter(r => !showOpenOnly || r.status === "open");
-	const openCount = reports.filter(r => r.status === "open").length;
+	const visible = filtered.filter(r => !showOpenOnly || r.status === "open");
+	const openCount = filtered.filter(r => r.status === "open").length;
 
 	return (
-		<Dialog open={open} onOpenChange={onOpenChange}>
-			<DialogContent className="sm:max-w-2xl max-h-[80vh] flex flex-col">
-				<DialogHeader>
-					<DialogTitle>Reports</DialogTitle>
-					<DialogDescription>
-						Reports about content in spaces you moderate, plus
-						floor-violation reports across the instance if you're
-						a server admin.  Use the room member list or message
-						toolbar to kick / ban / redact, then mark the report
-						resolved here.
-					</DialogDescription>
-				</DialogHeader>
-
-				<div className="flex items-center justify-between text-xs text-muted-foreground py-1">
-					<span>
-						{openCount} open
-						{reports.length > openCount && (
-							<> · {reports.length - openCount} closed</>
-						)}
-					</span>
-					<label className="inline-flex items-center gap-1.5 cursor-pointer select-none">
-						<input
-							type="checkbox"
-							checked={showOpenOnly}
-							onChange={(e) => setShowOpenOnly(e.target.checked)}
-							className="h-3 w-3"
-						/>
-						Open only
-					</label>
-				</div>
-
-				<div className="flex-1 overflow-y-auto -mx-6 px-6">
-					{visible.length === 0 ? (
-						<div className="text-sm text-muted-foreground italic py-6 text-center border border-dashed border-border rounded">
-							{showOpenOnly
-								? "No open reports.  Nice."
-								: "No reports recorded yet."}
-						</div>
-					) : (
-						<ol className="space-y-2">
-							{visible.map(r => (
-								<ReportRow
-									key={r.event_id}
-									r={r}
-									busy={busyId === r.event_id}
-									rooms={rooms}
-									spaces={spaces}
-									onDismiss={() => applyStatus(r.event_id, "dismiss")}
-									onAction={() => applyStatus(r.event_id, "action")}
-									onDeleteRoom={(roomId) => applyDestructive(r.event_id, "delete_room", roomId)}
-									onDeleteSpace={(spaceId) => applyDestructive(r.event_id, "delete_space", spaceId)}
-									onBanUser={(userId) => applyDestructive(r.event_id, "ban_user", userId)}
-									onDeactivateUser={(userId) => applyDestructive(r.event_id, "deactivate_user", userId)}
-									onOpenTarget={onOpenTarget}
-								/>
-							))}
-						</ol>
+		<div className="px-6 py-4">
+			<div className="flex items-center justify-between text-xs text-muted-foreground py-1 mb-3">
+				<span>
+					{openCount} open
+					{filtered.length > openCount && (
+						<> · {filtered.length - openCount} closed</>
 					)}
+				</span>
+				<label className="inline-flex items-center gap-1.5 cursor-pointer select-none">
+					<input
+						type="checkbox"
+						checked={showOpenOnly}
+						onChange={(e) => setShowOpenOnly(e.target.checked)}
+						className="h-3 w-3"
+					/>
+					Open only
+				</label>
+			</div>
+
+			{visible.length === 0 ? (
+				<div className="text-sm text-muted-foreground italic py-6 text-center border border-dashed border-border rounded">
+					{showOpenOnly
+						? "No open reports. Nice."
+						: "No reports recorded yet."}
 				</div>
-			</DialogContent>
-		</Dialog>
+			) : (
+				<ol className="space-y-2">
+					{visible.map(r => (
+						<ReportRow
+							key={r.event_id}
+							r={r}
+							busy={busyId === r.event_id}
+							rooms={rooms}
+							spaces={spaces}
+							onDismiss={() => applyStatus(r.event_id, "dismiss")}
+							onAction={() => applyStatus(r.event_id, "action")}
+							onDeleteRoom={(roomId) => applyDestructive(r.event_id, "delete_room", roomId)}
+							onDeleteSpace={(spaceId) => applyDestructive(r.event_id, "delete_space", spaceId)}
+							onBanUser={(userId) => applyDestructive(r.event_id, "ban_user", userId)}
+							onDeactivateUser={(userId) => applyDestructive(r.event_id, "deactivate_user", userId)}
+							onOpenTarget={onOpenTarget}
+						/>
+					))}
+				</ol>
+			)}
+		</div>
 	);
 }
+
+// ─── Bans tab ────────────────────────────────────────────────────
+
+function BansTab({
+	accessToken, selection, transport, isAdmin,
+}: {
+	accessToken: string;
+	selection: NonNullable<AdminSelection>;
+	transport: MatrixTransport | null;
+	isAdmin: boolean;
+}) {
+	if (selection.kind === "instance") {
+		return (
+			<div className="px-6 py-4">
+				<BannedUsersSection accessToken={accessToken} transport={transport} />
+			</div>
+		);
+	}
+
+	return (
+		<SpaceBansView
+			spaceId={selection.spaceId}
+			transport={transport}
+		/>
+	);
+}
+
+function SpaceBansView({
+	spaceId, transport,
+}: {
+	spaceId: SpaceId;
+	transport: MatrixTransport | null;
+}) {
+	const [banned, setBanned] = useState<Member[]>([]);
+	const [pendingMxid, setPendingMxid] = useState<string | null>(null);
+	const [error, setError] = useState<string | null>(null);
+
+	useEffect(() => {
+		if (!transport) return;
+		setBanned(transport.getSpaceBannedMembers(spaceId));
+	}, [spaceId, transport]);
+
+	async function handleUnban(userId: string) {
+		if (pendingMxid || !transport) return;
+		if (typeof window !== "undefined" && !window.confirm(
+			`Unban ${userId} from this space? They will be able to rejoin.`,
+		)) return;
+		setPendingMxid(userId);
+		setError(null);
+		try {
+			await transport.unbanFromSpace(spaceId, userId as UserId);
+			setBanned(prev => prev.filter(m => m.userId !== userId));
+		} catch (err) {
+			setError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setPendingMxid(null);
+		}
+	}
+
+	return (
+		<div className="px-6 py-4 space-y-3">
+			<div>
+				<p className="text-sm font-medium">Space bans</p>
+				<p className="text-xs text-muted-foreground mt-0.5">
+					Users banned from this space and all its rooms.
+				</p>
+			</div>
+
+			{error && (
+				<p className="text-xs text-destructive">{error}</p>
+			)}
+
+			{banned.length === 0 ? (
+				<p className="text-xs text-muted-foreground italic py-2">No banned users in this space.</p>
+			) : (
+				<ul className="space-y-2">
+					{banned.map(member => {
+						const busy = pendingMxid === member.userId;
+						return (
+							<li
+								key={member.userId}
+								className="flex items-center gap-3 p-2 rounded border border-border bg-card/50"
+							>
+								<MatrixAvatar
+									mxc={member.avatarUrl}
+									seed={member.userId}
+									className="h-8 w-8 shrink-0"
+								/>
+								<div className="flex-1 min-w-0">
+									<div className="text-sm font-medium truncate">
+										{member.displayName}
+									</div>
+									<div className="text-[11px] text-muted-foreground truncate">
+										{member.userId}
+									</div>
+								</div>
+								<button
+									type="button"
+									disabled={busy}
+									onClick={() => handleUnban(member.userId)}
+									className="shrink-0 px-2 py-1 rounded border border-border bg-card hover:bg-accent text-xs disabled:opacity-50"
+								>
+									{busy ? "Unbanning..." : "Unban"}
+								</button>
+							</li>
+						);
+					})}
+				</ul>
+			)}
+		</div>
+	);
+}
+
+// ─── Report row (moved from AdminReportsSheet) ──────────────────
 
 function ReportRow({
 	r, busy, rooms, spaces, onDismiss, onAction, onOpenTarget,
@@ -236,12 +380,6 @@ function ReportRow({
 	onDismiss(): void;
 	onAction(): void;
 	onOpenTarget?(roomId: string, eventId?: string): void;
-	// Server-admin floor-toolkit handlers, only invoked for
-	// `target_kind === "room"` rows.  Each takes the appropriate
-	// target id (roomId for delete-room, spaceId for delete-space,
-	// userId for deactivate-creator) so the row can do its own
-	// lookups from `rooms` + `spaces` and hand the parent a clean
-	// invocation.
 	onDeleteRoom(roomId: string): void | Promise<void>;
 	onDeleteSpace(spaceId: string): void | Promise<void>;
 	onBanUser(userId: string): void | Promise<void>;
@@ -249,35 +387,18 @@ function ReportRow({
 }) {
 	const time = new Date(r.created_at).toLocaleString();
 	const isClosed = r.status !== "open";
-	// Routing pill — why is this report visible to the viewer?
-	//
-	// We can't observe the engine's filter decision directly, but the
-	// rules are: (1) viewer has PL ≥ 50 in the reported room → space
-	// mod path; (2) viewer is server admin AND category=floor_violation
-	// → floor backstop.  When the room is in our local roster AND we
-	// hold PL ≥ 50 there, this is (1); otherwise the only remaining
-	// way the engine could have returned this row is (2).  No need to
-	// know server-admin status — the engine wouldn't have returned a
-	// non-floor row to us unless we're PL 50+ in that room (which we
-	// also wouldn't have if the room weren't in our roster).
 	const reportedRoomId = r.target_kind === "room"
 		? (r.target_room_id ?? r.room_id)
 		: r.room_id;
 	const room = rooms.find(rr => rr.id === reportedRoomId);
 	const viewerPl = room?.myPowerLevel ?? 0;
 	const isSpaceModPath = viewerPl >= 50;
-	// Find the parent space's name for the space-mod label.  Koven's
-	// invariant is one parent space per room, so parentSpaceIds[0] is
-	// the right pointer when the room IS a child of a space.  When
-	// the reported "room" IS a space itself (target_kind="room" on
-	// a space), fall back to looking up the space by its own id.
 	let spaceLabel: string | undefined;
 	if (isSpaceModPath && room) {
 		const parentId = room.parentSpaceIds[0];
 		if (parentId) {
 			spaceLabel = spaces.find(s => s.id === parentId)?.name;
 		} else {
-			// Could be a flagged space itself — its id IS a space id.
 			spaceLabel = spaces.find(s => s.id === room.id)?.name;
 		}
 	}
@@ -296,7 +417,7 @@ function ReportRow({
 						</span>
 						{isSpaceModPath ? (
 							<span
-								title="You see this report because you have PL ≥ 50 in the reported room"
+								title="You see this report because you have PL >= 50 in the reported room"
 								className="inline-flex items-center gap-1 uppercase tracking-wide text-[9px] font-medium px-1.5 py-px rounded bg-amber-500/15 text-amber-500"
 							>
 								<Shield className="h-2.5 w-2.5" />
@@ -362,7 +483,7 @@ function ReportRow({
 									className="inline-flex items-center gap-1 px-2 py-1 rounded border border-emerald-500/40 bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500/20 text-[11px] disabled:opacity-50"
 								>
 									<Check className="h-3 w-3" />
-									{busy ? "Marking…" : "Mark resolved"}
+									{busy ? "Marking..." : "Mark resolved"}
 								</button>
 								<button
 									type="button"
@@ -371,7 +492,7 @@ function ReportRow({
 									className="inline-flex items-center gap-1 px-2 py-1 rounded border border-border bg-card hover:bg-accent text-[11px] disabled:opacity-50"
 								>
 									<X className="h-3 w-3" />
-									{busy ? "Dismissing…" : "Dismiss"}
+									{busy ? "Dismissing..." : "Dismiss"}
 								</button>
 							</>
 						)}
@@ -394,19 +515,6 @@ function ReportRow({
 	);
 }
 
-/** Server-admin destructive-actions row.  Only appears on
- * room-target reports (which route to server admin only — see
- * computeReportVisibility in the engine).  Three buttons:
- *
- *   - Delete room      → adminDeleteRoom
- *   - Delete space     → adminDeleteSpace (only when the reported room IS a space)
- *   - Deactivate owner → adminDeactivateUser (only when we can identify the creator from local state)
- *
- * Every action is gated behind a strong confirm.  The deactivate
- * path additionally requires the operator to type the user's mxid
- * to confirm — it's the most catastrophic single action available
- * via the toolkit.
- */
 function FloorToolkitRow({
 	r, rooms, spaces, busy,
 	onDeleteRoom, onDeleteSpace, onBanUser, onDeactivateUser,
@@ -421,16 +529,8 @@ function FloorToolkitRow({
 	onDeactivateUser(userId: string): void | Promise<void>;
 }) {
 	const reportedRoomId = r.target_room_id ?? r.room_id;
-	// Is the reported "room" actually a Matrix space?  Look it up
-	// in the spaces roster; if present, offer Delete-space as a
-	// distinct action (walks m.space.child + deletes everything).
 	const reportedSpace = spaces.find(s => s.id === reportedRoomId);
 	const isSpace = !!reportedSpace;
-	// Creator lookup — for the Deactivate-creator button.  Tries
-	// the room first (regular rooms), then the space (when the
-	// target IS a space).  When we can't identify a creator
-	// (room not in our local roster — possible if we're not joined),
-	// the button is hidden rather than guessing.
 	const reportedRoom = rooms.find(rr => rr.id === reportedRoomId);
 	const creatorId = reportedRoom?.creatorId ?? reportedSpace?.creatorId ?? null;
 	return (
@@ -501,16 +601,14 @@ function FloorToolkitRow({
 					disabled={busy}
 					onClick={async () => {
 						if (typeof window === "undefined") return;
-						// Typed-confirm — the user has to retype the mxid
-						// to proceed.  Catastrophic action, no slips.
 						const typed = window.prompt(
 							`Permanently deactivate the creator of this ${isSpace ? "space" : "room"}?\n\n`
 							+ `User: ${creatorId}\n\n`
 							+ `Their account will be erased platform-wide:\n`
-							+ `  • They cannot log in again, ever.\n`
-							+ `  • Their profile is wiped.\n`
-							+ `  • Their messages are pseudonymised.\n`
-							+ `  • Their mxid is blocked from re-registration.\n\n`
+							+ `  - They cannot log in again, ever.\n`
+							+ `  - Their profile is wiped.\n`
+							+ `  - Their messages are pseudonymised.\n`
+							+ `  - Their mxid is blocked from re-registration.\n\n`
 							+ `Type the user's mxid exactly to confirm:`,
 						);
 						if (typed !== creatorId) return;
