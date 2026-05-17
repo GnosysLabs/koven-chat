@@ -31,6 +31,7 @@ import {
 	DialogTitle,
 } from "@/components/ui/dialog";
 import {
+	adminBanUser,
 	adminDeactivateUser,
 	adminDeleteRoom,
 	adminDeleteSpace,
@@ -38,7 +39,7 @@ import {
 	markReportActioned,
 	type AdminReport,
 } from "@/lib/instance";
-import { AlertTriangle, Check, ExternalLink, Flag, Shield, Trash2, UserX, X } from "lucide-react";
+import { AlertTriangle, Ban, Check, ExternalLink, Flag, Shield, Trash2, UserX, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Room, Space } from "@koven/shared";
 
@@ -119,7 +120,7 @@ export function AdminReportsSheet({
 	// dialog BEFORE invoking; this fn does no confirm of its own.
 	async function applyDestructive(
 		eventId: string,
-		kind: "delete_room" | "delete_space" | "deactivate_user",
+		kind: "delete_room" | "delete_space" | "deactivate_user" | "ban_user",
 		target: string,
 	) {
 		if (busyId) return;
@@ -128,6 +129,7 @@ export function AdminReportsSheet({
 			const body = { related_flag: eventId };
 			if (kind === "delete_room") await adminDeleteRoom(accessToken, target, body);
 			else if (kind === "delete_space") await adminDeleteSpace(accessToken, target, body);
+			else if (kind === "ban_user") await adminBanUser(accessToken, target, body);
 			else await adminDeactivateUser(accessToken, target, body);
 			// Mark the report actioned now that the underlying
 			// remediation succeeded — saves the operator a click.
@@ -210,6 +212,7 @@ export function AdminReportsSheet({
 									onAction={() => applyStatus(r.event_id, "action")}
 									onDeleteRoom={(roomId) => applyDestructive(r.event_id, "delete_room", roomId)}
 									onDeleteSpace={(spaceId) => applyDestructive(r.event_id, "delete_space", spaceId)}
+									onBanUser={(userId) => applyDestructive(r.event_id, "ban_user", userId)}
 									onDeactivateUser={(userId) => applyDestructive(r.event_id, "deactivate_user", userId)}
 									onOpenTarget={onOpenTarget}
 								/>
@@ -224,7 +227,7 @@ export function AdminReportsSheet({
 
 function ReportRow({
 	r, busy, rooms, spaces, onDismiss, onAction, onOpenTarget,
-	onDeleteRoom, onDeleteSpace, onDeactivateUser,
+	onDeleteRoom, onDeleteSpace, onBanUser, onDeactivateUser,
 }: {
 	r: AdminReport;
 	busy: boolean;
@@ -241,6 +244,7 @@ function ReportRow({
 	// invocation.
 	onDeleteRoom(roomId: string): void | Promise<void>;
 	onDeleteSpace(spaceId: string): void | Promise<void>;
+	onBanUser(userId: string): void | Promise<void>;
 	onDeactivateUser(userId: string): void | Promise<void>;
 }) {
 	const time = new Date(r.created_at).toLocaleString();
@@ -380,6 +384,7 @@ function ReportRow({
 							busy={busy}
 							onDeleteRoom={onDeleteRoom}
 							onDeleteSpace={onDeleteSpace}
+							onBanUser={onBanUser}
 							onDeactivateUser={onDeactivateUser}
 						/>
 					)}
@@ -404,7 +409,7 @@ function ReportRow({
  */
 function FloorToolkitRow({
 	r, rooms, spaces, busy,
-	onDeleteRoom, onDeleteSpace, onDeactivateUser,
+	onDeleteRoom, onDeleteSpace, onBanUser, onDeactivateUser,
 }: {
 	r: AdminReport;
 	rooms: Room[];
@@ -412,6 +417,7 @@ function FloorToolkitRow({
 	busy: boolean;
 	onDeleteRoom(roomId: string): void | Promise<void>;
 	onDeleteSpace(spaceId: string): void | Promise<void>;
+	onBanUser(userId: string): void | Promise<void>;
 	onDeactivateUser(userId: string): void | Promise<void>;
 }) {
 	const reportedRoomId = r.target_room_id ?? r.room_id;
@@ -467,6 +473,26 @@ function FloorToolkitRow({
 				>
 					<Trash2 className="h-3 w-3" />
 					Delete whole space
+				</button>
+			)}
+			{creatorId && (
+				<button
+					type="button"
+					disabled={busy}
+					onClick={async () => {
+						if (typeof window === "undefined") return;
+						if (!window.confirm(
+							`Ban the creator of this ${isSpace ? "space" : "room"} from the platform?\n\n`
+							+ `User: ${creatorId}\n\n`
+							+ `They will be immediately logged out and unable to sign in until unbanned.\n`
+							+ `This is reversible.`,
+						)) return;
+						await onBanUser(creatorId);
+					}}
+					className="inline-flex items-center gap-1 px-2 py-1 rounded border border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive/20 text-[11px] disabled:opacity-50"
+				>
+					<Ban className="h-3 w-3" />
+					Ban from platform
 				</button>
 			)}
 			{creatorId && (

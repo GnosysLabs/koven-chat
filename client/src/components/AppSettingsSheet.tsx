@@ -15,6 +15,7 @@ import { THEMES } from "@/state/settings";
 import { Check, Monitor, Palette, User, Wrench, type LucideIcon } from "lucide-react";
 import { InstanceAdminSection } from "@/components/InstanceAdminSection";
 import { AdminManagementSection } from "@/components/AdminManagementSection";
+import { BannedUsersSection } from "@/components/BannedUsersSection";
 import { AccountSection } from "@/components/AccountSection";
 import { SessionsSection } from "@/components/SessionsSection";
 import { fetchAdminStatus } from "@/lib/instance";
@@ -187,6 +188,10 @@ export function AppSettingsSheet({ open, onOpenChange, settings, onSettingsChang
 											currentUserId={currentUserId}
 										/>
 									)}
+									<BannedUsersSection
+										accessToken={accessToken}
+										transport={transport ?? null}
+									/>
 								</div>
 							)}
 						</div>

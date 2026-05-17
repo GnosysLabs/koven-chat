@@ -119,6 +119,12 @@ import {
 	writeDiscoverable,
 	listDiscoverableUsers,
 	countDiscoverableUsers,
+	isPlatformBanned,
+	insertPlatformBan,
+	deletePlatformBan,
+	listPlatformBans,
+	getPlatformBan,
+	type PlatformBanRow,
 } from "./db";
 import { deliverWebhook } from "./webhooks";
 import {
@@ -134,6 +140,8 @@ import {
 	adminResetPassword,
 	adminSetUserEmail,
 	deactivateUser,
+	lockUser,
+	unlockUser,
 	getEventSender,
 	getJoinedMembers,
 	getAllJoinedMembers,
@@ -1167,6 +1175,13 @@ export function startServer(): void {
 				const token = await loginAsUser(userId, uiaPassword);
 				if ("error" in token) {
 					return json({ error: token.error, detail: token.detail }, { status: 502 });
+				}
+
+				if (isPlatformBanned(userId)) {
+					return json({
+						error: "platform_banned",
+						detail: "Your account has been suspended by an instance administrator.",
+					}, { status: 403 });
 				}
 
 				// Everything succeeded.  Burn the code now so it can't
@@ -4286,6 +4301,126 @@ export function startServer(): void {
 						relatedFlag,
 					});
 					return json({ id: rec.id, created_at: rec.created_at });
+				}
+			}
+
+			// POST /api/admin/users/:userId/ban
+			// Reversible platform-wide ban.  Locks the Synapse account
+			// (invalidates sessions, prevents login) and records a
+			// platform_bans row.  Unlike deactivation the account and
+			// message history are preserved, and the ban can be lifted
+			// via the /unban endpoint.
+			{
+				const m = path.match(/^\/api\/admin\/users\/([^/]+)\/ban$/);
+				if (req.method === "POST" && m) {
+					const auth = await requireAdmin(req);
+					if (auth instanceof Response) return auth;
+					const targetUserId = decodeURIComponent(m[1]!);
+					const body = (await req.json().catch(() => ({}))) as {
+						reason?: unknown;
+						related_flag?: unknown;
+					};
+					const reason = typeof body.reason === "string" ? body.reason.slice(0, 1000) : null;
+					const relatedFlag = typeof body.related_flag === "string" ? body.related_flag : null;
+
+					if (targetUserId === auth.userId) {
+						return json({
+							errcode: "M_FORBIDDEN",
+							error: "cannot ban yourself via this path",
+						}, { status: 403 });
+					}
+					if (isAdmin(targetUserId)) {
+						return json({
+							errcode: "M_FORBIDDEN",
+							error: "target is a server admin — revoke admin first via /api/admins/revoke",
+						}, { status: 403 });
+					}
+					if (isPlatformBanned(targetUserId)) {
+						return json({
+							errcode: "M_ALREADY_EXISTS",
+							error: "user is already platform-banned",
+							ban: getPlatformBan(targetUserId),
+						}, { status: 409 });
+					}
+
+					const ok = await lockUser(targetUserId);
+					if (!ok) {
+						return json({
+							errcode: "M_UNKNOWN",
+							error: "synapse lock refused (user may not exist on this homeserver)",
+						}, { status: 502 });
+					}
+					insertPlatformBan(targetUserId, reason, auth.userId, relatedFlag);
+					const rec = recordInstanceAdminAction({
+						actor: auth.userId,
+						action: "ban_user",
+						target: targetUserId,
+						reason,
+						relatedFlag,
+					});
+					return json({ id: rec.id, created_at: rec.created_at });
+				}
+			}
+
+			// POST /api/admin/users/:userId/unban
+			// Lift a platform ban.  Unlocks the Synapse account so the
+			// user can log in again.
+			{
+				const m = path.match(/^\/api\/admin\/users\/([^/]+)\/unban$/);
+				if (req.method === "POST" && m) {
+					const auth = await requireAdmin(req);
+					if (auth instanceof Response) return auth;
+					const targetUserId = decodeURIComponent(m[1]!);
+					const body = (await req.json().catch(() => ({}))) as {
+						reason?: unknown;
+					};
+					const reason = typeof body.reason === "string" ? body.reason.slice(0, 1000) : null;
+
+					if (!isPlatformBanned(targetUserId)) {
+						return json({
+							errcode: "M_NOT_FOUND",
+							error: "user is not platform-banned",
+						}, { status: 404 });
+					}
+
+					const ok = await unlockUser(targetUserId);
+					if (!ok) {
+						return json({
+							errcode: "M_UNKNOWN",
+							error: "synapse unlock refused",
+						}, { status: 502 });
+					}
+					deletePlatformBan(targetUserId);
+					const rec = recordInstanceAdminAction({
+						actor: auth.userId,
+						action: "unban_user",
+						target: targetUserId,
+						reason,
+					});
+					return json({ ok: true, id: rec.id, created_at: rec.created_at });
+				}
+			}
+
+			// GET /api/admin/bans
+			// List all currently platform-banned users.
+			{
+				if (req.method === "GET" && path === "/api/admin/bans") {
+					const auth = await requireAdmin(req);
+					if (auth instanceof Response) return auth;
+					return json({ bans: listPlatformBans() });
+				}
+			}
+
+			// GET /api/admin/users/:userId/ban-status
+			// Check whether a single user is platform-banned.
+			{
+				const m = path.match(/^\/api\/admin\/users\/([^/]+)\/ban-status$/);
+				if (req.method === "GET" && m) {
+					const auth = await requireAdmin(req);
+					if (auth instanceof Response) return auth;
+					const targetUserId = decodeURIComponent(m[1]!);
+					const ban = getPlatformBan(targetUserId);
+					return json({ banned: !!ban, ban: ban ?? undefined });
 				}
 			}
 

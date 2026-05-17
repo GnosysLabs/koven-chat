@@ -110,6 +110,17 @@ db.exec(`
 		granted_by TEXT             -- NULL when self-bootstrap
 	);
 
+	-- Platform-wide bans.  Row present = user is currently banned.
+	-- Unbanning deletes the row; full history lives in
+	-- instance_admin_actions (ban_user / unban_user entries).
+	CREATE TABLE IF NOT EXISTS platform_bans (
+		user_id      TEXT PRIMARY KEY,
+		reason       TEXT,
+		banned_by    TEXT NOT NULL,
+		banned_at    INTEGER NOT NULL,
+		related_flag TEXT
+	);
+
 	-- Per-user, per-room notification level.  Three values:
 	--   'all'      → fire on every message (kind=message)
 	--   'mentions' → fire on DM/mention/reply only (current default)
@@ -2341,7 +2352,9 @@ export type InstanceAdminAction =
 	| "delete_space"
 	| "deactivate_user"
 	| "delete_room_by_owner"
-	| "delete_space_by_owner";
+	| "delete_space_by_owner"
+	| "ban_user"
+	| "unban_user";
 
 const insertInstanceAdminActionStmt = db.prepare(`
 	INSERT INTO instance_admin_actions (actor, action, target, reason, related_flag, created_at)
@@ -2365,6 +2378,62 @@ export function recordInstanceAdminAction(opts: {
 		createdAt,
 	);
 	return { id: Number(r.lastInsertRowid), created_at: createdAt };
+}
+
+// ─── Platform bans (reversible instance-wide lockout) ───────────
+
+export interface PlatformBanRow {
+	user_id: string;
+	reason: string | null;
+	banned_by: string;
+	banned_at: number;
+	related_flag: string | null;
+}
+
+const insertPlatformBanStmt = db.prepare(`
+	INSERT OR REPLACE INTO platform_bans (user_id, reason, banned_by, banned_at, related_flag)
+	VALUES (?, ?, ?, ?, ?)
+`);
+
+export function insertPlatformBan(
+	userId: string,
+	reason: string | null,
+	bannedBy: string,
+	relatedFlag: string | null,
+): void {
+	insertPlatformBanStmt.run(userId, reason, bannedBy, Date.now(), relatedFlag);
+}
+
+const deletePlatformBanStmt = db.prepare(
+	`DELETE FROM platform_bans WHERE user_id = ?`,
+);
+
+export function deletePlatformBan(userId: string): boolean {
+	return deletePlatformBanStmt.run(userId).changes > 0;
+}
+
+const isPlatformBannedStmt = db.prepare(
+	`SELECT 1 FROM platform_bans WHERE user_id = ?`,
+);
+
+export function isPlatformBanned(userId: string): boolean {
+	return !!isPlatformBannedStmt.get(userId);
+}
+
+const listPlatformBansStmt = db.prepare(
+	`SELECT * FROM platform_bans ORDER BY banned_at DESC`,
+);
+
+export function listPlatformBans(): PlatformBanRow[] {
+	return listPlatformBansStmt.all() as PlatformBanRow[];
+}
+
+const getPlatformBanStmt = db.prepare(
+	`SELECT * FROM platform_bans WHERE user_id = ?`,
+);
+
+export function getPlatformBan(userId: string): PlatformBanRow | null {
+	return (getPlatformBanStmt.get(userId) as PlatformBanRow) ?? null;
 }
 
 const modActionsForRoomStmt = db.prepare(`

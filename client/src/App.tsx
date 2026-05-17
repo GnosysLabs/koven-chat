@@ -3962,6 +3962,7 @@ export default function App() {
 				</div>
 			)}
 			<ProfileSheet
+				isInstanceAdmin={isAdmin}
 				viewedUserId={isMobileShell && viewedUserId !== creds.user_id ? null : viewedUserId}
 				onClose={() => setViewedUserId(null)}
 				transport={transport}

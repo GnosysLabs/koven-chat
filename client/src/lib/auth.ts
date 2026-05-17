@@ -93,6 +93,7 @@ export type VerifyCodeError =
 	| "invalid_username"
 	| "username_unavailable"
 	| "password_rotate_failed"
+	| "platform_banned"
 	| "synapse_error"
 	| "network";
 

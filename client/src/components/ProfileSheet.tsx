@@ -26,6 +26,7 @@ import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { ProfileBanner } from "@/components/ProfileBanner";
 import { BotBadge } from "@/components/BotBadge";
 import { fetchUserProfile, updateMyProfileData, type SocialLink } from "@/lib/profile";
+import { adminBanUser, adminUnbanUser, fetchUserBanStatus } from "@/lib/instance";
 import { SOCIAL_PLATFORMS, PLATFORM_PLACEHOLDERS, SocialIcon } from "@/components/SocialIcons";
 import { FounderBadge } from "@/components/FounderBadge";
 import { getFounderCap } from "@/lib/founders-cache";
@@ -94,6 +95,9 @@ export interface ProfileSheetProps {
 	// state; we just hand back the target.  When omitted, the credit
 	// row renders non-interactive (still informative, just no nav).
 	onViewProfile?(userId: UserId): void;
+	// True when the viewer is an instance admin.  Gates the platform
+	// ban/unban affordance on non-self, non-admin profiles.
+	isInstanceAdmin?: boolean;
 }
 
 interface BaseProfile {
@@ -103,7 +107,7 @@ interface BaseProfile {
 	homeserver: string;
 }
 
-export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ignoredUsers, onSelfProfileSaved, isBot, onStartDm, canKickBanBots, isMyBot, canRemoveOwnBot, onBotMembership, onViewProfile }: ProfileSheetProps) {
+export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ignoredUsers, onSelfProfileSaved, isBot, onStartDm, canKickBanBots, isMyBot, canRemoveOwnBot, onBotMembership, onViewProfile, isInstanceAdmin }: ProfileSheetProps) {
 	const isSelf = useMemo(() => {
 		if (!viewedUserId || !transport) return false;
 		return transport.currentUserId === viewedUserId;
@@ -119,6 +123,9 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 	// kicks back-to-back.
 	const [botActionPending, setBotActionPending] = useState<"kick" | "ban" | null>(null);
 	const isBlocked = !!(viewedUserId && ignoredUsers?.has(viewedUserId));
+	// Platform ban state (admin-only).
+	const [platformBanned, setPlatformBanned] = useState(false);
+	const [banActionPending, setBanActionPending] = useState(false);
 	// Founder branch: full Kick/Ban affordance.  Shown to the space
 	// founder for ANY bot in the space — including bots they own.
 	// "I'm the space founder AND I happen to own this bot" is a real
@@ -362,6 +369,16 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 			// (undefined) state — the Message button gating only
 			// applies to bots, so the human-DM path is unaffected.
 		}
+
+		// Platform ban status (admin-only, non-self).
+		if (isInstanceAdmin && !isSelf && accessToken) {
+			fetchUserBanStatus(accessToken, viewedUserId)
+				.then(s => { if (!cancelled) setPlatformBanned(s.banned); })
+				.catch(() => { if (!cancelled) setPlatformBanned(false); });
+		} else {
+			setPlatformBanned(false);
+		}
+
 		return () => { cancelled = true; };
 		// `profile` intentionally not in deps — including it would re-
 		// run the fetch every time the fetch resolves (we just set
@@ -370,7 +387,7 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 		// `isBot` is in deps because the creator-lookup branch reads
 		// it to decide whether to fire the engine call.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [open, transport, viewedUserId, isSelf, isBot]);
+	}, [open, transport, viewedUserId, isSelf, isBot, isInstanceAdmin, accessToken]);
 
 	// Clean up object URLs we made for previews.
 	useEffect(() => {
@@ -413,6 +430,28 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 			setError(err instanceof Error ? err.message : String(err));
 		} finally {
 			setBlocking(false);
+		}
+	}
+
+	async function togglePlatformBan() {
+		if (!viewedUserId || !accessToken || !isInstanceAdmin || isSelf) return;
+		const action = platformBanned ? "unban" : "ban";
+		const msg = platformBanned
+			? `Lift the platform ban on ${viewedUserId}? They will be able to sign in again.`
+			: `Ban ${viewedUserId} from the platform?\n\nThey will be immediately logged out and unable to sign in until unbanned. This is reversible.`;
+		if (typeof window !== "undefined" && !window.confirm(msg)) return;
+		setBanActionPending(true);
+		try {
+			if (platformBanned) {
+				await adminUnbanUser(accessToken, viewedUserId);
+			} else {
+				await adminBanUser(accessToken, viewedUserId);
+			}
+			setPlatformBanned(!platformBanned);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setBanActionPending(false);
 		}
 	}
 
@@ -875,6 +914,12 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 								<div className="text-[22px] font-semibold tracking-[-0.01em] text-foreground leading-tight break-words">
 									{profile.displayName}
 									{isBot && <BotBadge compact={false} />}
+									{platformBanned && (
+										<span className="ml-2 inline-flex items-center gap-1 align-middle text-[11px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-destructive/15 text-destructive">
+											<Ban className="h-3 w-3" />
+											Banned
+										</span>
+									)}
 								</div>
 								<div className="text-[14px] text-muted-foreground leading-snug truncate">
 									{profile.userId.includes(":") ? `@${profile.userId.slice(1, profile.userId.indexOf(":"))}` : profile.userId}
@@ -1066,6 +1111,20 @@ export function ProfileSheet({ viewedUserId, onClose, transport, accessToken, ig
 				)}
 
 				<DialogFooter>
+					{isInstanceAdmin && !isSelf && viewedUserId && !isBot && (
+						<Button
+							type="button"
+							variant="ghost"
+							onClick={togglePlatformBan}
+							disabled={banActionPending || loading}
+							className={platformBanned ? "text-amber-500 hover:text-amber-500" : "text-destructive hover:text-destructive"}
+						>
+							<Ban className="h-3.5 w-3.5 mr-1.5" />
+							{banActionPending
+								? (platformBanned ? "Unbanning…" : "Banning…")
+								: (platformBanned ? "Unban from platform" : "Platform ban")}
+						</Button>
+					)}
 					{/* Block is a personal-noise filter for human users:
 					    drop their messages from your timeline, refuse
 					    their DMs.  Bots aren't blockable in that sense

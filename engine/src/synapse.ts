@@ -120,6 +120,43 @@ export async function deactivateUser(userId: string, erase: boolean = true): Pro
 	return true;
 }
 
+/**
+ * Lock a user account via Synapse admin API (reversible).
+ * Invalidates all sessions and prevents login.  The account,
+ * rooms, and message history are preserved.
+ */
+export async function lockUser(userId: string): Promise<boolean> {
+	const path = `/_synapse/admin/v2/users/${encodeURIComponent(userId)}`;
+	const r = await adminFetch(path, {
+		method: "PUT",
+		body: JSON.stringify({ locked: true }),
+	});
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		console.warn(`engine: lockUser ${userId} → ${r.status} ${txt.slice(0, 200)}`);
+		return false;
+	}
+	return true;
+}
+
+/**
+ * Unlock a previously locked user account.  Restores full access;
+ * the user can log in again and resume where they left off.
+ */
+export async function unlockUser(userId: string): Promise<boolean> {
+	const path = `/_synapse/admin/v2/users/${encodeURIComponent(userId)}`;
+	const r = await adminFetch(path, {
+		method: "PUT",
+		body: JSON.stringify({ locked: false }),
+	});
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		console.warn(`engine: unlockUser ${userId} → ${r.status} ${txt.slice(0, 200)}`);
+		return false;
+	}
+	return true;
+}
+
 // ─── Admin user-token (real admin, not the appservice) ──────────────
 //
 // /_synapse/admin/v2/users (PUT) and /_synapse/admin/v1/users/<id>/login

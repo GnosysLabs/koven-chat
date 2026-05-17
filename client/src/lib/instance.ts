@@ -573,6 +573,96 @@ export async function adminDeactivateUser(
 	}
 }
 
+// ─── Platform bans (reversible instance-wide lockout) ───────────
+
+export interface PlatformBan {
+	user_id: string;
+	reason: string | null;
+	banned_by: string;
+	banned_at: number;
+	related_flag: string | null;
+}
+
+/** Ban a user platform-wide (reversible).  Locks them out of Synapse
+ * immediately and prevents login until unbanned. */
+export async function adminBanUser(
+	accessToken: string,
+	userId: string,
+	body: InstanceAdminActionBody = {},
+): Promise<void> {
+	const r = await fetch(
+		`${ENGINE_URL}/api/admin/users/${encodeURIComponent(userId)}/ban`,
+		{
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${accessToken}`,
+			},
+			body: JSON.stringify(body),
+		},
+	);
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		throw new Error(`ban user failed: ${r.status} ${txt.slice(0, 200)}`);
+	}
+}
+
+/** Lift a platform ban, restoring the user's ability to log in. */
+export async function adminUnbanUser(
+	accessToken: string,
+	userId: string,
+	body: { reason?: string } = {},
+): Promise<void> {
+	const r = await fetch(
+		`${ENGINE_URL}/api/admin/users/${encodeURIComponent(userId)}/unban`,
+		{
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${accessToken}`,
+			},
+			body: JSON.stringify(body),
+		},
+	);
+	if (!r.ok) {
+		const txt = await r.text().catch(() => "");
+		throw new Error(`unban user failed: ${r.status} ${txt.slice(0, 200)}`);
+	}
+}
+
+/** Fetch all currently platform-banned users. */
+export async function fetchPlatformBans(
+	accessToken: string,
+): Promise<PlatformBan[]> {
+	try {
+		const r = await fetch(`${ENGINE_URL}/api/admin/bans`, {
+			headers: { Authorization: `Bearer ${accessToken}` },
+		});
+		if (!r.ok) return [];
+		const body = await r.json() as { bans?: PlatformBan[] };
+		return body.bans ?? [];
+	} catch {
+		return [];
+	}
+}
+
+/** Check whether a single user is platform-banned. */
+export async function fetchUserBanStatus(
+	accessToken: string,
+	userId: string,
+): Promise<{ banned: boolean; ban?: PlatformBan }> {
+	try {
+		const r = await fetch(
+			`${ENGINE_URL}/api/admin/users/${encodeURIComponent(userId)}/ban-status`,
+			{ headers: { Authorization: `Bearer ${accessToken}` } },
+		);
+		if (!r.ok) return { banned: false };
+		return await r.json() as { banned: boolean; ban?: PlatformBan };
+	} catch {
+		return { banned: false };
+	}
+}
+
 // Records a moderator action to the audit trail.  Caller is expected
 // to perform the underlying Matrix mutation separately (via transport
 // .kickFromRoom etc.) — the engine endpoint only writes the audit

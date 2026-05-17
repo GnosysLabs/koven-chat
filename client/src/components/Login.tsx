@@ -551,6 +551,8 @@ function verifyErrorMessage(err: VerifyCodeError, detail?: string): string {
 			return detail
 				? `Sign-in blocked at the homeserver: ${detail}`
 				: "Server hiccup minting your session. Try again in a moment.";
+		case "platform_banned":
+			return "Your account has been suspended. Contact an administrator if you believe this is an error.";
 		case "synapse_error":
 			// Detail is the engine's verbatim Synapse error (status
 			// code + errcode + body).  Long, but truthful — far better

@@ -26,6 +26,7 @@ import { MobileSessionsScreen } from "@/components/MobileSessionsScreen";
 import { MobileDeleteAccountScreen } from "@/components/MobileDeleteAccountScreen";
 import { InstanceAdminSection } from "@/components/InstanceAdminSection";
 import { AdminManagementSection } from "@/components/AdminManagementSection";
+import { BannedUsersSection } from "@/components/BannedUsersSection";
 import { fetchAdminStatus } from "@/lib/instance";
 import { fetchUserProfile, updateMyProfileData } from "@/lib/profile";
 import { hapticImpact } from "@/lib/haptics";
@@ -304,6 +305,20 @@ export function MobileSettingsScreen({
 								<GroupFooter>
 									Promote another user to admin before stepping back from this role — instance moderation breaks down if there's nobody to review reports.
 								</GroupFooter>
+							</>
+						)}
+
+						{accessToken && (
+							<>
+								<GroupLabel>Platform bans</GroupLabel>
+								<GroupCard>
+									<div className="px-4 py-4">
+										<BannedUsersSection
+											accessToken={accessToken}
+											transport={transport ?? null}
+										/>
+									</div>
+								</GroupCard>
 							</>
 						)}
 					</div>
