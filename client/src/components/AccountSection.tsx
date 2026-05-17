@@ -58,19 +58,12 @@ export function AccountSection({ accessToken, transport, ignoredUsers, onSignedO
 	const [unblockingUser, setUnblockingUser] = useState<UserId | null>(null);
 	const [unblockError, setUnblockError] = useState<string | null>(null);
 
-	const [discoverable, setDiscoverable] = useState(true);
+	const [discoverable, setDiscoverable] = useState<boolean | null>(null);
 
-	// Deletion flow.  Three distinct UI states:
-	//   "idle":       just a "Delete account" button
-	//   "confirming": ack-checkbox + final-confirm
-	//   "running":    request in flight
 	const [deleteState, setDeleteState] = useState<"idle" | "confirming" | "running">("idle");
 	const [deleteAck, setDeleteAck] = useState(false);
 	const [deleteError, setDeleteError] = useState<string | null>(null);
 
-	// Only-admin gate.  Pulled from /api/instance/me on mount.  When
-	// the user is the lone admin we surface a "promote another admin
-	// first" message instead of the delete button.
 	const [isOnlyAdmin, setIsOnlyAdmin] = useState<boolean | null>(null);
 
 	useEffect(() => {
@@ -86,7 +79,7 @@ export function AccountSection({ accessToken, transport, ignoredUsers, onSignedO
 		let cancelled = false;
 		fetchUserProfile(currentUserId)
 			.then(p => { if (!cancelled) setDiscoverable(p.discoverable !== false); })
-			.catch(() => {});
+			.catch(() => { if (!cancelled && discoverable === null) setDiscoverable(true); });
 		return () => { cancelled = true; };
 	}, [currentUserId]);
 
@@ -170,11 +163,13 @@ export function AccountSection({ accessToken, transport, ignoredUsers, onSignedO
 						</p>
 					</div>
 					<Switch
-						checked={discoverable}
+						checked={discoverable ?? true}
+						disabled={discoverable === null}
 						onCheckedChange={(checked) => {
+							const prev = discoverable;
 							setDiscoverable(checked);
 							updateMyProfileData(accessToken, { discoverable: checked })
-								.catch(() => setDiscoverable(!checked));
+								.catch(() => setDiscoverable(prev));
 						}}
 					/>
 				</div>
