@@ -2977,7 +2977,7 @@ const insertNotificationStmt = db.prepare(`
 // observed (~300ms tail) and the 30s bell poll interval — covers
 // the user-leaves-then-poll-fires window the bug report named.
 
-const RECENTLY_ACTIVE_MS = 60_000;
+const RECENTLY_ACTIVE_MS = 5_000;
 
 const upsertRoomActiveStmt = db.prepare(`
 	INSERT INTO room_active (user_id, room_id, last_active_ts)
