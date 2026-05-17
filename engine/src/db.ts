@@ -1412,6 +1412,7 @@ export function listDiscoverableUsers(opts: {
 	const conditions = [
 		`COALESCE(up.discoverable, 1) = 1`,
 		`u.user_id NOT IN (SELECT mxid FROM bots)`,
+		`u.user_id NOT IN (SELECT user_id FROM platform_bans)`,
 	];
 	const params: (string | number)[] = [];
 
@@ -1447,6 +1448,7 @@ export function countDiscoverableUsers(): number {
 		LEFT JOIN user_profiles up ON up.user_id = u.user_id
 		WHERE COALESCE(up.discoverable, 1) = 1
 		  AND u.user_id NOT IN (SELECT mxid FROM bots)
+		  AND u.user_id NOT IN (SELECT user_id FROM platform_bans)
 	`).get() as { n: number };
 	return row.n;
 }
@@ -3423,6 +3425,7 @@ const founderCountStmt = db.prepare(`
 
 const allFoundersStmt = db.prepare(`
 	SELECT user_id, founder_number FROM founders
+	WHERE user_id NOT IN (SELECT user_id FROM platform_bans)
 	ORDER BY founder_number ASC
 `);
 
