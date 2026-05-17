@@ -7,6 +7,8 @@
 // where a leftover bare `@capacitor/*` import cannot be resolved at
 // runtime.
 
+import { ENGINE_URL } from "@/lib/urls";
+
 /** True when running inside a Capacitor WebView (iOS / Android shell). */
 export function isCapacitor(): boolean {
 	return typeof window !== "undefined"
@@ -230,7 +232,7 @@ export async function registerPushToken(accessToken: string): Promise<void> {
 
 		push.addListener("registration", (token) => {
 			pushRegistered = true;
-			fetch("/api/push/register", {
+			fetch(`${ENGINE_URL}/api/push/register`, {
 				method: "POST",
 				headers: {
 					"Authorization": `Bearer ${accessToken}`,
@@ -254,7 +256,7 @@ export async function registerPushToken(accessToken: string): Promise<void> {
  * Call on sign-out. */
 export async function unregisterPushToken(accessToken: string, token: string): Promise<void> {
 	try {
-		await fetch("/api/push/unregister", {
+		await fetch(`${ENGINE_URL}/api/push/unregister`, {
 			method: "POST",
 			headers: {
 				"Authorization": `Bearer ${accessToken}`,
