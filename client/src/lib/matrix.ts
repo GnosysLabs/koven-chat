@@ -3284,7 +3284,7 @@ export class MatrixTransport {
 		const childCount = new Map<string, number>();
 		await Promise.all(spaceEntries.map(async (sp) => {
 			try {
-				// depth=2 covers the typical "space → rooms" structure;
+				// depth=2 covers the typical "space -> rooms" structure;
 				// nested-space children are handled when their parent
 				// surfaces in the directory and we walk it separately.
 				const h = await c.getRoomHierarchy(sp.roomId, 100, 2, false);
@@ -3292,8 +3292,8 @@ export class MatrixTransport {
 				for (const child of (h.rooms ?? []) as Array<{ room_id: string; room_type?: string }>) {
 					if (child.room_id === sp.roomId) continue;
 					childIds.add(child.room_id);
-					// Don't count nested sub-spaces toward the room count
-					// — "rooms" should mean leaf rooms, not other spaces.
+					// Don't count nested sub-spaces toward the room count;
+					// "rooms" should mean leaf rooms, not other spaces.
 					if (child.room_type !== "m.space") count++;
 				}
 				childCount.set(sp.roomId, count);

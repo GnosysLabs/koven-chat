@@ -28,6 +28,7 @@ interface PublicEntry {
 	joinRule: string;
 	roomCount?: number;
 	nsfw?: boolean;
+	creatorId?: string;
 }
 
 type ExploreTab = "spaces" | "people";
@@ -82,12 +83,13 @@ export function ExplorePane({
 				];
 				const ids = merged.map(e => e.roomId);
 				const meta = await fetchRoomIcons(ids).catch(
-					() => ({ icons: {} as Record<string, string>, nsfw: new Set<string>() }),
+					() => ({ icons: {} as Record<string, string>, nsfw: new Set<string>(), creators: {} as Record<string, string> }),
 				);
 				const enriched = merged.map(e => ({
 					...e,
 					iconEmoji: meta.icons[e.roomId] ?? e.iconEmoji,
 					nsfw: meta.nsfw.has(e.roomId),
+					creatorId: meta.creators[e.roomId],
 				}));
 				setResults(enriched);
 			} catch (err) {
@@ -233,6 +235,7 @@ export function ExplorePane({
 								<SpaceRow
 									key={entry.roomId}
 									entry={entry}
+									transport={transport}
 									joined={joinedIds.has(entry.roomId)}
 									joining={joining === entry.roomId}
 									onJoin={() => handleJoin(entry)}
@@ -281,14 +284,16 @@ export function ExplorePane({
 
 
 function SpaceRow({
-	entry, joined, joining, onJoin, onFlag,
+	entry, transport, joined, joining, onJoin, onFlag,
 }: {
 	entry: PublicEntry;
+	transport: MatrixTransport | null;
 	joined: boolean;
 	joining: boolean;
 	onJoin(): void;
 	onFlag?(): void;
 }) {
+	const creator = useResolvedUser(transport, entry.creatorId);
 	return (
 		<div className="flex items-start gap-3 px-3 py-3">
 			<MatrixAvatar
@@ -309,6 +314,17 @@ function SpaceRow({
 							NSFW
 						</span>
 					)}
+					{creator && (
+						<span className="inline-flex items-center gap-1 ml-auto text-xs text-muted-foreground">
+							<MatrixAvatar
+								mxc={creator.avatarMxc}
+								seed={entry.creatorId!}
+								kind="user"
+								className="h-4 w-4 rounded-full"
+							/>
+							<span className="truncate max-w-[120px]">{creator.displayName}</span>
+						</span>
+					)}
 				</div>
 				<div className="flex items-center gap-1.5 text-xs text-muted-foreground mt-0.5">
 					<Users className="h-3 w-3" />
@@ -320,13 +336,12 @@ function SpaceRow({
 							<span>{entry.roomCount} {entry.roomCount === 1 ? "room" : "rooms"}</span>
 						</>
 					)}
-					{entry.topic && (
-						<>
-							<span>·</span>
-							<span className="truncate">{entry.topic}</span>
-						</>
-					)}
 				</div>
+				{entry.topic && (
+					<div className="text-xs text-muted-foreground/80 mt-0.5 truncate">
+						{entry.topic}
+					</div>
+				)}
 			</div>
 			<div className="shrink-0 flex items-center gap-1.5">
 				{onFlag && (

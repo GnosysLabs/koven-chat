@@ -3646,11 +3646,13 @@ export function startServer(): void {
 				);
 				const icons: Record<string, string> = {};
 				const nsfw: string[] = [];
+				const creators: Record<string, string> = {};
 				for (const [id, meta] of results) {
 					if (meta.iconEmoji) icons[id] = meta.iconEmoji;
 					if (meta.nsfw) nsfw.push(id);
+					if (meta.creatorId) creators[id] = meta.creatorId;
 				}
-				return json({ icons, nsfw });
+				return json({ icons, nsfw, creators });
 			}
 
 			// GET /api/rooms/:roomId/seen-by

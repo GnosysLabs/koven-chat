@@ -1474,6 +1474,7 @@ export async function leaveRoomAs(opts: {
 export async function getRoomKovenMeta(roomId: string): Promise<{
 	iconEmoji: string | null;
 	nsfw: boolean;
+	creatorId: string | null;
 }> {
 	const state = await readRoomState(roomId);
 	const icon = pickStateContent(state, "chat.koven.room_icon");
@@ -1483,7 +1484,11 @@ export async function getRoomKovenMeta(roomId: string): Promise<{
 		const trimmed = icon.emoji.trim();
 		if (trimmed && trimmed.length <= 16) iconEmoji = trimmed;
 	}
-	return { iconEmoji, nsfw: nsfw?.enabled === true };
+	const createEvent = state?.find(ev => ev.type === "m.room.create" && ev.state_key === "");
+	const creatorId = createEvent?.sender
+		?? (typeof createEvent?.content?.creator === "string" ? createEvent.content.creator : null)
+		?? null;
+	return { iconEmoji, nsfw: nsfw?.enabled === true, creatorId };
 }
 
 export async function getRoomNsfw(roomId: string): Promise<boolean> {

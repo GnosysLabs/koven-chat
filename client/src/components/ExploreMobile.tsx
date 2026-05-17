@@ -27,6 +27,7 @@ interface PublicEntry {
 	joinRule: string;
 	roomCount?: number;
 	nsfw?: boolean;
+	creatorId?: string;
 }
 
 type ExploreTab = "spaces" | "people";
@@ -77,12 +78,13 @@ export function ExploreMobile({
 				];
 				const ids = merged.map(e => e.roomId);
 				const meta = await fetchRoomIcons(ids).catch(
-					() => ({ icons: {} as Record<string, string>, nsfw: new Set<string>() }),
+					() => ({ icons: {} as Record<string, string>, nsfw: new Set<string>(), creators: {} as Record<string, string> }),
 				);
 				const enriched = merged.map(e => ({
 					...e,
 					iconEmoji: meta.icons[e.roomId] ?? e.iconEmoji,
 					nsfw: meta.nsfw.has(e.roomId),
+					creatorId: meta.creators[e.roomId],
 				}));
 				setResults(enriched);
 			} catch (err) {
@@ -252,6 +254,7 @@ export function ExploreMobile({
 								<SpaceRow
 									key={entry.roomId}
 									entry={entry}
+									transport={transport}
 									joined={joinedIds.has(entry.roomId)}
 									joining={joining === entry.roomId}
 									onJoin={() => handleJoin(entry)}
@@ -299,9 +302,10 @@ export function ExploreMobile({
 }
 
 function SpaceRow({
-	entry, joined, joining, onJoin, onFlag, showDivider,
+	entry, transport, joined, joining, onJoin, onFlag, showDivider,
 }: {
 	entry: PublicEntry;
+	transport: MatrixTransport | null;
 	joined: boolean;
 	joining: boolean;
 	onJoin(): void;
@@ -313,6 +317,7 @@ function SpaceRow({
 		? `${entry.roomCount} ${entry.roomCount === 1 ? "room" : "rooms"}`
 		: null;
 	const meta = [memberLabel, roomLabel].filter(Boolean).join(" · ");
+	const creator = useResolvedUser(transport, entry.creatorId);
 	return (
 		<>
 			{showDivider && <div className="h-px bg-foreground/[0.08]" aria-hidden />}
@@ -340,12 +345,7 @@ function SpaceRow({
 					</div>
 				</div>
 
-				<div className="flex items-center justify-between gap-2 mt-3">
-					<div className="flex items-center gap-1.5 min-w-0 flex-wrap">
-						{entry.nsfw && (
-							<MetaPill tone="destructive">NSFW</MetaPill>
-						)}
-					</div>
+				<div className="flex items-center gap-2 mt-3">
 					<div className="flex items-center gap-1 shrink-0">
 						{onFlag && !joined && (
 							<button
@@ -357,6 +357,28 @@ function SpaceRow({
 								<Flag className="size-[15px]" strokeWidth={2.25} />
 							</button>
 						)}
+						{entry.nsfw && (
+							<MetaPill tone="destructive">NSFW</MetaPill>
+						)}
+					</div>
+
+					<div className="flex-1 flex items-center justify-center gap-1.5 min-w-0">
+						{creator && (
+							<>
+								<MatrixAvatar
+									mxc={creator.avatarMxc}
+									seed={entry.creatorId!}
+									kind="user"
+									className="h-5 w-5 rounded-full shrink-0"
+								/>
+								<span className="text-[13px] text-muted-foreground truncate">
+									{creator.displayName}
+								</span>
+							</>
+						)}
+					</div>
+
+					<div className="shrink-0">
 						{joined ? (
 							<span className="inline-flex items-center gap-1 px-3 h-7 rounded-full bg-foreground/[0.08] text-[13px] font-semibold text-muted-foreground">
 								<Check className="size-[14px]" strokeWidth={2.75} /> Joined
@@ -373,7 +395,7 @@ function SpaceRow({
 									"disabled:opacity-50",
 								)}
 							>
-								{joining ? "Joining…" : "Join"}
+								{joining ? "Joining..." : "Join"}
 							</button>
 						)}
 					</div>
