@@ -1177,7 +1177,7 @@ export function ChatPane({
 					</span>
 				</div>
 				<div className="flex items-center gap-1 shrink-0">
-					{room.kind === "private" && (
+					{room.kind === "private" && !isMobileShell && (
 						<RoomBadge
 							icon={<EyeOff className="h-3 w-3" />}
 							label="Private"
