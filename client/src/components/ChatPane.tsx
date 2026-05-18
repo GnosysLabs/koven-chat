@@ -3830,8 +3830,8 @@ function UrlPreviewSlot({ text }: { text: string }) {
 	//   "hero"    — image dominates, sitting on top of the card with
 	//               the text stack below.  Twitter's
 	//               summary_large_image.  Used when the OG image is
-	//               large enough to read at width (>= 400 px reported)
-	//               OR clearly landscape (aspect >= 1.3).
+	//               genuinely large (>= 1200 px wide, the standard OG
+	//               recommended minimum for large cards).
 	//
 	//   "compact" — small square thumbnail on the right, text on the
 	//               left.  Twitter's summary.  Used when an image
@@ -3850,7 +3850,7 @@ function UrlPreviewSlot({ text }: { text: string }) {
 		if (!imageUrl) return "text";
 		const w = preview.imageWidth ?? 0;
 		const h = preview.imageHeight ?? 0;
-		if (w >= 400 || (w > 0 && h > 0 && w / h >= 1.3)) return "hero";
+		if (w >= 1200) return "hero";
 		return "compact";
 	})();
 
