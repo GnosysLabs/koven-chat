@@ -346,7 +346,7 @@ function corsHeaders(): Record<string, string> {
 		// error in the network tab — confirmed via curl that this
 		// list was the gate.
 		"Access-Control-Allow-Methods": "GET, PUT, POST, PATCH, DELETE, OPTIONS",
-		"Access-Control-Allow-Headers": "Content-Type, Authorization, X-Matrix-Token, X-Koven-Client",
+		"Access-Control-Allow-Headers": "Content-Type, Authorization, X-Matrix-Token, X-Koven-Client, X-Koven-Qr-Claim",
 	};
 }
 
