@@ -466,6 +466,20 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 	const endCall = useCallback(async () => {
 		if (meeting) {
 			try {
+				// Stop screen share BEFORE leaving.  Calling leaveRoom()
+				// while a getDisplayMedia track is still live didn't
+				// fully tear the room down on the first call — it
+				// stopped the share and then needed a SECOND leave to
+				// actually disconnect.  Disabling the share explicitly
+				// (and awaiting it) means one Leave click ends the call
+				// even mid-screenshare.
+				if (meeting.self.screenShareEnabled) {
+					try {
+						await meeting.self.disableScreenShare();
+					} catch (e) {
+						console.warn("endCall: disableScreenShare threw", e);
+					}
+				}
 				await meeting.leaveRoom();
 				// Don't reset state here — the roomLeft handler above
 				// will fire and do it.  Resetting eagerly here would
