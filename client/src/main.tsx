@@ -18,6 +18,7 @@ import App from "./App";
 import { DesktopTitleBar } from "./components/DesktopTitleBar";
 import { CallWindowApp } from "./components/voice/CallWindowApp";
 import { CallProvider } from "./lib/call-context";
+import { primeRingtone } from "./lib/callRingtone";
 import { tryDeepLinkBounce } from "./lib/deepLinkBounce";
 import { drainPendingCall, isCallWindow, type PendingCall } from "./lib/native-window";
 import "./index.css";
@@ -153,6 +154,9 @@ if (isCallWin) {
 			renderCallWindow(pendingCall);
 		});
 } else {
+	// Arm the call ringtone so the first click/tap unlocks audio
+	// playback before any call arrives.  See callRingtone.ts.
+	primeRingtone();
 	renderMain();
 }
 

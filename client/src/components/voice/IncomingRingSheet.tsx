@@ -5,7 +5,7 @@
 // the lifecycle (timeout, cancel events, etc.) and just hands us
 // the data + actions.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
 	Dialog,
 	DialogContent,
@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
+import { startRing, stopRing } from "@/lib/callRingtone";
 import { hapticImpact } from "@/lib/haptics";
 import { Phone, PhoneOff } from "lucide-react";
 import type { UserId, RoomId, EventId } from "@koven/shared";
@@ -35,45 +36,15 @@ export interface IncomingRingSheetProps {
 
 export function IncomingRingSheet({ ring, onAccept, onDecline }: IncomingRingSheetProps) {
 	const [busy, setBusy] = useState<"accept" | "decline" | null>(null);
-	// Looping ringtone while the sheet is up.  Mounted/unmounted
-	// with the sheet so it stops naturally on accept/decline/timeout.
-	//
-	// Browser autoplay quirks:
-	//   - `preload="auto"` doesn't guarantee the file is decoded by
-	//     the time we call play(); on some browsers play() returns
-	//     a rejected promise with NotAllowedError or AbortError if
-	//     the data isn't ready.  Wait for canplay before invoking.
-	//   - Chrome / Safari require a recent user gesture to autoplay.
-	//     The recipient has been clicking around the app, so MEI
-	//     (Media Engagement Index) should be high — but if play()
-	//     still rejects we LOG it (instead of swallowing silently)
-	//     so we can see the failure mode in dev.
-	const audioRef = useRef<HTMLAudioElement | null>(null);
+	// Looping ringtone while the sheet is up.  Driven by the shared
+	// callRingtone singleton (pre-unlocked on the first user gesture)
+	// rather than a fresh <audio> element here — gesture-less play()
+	// on a freshly created element is policy-blocked on iOS / WKWebView
+	// and unreliable in Chrome.  Starts on mount, stops on unmount, so
+	// it ends naturally on accept / decline / timeout.
 	useEffect(() => {
-		const el = audioRef.current;
-		if (!el) return;
-		el.loop = true;
-		el.volume = 0.6;
-		// Tap into canplay so play() runs once data is ready —
-		// fixes the case where the file hasn't decoded yet.  Also
-		// kick off a play() attempt immediately for the cached-
-		// resource case where the audio is already buffered.
-		const tryPlay = () => {
-			el.play().catch(err => {
-				console.warn("ring audio: play() rejected", err);
-			});
-		};
-		el.addEventListener("canplaythrough", tryPlay);
-		// Fire once immediately too — fast path when the browser
-		// already has the file cached from a prior ring.
-		tryPlay();
-		return () => {
-			el.removeEventListener("canplaythrough", tryPlay);
-			try {
-				el.pause();
-				el.currentTime = 0;
-			} catch { /* element gone, fine */ }
-		};
+		startRing();
+		return stopRing;
 	}, []);
 
 	async function handle(action: "accept" | "decline") {
@@ -97,11 +68,6 @@ export function IncomingRingSheet({ ring, onAccept, onDecline }: IncomingRingShe
 						{ring.callerDisplayName} is calling you.  Accept or decline.
 					</DialogDescription>
 				</DialogHeader>
-				{/* Looping ringtone — hidden, audio-only.  Mount/unmount
-				    follows the sheet so accept/decline/timeout stop
-				    the sound for free. */}
-				<audio ref={audioRef} src="/ring.mp3" preload="auto" />
-
 				<div className="flex flex-col items-center gap-4 py-2">
 					{/* Pulsing avatar — same animate-pulse as the
 					    Connecting state, but on a larger tile.  Reads

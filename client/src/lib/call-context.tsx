@@ -37,6 +37,7 @@ import {
 	useRealtimeKitClient,
 } from "@cloudflare/realtimekit-react";
 import { joinCall, pingCallPresenceJoined, pingCallPresenceLeft } from "@/lib/calls-api";
+import { startRing, stopRing } from "@/lib/callRingtone";
 import {
 	closeCurrentWindow,
 	drainPendingCall,
@@ -316,6 +317,21 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 		recipientAccepted: boolean;
 	} | null>(null);
 
+	// Safety timer for the caller's outgoing ringback.  The ringback
+	// loops /ring.mp3 while the caller waits for an answer; this timer
+	// stops it after RING_TIMEOUT_MS if the call is neither answered
+	// nor hung up by then (matches the recipient sheet's 30s
+	// auto-dismiss).  stopRingback() also handles the answered /
+	// hung-up paths.
+	const ringbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const stopRingback = useCallback(() => {
+		stopRing();
+		if (ringbackTimerRef.current) {
+			clearTimeout(ringbackTimerRef.current);
+			ringbackTimerRef.current = null;
+		}
+	}, []);
+
 	// Listen for the SDK's roomJoined / roomLeft events.  roomJoined
 	// fires the iam-here presence ping AND (for DMs) sends the
 	// `chat.koven.call.ring` so the recipient's IncomingRingSheet
@@ -335,6 +351,16 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 			// Without this guard, recipient + caller would ring
 			// each other in an infinite loop on accept.
 			if (ac.isDm && !ac.isAnsweringRing) {
+				// Caller-side ringback: loop /ring.mp3 while waiting
+				// for the recipient to answer.  Stopped on
+				// participantJoined (answered), roomLeft (hung up /
+				// declined), or the safety timer below.
+				startRing();
+				if (ringbackTimerRef.current) clearTimeout(ringbackTimerRef.current);
+				ringbackTimerRef.current = setTimeout(() => {
+					stopRing();
+					ringbackTimerRef.current = null;
+				}, RING_TIMEOUT_MS);
 				void sendCallEvent({
 					accessToken: ac.accessToken,
 					roomId: ac.roomId,
@@ -348,6 +374,9 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 			}
 		};
 		const onLeft = () => {
+			// Caller hung up (or decline → endCall → roomLeft):
+			// kill any ringback that's still looping.
+			stopRingback();
 			const ac = activeCallRef.current;
 			const ring = ringStateRef.current;
 			if (ac) {
@@ -374,6 +403,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 		meeting.self.on("roomJoined", onJoined);
 		meeting.self.on("roomLeft", onLeft);
 		return () => {
+			stopRingback();
 			try {
 				meeting.self.off("roomJoined", onJoined);
 				meeting.self.off("roomLeft", onLeft);
@@ -381,7 +411,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 				// SDK already torn down — fine.
 			}
 		};
-	}, [meeting]);
+	}, [meeting, stopRingback]);
 
 	// Listen for "another participant joined the meeting" events.
 	// When a remote joins the same DM call (their iam-here will be
@@ -392,6 +422,8 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 	useEffect(() => {
 		if (!meeting) return;
 		const onParticipantJoined = () => {
+			// Recipient answered — silence the caller's ringback.
+			stopRingback();
 			if (ringStateRef.current && !ringStateRef.current.recipientAccepted) {
 				ringStateRef.current = { ...ringStateRef.current, recipientAccepted: true };
 			}
@@ -404,7 +436,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 				joined.off("participantJoined", onParticipantJoined);
 			} catch { /* SDK torn down */ }
 		};
-	}, [meeting]);
+	}, [meeting, stopRingback]);
 
 	const startCall = useCallback((opts: ActiveCall) => {
 		// Replace any in-flight call.  Caller is expected to have
