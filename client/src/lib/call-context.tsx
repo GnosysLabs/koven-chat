@@ -38,6 +38,7 @@ import {
 } from "@cloudflare/realtimekit-react";
 import { joinCall, pingCallPresenceJoined, pingCallPresenceLeft, pingCallPresenceLeftSync, type ActiveBrowserSession } from "@/lib/calls-api";
 import { startRing, stopRing } from "@/lib/callRingtone";
+import * as noiseSuppression from "@/lib/noise-suppression";
 import {
 	closeCurrentWindow,
 	drainPendingCall,
@@ -153,6 +154,11 @@ interface CallContextValue {
 	// no shared browser is running.
 	browserSession: ActiveBrowserSession | null;
 	setBrowserSession(s: ActiveBrowserSession | null): void;
+	// DeepFilterNet noise-suppression toggle.  Default on; the user
+	// can disable it from the in-call / pre-join Devices popover
+	// (e.g. musicians who want raw audio).  Persisted across calls.
+	noiseSuppressionEnabled: boolean;
+	setNoiseSuppressionEnabled(b: boolean): void;
 }
 
 const CallContext = createContext<CallContextValue | null>(null);
@@ -172,6 +178,9 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 	const [spotlitId, setSpotlightState] = useState<string | null>(null);
 	const [browserSession, setBrowserSession] = useState<ActiveBrowserSession | null>(null);
 	const [inCallView, setInCallViewState] = useState<boolean>(false);
+	const [noiseSuppressionEnabled, setNoiseSuppressionState] = useState<boolean>(
+		noiseSuppression.getNoiseSuppressionPref(),
+	);
 	const [meeting, initMeeting] = useRealtimeKitClient();
 
 	// Reset spotlight + view-flag when the call ends so the next
@@ -222,16 +231,21 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 				// Window capture never includes audio.  Nothing to
 				// configure on our side — it's a browser limitation.
 				//
-				// Audio processing: turn on the three standard WebRTC
-				// processors so calls match Discord/Meet/Zoom out of
-				// the box.  The SDK defaults these to off.  NB the
+				// Audio processing: keep echo cancellation and auto
+				// gain control on (they complement, not duplicate,
+				// what comes next), but DISABLE the browser's WebRTC
+				// noise suppressor.  We run DeepFilterNet3 as an audio
+				// middleware instead (see noise-suppression.ts), and
+				// stacking two noise suppressors causes pumping and
+				// artifacts — this is why Discord drops WebRTC NS when
+				// Krisp is on.  DeepFilterNet owns NS now.  NB the
 				// `noiseSupression` key is misspelled in RealtimeKit's
 				// type (one 's'); we have to match that or it gets
 				// silently dropped.
 				mediaConfiguration: {
 					audio: {
 						echoCancellation: true,
-						noiseSupression: true,
+						noiseSupression: false,
 						autoGainControl: true,
 					},
 					screenshare: {
@@ -470,6 +484,27 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 			} catch { /* SDK torn down */ }
 		};
 	}, [meeting, stopRingback]);
+
+	// Register the DeepFilterNet noise-suppression middleware on the
+	// meeting as soon as the SDK client exists.  RealtimeKit applies
+	// audio middlewares when the mic track is (re)published, so doing
+	// this at meeting-init time covers both the pre-join enableAudio
+	// and any later mid-call device switch.  preload() also kicks off
+	// the WASM + model fetch here so it is warm before the user joins.
+	useEffect(() => {
+		if (!meeting) return;
+		void noiseSuppression.preload();
+		noiseSuppression.attach(meeting).catch(err => {
+			// Non-fatal: the call still works, just without the extra
+			// suppression layer.  Logged so it's grep-able.
+			console.warn("CallProvider: noise-suppression attach failed", err);
+		});
+	}, [meeting]);
+
+	const setNoiseSuppressionEnabled = useCallback((next: boolean) => {
+		noiseSuppression.setEnabled(next);
+		setNoiseSuppressionState(next);
+	}, []);
 
 	const startCall = useCallback((opts: ActiveCall) => {
 		// Replace any in-flight call.  Caller is expected to have
@@ -738,8 +773,8 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 	}, []);
 
 	const value = useMemo<CallContextValue>(
-		() => ({ activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall, popOutToWindow, popInToMain, browserSession, setBrowserSession }),
-		[activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall, popOutToWindow, popInToMain, browserSession],
+		() => ({ activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall, popOutToWindow, popInToMain, browserSession, setBrowserSession, noiseSuppressionEnabled, setNoiseSuppressionEnabled }),
+		[activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall, popOutToWindow, popInToMain, browserSession, noiseSuppressionEnabled, setNoiseSuppressionEnabled],
 	);
 
 	// Always render the RealtimeKitProvider — even when meeting is

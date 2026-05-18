@@ -12,6 +12,7 @@ import { useRealtimeKitMeeting } from "@cloudflare/realtimekit-react";
 import { Mic, Settings, Video, Volume2 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { DeviceRow } from "@/components/voice/DeviceRow";
+import { NoiseSuppressionToggle } from "@/components/voice/NoiseSuppressionToggle";
 import { useCallDevices } from "@/components/voice/useCallDevices";
 
 export function InCallDeviceMenu() {
@@ -62,6 +63,7 @@ export function InCallDeviceMenu() {
 					placeholder="Default speaker"
 					onChange={(id) => pick("speaker", id)}
 				/>
+				<NoiseSuppressionToggle />
 				{error && (
 					<div className="text-xs text-destructive border border-destructive/40 bg-destructive/10 rounded px-2 py-1.5">
 						{error}

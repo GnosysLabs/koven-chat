@@ -32,6 +32,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRealtimeKitMeeting } from "@cloudflare/realtimekit-react";
 import { Button } from "@/components/ui/button";
 import { DeviceRow } from "@/components/voice/DeviceRow";
+import { NoiseSuppressionToggle } from "@/components/voice/NoiseSuppressionToggle";
 import { useCallDevices } from "@/components/voice/useCallDevices";
 import { cn } from "@/lib/utils";
 import { Mic, MicOff, Video, VideoOff, Volume2 } from "lucide-react";
@@ -303,6 +304,7 @@ export function PreJoinScreen({ roomName, onJoined, onCancel, isDm, isAnsweringR
 					placeholder="Default speaker"
 					onChange={(id) => pickDevice("speaker", id)}
 				/>
+				<NoiseSuppressionToggle />
 			</div>
 
 			{/* Join is the obvious primary, generously sized + centered.
