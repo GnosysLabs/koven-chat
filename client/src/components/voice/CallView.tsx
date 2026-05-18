@@ -382,11 +382,13 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 				<div className="relative flex-1 min-h-0 flex items-center justify-center p-4">
 					{hasBrowser ? (
 						/* Shared browser spotlight: the Hyperbeam embed
-						   fills the tile area; participant tiles move to
-						   the thumbnail strip below. */
+						   fills the entire tile area edge-to-edge;
+						   hb.resize() keeps the VM viewport in sync so
+						   there are no letterbox bars.  Participant
+						   tiles move to the thumbnail strip below. */
 						<SharedBrowserTile
 							embedUrl={browserSession!.embedUrl}
-							className="max-h-full max-w-full"
+							className="!w-full !h-full"
 						/>
 					) : totalTiles === 1 ? (
 						/* Solo case: just self, centered + fit-to-fill. */

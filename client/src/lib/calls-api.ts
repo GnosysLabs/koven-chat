@@ -175,3 +175,29 @@ export async function pingCallPresenceLeft(opts: {
 		},
 	).catch(() => { /* best-effort */ });
 }
+
+/** Fire-and-forget iam-gone via sendBeacon.  Used by the
+ *  beforeunload handler where async fetch won't complete in
+ *  time.  sendBeacon queues a POST that the browser guarantees
+ *  will be sent even as the page tears down. */
+export function pingCallPresenceLeftSync(opts: {
+	accessToken: string;
+	roomId: RoomId;
+}): void {
+	const url = `${ENGINE_URL}/api/calls/${encodeURIComponent(opts.roomId)}/iam-gone`;
+	// sendBeacon can only send a body, not custom headers.  The
+	// engine's iam-gone route reads Authorization from the header,
+	// so we fall back to a keepalive fetch which IS allowed during
+	// beforeunload (the keepalive flag tells the browser to finish
+	// the request after the page dies).
+	try {
+		fetch(url, {
+			method: "POST",
+			headers: { Authorization: `Bearer ${opts.accessToken}` },
+			keepalive: true,
+		}).catch(() => {});
+	} catch {
+		// Last resort: some browsers may reject keepalive fetch in
+		// beforeunload.  Nothing more we can do.
+	}
+}

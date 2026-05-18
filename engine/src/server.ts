@@ -2129,7 +2129,10 @@ export function startServer(): void {
 				} catch (err) {
 					const detail = err instanceof Error ? err.message : String(err);
 					console.error(`browser /start: createBrowserSession failed`, err);
-					return json({ errcode: "M_UNKNOWN", error: detail }, { status: 502 });
+					// Use 429 for rate-limit errors so nginx's own 502
+					// doesn't mask the real cause.
+					const status = detail.includes("rate-limit") ? 429 : 500;
+					return json({ errcode: "M_UNKNOWN", error: detail }, { status });
 				}
 			}
 

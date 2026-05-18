@@ -36,7 +36,7 @@ import {
 	RealtimeKitProvider,
 	useRealtimeKitClient,
 } from "@cloudflare/realtimekit-react";
-import { joinCall, pingCallPresenceJoined, pingCallPresenceLeft, type ActiveBrowserSession } from "@/lib/calls-api";
+import { joinCall, pingCallPresenceJoined, pingCallPresenceLeft, pingCallPresenceLeftSync, type ActiveBrowserSession } from "@/lib/calls-api";
 import { startRing, stopRing } from "@/lib/callRingtone";
 import {
 	closeCurrentWindow,
@@ -424,6 +424,27 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 			}
 		};
 	}, [meeting, stopRingback]);
+
+	// Catch page refresh / close while in a call.  Without this
+	// the old Cloudflare WebRTC participant lingers until it times
+	// out (~30s) and a fresh page load creates a second participant,
+	// duplicating the user in the call.  The keepalive fetch fires
+	// the iam-gone ping so the engine drops us from the participant
+	// list immediately; meeting.leaveRoom() tells Cloudflare to
+	// tear down the WebRTC session server-side.
+	useEffect(() => {
+		const handler = () => {
+			const ac = activeCallRef.current;
+			if (ac) {
+				pingCallPresenceLeftSync({ accessToken: ac.accessToken, roomId: ac.roomId });
+			}
+			if (meeting) {
+				try { meeting.leaveRoom(); } catch { /* best-effort */ }
+			}
+		};
+		window.addEventListener("beforeunload", handler);
+		return () => window.removeEventListener("beforeunload", handler);
+	}, [meeting]);
 
 	// Listen for "another participant joined the meeting" events.
 	// When a remote joins the same DM call (their iam-here will be
