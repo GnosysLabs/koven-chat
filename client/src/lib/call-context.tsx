@@ -232,7 +232,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 					audio: {
 						echoCancellation: true,
 						noiseSupression: true,
-						autoGainControl: false,
+						autoGainControl: true,
 					},
 					screenshare: {
 						frameRate: { ideal: 30, max: 30 },
