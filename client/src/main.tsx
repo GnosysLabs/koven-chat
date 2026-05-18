@@ -1,3 +1,9 @@
+// Pin every AudioContext to 48 kHz before any audio code (RealtimeKit
+// included) can create one.  Must be the first import — see the
+// module's own header for why Bluetooth headsets otherwise break the
+// call audio pipeline.
+import "./lib/audio-context-rate";
+
 // Surgical Node-globals shim, applied before React mounts.  Only
 // `Buffer` is genuinely needed — matrix-js-sdk uses it in places that
 // don't tolerate undefined.  We deliberately do NOT use

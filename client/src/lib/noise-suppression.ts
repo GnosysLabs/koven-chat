@@ -113,6 +113,16 @@ export function preload(): Promise<DeepFilterNet3Core> {
  */
 export async function attach(meeting: RTKMeetingLike): Promise<void> {
 	const result = await meeting.self.addAudioMiddleware(async (audioContext) => {
+		// DeepFilterNet3 is a 48 kHz model and its worklet does not
+		// resample.  audio-context-rate.ts pins all AudioContexts to
+		// 48 kHz so this always holds; if it ever does not, the model
+		// would mangle audio, so surface it loudly rather than ship
+		// broken sound silently.
+		if (audioContext.sampleRate !== 48000) {
+			console.warn(
+				`noise-suppression: AudioContext is ${audioContext.sampleRate} Hz, expected 48000 — output may be degraded`,
+			);
+		}
 		const c = await preload();
 		const node = await c.createAudioWorkletNode(audioContext as AudioContext);
 		// The worklet starts active; mirror the current preference so a
