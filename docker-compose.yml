@@ -167,6 +167,9 @@ services:
       APNS_KEY_ID:               ${APNS_KEY_ID:-}
       APNS_TEAM_ID:              ${APNS_TEAM_ID:-}
       APNS_PRODUCTION:           ${APNS_PRODUCTION:-false}
+      # Hyperbeam (shared cloud browser in calls).  When unset, the
+      # browser-share button is hidden.
+      HYPERBEAM_API_KEY:         ${HYPERBEAM_API_KEY:-}
     depends_on:
       - synapse
 
