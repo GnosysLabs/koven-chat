@@ -2215,10 +2215,10 @@ function MessageRowComponent({
 	//   - Continuation row pt: pt-0 (0px) — bubbles touch directly,
 	//     same-sender stack reads as one continuous thread.
 	//   - New-group row pt:    pt-4 (16px) — clear group separator.
-	//   - pb when reactions present: pb-7 (28px) — landing zone for
-	//     the absolutely-positioned reaction pills (pill height ~24px
-	//     + 4px breathing room).  Without this the pills overlay the
-	//     next row's bubble.
+	//   - pb when reactions present: pb-9 (36px) — landing zone for
+	//     the absolutely-positioned reaction pills (pill row ~30px
+	//     including mt-1 gap + 6px breathing room so pills don't
+	//     touch the next bubble).
 	//   - pb when no reactions:    pb-0.5 (2px) — minimal gap, lets
 	//     same-sender stacks pack as tightly as possible.  Adding a
 	//     reaction grows the row by ~26px which IS a real layout
@@ -2236,7 +2236,7 @@ function MessageRowComponent({
 		? cn(continuesGroup ? "pt-0" : "pt-2", hasReactions ? "pb-2" : "pb-0.5")
 		: cn(
 			continuesGroup ? "pt-0" : "pt-4",
-			hasReactions ? "pb-7" : "pb-0.5",
+			hasReactions ? "pb-9" : "pb-0.5",
 		);
 
 	// Discord-style mention highlight: left accent border + faint

@@ -750,14 +750,17 @@ export class MatrixTransport {
 				creds.user_id,
 				creds.device_id,
 			);
-			// The wipe is now the primary correctness mechanism, not a
-			// latency optimization, so a failure here is NOT swallowed:
-			// proceeding to initRustCrypto against a store we know is
-			// stale just reproduces the mismatch hang.  withTimeout
-			// guarantees the wipe can't hang the boot past 20s; on
-			// timeout or failure it rejects, start() rejects, and
-			// App.tsx surfaces the bootError recovery UI.
-			await withTimeout(wipeRustCryptoIndexedDB(), 20_000, "wipeRustCryptoIndexedDB");
+			// Best-effort wipe: if the IDB is still held open by a
+			// connection from the previous session (common after the
+			// OTK-collision bounce), swallow the failure and let
+			// initRustCrypto run.  It will either create a fresh olm
+			// machine or throw a mismatch, which hits the catch block
+			// below that retries the wipe after more drain time.
+			try {
+				await withTimeout(wipeRustCryptoIndexedDB(), 20_000, "wipeRustCryptoIndexedDB");
+			} catch (wipeErr) {
+				console.warn("matrix.start: pre-init crypto wipe failed (will retry if initRustCrypto mismatches)", wipeErr);
+			}
 		}
 		// IndexedDBStore for the matrix-js-sdk room/timeline cache.
 		// Sandboxed per user_id so multi-account never crosses streams,

@@ -1715,6 +1715,16 @@ export default function App() {
 						roomId: roomIdAtMount,
 						messages: transport.getRoomMessages(roomIdAtMount),
 					});
+					dispatch({
+						type: "reactions_loaded",
+						reactions: transport.getRoomReactions(roomIdAtMount),
+						myUserId: creds.user_id as UserId,
+					});
+					dispatch({
+						type: "flags_loaded",
+						flags: transport.getRoomFlags(roomIdAtMount),
+						myUserId: creds.user_id as UserId,
+					});
 				} catch (err) {
 					console.warn("room-enter backfill failed", err);
 				}
@@ -2968,6 +2978,16 @@ export default function App() {
 								type: "messages_loaded",
 								roomId,
 								messages: transport.getRoomMessages(roomId),
+							});
+							dispatch({
+								type: "reactions_loaded",
+								reactions: transport.getRoomReactions(roomId),
+								myUserId: creds.user_id as UserId,
+							});
+							dispatch({
+								type: "flags_loaded",
+								flags: transport.getRoomFlags(roomId),
+								myUserId: creds.user_id as UserId,
 							});
 						}
 						return got;
