@@ -36,12 +36,13 @@ interface SpaceHomeMobileProps {
 	onEditRoom?(roomId: RoomId): void;
 	onLeaveRoom?(roomId: RoomId): void;
 	onDeleteRoom?(roomId: RoomId): void;
+	onFlagRoom?(roomId: RoomId): void;
 }
 
 export function SpaceHomeMobile({
 	space, rooms, currentUserId, accessToken, transport,
 	onSelectRoom, onAddRoom, onInvite, onOpenSettings,
-	onEditRoom, onLeaveRoom, onDeleteRoom,
+	onEditRoom, onLeaveRoom, onDeleteRoom, onFlagRoom,
 }: SpaceHomeMobileProps) {
 	// PL gates: same threshold the desktop SpaceLanding uses.  PL ≥ 50
 	// is Matrix's default for sending state events, which is what every
@@ -175,6 +176,7 @@ export function SpaceHomeMobile({
 						});
 					}}
 					onDelete={onDeleteRoom ? () => onDeleteRoom(ctxMenu.room.id) : undefined}
+					onFlagRoom={onFlagRoom ? () => { setCtxMenu(null); onFlagRoom(ctxMenu.room.id); } : undefined}
 					onClose={() => setCtxMenu(null)}
 				/>
 			)}

@@ -89,6 +89,8 @@ export interface MemberListProps {
 	onPromoteToMod?(userId: string): void | Promise<void>;
 	onPromoteToAdmin?(userId: string): void | Promise<void>;
 	onResetRole?(userId: string): void | Promise<void>;
+	className?: string;
+	hideHeader?: boolean;
 }
 
 /** Effective presence for a member.  Bots always read as online;
@@ -135,6 +137,8 @@ export function MemberList({
 	onPromoteToMod,
 	onPromoteToAdmin,
 	onResetRole,
+	className: outerClassName,
+	hideHeader,
 }: MemberListProps) {
 	// Right-click menu state.  Stored as the targeted member +
 	// cursor coords; null when the menu is closed.  We portal the
@@ -214,8 +218,8 @@ export function MemberList({
 	// members arrive.
 	if (members === null) {
 		return (
-			<aside className="w-56 border-l border-border bg-card flex flex-col">
-				{roomAvatarUrl && (
+			<aside className={outerClassName ?? "w-56 border-l border-border bg-card flex flex-col"}>
+				{!hideHeader && roomAvatarUrl && (
 					<div className="px-4 pt-4 pb-3 border-b border-border flex flex-col items-center gap-2">
 						<MatrixAvatar
 							mxc={roomAvatarUrl}
@@ -230,11 +234,13 @@ export function MemberList({
 						)}
 					</div>
 				)}
-				<div className="px-4 h-12 flex items-center border-b border-border">
-					<span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-						Members
-					</span>
-				</div>
+				{!hideHeader && (
+					<div className="px-4 h-12 flex items-center border-b border-border">
+						<span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+							Members
+						</span>
+					</div>
+				)}
 				<div className="flex-1 overflow-y-auto py-2" />
 			</aside>
 		);
@@ -267,7 +273,7 @@ export function MemberList({
 	const offline = decorated.filter(d => !d.isBot && !isOnlinePresence(d.presence) && !isAwayPresence(d.presence)).sort(sortRows);
 
 	return (
-		<aside className="w-56 border-l border-border bg-card flex flex-col">
+		<aside className={outerClassName ?? "w-56 border-l border-border bg-card flex flex-col"}>
 			{/* Room avatar banner.  Only rendered when the active
 			    room has a real uploaded image (mxc).  Square, full
 			    sidebar width, rounded; the centred-image proportion
@@ -278,7 +284,7 @@ export function MemberList({
 			    chat header has scrolled out of casual view.  The
 			    block is fixed-height (no scroll inside this section)
 			    so the member list below still scrolls cleanly. */}
-			{roomAvatarUrl && (
+			{!hideHeader && roomAvatarUrl && (
 				<div className="px-4 pt-4 pb-3 border-b border-border flex flex-col items-center gap-2">
 					<MatrixAvatar
 						mxc={roomAvatarUrl}
@@ -293,11 +299,13 @@ export function MemberList({
 					)}
 				</div>
 			)}
+			{!hideHeader && (
 			<div className="px-4 h-12 flex items-center border-b border-border">
 				<span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
 					Members &middot; {visibleMembers.length}
 				</span>
 			</div>
+			)}
 			<div className="flex-1 overflow-y-auto py-2">
 				{visibleMembers.length === 0 ? (
 					<div className="text-xs text-muted-foreground px-4 py-3">No members.</div>

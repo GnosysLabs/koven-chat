@@ -30,6 +30,8 @@ import { MobileMeScreen } from "@/components/MobileMeScreen";
 import { MobileProfileScreen } from "@/components/MobileProfileScreen";
 import { MobileOtherProfileScreen } from "@/components/MobileOtherProfileScreen";
 import { MobileSettingsScreen } from "@/components/MobileSettingsScreen";
+import { MobileMemberList } from "@/components/MobileMemberList";
+import { FlagDialog } from "@/components/FlagDialog";
 import { PushSlot } from "@/components/mobile/Chrome";
 import { isMobileShell } from "@/lib/mobile";
 import { applyNativeShellTweaks, registerPushToken } from "@/lib/nativeShell";
@@ -344,6 +346,9 @@ export default function App() {
 	// the spaces list inside the same overlay.
 	const [mobileSpacesOpen, setMobileSpacesOpen] = useState(false);
 	const [mobileSelectedSpaceId, setMobileSelectedSpaceId] = useState<SpaceId | null>(null);
+	const [mobileMembersOpen, setMobileMembersOpen] = useState(false);
+	useEffect(() => { setMobileMembersOpen(false); }, [state.activeRoomId]);
+	const [flagRoomTarget, setFlagRoomTarget] = useState<RoomId | null>(null);
 	// Shared bilateral-DM-delete dialog state.  Driven by two entry
 	// points (the DmProfilePanel button on the right sidebar AND the
 	// sidebar room-row right-click "Delete conversation" item), both
@@ -2446,7 +2451,7 @@ export default function App() {
 			    (root + push views) renders its own iOS-style nav
 			    chrome, so the brand top bar would just stack on
 			    top of a second header. */}
-			{isMobileShell && !mobileMeOpen && (
+			{isMobileShell && !mobileMeOpen && !mobileMembersOpen && (
 				<MobileTopBar
 					onBack={
 						state.activeRoomId
@@ -3060,6 +3065,7 @@ export default function App() {
 						const r = await flagRoom(creds.access_token, roomId, category, rationale);
 						if (!r.ok) throw new Error(r.error ?? "Report submission failed");
 					}}
+					onOpenMembers={isMobileShell ? () => setMobileMembersOpen(true) : undefined}
 					onAcceptInvite={async (roomId) => {
 						await acceptInviteWithGate(roomId as RoomId);
 					}}
@@ -3144,6 +3150,48 @@ export default function App() {
 						</PushSlot>
 					) : chatPane;
 				})()
+				)}
+				{isMobileShell && (
+					<PushSlot
+						visible={mobileMembersOpen}
+						onPop={() => setMobileMembersOpen(false)}
+					>
+						{activeRoom && (
+							<MobileMemberList
+								members={
+									state.activeRoomId && state.loadedMembers.has(state.activeRoomId)
+										? state.membersByRoom.get(state.activeRoomId) ?? []
+										: null
+								}
+								currentUserId={creds.user_id}
+								onSelectMember={(userId) => {
+									setMobileMembersOpen(false);
+									setViewedUserId(userId as UserId);
+								}}
+								botMxids={botMxids}
+								hiddenUserIds={(() => {
+									const me = creds.user_id;
+									const colon = me.indexOf(":");
+									if (colon <= 0) return undefined;
+									return new Set([`@engine${me.slice(colon)}`]);
+								})()}
+								roomAvatarUrl={activeRoom.iconEmoji ? undefined : activeRoom.avatarUrl}
+								roomId={activeRoom.id}
+								roomName={activeRoom.name}
+								onBack={() => setMobileMembersOpen(false)}
+								onStartDm={transport ? async (userId) => {
+									try {
+										const roomId = await transport.startDm(userId as UserId);
+										setMobileMembersOpen(false);
+										dispatch({ type: "set_active_space", space: { kind: "dms" } });
+										dispatch({ type: "set_active_room", roomId });
+									} catch (e) {
+										dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
+									}
+								} : undefined}
+							/>
+						)}
+					</PushSlot>
 				)}
 				</div>
 				<div className="contents" data-mobile-pane="aux">
@@ -3745,6 +3793,7 @@ export default function App() {
 											dispatch({ type: "error", message: err instanceof Error ? err.message : String(err) });
 										});
 									}}
+									onFlagRoom={(roomId) => setFlagRoomTarget(roomId)}
 								/>
 							);
 						})()}
@@ -4219,6 +4268,17 @@ export default function App() {
 				deleting={deleteDmInflight}
 				progress={deleteDmProgress}
 				onConfirm={confirmDeleteDm}
+			/>
+			<FlagDialog
+				open={!!flagRoomTarget}
+				onOpenChange={(o) => { if (!o) setFlagRoomTarget(null); }}
+				target="room"
+				onSubmit={async (category, rationale) => {
+					if (!creds?.access_token || !flagRoomTarget) return;
+					const r = await flagRoom(creds.access_token, flagRoomTarget, category, rationale);
+					if (!r.ok) throw new Error(r.error ?? "Report submission failed");
+					setFlagRoomTarget(null);
+				}}
 			/>
 			<PendingInvitesSheet
 				open={pendingInvitesOpen && state.spaceInvites.length > 0}

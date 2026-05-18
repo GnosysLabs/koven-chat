@@ -13,7 +13,7 @@
 import { useMemo } from "react";
 import { ContextMenu, type ContextMenuItem } from "@/components/ui/context-menu";
 import {
-	Bell, BellOff, Check, Copy, Eye, LogOut, MessageSquare,
+	Bell, BellOff, Check, Copy, Eye, Flag, LogOut, MessageSquare,
 	Pencil, Trash2, User as UserIcon, UserX,
 } from "lucide-react";
 import type { Room, UserId, SpaceId } from "@koven/shared";
@@ -50,6 +50,7 @@ export interface RoomRowContextMenuProps {
 	// DM-only:
 	onOpenProfile?(): void;
 	onBlockDmUser?(): void;
+	onFlagRoom?(): void;
 	onClose(): void;
 }
 
@@ -59,6 +60,7 @@ export function RoomRowContextMenu({
 	onMarkRead, onMarkUnread, onCopyId,
 	onEdit, onLeave, onDelete,
 	onOpenProfile, onBlockDmUser,
+	onFlagRoom,
 	onClose,
 }: RoomRowContextMenuProps) {
 	const isDm = room.kind === "dm";
@@ -187,6 +189,14 @@ export function RoomRowContextMenu({
 				label: "Edit room…",
 				icon: <Pencil className="h-4 w-4" />,
 				onClick: onEdit,
+			});
+		}
+
+		if (!isDm && !room.encrypted && onFlagRoom && room.creatorId !== _currentUserId) {
+			out.push({
+				label: "Report room",
+				icon: <Flag className="h-4 w-4" />,
+				onClick: onFlagRoom,
 			});
 		}
 

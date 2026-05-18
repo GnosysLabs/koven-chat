@@ -45,6 +45,7 @@ import {
 	ChevronLeft,
 	ChevronRight,
 	Globe,
+	Loader2,
 	Maximize,
 	Mic,
 	MicOff,
@@ -235,7 +236,7 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 	// Click a thumbnail to pin; click the spotlight to unpin;
 	// ‹ › arrows cycle.  Auto-clears if the pinned participant
 	// leaves the room.
-	const { spotlitId: pinnedId, setSpotlight, activeCall, popOutToWindow, popInToMain, browserSession } = useCall();
+	const { spotlitId: pinnedId, setSpotlight, activeCall, popOutToWindow, popInToMain, browserSession, setBrowserSession } = useCall();
 
 	// FaceTime-style pop-out: only offered in the desktop shell's
 	// main window.  Hidden in plain browsers (no native pop-out path
@@ -260,6 +261,8 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 		? () => { void toggleCallWindowFullscreen(); }
 		: undefined;
 
+	const [browserStarting, setBrowserStarting] = useState(false);
+
 	const toggleBrowser = useCallback(async () => {
 		if (!activeCall) return;
 		setError(null);
@@ -267,12 +270,16 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 			if (browserSession) {
 				await stopBrowserSession({ accessToken: activeCall.accessToken, roomId: activeCall.roomId });
 			} else {
-				await startBrowserSession({ accessToken: activeCall.accessToken, roomId: activeCall.roomId });
+				setBrowserStarting(true);
+				const session = await startBrowserSession({ accessToken: activeCall.accessToken, roomId: activeCall.roomId });
+				setBrowserSession(session);
 			}
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
+		} finally {
+			setBrowserStarting(false);
 		}
-	}, [activeCall, browserSession]);
+	}, [activeCall, browserSession, setBrowserSession]);
 
 	const togglePin = useCallback((id: string) => {
 		setSpotlight(pinnedId === id ? null : id);
@@ -459,6 +466,7 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 							videoOn={videoOn}
 							screenOn={screenOn}
 							browserOn={hasBrowser}
+							browserStarting={browserStarting}
 							toggleAudio={toggleAudio}
 							toggleVideo={toggleVideo}
 							toggleScreen={toggleScreen}
@@ -489,6 +497,7 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 							videoOn={videoOn}
 							screenOn={screenOn}
 							browserOn={hasBrowser}
+							browserStarting={browserStarting}
 							toggleAudio={toggleAudio}
 							toggleVideo={toggleVideo}
 							toggleScreen={toggleScreen}
@@ -527,7 +536,7 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
  *  mode where the thumbnail strip below would otherwise be
  *  fighting for the same bottom space. */
 function ControlBar({
-	floating, audioOn, videoOn, screenOn, browserOn,
+	floating, audioOn, videoOn, screenOn, browserOn, browserStarting,
 	toggleAudio, toggleVideo, toggleScreen, toggleBrowser, onLeave,
 	onPopOut, onPopIn, onFullscreen,
 }: {
@@ -536,6 +545,7 @@ function ControlBar({
 	videoOn: boolean;
 	screenOn: boolean;
 	browserOn: boolean;
+	browserStarting: boolean;
 	toggleAudio(): void;
 	toggleVideo(): void;
 	toggleScreen(): void;
@@ -608,16 +618,19 @@ function ControlBar({
 			<button
 				type="button"
 				onClick={toggleBrowser}
+				disabled={browserStarting}
 				aria-label={browserOn ? "Stop shared browser" : "Share browser"}
 				title={browserOn ? "Stop shared browser" : "Share browser"}
 				className={cn(
 					"h-11 w-11 rounded-full flex items-center justify-center transition-colors",
-					browserOn
+					browserOn || browserStarting
 						? "bg-primary hover:bg-primary/90 text-primary-foreground"
 						: "bg-muted hover:bg-accent text-foreground",
 				)}
 			>
-				<Globe className="h-5 w-5" />
+				{browserStarting
+					? <Loader2 className="h-5 w-5 animate-spin" />
+					: <Globe className="h-5 w-5" />}
 			</button>
 			{onPopOut && (
 				<button

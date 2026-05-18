@@ -109,7 +109,7 @@ import {
 	DialogTitle,
 } from "@/components/ui/dialog";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { AlertTriangle, ArrowDown, ArrowUp, BarChart3, Check, CheckCheck, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Images, Lock, Maximize2, MessageSquare as MessageSquareIcon, Minimize2, Paperclip, Pause, Play, Plus, Reply, Scale, Settings, X } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, BarChart3, Check, CheckCheck, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Images, Lock, Maximize2, MessageSquare as MessageSquareIcon, Minimize2, Paperclip, Pause, Play, Plus, Reply, Scale, Settings, Users, X } from "lucide-react";
 
 export interface ChatPaneProps {
 	room: Room | null;
@@ -137,6 +137,7 @@ export interface ChatPaneProps {
 	// encrypted rooms, etc.) the icon is hidden.  Throws on engine-
 	// side rejection so the dialog can show the error inline.
 	onFlagRoom?(roomId: EventId, category: FlagCategory, rationale?: string): void | Promise<void>;
+	onOpenMembers?(): void;
 	// mxids that should render with a BOT badge next to their name
 	// (sender labels, reply-quote labels).  Default empty Set means
 	// no badges — safe pre-fetch state.
@@ -315,7 +316,7 @@ const MAX_PENDING_ATTACHMENTS = 10;
 export function ChatPane({
 	room, messages, memberAvatars, reactionsByMessage, flagsByMessage,
 	onSendMessage, onSendAttachment, onReact, onUnreact, onFlag, onUnflag, onAcceptInvite, onDeclineInvite, onInvite, onEditRoom,
-	onOpenModLog, onFlagRoom,
+	onOpenModLog, onFlagRoom, onOpenMembers,
 	botMxids,
 	serviceMxids,
 	myOwnedBotMxids,
@@ -1258,22 +1259,26 @@ export function ChatPane({
 							<Scale className={isMobileShell ? "h-5 w-5" : "h-4 w-4"} />
 						</button>
 					)}
-					{onFlagRoom && room.kind !== "dm" && !room.isInvite && !room.encrypted && (
-						// Report the room itself (its name + topic), not a
-						// single message inside it.  Same gating as the
-						// mod log icon — hidden in DMs and encrypted
-						// rooms where the engine can't read content.
+					{isMobileShell && onOpenMembers && !room.isInvite && (
+						<button
+							type="button"
+							onClick={onOpenMembers}
+							className="size-11 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+							title="Members"
+							aria-label="Members"
+						>
+							<Users className="h-5 w-5" />
+						</button>
+					)}
+					{!isMobileShell && onFlagRoom && room.kind !== "dm" && !room.isInvite && !room.encrypted && room.creatorId !== viewerUserId && (
 						<button
 							type="button"
 							onClick={() => setRoomFlagOpen(true)}
-							className={cn(
-									isMobileShell ? "size-11 flex items-center justify-center" : "p-1",
-									"rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors",
-								)}
+							className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
 							title="Report this room"
 							aria-label="Report this room"
 						>
-							<Flag className={isMobileShell ? "h-5 w-5" : "h-4 w-4"} />
+							<Flag className="h-4 w-4" />
 						</button>
 					)}
 					{room.kind !== "dm" && !room.isInvite && (room.myPowerLevel ?? 0) >= 50 && (
@@ -2233,10 +2238,10 @@ function MessageRowComponent({
 	// for reactions.  New-group top is also pulled in from 16px →
 	// 8px since mobile viewports waste vertical space fast.
 	const rowPadding = isMobileShell
-		? cn(continuesGroup ? "pt-0" : "pt-2", hasReactions ? "pb-2" : "pb-0.5")
+		? cn(continuesGroup ? "pt-0" : "pt-2", hasReactions ? "pb-2" : "pb-1")
 		: cn(
 			continuesGroup ? "pt-0" : "pt-4",
-			hasReactions ? "pb-9" : "pb-0.5",
+			hasReactions ? "pb-9" : "pb-1",
 		);
 
 	// Discord-style mention highlight: left accent border + faint

@@ -16,7 +16,7 @@
 // admin-gated, and a HIG reskin is a separate pass.
 
 import { useEffect, useState } from "react";
-import { ChevronRight, Check, Eye, Palette, Shield, Monitor, QrCode, Wrench, LogOut, Trash2 } from "lucide-react";
+import { ChevronRight, Check, Eye, Palette, Shield, Monitor, QrCode, Wrench, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Switch } from "@/components/ui/switch";
 import type { Settings, Theme } from "@/state/settings";
@@ -183,9 +183,6 @@ export function MobileSettingsScreen({
 								/>
 							)}
 						</GroupCard>
-						<GroupFooter>
-							When on, other users can find you in the People directory on Explore.
-						</GroupFooter>
 					</>
 				)}
 
@@ -204,21 +201,6 @@ export function MobileSettingsScreen({
 						</GroupCard>
 					</>
 				)}
-
-				{/* ─── Session ─────────────────────────────────────── */}
-				<GroupLabel>Session</GroupLabel>
-				<GroupCard>
-					<ActionRow
-						icon={<LogOut className="h-[20px] w-[20px]" strokeWidth={2.1} />}
-						iconBg="bg-amber-500"
-						label="Sign Out"
-						onClick={() => {
-							void hapticImpact("light");
-							onSignOut();
-						}}
-						last
-					/>
-				</GroupCard>
 
 				{/* ─── Danger zone ─────────────────────────────────── */}
 				{accessToken && (
