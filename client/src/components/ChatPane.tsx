@@ -3833,11 +3833,6 @@ function UrlPreviewSlot({ text }: { text: string }) {
 	//               genuinely large (>= 1200 px wide, the standard OG
 	//               recommended minimum for large cards).
 	//
-	//   "compact" — small square thumbnail on the right, text on the
-	//               left.  Twitter's summary.  Used when an image
-	//               exists but is small, portrait, or has no reported
-	//               dimensions (safer default than ballooning a
-	//               favicon to hero size).
 	//
 	//   "text"    — no image at all.  Card shrinks to just the metadata
 	//               block.
@@ -3846,12 +3841,11 @@ function UrlPreviewSlot({ text }: { text: string }) {
 	// here.  Servers that don't expose them collapse to "compact" so
 	// the worst case is a tiny image rendered as a 96px thumbnail —
 	// never an icon stretched to fill a hero slot.
-	const layout: "hero" | "compact" | "text" = (() => {
+	const layout: "hero" | "text" = (() => {
 		if (!imageUrl) return "text";
 		const w = preview.imageWidth ?? 0;
-		const h = preview.imageHeight ?? 0;
 		if (w >= 1200) return "hero";
-		return "compact";
+		return "text";
 	})();
 
 	return (
@@ -3885,21 +3879,6 @@ function UrlPreviewSlot({ text }: { text: string }) {
 						<UrlPreviewText preview={preview} host={host} />
 					</div>
 				</>
-			)}
-			{layout === "compact" && (
-				<div className="flex gap-3">
-					<div className="flex-1 min-w-0 px-3 py-2.5 space-y-1">
-						<UrlPreviewText preview={preview} host={host} />
-					</div>
-					<div className="shrink-0 w-24 h-24 bg-muted-foreground/10 overflow-hidden">
-						<img
-							src={imageUrl ?? ""}
-							alt=""
-							loading="lazy"
-							className="w-full h-full object-cover block"
-						/>
-					</div>
-				</div>
 			)}
 			{layout === "text" && (
 				<div className="px-3 py-2.5 space-y-1">

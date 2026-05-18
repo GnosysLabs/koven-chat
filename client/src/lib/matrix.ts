@@ -774,11 +774,42 @@ export class MatrixTransport {
 		});
 		this.store = buildStore();
 
+		// Late-bound handler for OTK collision recovery.  Assigned
+		// once fireSessionDead is defined (further down in start()).
+		// The fetch wrapper only fires during network requests, which
+		// happen after startClient, so the reference is always set by
+		// the time it is needed.
+		let onOtkCollision: (() => void) | null = null;
+		let otkCollisionFired = false;
+		const otkAwareFetch: typeof globalThis.fetch = async (input, init) => {
+			const resp = await globalThis.fetch(input, init);
+			if (
+				!otkCollisionFired
+				&& resp.status === 400
+				&& init?.method === "POST"
+			) {
+				const url = typeof input === "string"
+					? input
+					: input instanceof Request ? input.url : "";
+				if (url.includes("/keys/upload")) {
+					try {
+						const body = await resp.clone().json();
+						if (typeof body?.error === "string" && body.error.includes("already exists")) {
+							otkCollisionFired = true;
+							onOtkCollision?.();
+						}
+					} catch { /* body parse failed, not our error */ }
+				}
+			}
+			return resp;
+		};
+
 		const buildClient = () => sdk.createClient({
 			baseUrl: creds.homeserver,
 			accessToken: creds.access_token,
 			userId: creds.user_id,
 			deviceId: creds.device_id,
+			fetchFn: otkAwareFetch,
 			// Persistent timeline + sync-token cache.  Without this,
 			// every cold launch refetches /sync from scratch and the
 			// user sees a stale UI for the few seconds it takes to
@@ -786,7 +817,7 @@ export class MatrixTransport {
 			// MemoryStore subclass with periodic write-through to IDB,
 			// so reads stay in-memory fast and writes batch in the
 			// background.  Reused across the rust-crypto-mismatch
-			// retry path (see initRustCrypto catch below) — same
+			// retry path (see initRustCrypto catch below) -- same
 			// store, same on-disk data, just a fresh client instance.
 			store: this.store ?? undefined,
 			cryptoCallbacks: {
@@ -1015,6 +1046,15 @@ export class MatrixTransport {
 		this.client.on(HttpApiEvent.SessionLoggedOut, () => {
 			fireSessionDead("HttpApiEvent.SessionLoggedOut");
 		});
+		// Wire up the OTK collision handler now that fireSessionDead
+		// exists.  When the fetch wrapper detects a /keys/upload 400
+		// with "already exists", the local crypto state is irreconcilably
+		// diverged from the server: the device's OTKs were regenerated
+		// locally but the server still holds old keys at the same counter
+		// IDs.  Other devices claiming those stale OTKs get key material
+		// we can no longer decrypt, breaking E2EE.  The only clean fix
+		// is a fresh device, so we bounce to login.
+		onOtkCollision = () => fireSessionDead("otk-collision: device crypto state diverged, needs fresh device");
 
 		// Hooks must be in place BEFORE startClient or we miss the
 		// initial sync's events.

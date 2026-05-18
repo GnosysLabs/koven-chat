@@ -14,7 +14,7 @@ export interface ReactionPillsProps {
 export function ReactionPills({ reactions, onToggle }: ReactionPillsProps) {
 	if (reactions.length === 0) return null;
 	return (
-		<div className="flex flex-wrap gap-1 mt-1">
+		<div className="flex flex-wrap gap-1 mt-1 mb-1">
 			{reactions.map(r => {
 				const reacted = !!r.myReactionId;
 				return (
