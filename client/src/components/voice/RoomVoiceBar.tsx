@@ -134,6 +134,10 @@ export function RoomVoiceBar({ roomId, roomName, accessToken, isDm }: RoomVoiceB
 				authToken: r.authToken,
 				accessToken,
 				isDm: !!isDm,
+				// If the /active poll already shows someone in this
+				// DM call, we're hopping into a call in progress —
+				// don't re-ring the person who's already there.
+				skipRing: participants.length > 0,
 			});
 			setState({ status: "idle" });
 		} catch (err) {
@@ -145,7 +149,7 @@ export function RoomVoiceBar({ roomId, roomName, accessToken, isDm }: RoomVoiceB
 			console.warn(`voice: join failed for ${roomId}`, err);
 			setState({ status: "error", message });
 		}
-	}, [accessToken, roomId, roomName, inAnotherRoomsCall, call]);
+	}, [accessToken, roomId, roomName, inAnotherRoomsCall, call, isDm, participants]);
 
 	if (state.status === "not_configured") return null;
 

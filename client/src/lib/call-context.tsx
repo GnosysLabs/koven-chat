@@ -88,6 +88,12 @@ export interface ActiveCall {
 	// flips the pre-join CTA copy from "Ring X" to "Join X" since
 	// the user is answering, not ringing.
 	isAnsweringRing?: boolean;
+	// True when joining a DM call that already has someone in it
+	// ("hop in").  Suppresses the outgoing ring + ringback — the
+	// other party is already on the call, re-ringing them is just
+	// noise.  Distinct from isAnsweringRing (that's specifically
+	// answering an incoming ring); this is "join silently."
+	skipRing?: boolean;
 	// Initial mic + camera state.  Channel-style calls default
 	// both off (Discord's "join muted" convention; user enables
 	// in pre-join).  DMs may want defaults differently per the
@@ -356,7 +362,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 			// call (not when answering someone else's ring).
 			// Without this guard, recipient + caller would ring
 			// each other in an infinite loop on accept.
-			if (ac.isDm && !ac.isAnsweringRing) {
+			if (ac.isDm && !ac.isAnsweringRing && !ac.skipRing) {
 				// Caller-side ringback: loop /ring.mp3 while waiting
 				// for the recipient to answer.  Stopped on
 				// participantJoined (answered), roomLeft (hung up /

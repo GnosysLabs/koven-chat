@@ -473,7 +473,7 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 								   actually drive the browser.  Unfocus via
 								   the corner button, the ‹ › arrows, or a
 								   strip thumbnail. */
-								<div className="relative aspect-video max-h-full max-w-full w-auto">
+								<div className="relative h-full aspect-video max-w-full">
 									<div ref={browserSlotRef} className="w-full h-full" />
 									<button
 										type="button"
