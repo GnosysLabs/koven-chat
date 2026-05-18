@@ -16,7 +16,7 @@
 // admin-gated, and a HIG reskin is a separate pass.
 
 import { useEffect, useState } from "react";
-import { ChevronRight, Check, Eye, Palette, Shield, Monitor, Wrench, LogOut, Trash2 } from "lucide-react";
+import { ChevronRight, Check, Eye, Palette, Shield, Monitor, QrCode, Wrench, LogOut, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Switch } from "@/components/ui/switch";
 import type { Settings, Theme } from "@/state/settings";
@@ -24,12 +24,14 @@ import { THEMES } from "@/state/settings";
 import { MobileBlockedUsersScreen } from "@/components/MobileBlockedUsersScreen";
 import { MobileSessionsScreen } from "@/components/MobileSessionsScreen";
 import { MobileDeleteAccountScreen } from "@/components/MobileDeleteAccountScreen";
+import { MobileLinkDeviceScreen } from "@/components/MobileLinkDeviceScreen";
 import { InstanceAdminSection } from "@/components/InstanceAdminSection";
 import { AdminManagementSection } from "@/components/AdminManagementSection";
 import { BannedUsersSection } from "@/components/BannedUsersSection";
 import { fetchAdminStatus } from "@/lib/instance";
 import { fetchUserProfile, updateMyProfileData } from "@/lib/profile";
 import { hapticImpact } from "@/lib/haptics";
+import { isCapacitor } from "@/lib/nativeShell";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
 import {
@@ -57,6 +59,7 @@ type SubScreen =
 	| "appearance"
 	| "blocked"
 	| "sessions"
+	| "linkdevice"
 	| "instance"
 	| "delete";
 
@@ -168,8 +171,17 @@ export function MobileSettingsScreen({
 								iconBg="bg-blue-500"
 								label="Active Sessions"
 								onClick={() => push("sessions")}
-								last
+								last={!isCapacitor()}
 							/>
+							{isCapacitor() && (
+								<DisclosureRow
+									icon={<QrCode className="h-[20px] w-[20px]" strokeWidth={2.1} />}
+									iconBg="bg-indigo-500"
+									label="Link a Device"
+									onClick={() => push("linkdevice")}
+									last
+								/>
+							)}
 						</GroupCard>
 						<GroupFooter>
 							When on, other users can find you in the People directory on Explore.
@@ -262,6 +274,13 @@ export function MobileSettingsScreen({
 						<EmptyHint label="Sign in required" />
 					</SubScreenShell>
 				)}
+			</PushSlot>
+			<PushSlot visible={sub === "linkdevice"} onPop={pop}>
+				<MobileLinkDeviceScreen
+					transport={transport ?? null}
+					accessToken={accessToken}
+					onBack={pop}
+				/>
 			</PushSlot>
 			<PushSlot visible={sub === "instance"} onPop={pop}>
 				{/* Instance admin: dense forms (branding fields,

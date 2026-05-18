@@ -43,5 +43,7 @@
 	<true/>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>NSCameraUsageDescription</key>
+	<string>Koven uses the camera to scan QR codes for signing in on another device.</string>
 </dict>
 </plist>

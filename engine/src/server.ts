@@ -20,7 +20,7 @@
 import { mkdir, rm, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { config } from "./config";
 import { applyEvent, type MatrixEvent } from "./aggregate";
 import {
@@ -102,6 +102,10 @@ import {
 	touchEmailLogin,
 	updateBot,
 	verifyAuthCode,
+	createQrSession,
+	getQrSession,
+	approveQrSession,
+	deleteQrSession,
 	writeBio,
 	readSocialLinks,
 	writeSocialLinks,
@@ -871,6 +875,11 @@ function randomToken(bytes: number): string {
 		.replace(/=+$/, "");
 }
 
+// Lifetime of a QR sign-in session.  Short on purpose: the desktop
+// shows the QR, the user scans it within a minute or two, and a stale
+// row is just dead weight.  Expired rows are pruned on the engine tick.
+const QR_SESSION_TTL_MS = 2 * 60 * 1000;
+
 /**
  * Pull the `errcode` out of a Synapse error response body.  Synapse
  * always replies to errors with `{"errcode": "M_*", "error": "human
@@ -1306,6 +1315,155 @@ export function startServer(): void {
 					}, { status: 502 });
 				}
 				return json({ password });
+			}
+
+			// ─── QR-code device sign-in ──────────────────────────────
+			//
+			// "Scan to sign in": a desktop / web session shows a QR, the
+			// already-signed-in mobile app scans + approves, and the
+			// engine relays a freshly-minted Matrix session back to the
+			// desktop.  Three endpoints:
+			//
+			//   POST /api/auth/qr/initiate  : desktop opens a session
+			//   POST /api/auth/qr/approve   : mobile (authed) approves it
+			//   GET  /api/auth/qr/status    : desktop polls + claims it
+			//
+			// The user's encryption recovery key is end-to-end encrypted
+			// between mobile and desktop (ECDH P-256 + AES-GCM); the
+			// engine only ever relays opaque ciphertext.  `claim_secret`
+			// is returned to the desktop but never placed in the QR, so
+			// a photographed QR cannot poll or claim the session.
+
+			// POST /api/auth/qr/initiate { desktop_pubkey }
+			// Unauthenticated: the desktop has no session yet.  Mints a
+			// qr_id + claim_secret and stores a 'pending' row.
+			if (req.method === "POST" && path === "/api/auth/qr/initiate") {
+				const body = await readJson(req);
+				const desktopPubkey = typeof body.desktop_pubkey === "string"
+					? body.desktop_pubkey : "";
+				// Raw P-256 public keys are 65 bytes → ~88 base64url
+				// chars; cap generously to reject obvious junk.
+				if (!desktopPubkey || desktopPubkey.length > 256) {
+					return json({ error: "invalid_request" }, { status: 400 });
+				}
+				const qrId = randomToken(18);
+				const claimSecret = randomToken(32);
+				createQrSession(qrId, desktopPubkey, claimSecret, QR_SESSION_TTL_MS);
+				return json({
+					qr_id: qrId,
+					claim_secret: claimSecret,
+					expires_at: Date.now() + QR_SESSION_TTL_MS,
+				});
+			}
+
+			// POST /api/auth/qr/approve { qr_id, mobile_pubkey, iv, ciphertext }
+			// Authed via the scanning user's Matrix access token.  Mints
+			// a fresh Synapse session for that user and attaches it +
+			// the relayed encrypted recovery key to the pending row.
+			if (req.method === "POST" && path === "/api/auth/qr/approve") {
+				const userId = await whoami(extractToken(req));
+				if (!userId) {
+					return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				}
+				const body = await readJson(req);
+				const qrId = typeof body.qr_id === "string" ? body.qr_id : "";
+				const mobilePubkey = typeof body.mobile_pubkey === "string" ? body.mobile_pubkey : "";
+				const iv = typeof body.iv === "string" ? body.iv : "";
+				const ciphertext = typeof body.ciphertext === "string" ? body.ciphertext : "";
+				if (!qrId || !mobilePubkey || !iv || !ciphertext
+					|| mobilePubkey.length > 256 || iv.length > 64 || ciphertext.length > 4096) {
+					return json({ error: "invalid_request" }, { status: 400 });
+				}
+				const session = getQrSession(qrId);
+				if (!session) {
+					return json({ error: "not_found" }, { status: 404 });
+				}
+				if (session.expires_at < Date.now()) {
+					return json({ error: "expired" }, { status: 410 });
+				}
+				if (session.status !== "pending") {
+					return json({ error: "already_approved" }, { status: 409 });
+				}
+				if (isPlatformBanned(userId)) {
+					return json({ error: "platform_banned" }, { status: 403 });
+				}
+				// Mint a fresh session the same way the email-code flow
+				// does: rotate the Synapse password to a known random
+				// value, then log in with it.  Rotating is harmless:
+				// other sessions auth by access token, not password, and
+				// every email login rotates it anyway.  One retry on a
+				// transient Synapse failure, mirroring verify-code.
+				const minted = randomPassword();
+				let resetResult = await adminResetPassword(userId, minted);
+				if (!resetResult.ok) {
+					await new Promise(r => setTimeout(r, 250));
+					resetResult = await adminResetPassword(userId, minted);
+				}
+				if (!resetResult.ok) {
+					return json({
+						error: "password_rotate_failed",
+						detail: `Synapse ${resetResult.status}: ${resetResult.detail}`,
+					}, { status: 502 });
+				}
+				const token = await loginAsUser(userId, minted);
+				if ("error" in token) {
+					return json({ error: token.error, detail: token.detail }, { status: 502 });
+				}
+				const ok = approveQrSession(qrId, {
+					userId: token.user_id,
+					accessToken: token.access_token,
+					deviceId: token.device_id,
+					mobilePubkey,
+					iv,
+					ciphertext,
+				});
+				if (!ok) {
+					// Lost a race: the row stopped being 'pending'
+					// between our read and the UPDATE.
+					return json({ error: "already_approved" }, { status: 409 });
+				}
+				return json({ ok: true });
+			}
+
+			// GET /api/auth/qr/status?qr_id=...   (claim_secret in header)
+			// The desktop polls this.  On 'approved' it returns the
+			// minted credentials + relayed ciphertext once, then deletes
+			// the row (single-use claim).
+			if (req.method === "GET" && path === "/api/auth/qr/status") {
+				const qrId = url.searchParams.get("qr_id") ?? "";
+				const claimSecret = req.headers.get("X-Koven-Qr-Claim") ?? "";
+				if (!qrId || !claimSecret) {
+					return json({ error: "invalid_request" }, { status: 400 });
+				}
+				const session = getQrSession(qrId);
+				if (!session) {
+					return json({ status: "expired" });
+				}
+				// Constant-time compare so the endpoint isn't a timing
+				// oracle for the claim secret.
+				const a = Buffer.from(session.claim_secret);
+				const b = Buffer.from(claimSecret);
+				const secretOk = a.length === b.length && timingSafeEqual(a, b);
+				if (!secretOk) {
+					return json({ errcode: "M_FORBIDDEN", error: "bad claim secret" }, { status: 403 });
+				}
+				if (session.status === "pending") {
+					if (session.expires_at < Date.now()) {
+						return json({ status: "expired" });
+					}
+					return json({ status: "pending" });
+				}
+				// Approved: hand the session over exactly once.
+				deleteQrSession(qrId);
+				return json({
+					status: "approved",
+					user_id: session.user_id,
+					access_token: session.access_token,
+					device_id: session.device_id,
+					mobile_pubkey: session.mobile_pubkey,
+					iv: session.relay_iv,
+					ciphertext: session.relay_ciphertext,
+				});
 			}
 
 			// "Am I an admin?" — used by the client to decide whether

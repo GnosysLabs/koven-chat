@@ -414,6 +414,59 @@ export interface LinkPreview {
 	favicon?: string;
 }
 
+// ─── QR-code device sign-in ──────────────────────────────────────────
+//
+// "Scan to sign in": a desktop / web session shows a QR code, the
+// already-signed-in mobile app scans it and approves, and the engine
+// relays a freshly-minted Matrix session back to the desktop.  The
+// user's encryption recovery key travels end-to-end encrypted between
+// the two devices (ECDH P-256 + AES-GCM); the engine only ever sees
+// ciphertext.  See engine/src/server.ts (/api/auth/qr/*) and
+// client/src/lib/qrLink.ts.
+
+// Wire format encoded into the QR image itself.  `desktopPubKey` is a
+// base64url-encoded raw ECDH P-256 public key (the `claim_secret`
+// stays on the desktop and is deliberately NOT part of this payload).
+export interface QrLinkPayload {
+	v: 1;
+	qrId: string;
+	desktopPubKey: string;
+}
+
+// POST /api/auth/qr/initiate response.
+export interface QrInitiateResponse {
+	qr_id: string;
+	claim_secret: string;
+	expires_at: number;
+}
+
+// POST /api/auth/qr/approve request body.  `iv` + `ciphertext` are the
+// AES-GCM-encrypted recovery key; all binary fields are base64url.
+export interface QrApproveRequest {
+	qr_id: string;
+	mobile_pubkey: string;
+	iv: string;
+	ciphertext: string;
+}
+
+// GET /api/auth/qr/status response.  `approved` carries the minted
+// Matrix credentials plus the relayed encrypted recovery key.  The
+// desktop derives its own homeserver URL (HOMESERVER_URL from
+// client/src/lib/urls.ts), so it is deliberately not sent here. The
+// engine's in-container homeserver URL is not reachable by clients.
+export type QrStatusResponse =
+	| { status: "pending" }
+	| { status: "expired" }
+	| {
+		status: "approved";
+		user_id: UserId;
+		access_token: string;
+		device_id: string;
+		mobile_pubkey: string;
+		iv: string;
+		ciphertext: string;
+	};
+
 // ─── Koven governance ────────────────────────────────────────────────
 
 export * from "./governance";

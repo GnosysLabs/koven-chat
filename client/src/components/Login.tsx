@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils";
 import { isMobileShell } from "@/lib/mobile";
 import { isNativeShell } from "@/lib/nativeShell";
 import { LoginMobile } from "@/components/LoginMobile";
+import { QrSignIn } from "@/components/QrSignIn";
 import type { MatrixCredentials } from "@/lib/matrix";
 import { fetchInstanceConfig, resolveAssetUrl, type InstanceConfig } from "@/lib/instance";
 import {
@@ -39,7 +40,10 @@ export interface InviteContext {
 }
 
 export interface LoginProps {
-	onLoggedIn(creds: MatrixCredentials, uiaPassword: string): void;
+	// `recoveryKey` is set only by the QR device-link flow, which
+	// relays the user's encryption recovery key so the new session can
+	// unlock SSSS without prompting.  Omitted for the email-code flow.
+	onLoggedIn(creds: MatrixCredentials, uiaPassword: string, recoveryKey?: string): void;
 	// "Add account" mode flips the heading to make it clear the user
 	// is signing INTO an additional account rather than the only one,
 	// and surfaces a "Back" button so they can cancel without
@@ -54,7 +58,7 @@ export interface LoginProps {
 	inviteContext?: InviteContext;
 }
 
-type Step = "email" | "code";
+type Step = "email" | "code" | "qr";
 
 // Top-level router: mobile viewports get the iOS-HIG layout
 // (LoginMobile), everyone else gets the original desktop glass-card
@@ -349,7 +353,12 @@ function LoginDesktop({ onLoggedIn, addingAccount, onCancelAddAccount, inviteCon
 						)
 						: "bg-card border border-border",
 				)}>
-					{step === "email" ? (
+					{step === "qr" ? (
+						<QrSignIn
+							onLoggedIn={onLoggedIn}
+							onBack={() => setStep("email")}
+						/>
+					) : step === "email" ? (
 						<form onSubmit={submitEmail} className="p-5 space-y-3">
 							<div className="space-y-1">
 								<div className="text-sm font-medium">Sign In/Create Account</div>
@@ -388,6 +397,20 @@ function LoginDesktop({ onLoggedIn, addingAccount, onCancelAddAccount, inviteCon
 
 							<Button type="submit" disabled={continueDisabled} className="w-full">
 								{pending ? "Sending code…" : "Send code"}
+							</Button>
+
+							<div className="flex items-center gap-2 py-0.5">
+								<div className="h-px flex-1 bg-border" />
+								<span className="text-[10px] uppercase tracking-wide text-muted-foreground">or</span>
+								<div className="h-px flex-1 bg-border" />
+							</div>
+							<Button
+								type="button"
+								variant="outline"
+								className="w-full"
+								onClick={() => setStep("qr")}
+							>
+								Sign in with a QR code
 							</Button>
 						</form>
 					) : (

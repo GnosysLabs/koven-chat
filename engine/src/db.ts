@@ -673,6 +673,33 @@ db.exec(`
 	);
 	CREATE INDEX IF NOT EXISTS idx_push_tokens_user
 		ON push_tokens(user_id);
+
+	-- ─── QR-code device sign-in ───────────────────────────────────
+	-- One row per in-flight "scan to sign in" attempt.  A desktop /
+	-- web session creates a 'pending' row, the mobile app approves it
+	-- (filling user_id + the minted credentials + the relayed
+	-- encrypted recovery key), and the desktop claims it once, at
+	-- which point the row is deleted.  Rows are short-lived (2 min)
+	-- and pruned on the engine tick.  claim_secret never leaves the
+	-- desktop and never enters the QR, so a photographed QR can't
+	-- claim the session.  relay_iv / relay_ciphertext hold the
+	-- AES-GCM-encrypted recovery key; the engine only relays it.
+	CREATE TABLE IF NOT EXISTS qr_sessions (
+		qr_id            TEXT PRIMARY KEY,
+		desktop_pubkey   TEXT NOT NULL,
+		claim_secret     TEXT NOT NULL,
+		status           TEXT NOT NULL DEFAULT 'pending',
+		user_id          TEXT,
+		access_token     TEXT,
+		device_id        TEXT,
+		mobile_pubkey    TEXT,
+		relay_iv         TEXT,
+		relay_ciphertext TEXT,
+		created_at       INTEGER NOT NULL,
+		expires_at       INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_qr_sessions_expires
+		ON qr_sessions(expires_at);
 `);
 
 // SQLite ships with foreign-key enforcement OFF by default; flip it
@@ -2731,6 +2758,86 @@ export function verifyAuthCode(email: string, code: string): { ok: true; codeId:
  * (taken username, etc.) leave the code valid for another try. */
 export function markAuthCodeUsed(codeId: number): void {
 	markCodeUsedStmt.run(Date.now(), codeId);
+}
+
+// ─── QR-code device sign-in ─────────────────────────────────────────
+
+export interface QrSessionRow {
+	qr_id: string;
+	desktop_pubkey: string;
+	claim_secret: string;
+	status: "pending" | "approved";
+	user_id: string | null;
+	access_token: string | null;
+	device_id: string | null;
+	mobile_pubkey: string | null;
+	relay_iv: string | null;
+	relay_ciphertext: string | null;
+	created_at: number;
+	expires_at: number;
+}
+
+const insertQrSessionStmt = db.prepare(`
+	INSERT INTO qr_sessions (qr_id, desktop_pubkey, claim_secret, created_at, expires_at)
+	VALUES (?, ?, ?, ?, ?)
+`);
+const getQrSessionStmt = db.prepare(`SELECT * FROM qr_sessions WHERE qr_id = ?`);
+const approveQrSessionStmt = db.prepare(`
+	UPDATE qr_sessions
+	SET status = 'approved', user_id = ?, access_token = ?, device_id = ?,
+	    mobile_pubkey = ?, relay_iv = ?, relay_ciphertext = ?
+	WHERE qr_id = ? AND status = 'pending'
+`);
+const deleteQrSessionStmt = db.prepare(`DELETE FROM qr_sessions WHERE qr_id = ?`);
+const cleanupQrSessionsStmt = db.prepare(`DELETE FROM qr_sessions WHERE expires_at < ?`);
+
+/** Create a fresh 'pending' QR sign-in session. */
+export function createQrSession(
+	qrId: string,
+	desktopPubkey: string,
+	claimSecret: string,
+	ttlMs: number,
+): void {
+	const now = Date.now();
+	insertQrSessionStmt.run(qrId, desktopPubkey, claimSecret, now, now + ttlMs);
+}
+
+/** Look up a QR session by id.  Returns null if it does not exist. */
+export function getQrSession(qrId: string): QrSessionRow | null {
+	return (getQrSessionStmt.get(qrId) as QrSessionRow | undefined) ?? null;
+}
+
+/**
+ * Attach minted credentials + the relayed encrypted recovery key to a
+ * still-pending session.  Returns true if a pending row was updated,
+ * false if the row was missing or already approved (double-approve).
+ */
+export function approveQrSession(
+	qrId: string,
+	v: {
+		userId: string;
+		accessToken: string;
+		deviceId: string;
+		mobilePubkey: string;
+		iv: string;
+		ciphertext: string;
+	},
+): boolean {
+	const r = approveQrSessionStmt.run(
+		v.userId, v.accessToken, v.deviceId,
+		v.mobilePubkey, v.iv, v.ciphertext, qrId,
+	);
+	return r.changes > 0;
+}
+
+/** Delete a QR session (single-use claim, or cancel). */
+export function deleteQrSession(qrId: string): void {
+	deleteQrSessionStmt.run(qrId);
+}
+
+/** Prune expired QR sessions.  Called on the engine tick. */
+export function cleanupQrSessions(): void {
+	cleanupQrSessionsStmt.run(Date.now());
 }
 
 // ─── Bots ────────────────────────────────────────────────────────────

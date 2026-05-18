@@ -11,7 +11,7 @@ import { config } from "./config";
 import "./db";
 import { startServer } from "./server";
 import { gcMcpScratchDirs } from "./mcp/janitor";
-import { reapStaleCallParticipants } from "./db";
+import { reapStaleCallParticipants, cleanupQrSessions } from "./db";
 import { bootstrapAdminIfNeeded } from "./admins";
 import { startAllBots, stopAllBots } from "./bot_manager";
 import { adminListLocalUsersByRegistration, registerAppserviceUser } from "./synapse";
@@ -119,6 +119,8 @@ async function fullTick(): Promise<void> {
 	bootstrapAdminIfNeeded();
 	const reaped = reapStaleCallParticipants();
 	if (reaped > 0) console.log(`engine: reaped ${reaped} stale call participant(s)`);
+	// Prune expired QR sign-in sessions (2-min TTL each).
+	cleanupQrSessions();
 	reapIdleBrowserSessions()
 		.then(n => { if (n > 0) console.log(`engine: reaped ${n} idle browser session(s)`); })
 		.catch(err => console.error("engine: browser session reaper failed", err));

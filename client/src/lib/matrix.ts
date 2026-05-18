@@ -1891,6 +1891,67 @@ export class MatrixTransport {
 	}
 
 	/**
+	 * Produce the encoded recovery key for QR device-linking.
+	 *
+	 * The "scan to sign in" flow relays this to a freshly-signed-in
+	 * desktop so it can unlock encryption without the user retyping
+	 * anything.  Two paths:
+	 *
+	 *   - SSSS key already unlocked in memory this session → encode it
+	 *     directly, no user input needed.
+	 *   - Not in memory (device was already trusted, never unlocked
+	 *     SSSS this session) → the caller must collect the user's
+	 *     passphrase or recovery key and pass it as `input`; we derive
+	 *     and verify it against the stored SSSS, then encode it.
+	 *
+	 * Returns the recovery key on success, or a tagged reason: the
+	 * caller shows an input field on "need_input" and an error on
+	 * "bad_input".
+	 */
+	async resolveLinkingRecoveryKey(input?: string): Promise<
+		| { ok: true; recoveryKey: string }
+		| { ok: false; reason: "need_input" | "bad_input" | "no_encryption" }
+	> {
+		const c = this.requireClient();
+		const cryptoApi = await import("matrix-js-sdk/lib/crypto-api");
+
+		// Fast path: SSSS private key is already cached in memory.
+		if (this.ssssKey) {
+			const encoded = cryptoApi.encodeRecoveryKey(this.ssssKey.privateKey);
+			if (encoded) return { ok: true, recoveryKey: encoded };
+		}
+
+		const keyInfo = await c.secretStorage.getKey();
+		if (!keyInfo) return { ok: false, reason: "no_encryption" };
+		const [, info] = keyInfo;
+
+		if (!input) return { ok: false, reason: "need_input" };
+
+		// Mirror unlockEncryption's derivation: try the recovery-key
+		// form first, fall back to passphrase derivation.
+		let privateKey: Uint8Array | null = null;
+		try {
+			privateKey = cryptoApi.decodeRecoveryKey(input);
+		} catch {
+			if (info.passphrase) {
+				privateKey = await cryptoApi.deriveRecoveryKeyFromPassphrase(
+					input,
+					info.passphrase.salt,
+					info.passphrase.iterations,
+				);
+			}
+		}
+		if (!privateKey) return { ok: false, reason: "bad_input" };
+
+		const ok = await c.secretStorage.checkKey(privateKey, info);
+		if (!ok) return { ok: false, reason: "bad_input" };
+
+		const encoded = cryptoApi.encodeRecoveryKey(privateKey);
+		if (!encoded) return { ok: false, reason: "bad_input" };
+		return { ok: true, recoveryKey: encoded };
+	}
+
+	/**
 	 * Probe the current encryption state for the signed-in account.
 	 * The login UI uses this to decide between three states:
 	 *
