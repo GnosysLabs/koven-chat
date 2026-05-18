@@ -1,8 +1,15 @@
 // Hyperbeam shared-browser embed for the in-call spotlight.
 //
 // Mounts the @hyperbeam/web SDK into a div and streams the cloud
-// browser.  Multi-cursor input is handled natively by the SDK.
-// Cleans up on unmount so the WebRTC session doesn't leak.
+// browser.  Multi-cursor input is handled natively by the SDK
+// (via a shadow DOM that receives mouse/keyboard events).
+//
+// Video rendering: the SDK renders inside its shadow DOM, which
+// works in Chrome but fails silently in WKWebView (Tauri desktop
+// on macOS).  To work everywhere, we use `videoTrackCb` to capture
+// the raw MediaStreamTrack and render it in our own <video> element
+// layered on top with pointer-events:none so input still flows
+// through to the SDK's shadow DOM underneath.
 //
 // Uses a ResizeObserver + hb.resize() so the cloud VM's viewport
 // always matches the container's pixel dimensions.  This eliminates
@@ -19,6 +26,7 @@ export interface SharedBrowserTileProps {
 
 export function SharedBrowserTile({ embedUrl, className }: SharedBrowserTileProps) {
 	const containerRef = useRef<HTMLDivElement>(null);
+	const videoRef = useRef<HTMLVideoElement>(null);
 	const hbRef = useRef<HyperbeamEmbed | null>(null);
 	const [state, setState] = useState<"connecting" | "ready" | "error">("connecting");
 	const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -30,6 +38,16 @@ export function SharedBrowserTile({ embedUrl, className }: SharedBrowserTileProp
 		let destroyed = false;
 
 		Hyperbeam(container, embedUrl, {
+			// Capture the video track ourselves so we can render it
+			// in a regular <video> element.  This bypasses the SDK's
+			// shadow-DOM rendering, which doesn't work in WKWebView.
+			videoTrackCb: (track) => {
+				const video = videoRef.current;
+				if (!video || destroyed) return;
+				const stream = new MediaStream([track]);
+				video.srcObject = stream;
+				video.play().catch(() => {});
+			},
 			onConnectionStateChange: (e) => {
 				if (destroyed) return;
 				if (e.state === "playing") setState("ready");
@@ -65,6 +83,7 @@ export function SharedBrowserTile({ embedUrl, className }: SharedBrowserTileProp
 
 		return () => {
 			destroyed = true;
+			if (videoRef.current) videoRef.current.srcObject = null;
 			hbRef.current?.destroy();
 			hbRef.current = null;
 		};
@@ -106,7 +125,23 @@ export function SharedBrowserTile({ embedUrl, className }: SharedBrowserTileProp
 				className,
 			)}
 		>
+			{/* SDK shadow DOM container: handles mouse/keyboard input
+			    mapping to the cloud VM.  Sits at the bottom of the
+			    stacking order. */}
 			<div ref={containerRef} className="w-full h-full" />
+
+			{/* Our own video element layered on top.  pointer-events:none
+			    lets clicks pass through to the shadow DOM beneath so
+			    Hyperbeam's input handling still works.  This renders the
+			    raw WebRTC track we captured via videoTrackCb, which works
+			    in both Chrome and WKWebView. */}
+			<video
+				ref={videoRef}
+				autoPlay
+				playsInline
+				muted
+				className="absolute inset-0 w-full h-full object-cover pointer-events-none"
+			/>
 
 			{state === "connecting" && (
 				<div className="absolute inset-0 flex items-center justify-center bg-muted">
