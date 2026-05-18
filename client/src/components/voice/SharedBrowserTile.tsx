@@ -1,21 +1,21 @@
 // Hyperbeam shared-browser embed for the in-call spotlight.
 //
-// Mounts the @hyperbeam/web SDK into a div and streams the cloud
-// browser.  Multi-cursor input is handled natively by the SDK
-// (via a shadow DOM that receives mouse/keyboard events).
+// Video: the SDK's shadow-DOM rendering works in Chrome but fails
+// silently in WKWebView (Tauri desktop on macOS).  We use
+// `videoTrackCb` to capture the raw MediaStreamTrack and render it
+// in our own <video> element that works everywhere.
 //
-// Video rendering: the SDK renders inside its shadow DOM, which
-// works in Chrome but fails silently in WKWebView (Tauri desktop
-// on macOS).  To work everywhere, we use `videoTrackCb` to capture
-// the raw MediaStreamTrack and render it in our own <video> element
-// layered on top with pointer-events:none so input still flows
-// through to the SDK's shadow DOM underneath.
+// Input: since we handle video externally, the SDK's shadow-DOM
+// input surface doesn't reliably capture events.  We listen for
+// mouse, keyboard, and wheel events on our interactive overlay and
+// forward them to the VM via `hb.sendEvent()` with normalized 0-1
+// coordinates.  This is Hyperbeam's supported API for custom
+// rendering setups.
 //
-// Uses a ResizeObserver + hb.resize() so the cloud VM's viewport
-// always matches the container's pixel dimensions.  This eliminates
-// letterbox bars: the VM renders at exactly the size we show it.
+// Resize: a ResizeObserver + hb.resize() keeps the cloud VM's
+// viewport matched to the container so there are no letterbox bars.
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Hyperbeam, { type HyperbeamEmbed } from "@hyperbeam/web";
 import { cn } from "@/lib/utils";
 
@@ -25,12 +25,15 @@ export interface SharedBrowserTileProps {
 }
 
 export function SharedBrowserTile({ embedUrl, className }: SharedBrowserTileProps) {
+	const wrapperRef = useRef<HTMLDivElement>(null);
 	const containerRef = useRef<HTMLDivElement>(null);
 	const videoRef = useRef<HTMLVideoElement>(null);
+	const overlayRef = useRef<HTMLDivElement>(null);
 	const hbRef = useRef<HyperbeamEmbed | null>(null);
 	const [state, setState] = useState<"connecting" | "ready" | "error">("connecting");
 	const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+	// Initialize the Hyperbeam SDK.
 	useEffect(() => {
 		const container = containerRef.current;
 		if (!container) return;
@@ -38,9 +41,6 @@ export function SharedBrowserTile({ embedUrl, className }: SharedBrowserTileProp
 		let destroyed = false;
 
 		Hyperbeam(container, embedUrl, {
-			// Capture the video track ourselves so we can render it
-			// in a regular <video> element.  This bypasses the SDK's
-			// shadow-DOM rendering, which doesn't work in WKWebView.
 			videoTrackCb: (track) => {
 				const video = videoRef.current;
 				if (!video || destroyed) return;
@@ -69,7 +69,6 @@ export function SharedBrowserTile({ embedUrl, className }: SharedBrowserTileProp
 				}
 				hbRef.current = hb;
 				setState("ready");
-				// Initial resize to match the container right away.
 				const { width, height } = container.getBoundingClientRect();
 				if (width > 0 && height > 0) {
 					hb.resize(Math.round(width), Math.round(height)).catch(() => {});
@@ -89,14 +88,10 @@ export function SharedBrowserTile({ embedUrl, className }: SharedBrowserTileProp
 		};
 	}, [embedUrl]);
 
-	// Keep the cloud VM's viewport in sync with the container so
-	// there are never letterbox bars.  The observer fires on mount
-	// and whenever the container resizes (window resize, layout
-	// shift, etc.).  Debounced slightly so rapid resize drags don't
-	// spam the Hyperbeam control channel.
+	// Resize the VM viewport to match the container.
 	useEffect(() => {
-		const container = containerRef.current;
-		if (!container) return;
+		const wrapper = wrapperRef.current;
+		if (!wrapper) return;
 
 		let timer: ReturnType<typeof setTimeout> | null = null;
 		const ro = new ResizeObserver((entries) => {
@@ -111,40 +106,106 @@ export function SharedBrowserTile({ embedUrl, className }: SharedBrowserTileProp
 				hb.resize(Math.round(width), Math.round(height)).catch(() => {});
 			}, 150);
 		});
-		ro.observe(container);
+		ro.observe(wrapper);
 		return () => {
 			ro.disconnect();
 			if (timer) clearTimeout(timer);
 		};
 	}, []);
 
+	// Forward mouse events to the VM as normalized 0-1 coordinates.
+	const sendMouse = useCallback((e: React.MouseEvent, type: "mousedown" | "mousemove" | "mouseup") => {
+		const hb = hbRef.current;
+		const overlay = overlayRef.current;
+		if (!hb || !overlay) return;
+		const rect = overlay.getBoundingClientRect();
+		if (rect.width === 0 || rect.height === 0) return;
+		hb.sendEvent({
+			type,
+			x: (e.clientX - rect.left) / rect.width,
+			y: (e.clientY - rect.top) / rect.height,
+			button: e.button,
+		});
+	}, []);
+
+	// Forward wheel events.
+	useEffect(() => {
+		const overlay = overlayRef.current;
+		if (!overlay) return;
+		const handler = (e: WheelEvent) => {
+			const hb = hbRef.current;
+			if (!hb) return;
+			e.preventDefault();
+			hb.sendEvent({ type: "wheel", deltaY: e.deltaY });
+		};
+		overlay.addEventListener("wheel", handler, { passive: false });
+		return () => overlay.removeEventListener("wheel", handler);
+	}, []);
+
+	// Forward keyboard events when the overlay is focused.
+	useEffect(() => {
+		const overlay = overlayRef.current;
+		if (!overlay) return;
+		const onKey = (e: KeyboardEvent) => {
+			const hb = hbRef.current;
+			if (!hb) return;
+			e.preventDefault();
+			hb.sendEvent({
+				type: e.type as "keydown" | "keyup",
+				key: e.key,
+				ctrlKey: e.ctrlKey,
+				metaKey: e.metaKey,
+			});
+		};
+		overlay.addEventListener("keydown", onKey);
+		overlay.addEventListener("keyup", onKey);
+		return () => {
+			overlay.removeEventListener("keydown", onKey);
+			overlay.removeEventListener("keyup", onKey);
+		};
+	}, []);
+
 	return (
 		<div
+			ref={wrapperRef}
 			className={cn(
 				"relative w-full h-full rounded-xl overflow-hidden bg-muted",
 				className,
 			)}
 		>
-			{/* SDK shadow DOM container: handles mouse/keyboard input
-			    mapping to the cloud VM.  Sits at the bottom of the
-			    stacking order. */}
-			<div ref={containerRef} className="w-full h-full" />
+			{/* Hidden SDK container: Hyperbeam attaches its shadow DOM
+			    here for signaling + WebRTC.  We don't rely on it for
+			    rendering or input, but the SDK needs a mounted DOM
+			    node to initialize against. */}
+			<div ref={containerRef} className="absolute w-0 h-0 overflow-hidden" />
 
-			{/* Our own video element layered on top.  pointer-events:none
-			    lets clicks pass through to the shadow DOM beneath so
-			    Hyperbeam's input handling still works.  This renders the
-			    raw WebRTC track we captured via videoTrackCb, which works
-			    in both Chrome and WKWebView. */}
+			{/* Video layer: renders the raw WebRTC track captured via
+			    videoTrackCb.  Works in both Chrome and WKWebView. */}
 			<video
 				ref={videoRef}
 				autoPlay
 				playsInline
 				muted
-				className="absolute inset-0 w-full h-full object-cover pointer-events-none"
+				className="absolute inset-0 w-full h-full object-cover"
+			/>
+
+			{/* Interactive overlay: captures mouse, keyboard, and wheel
+			    events and forwards them to the VM via hb.sendEvent()
+			    with normalized coordinates.  tabIndex makes it
+			    focusable so keyboard events reach it. */}
+			{/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
+			<div
+				ref={overlayRef}
+				tabIndex={0}
+				className="absolute inset-0 w-full h-full z-10 outline-none cursor-default"
+				onMouseDown={(e) => sendMouse(e, "mousedown")}
+				onMouseMove={(e) => sendMouse(e, "mousemove")}
+				onMouseUp={(e) => sendMouse(e, "mouseup")}
+				onContextMenu={(e) => e.preventDefault()}
 			/>
 
 			{state === "connecting" && (
-				<div className="absolute inset-0 flex items-center justify-center bg-muted">
+				<div className="absolute inset-0 flex items-center justify-center bg-muted z-20">
 					<p className="text-sm text-muted-foreground animate-pulse">
 						Connecting to shared browser...
 					</p>
@@ -152,7 +213,7 @@ export function SharedBrowserTile({ embedUrl, className }: SharedBrowserTileProp
 			)}
 
 			{state === "error" && (
-				<div className="absolute inset-0 flex items-center justify-center bg-muted">
+				<div className="absolute inset-0 flex items-center justify-center bg-muted z-20">
 					<p className="text-sm text-destructive">
 						{errorMsg ?? "Something went wrong"}
 					</p>
