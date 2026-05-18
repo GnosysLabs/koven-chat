@@ -1891,64 +1891,62 @@ export class MatrixTransport {
 	}
 
 	/**
-	 * Produce the encoded recovery key for QR device-linking.
+	 * Export this device's encryption secrets as a bundle for QR
+	 * device-linking.
 	 *
-	 * The "scan to sign in" flow relays this to a freshly-signed-in
-	 * desktop so it can unlock encryption without the user retyping
-	 * anything.  Two paths:
+	 * The "scan to sign in" flow relays this bundle to a freshly-
+	 * signed-in desktop so it can become a trusted device without the
+	 * user retyping anything.  Crucially this reads the cross-signing
+	 * keys + megolm backup key straight out of the local rust-crypto
+	 * store, so it works on any already-trusted session WITHOUT the
+	 * user re-entering their passphrase.  (The SSSS recovery key is
+	 * never persisted, so it simply isn't available on an established
+	 * session; the secrets bundle is.)
 	 *
-	 *   - SSSS key already unlocked in memory this session → encode it
-	 *     directly, no user input needed.
-	 *   - Not in memory (device was already trusted, never unlocked
-	 *     SSSS this session) → the caller must collect the user's
-	 *     passphrase or recovery key and pass it as `input`; we derive
-	 *     and verify it against the stored SSSS, then encode it.
-	 *
-	 * Returns the recovery key on success, or a tagged reason: the
-	 * caller shows an input field on "need_input" and an error on
-	 * "bad_input".
+	 * Returns the bundle JSON-stringified, or null when this device
+	 * can't produce one (crypto unavailable, or not a trusted device).
 	 */
-	async resolveLinkingRecoveryKey(input?: string): Promise<
-		| { ok: true; recoveryKey: string }
-		| { ok: false; reason: "need_input" | "bad_input" | "no_encryption" }
-	> {
+	async exportLinkingSecrets(): Promise<string | null> {
 		const c = this.requireClient();
-		const cryptoApi = await import("matrix-js-sdk/lib/crypto-api");
-
-		// Fast path: SSSS private key is already cached in memory.
-		if (this.ssssKey) {
-			const encoded = cryptoApi.encodeRecoveryKey(this.ssssKey.privateKey);
-			if (encoded) return { ok: true, recoveryKey: encoded };
-		}
-
-		const keyInfo = await c.secretStorage.getKey();
-		if (!keyInfo) return { ok: false, reason: "no_encryption" };
-		const [, info] = keyInfo;
-
-		if (!input) return { ok: false, reason: "need_input" };
-
-		// Mirror unlockEncryption's derivation: try the recovery-key
-		// form first, fall back to passphrase derivation.
-		let privateKey: Uint8Array | null = null;
+		const crypto = c.getCrypto();
+		if (!crypto || !crypto.exportSecretsBundle) return null;
 		try {
-			privateKey = cryptoApi.decodeRecoveryKey(input);
-		} catch {
-			if (info.passphrase) {
-				privateKey = await cryptoApi.deriveRecoveryKeyFromPassphrase(
-					input,
-					info.passphrase.salt,
-					info.passphrase.iterations,
-				);
-			}
+			const bundle = await crypto.exportSecretsBundle();
+			return JSON.stringify(bundle);
+		} catch (err) {
+			console.warn("exportLinkingSecrets failed", err);
+			return null;
 		}
-		if (!privateKey) return { ok: false, reason: "bad_input" };
+	}
 
-		const ok = await c.secretStorage.checkKey(privateKey, info);
-		if (!ok) return { ok: false, reason: "bad_input" };
-
-		const encoded = cryptoApi.encodeRecoveryKey(privateKey);
-		if (!encoded) return { ok: false, reason: "bad_input" };
-		return { ok: true, recoveryKey: encoded };
+	/**
+	 * Import an encryption secrets bundle relayed from another device
+	 * during QR device-linking, then cross-sign this device and
+	 * restore the key backup.  Run on the desktop right after a QR
+	 * sign-in so encrypted history decrypts with zero user input.
+	 */
+	async importLinkingSecrets(bundleJson: string): Promise<void> {
+		const c = this.requireClient();
+		const crypto = c.getCrypto();
+		if (!crypto || !crypto.importSecretsBundle) {
+			throw new Error("secrets bundle import not supported");
+		}
+		const bundle = JSON.parse(bundleJson) as Parameters<
+			NonNullable<typeof crypto.importSecretsBundle>
+		>[0];
+		await crypto.importSecretsBundle(bundle);
+		// Cross-sign this freshly-linked device with the now-imported
+		// cross-signing keys so the user's other devices trust it.
+		// Uploading a device signature is not UIA-gated (only creating
+		// cross-signing is), so this needs no password.
+		await crypto.bootstrapCrossSigning({});
+		// Pull the megolm key backup so old encrypted history decrypts.
+		// The backup decryption key arrived inside the bundle.
+		try {
+			await crypto.restoreKeyBackup();
+		} catch (err) {
+			console.error("importLinkingSecrets: restoreKeyBackup failed; old encrypted messages may not decrypt until key forwarding catches up", err);
+		}
 	}
 
 	/**

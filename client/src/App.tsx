@@ -470,12 +470,12 @@ export default function App() {
 	// transport can pick it up the moment it's constructed.  See
 	// handleLogin for the rationale.
 	const pendingUiaPasswordRef = useRef<string | null>(null);
-	// Holds the encryption recovery key relayed by a QR device-link
-	// sign-in.  When set, the encryption probe below uses it to unlock
-	// SSSS automatically instead of showing the unlock sheet. The
-	// whole point of "scan to sign in" is the user types nothing on
-	// the desktop.  Memory-only, cleared after one unlock attempt.
-	const pendingRecoveryKeyRef = useRef<string | null>(null);
+	// Holds the encryption secrets bundle relayed by a QR device-link
+	// sign-in.  When set, the encryption probe below imports it to make
+	// this device trusted automatically instead of showing the unlock
+	// sheet.  The whole point of "scan to sign in" is the user types
+	// nothing on the desktop.  Memory-only, cleared after one attempt.
+	const pendingLinkSecretsRef = useRef<string | null>(null);
 
 	// Apply theme on mount and whenever it changes.  Persist on every
 	// settings update.
@@ -1051,18 +1051,19 @@ export default function App() {
 				console.time("app.boot: encryptionStatus");
 				let status = await t.encryptionStatus();
 				console.timeEnd("app.boot: encryptionStatus");
-				// QR device-link auto-unlock: a "scan to sign in" login
-				// relays the recovery key so the desktop unlocks SSSS
-				// without prompting.  Consume the pending key exactly
-				// once; on failure fall through to the unlock sheet.
-				const relayedKey = pendingRecoveryKeyRef.current;
-				pendingRecoveryKeyRef.current = null;
-				if (relayedKey && status === "needs-unlock") {
+				// QR device-link auto-trust: a "scan to sign in" login
+				// relays an encryption secrets bundle so the desktop
+				// becomes a trusted device without prompting.  Consume
+				// the pending bundle exactly once; on failure fall
+				// through to the unlock sheet.
+				const relayedSecrets = pendingLinkSecretsRef.current;
+				pendingLinkSecretsRef.current = null;
+				if (relayedSecrets && status === "needs-unlock") {
 					try {
-						const unlocked = await t.unlockEncryption(relayedKey);
-						if (unlocked) status = "ready";
+						await t.importLinkingSecrets(relayedSecrets);
+						status = await t.encryptionStatus();
 					} catch (err) {
-						console.warn("QR sign-in auto-unlock failed", err);
+						console.warn("QR sign-in secrets import failed", err);
 					}
 				}
 				if (!cancelled) setEncState(status);
@@ -1733,7 +1734,7 @@ export default function App() {
 	function handleLogin(
 		newCreds: MatrixCredentials,
 		uiaPassword: string,
-		recoveryKey?: string,
+		linkSecrets?: string,
 	) {
 		// Insert (or refresh) the account in the array.  Existing rows
 		// for the same user_id are replaced — covers the "log in again
@@ -1755,10 +1756,10 @@ export default function App() {
 		// that fires later this session calls fetchUiaPassword() to
 		// rotate fresh.
 		pendingUiaPasswordRef.current = uiaPassword;
-		// QR device-link sign-in hands back the user's recovery key so
-		// the encryption probe can unlock SSSS without prompting.  null
-		// for the ordinary email-code flow.
-		pendingRecoveryKeyRef.current = recoveryKey ?? null;
+		// QR device-link sign-in hands back an encryption secrets
+		// bundle so the encryption probe can trust this device without
+		// prompting.  null for the ordinary email-code flow.
+		pendingLinkSecretsRef.current = linkSecrets ?? null;
 		// Surface the login screen as DONE — required when we're in
 		// "add account" mode where the LoginScreen was rendered on top
 		// of the existing transport.

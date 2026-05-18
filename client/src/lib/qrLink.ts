@@ -4,13 +4,13 @@
 // already-signed-in mobile app scans it and approves, and the engine
 // relays a freshly-minted Matrix session back to the desktop.
 //
-// The user's encryption recovery key never travels in clear: the
-// desktop puts an ephemeral ECDH P-256 public key in the QR, the
-// mobile derives a shared AES-GCM key against it, encrypts the
-// recovery key, and the desktop decrypts it after the engine relays
-// the ciphertext.  The engine only ever sees opaque bytes.
+// The user's encryption secrets never travel in clear: the desktop
+// puts an ephemeral ECDH P-256 public key in the QR, the mobile
+// derives a shared AES-GCM key against it, encrypts the secrets
+// bundle, and the desktop decrypts it after the engine relays the
+// ciphertext.  The engine only ever sees opaque bytes.
 //
-// Desktop side  : initiateQrLink → pollQrLink → claimRecoveryKey.
+// Desktop side  : initiateQrLink → pollQrLink → claimSecrets.
 // Mobile side   : approveQrLink (parses a scanned QrLinkPayload).
 //
 // crypto.subtle requires a secure context; all three Koven hosts
@@ -162,10 +162,11 @@ export async function pollQrLink(
 	return (await r.json()) as QrStatusResponse;
 }
 
-/** Decrypt the recovery key the mobile app relayed through the engine.
- * Call with the `approved` status response and the session's private
- * key. */
-export async function claimRecoveryKey(
+/** Decrypt the encryption secrets bundle the mobile app relayed
+ * through the engine.  Call with the `approved` status response and
+ * the session's private key.  Returns the bundle JSON string, ready
+ * to hand to MatrixTransport.importLinkingSecrets. */
+export async function claimSecrets(
 	approved: Extract<QrStatusResponse, { status: "approved" }>,
 	privateKey: CryptoKey,
 ): Promise<string> {
@@ -195,12 +196,12 @@ export function parseQrPayload(raw: string): QrLinkPayload | null {
 	}
 }
 
-/** Approve a scanned QR sign-in: encrypt the recovery key to the
+/** Approve a scanned QR sign-in: encrypt the secrets bundle to the
  * desktop's public key and post it to the engine, authenticated as
  * the current (mobile) user. */
 export async function approveQrLink(
 	payload: QrLinkPayload,
-	recoveryKey: string,
+	secretsBundle: string,
 	accessToken: string,
 ): Promise<ApproveQrResult> {
 	let body: QrApproveRequest;
@@ -208,7 +209,7 @@ export async function approveQrLink(
 		const desktopPublic = await importRawPublicKey(payload.desktopPubKey);
 		const pair = await generateEcdhKeyPair();
 		const shared = await deriveSharedKey(pair.privateKey, desktopPublic);
-		const { iv, ciphertext } = await aesEncrypt(shared, recoveryKey);
+		const { iv, ciphertext } = await aesEncrypt(shared, secretsBundle);
 		body = {
 			qr_id: payload.qrId,
 			mobile_pubkey: await exportRawPublicKey(pair.publicKey),

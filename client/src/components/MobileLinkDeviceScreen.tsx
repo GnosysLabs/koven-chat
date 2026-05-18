@@ -1,22 +1,19 @@
 // MobileLinkDeviceScreen: HIG sub-screen for QR device sign-in.
 //
 // The user scans a QR code shown on a desktop / web Koven login
-// screen.  This screen confirms the action, resolves the encryption
-// recovery key, and approves the desktop session via the engine.  The
-// recovery key is encrypted to the desktop's public key before it
-// leaves the phone (see client/src/lib/qrLink.ts); the engine only
+// screen.  This screen confirms the action, exports this device's
+// encryption secrets bundle, and approves the desktop session via the
+// engine.  The bundle is encrypted to the desktop's public key before
+// it leaves the phone (see client/src/lib/qrLink.ts); the engine only
 // relays ciphertext.
 //
-// Resolving the recovery key has two paths: if the SSSS key is already
-// unlocked in memory this session we use it silently; otherwise the
-// user is asked for their encryption passphrase or recovery key, which
-// doubles as a confirmation that the person scanning controls the
-// account's encryption identity.
+// The secrets bundle is read straight out of the local crypto store,
+// so an already-signed-in phone shares its encryption identity with
+// zero extra typing: no passphrase, no recovery key.
 
 import { useState } from "react";
 import { QrCode, MonitorSmartphone, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { hapticImpact, hapticNotification } from "@/lib/haptics";
 import { scanQrCode } from "@/lib/barcodeScanner";
 import { parseQrPayload, approveQrLink } from "@/lib/qrLink";
@@ -25,9 +22,6 @@ import type { MatrixTransport } from "@/lib/matrix";
 import {
 	NavBar,
 	NavBackButton,
-	GroupLabel,
-	GroupCard,
-	GroupFooter,
 	ErrorBanner,
 } from "@/components/mobile/Chrome";
 
@@ -37,7 +31,7 @@ export interface MobileLinkDeviceScreenProps {
 	onBack(): void;
 }
 
-type Phase = "intro" | "confirm" | "needsKey" | "approving" | "done" | "error";
+type Phase = "intro" | "confirm" | "approving" | "done" | "error";
 
 export function MobileLinkDeviceScreen({
 	transport,
@@ -47,8 +41,6 @@ export function MobileLinkDeviceScreen({
 	const [phase, setPhase] = useState<Phase>("intro");
 	const [payload, setPayload] = useState<QrLinkPayload | null>(null);
 	const [error, setError] = useState<string | null>(null);
-	const [keyInput, setKeyInput] = useState("");
-	const [keyError, setKeyError] = useState<string | null>(null);
 
 	function fail(message: string) {
 		void hapticNotification("error");
@@ -78,32 +70,21 @@ export function MobileLinkDeviceScreen({
 		setPhase("confirm");
 	}
 
-	// Resolve the recovery key and approve, optionally with a
-	// user-supplied passphrase / recovery key.
-	async function approve(suppliedKey?: string) {
+	// Export this device's encryption secrets and approve the sign-in.
+	async function approve() {
 		if (!transport || !accessToken || !payload) {
 			fail("Sign-in session is no longer available.");
 			return;
 		}
 		setPhase("approving");
-		setKeyError(null);
 
-		const resolved = await transport.resolveLinkingRecoveryKey(suppliedKey);
-		if (!resolved.ok) {
-			if (resolved.reason === "need_input") {
-				setPhase("needsKey");
-				return;
-			}
-			if (resolved.reason === "bad_input") {
-				setKeyError("That passphrase or recovery key didn't match. Try again.");
-				setPhase("needsKey");
-				return;
-			}
-			fail("This account doesn't have encryption set up yet.");
+		const bundle = await transport.exportLinkingSecrets();
+		if (!bundle) {
+			fail("This device can't share its encryption keys. Open an encrypted chat here first, then try again.");
 			return;
 		}
 
-		const res = await approveQrLink(payload, resolved.recoveryKey, accessToken);
+		const res = await approveQrLink(payload, bundle, accessToken);
 		if (res.ok) {
 			void hapticNotification("success");
 			setPhase("done");
@@ -164,42 +145,11 @@ export function MobileLinkDeviceScreen({
 							</p>
 						</div>
 						<div className="px-4 space-y-2">
-							<Button className="w-full" onClick={() => approve()}>
+							<Button className="w-full" onClick={approve}>
 								Sign in that device
 							</Button>
 							<Button variant="ghost" className="w-full" onClick={onBack}>
 								Cancel
-							</Button>
-						</div>
-					</>
-				)}
-
-				{phase === "needsKey" && (
-					<>
-						<GroupLabel>Confirm it's you</GroupLabel>
-						<GroupCard>
-							<div className="px-4 py-3 space-y-2">
-								<p className="text-[13px] text-muted-foreground leading-snug">
-									Enter your encryption passphrase or recovery key to
-									unlock encrypted chats on the other device.
-								</p>
-								<Input
-									type="password"
-									autoFocus
-									value={keyInput}
-									onChange={(e) => setKeyInput(e.target.value)}
-									placeholder="Passphrase or recovery key"
-								/>
-							</div>
-						</GroupCard>
-						{keyError && <GroupFooter>{keyError}</GroupFooter>}
-						<div className="px-4 pt-3">
-							<Button
-								className="w-full"
-								disabled={!keyInput.trim()}
-								onClick={() => approve(keyInput.trim())}
-							>
-								Confirm and sign in
 							</Button>
 						</div>
 					</>

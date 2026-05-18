@@ -15,7 +15,7 @@ import { HOMESERVER_URL } from "@/lib/urls";
 import {
 	initiateQrLink,
 	pollQrLink,
-	claimRecoveryKey,
+	claimSecrets,
 	type QrLinkSession,
 } from "@/lib/qrLink";
 import type { MatrixCredentials } from "@/lib/matrix";
@@ -102,16 +102,16 @@ export function QrSignIn({ onLoggedIn, onBack }: QrSignInProps) {
 					setPhase("expired");
 					return;
 				}
-				// Approved: decrypt the relayed recovery key and sign in.
+				// Approved: decrypt the relayed secrets bundle and sign in.
 				try {
-					const recoveryKey = await claimRecoveryKey(res, session.privateKey);
+					const secretsBundle = await claimSecrets(res, session.privateKey);
 					const creds: MatrixCredentials = {
 						homeserver: HOMESERVER_URL,
 						user_id: res.user_id,
 						access_token: res.access_token,
 						device_id: res.device_id,
 					};
-					onLoggedInRef.current(creds, "", recoveryKey);
+					onLoggedInRef.current(creds, "", secretsBundle);
 				} catch {
 					if (!cancelled) setPhase("error");
 				}
