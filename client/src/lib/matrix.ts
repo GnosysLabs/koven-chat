@@ -1934,12 +1934,22 @@ export class MatrixTransport {
 		const bundle = JSON.parse(bundleJson) as Parameters<
 			NonNullable<typeof crypto.importSecretsBundle>
 		>[0];
+		// The critical step: import cross-signing + backup secrets into
+		// the local store.  Once this succeeds the device is trusted
+		// (encryptionStatus reads the cross-signing keys back out), so
+		// everything after it is best-effort and must NOT abort the
+		// flow.  A throw here, by contrast, is a real failure and the
+		// caller falls back to the unlock sheet.
 		await crypto.importSecretsBundle(bundle);
-		// Cross-sign this freshly-linked device with the now-imported
-		// cross-signing keys so the user's other devices trust it.
-		// Uploading a device signature is not UIA-gated (only creating
-		// cross-signing is), so this needs no password.
-		await crypto.bootstrapCrossSigning({});
+		console.log("importLinkingSecrets: secrets bundle imported");
+		// Cross-sign this freshly-linked device so the user's other
+		// devices trust it.  Best-effort: if it throws, the device is
+		// still usable (it has the keys) and can be signed later.
+		try {
+			await crypto.bootstrapCrossSigning({});
+		} catch (err) {
+			console.error("importLinkingSecrets: bootstrapCrossSigning failed (device still has keys cached)", err);
+		}
 		// Pull the megolm key backup so old encrypted history decrypts.
 		// The backup decryption key arrived inside the bundle.
 		try {

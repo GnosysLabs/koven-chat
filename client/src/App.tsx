@@ -1061,10 +1061,16 @@ export default function App() {
 				if (relayedSecrets && status === "needs-unlock") {
 					try {
 						await t.importLinkingSecrets(relayedSecrets);
-						status = await t.encryptionStatus();
 					} catch (err) {
 						console.warn("QR sign-in secrets import failed", err);
 					}
+					// Re-probe regardless of whether importLinkingSecrets
+					// threw: the bundle import is the step that makes the
+					// device trusted, and a best-effort follow-up (cross-
+					// signing, backup restore) can throw after it already
+					// succeeded.  Only a genuinely failed import leaves
+					// status at "needs-unlock" and routes to the sheet.
+					status = await t.encryptionStatus();
 				}
 				if (!cancelled) setEncState(status);
 			} catch (err) {
