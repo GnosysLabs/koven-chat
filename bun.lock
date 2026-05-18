@@ -47,6 +47,7 @@
         "@dnd-kit/utilities": "^3.2.2",
         "@emoji-mart/data": "^1.2.1",
         "@emoji-mart/react": "^1.1.1",
+        "@hyperbeam/web": "^0.0.38",
         "@koven/shared": "workspace:*",
         "@matrix-org/matrix-sdk-crypto-wasm": "^18.2.0",
         "@radix-ui/react-dialog": "^1.1.15",
@@ -179,6 +180,18 @@
 
     "@capacitor/splash-screen": ["@capacitor/splash-screen@7.0.5", "", { "peerDependencies": { "@capacitor/core": ">=7.0.0" } }, "sha512-bPG2SamFL7VT5I3XsgsGgJhkiyxq3OXCOVKEDupSieVdtEiG7j2vLbSD0xL+91zteF/qLuxsjbugGy5LD8mS2A=="],
 
+    "@cbor-extract/cbor-extract-darwin-arm64": ["@cbor-extract/cbor-extract-darwin-arm64@2.2.2", "", { "os": "darwin", "cpu": "arm64" }, "sha512-ZKZ/F8US7JR92J4DMct6cLW/Y66o2K576+zjlEN/MevH70bFIsB10wkZEQPLzl2oNh2SMGy55xpJ9JoBRl5DOA=="],
+
+    "@cbor-extract/cbor-extract-darwin-x64": ["@cbor-extract/cbor-extract-darwin-x64@2.2.2", "", { "os": "darwin", "cpu": "x64" }, "sha512-32b1mgc+P61Js+KW9VZv/c+xRw5EfmOcPx990JbCBSkYJFY0l25VinvyyWfl+3KjibQmAcYwmyzKF9J4DyKP/Q=="],
+
+    "@cbor-extract/cbor-extract-linux-arm": ["@cbor-extract/cbor-extract-linux-arm@2.2.2", "", { "os": "linux", "cpu": "arm" }, "sha512-tNg0za41TpQfkhWjptD+0gSD2fggMiDCSacuIeELyb2xZhr7PrhPe5h66Jc67B/5dmpIhI2QOUtv4SBsricyYQ=="],
+
+    "@cbor-extract/cbor-extract-linux-arm64": ["@cbor-extract/cbor-extract-linux-arm64@2.2.2", "", { "os": "linux", "cpu": "arm64" }, "sha512-wfqgzqCAy/Vn8i6WVIh7qZd0DdBFaWBjPdB6ma+Wihcjv0gHqD/mw3ouVv7kbbUNrab6dKEx/w3xQZEdeXIlzg=="],
+
+    "@cbor-extract/cbor-extract-linux-x64": ["@cbor-extract/cbor-extract-linux-x64@2.2.2", "", { "os": "linux", "cpu": "x64" }, "sha512-rpiLnVEsqtPJ+mXTdx1rfz4RtUGYIUg2rUAZgd1KjiC1SehYUSkJN7Yh+aVfSjvCGtVP0/bfkQkXpPXKbmSUaA=="],
+
+    "@cbor-extract/cbor-extract-win32-x64": ["@cbor-extract/cbor-extract-win32-x64@2.2.2", "", { "os": "win32", "cpu": "x64" }, "sha512-dI+9P7cfWxkTQ+oE+7Aa6onEn92PHgfWXZivjNheCRmTBDBf2fx6RyTi0cmgpYLnD1KLZK9ZYrMxaPZ4oiXhGA=="],
+
     "@cloudflare/realtimekit": ["@cloudflare/realtimekit@1.4.0", "", { "dependencies": { "@protobuf-ts/runtime": "^2.7.0", "bowser": "^2.11.0", "sdp-transform": "^2.14.1", "uuid": "^8.3.2", "worker-timers": "7.0.60" } }, "sha512-y4PXDcmP6FfhAjt0kBHk2OHXXwujwORvhveiAIgRznww80n5ojo4UXAeBiU+cBMnZBH1+UCgmbS23mb0+r3cKg=="],
 
     "@cloudflare/realtimekit-react": ["@cloudflare/realtimekit-react@1.4.0", "", { "dependencies": { "@cloudflare/realtimekit": "1.4.0" }, "peerDependencies": { "react": ">=16.8.6" } }, "sha512-6nZNAhceh/YmxamGokDidPtRRo7FrzYYozgiu6iRyM1wbjjcZzkRt+8OtbloL8Cx5v0H7+16orJ8kmw3DRtdbQ=="],
@@ -262,6 +275,8 @@
     "@floating-ui/utils": ["@floating-ui/utils@0.2.11", "", {}, "sha512-RiB/yIh78pcIxl6lLMG0CgBXAZ2Y0eVHqMPYugu+9U0AeT6YBeiJpf7lbdJNIugFP5SIjwNRgo4DhR1Qxi26Gg=="],
 
     "@hono/node-server": ["@hono/node-server@1.19.14", "", { "peerDependencies": { "hono": "^4" } }, "sha512-GwtvgtXxnWsucXvbQXkRgqksiH2Qed37H9xHZocE5sA3N8O8O8/8FA3uclQXxXVzc9XBZuEOMK7+r02FmSpHtw=="],
+
+    "@hyperbeam/web": ["@hyperbeam/web@0.0.38", "", { "dependencies": { "cbor-x": "^1.6.0" } }, "sha512-odTjsuyARGveVXocodJsd+XQxoTS+ZoBi++WeopCmMaNatPukEjW1dW5XICWW7eI0YEfF+nmxcuIVQ+A1z/46g=="],
 
     "@ionic/cli-framework-output": ["@ionic/cli-framework-output@2.2.8", "", { "dependencies": { "@ionic/utils-terminal": "2.3.5", "debug": "^4.0.0", "tslib": "^2.0.1" } }, "sha512-TshtaFQsovB4NWRBydbNFawql6yul7d5bMiW1WYYf17hd99V6xdDdk3vtF51bw6sLkxON3bDQpWsnUc9/hVo3g=="],
 
@@ -613,6 +628,10 @@
 
     "canvas-confetti": ["canvas-confetti@1.9.4", "", {}, "sha512-yxQbJkAVrFXWNbTUjPqjF7G+g6pDotOUHGbkZq2NELZUMDpiJ85rIEazVb8GTaAptNW2miJAXbs1BtioA251Pw=="],
 
+    "cbor-extract": ["cbor-extract@2.2.2", "", { "dependencies": { "node-gyp-build-optional-packages": "5.1.1" }, "optionalDependencies": { "@cbor-extract/cbor-extract-darwin-arm64": "2.2.2", "@cbor-extract/cbor-extract-darwin-x64": "2.2.2", "@cbor-extract/cbor-extract-linux-arm": "2.2.2", "@cbor-extract/cbor-extract-linux-arm64": "2.2.2", "@cbor-extract/cbor-extract-linux-x64": "2.2.2", "@cbor-extract/cbor-extract-win32-x64": "2.2.2" }, "bin": { "download-cbor-prebuilds": "bin/download-prebuilds.js" } }, "sha512-hlSxxI9XO2yQfe9g6msd3g4xCfDqK5T5P0fRMLuaLHhxn4ViPrm+a+MUfhrvH2W962RGxcBwEGzLQyjbDG1gng=="],
+
+    "cbor-x": ["cbor-x@1.6.4", "", { "optionalDependencies": { "cbor-extract": "^2.2.2" } }, "sha512-UGKHjp6RHC6QuZ2yy5LCKm7MojM4716DwoSaqwQpaH4DvZvbBTGcoDNTiG9Y2lByXZYFEs9WRkS5tLl96IrF1Q=="],
+
     "ccount": ["ccount@2.0.1", "", {}, "sha512-eyrF0jiFpY+3drT6383f1qhkbGsLSifNAjA61IUjZjmLCWjItY6LB9ft9YhoDgwfmclB2zhu51Lc7+95b8NRAg=="],
 
     "character-entities": ["character-entities@2.0.2", "", {}, "sha512-shx7oQ0Awen/BRIdkjkvz54PnEEI/EjwXDSIZp86/KKdbafHh1Df/RYGBhn4hbe2+uKC9FnT5UCEdyPz3ai9hQ=="],
@@ -668,6 +687,8 @@
     "depd": ["depd@2.0.0", "", {}, "sha512-g7nH6P6dyDioJogAAGprGpCtVImJhpPk/roCzdb3fIh61/s/nPsfR6onyMwkCAR/OlC3yBC0lESvUoQEAssIrw=="],
 
     "dequal": ["dequal@2.0.3", "", {}, "sha512-0je+qPKHEMohvfRTCEo3CrPG6cAzAYgmzKyxRiYSSDkS6eGJdyVJm7WaYA5ECaAD9wLB2T4EEeymA5aFVcYXCA=="],
+
+    "detect-libc": ["detect-libc@2.1.2", "", {}, "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ=="],
 
     "detect-node-es": ["detect-node-es@1.1.0", "", {}, "sha512-ypdmJU/TbBby2Dxibuv7ZLW3Bs1QEmM7nHjEANfohJLvE0XVujisn1qPJcZxg+qDucsr+bP6fLD1rPS3AhJ7EQ=="],
 
@@ -1016,6 +1037,8 @@
     "native-run": ["native-run@2.0.3", "", { "dependencies": { "@ionic/utils-fs": "^3.1.7", "@ionic/utils-terminal": "^2.3.4", "bplist-parser": "^0.3.2", "debug": "^4.3.4", "elementtree": "^0.1.7", "ini": "^4.1.1", "plist": "^3.1.0", "split2": "^4.2.0", "through2": "^4.0.2", "tslib": "^2.6.2", "yauzl": "^2.10.0" }, "bin": { "native-run": "bin/native-run" } }, "sha512-U1PllBuzW5d1gfan+88L+Hky2eZx+9gv3Pf6rNBxKbORxi7boHzqiA6QFGSnqMem4j0A9tZ08NMIs5+0m/VS1Q=="],
 
     "negotiator": ["negotiator@1.0.0", "", {}, "sha512-8Ofs/AUQh8MaEcrlq5xOX0CQ9ypTF5dl78mjlMNfOK08fzpgTHQRQPBxcPlEtIw0yRpws+Zo/3r+5WRby7u3Gg=="],
+
+    "node-gyp-build-optional-packages": ["node-gyp-build-optional-packages@5.1.1", "", { "dependencies": { "detect-libc": "^2.0.1" }, "bin": { "node-gyp-build-optional-packages": "bin.js", "node-gyp-build-optional-packages-test": "build-test.js", "node-gyp-build-optional-packages-optional": "optional.js" } }, "sha512-+P72GAjVAbTxjjwUmwjVrqrdZROD4nf8KgpBoDxqXXTiYZZt/ud60dE5yvCSr9lRO8e8yv6kgJIC0K0PfZFVQw=="],
 
     "node-releases": ["node-releases@2.0.38", "", {}, "sha512-3qT/88Y3FbH/Kx4szpQQ4HzUbVrHPKTLVpVocKiLfoYvw9XSGOX2FmD2d6DrXbVYyAQTF2HeF6My8jmzx7/CRw=="],
 

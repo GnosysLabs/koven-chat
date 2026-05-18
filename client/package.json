@@ -22,6 +22,7 @@
     "@dnd-kit/utilities": "^3.2.2",
     "@emoji-mart/data": "^1.2.1",
     "@emoji-mart/react": "^1.1.1",
+    "@hyperbeam/web": "^0.0.38",
     "@koven/shared": "workspace:*",
     "@matrix-org/matrix-sdk-crypto-wasm": "^18.2.0",
     "@radix-ui/react-dialog": "^1.1.15",

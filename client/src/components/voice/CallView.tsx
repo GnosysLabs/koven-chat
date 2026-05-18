@@ -31,7 +31,9 @@ import { useRealtimeKitMeeting } from "@cloudflare/realtimekit-react";
 import type { RTKParticipant, RTKSelf } from "@cloudflare/realtimekit-react";
 import { Button } from "@/components/ui/button";
 import { ParticipantTile } from "@/components/voice/ParticipantTile";
+import { SharedBrowserTile } from "@/components/voice/SharedBrowserTile";
 import { useCall } from "@/lib/call-context";
+import { startBrowserSession, stopBrowserSession } from "@/lib/browser-api";
 import { cn } from "@/lib/utils";
 import { isMobileShell } from "@/lib/mobile";
 import {
@@ -42,6 +44,7 @@ import {
 import {
 	ChevronLeft,
 	ChevronRight,
+	Globe,
 	Maximize,
 	Mic,
 	MicOff,
@@ -232,7 +235,7 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 	// Click a thumbnail to pin; click the spotlight to unpin;
 	// ‹ › arrows cycle.  Auto-clears if the pinned participant
 	// leaves the room.
-	const { spotlitId: pinnedId, setSpotlight, activeCall, popOutToWindow, popInToMain } = useCall();
+	const { spotlitId: pinnedId, setSpotlight, activeCall, popOutToWindow, popInToMain, browserSession } = useCall();
 
 	// FaceTime-style pop-out: only offered in the desktop shell's
 	// main window.  Hidden in plain browsers (no native pop-out path
@@ -256,6 +259,21 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 	const onFullscreen = isCallWindow()
 		? () => { void toggleCallWindowFullscreen(); }
 		: undefined;
+
+	const toggleBrowser = useCallback(async () => {
+		if (!activeCall) return;
+		setError(null);
+		try {
+			if (browserSession) {
+				await stopBrowserSession({ accessToken: activeCall.accessToken, roomId: activeCall.roomId });
+			} else {
+				await startBrowserSession({ accessToken: activeCall.accessToken, roomId: activeCall.roomId });
+			}
+		} catch (err) {
+			setError(err instanceof Error ? err.message : String(err));
+		}
+	}, [activeCall, browserSession]);
+
 	const togglePin = useCallback((id: string) => {
 		setSpotlight(pinnedId === id ? null : id);
 	}, [pinnedId, setSpotlight]);
@@ -334,14 +352,17 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 
 	const pinnedTile = pinnedId ? allTiles.find(t => t.key === pinnedId) : null;
 
+	// When the shared browser is active it forces a spotlight layout,
+	// overriding any manual pin.  Participant tiles move to the strip.
+	const hasBrowser = !!browserSession;
+	const effectivePinned = hasBrowser ? true : !!pinnedTile;
+
 	return (
 		<div className="flex-1 flex flex-col min-h-0">
-			{/* Subtle header strip showing the room name so the user
-			    knows which channel they're in (the parent dialog has
-			    a sr-only title only). */}
 			<div className="shrink-0 px-4 py-2 border-b border-border text-xs text-muted-foreground text-center">
 				Live in <span className="text-foreground font-medium">{roomName}</span>
 				{" · "}{totalTiles} {totalTiles === 1 ? "person" : "people"}
+				{hasBrowser && <span className="ml-1 text-primary"> · shared browser</span>}
 			</div>
 
 			{/* Body — flex column with three rows depending on mode:
@@ -359,10 +380,16 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 			    critical so a wide 16:9 doesn't blow past 85vh. */}
 			<div className="relative flex-1 min-h-0 group bg-background flex flex-col">
 				<div className="relative flex-1 min-h-0 flex items-center justify-center p-4">
-					{totalTiles === 1 ? (
-						/* Solo case: just self, centered + fit-to-fill.
-						   No point thumbnailing yourself in a wall of
-						   empty space.  Big tile, mirrored selfie cam. */
+					{hasBrowser ? (
+						/* Shared browser spotlight: the Hyperbeam embed
+						   fills the tile area; participant tiles move to
+						   the thumbnail strip below. */
+						<SharedBrowserTile
+							embedUrl={browserSession!.embedUrl}
+							className="max-h-full max-w-full"
+						/>
+					) : totalTiles === 1 ? (
+						/* Solo case: just self, centered + fit-to-fill. */
 						<div className="aspect-video max-h-full max-w-full w-auto">
 							<ParticipantTile
 								participant={meeting.self}
@@ -372,8 +399,7 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 						</div>
 					) : pinnedTile ? (
 						/* Spotlight: pinned tile fills the tile-area row.
-						   Click it to unpin.  ‹ › arrows float on the
-						   sides for keyboard-free cycling. */
+						   Click it to unpin.  Arrows cycle through. */
 						<>
 							<button
 								type="button"
@@ -421,18 +447,20 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 					)}
 
 					{/* Floating control bar — solo + grid modes only.
-					    In spotlight mode the strip below already
-					    consumes chrome space; the inline bar variant
-					    further down handles that case. */}
-					{!pinnedTile && (
+					    In spotlight / browser mode the strip below
+					    already consumes chrome space; the inline bar
+					    variant further down handles that case. */}
+					{!effectivePinned && (
 						<ControlBar
 							floating
 							audioOn={audioOn}
 							videoOn={videoOn}
 							screenOn={screenOn}
+							browserOn={hasBrowser}
 							toggleAudio={toggleAudio}
 							toggleVideo={toggleVideo}
 							toggleScreen={toggleScreen}
+							toggleBrowser={toggleBrowser}
 							onLeave={onLeave}
 							onPopOut={onPopOut}
 							onPopIn={onPopIn}
@@ -441,15 +469,10 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 					)}
 				</div>
 
-				{pinnedTile && (
-					/* Spotlight bottom chrome — controls + thumbnail
-					   strip stack inline so they never overlap.  No
-					   hover gate here: the strip is already eating
-					   visual real estate, so hiding the controls
-					   inconsistently would just confuse things.
-					   On mobile, pad the bottom through the iOS home
-					   indicator via env(safe-area-inset-bottom) so
-					   the strip doesn't sit under the indicator. */
+				{effectivePinned && (
+					/* Spotlight / browser bottom chrome — controls +
+					   thumbnail strip stack inline so they never
+					   overlap. */
 					<div
 						className="shrink-0 flex flex-col items-center gap-2 px-4 pb-3 pt-1"
 						style={
@@ -463,9 +486,11 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 							audioOn={audioOn}
 							videoOn={videoOn}
 							screenOn={screenOn}
+							browserOn={hasBrowser}
 							toggleAudio={toggleAudio}
 							toggleVideo={toggleVideo}
 							toggleScreen={toggleScreen}
+							toggleBrowser={toggleBrowser}
 							onLeave={onLeave}
 							onPopOut={onPopOut}
 							onPopIn={onPopIn}
@@ -500,17 +525,19 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
  *  mode where the thumbnail strip below would otherwise be
  *  fighting for the same bottom space. */
 function ControlBar({
-	floating, audioOn, videoOn, screenOn,
-	toggleAudio, toggleVideo, toggleScreen, onLeave,
+	floating, audioOn, videoOn, screenOn, browserOn,
+	toggleAudio, toggleVideo, toggleScreen, toggleBrowser, onLeave,
 	onPopOut, onPopIn, onFullscreen,
 }: {
 	floating: boolean;
 	audioOn: boolean;
 	videoOn: boolean;
 	screenOn: boolean;
+	browserOn: boolean;
 	toggleAudio(): void;
 	toggleVideo(): void;
 	toggleScreen(): void;
+	toggleBrowser(): void;
 	onLeave(): void;
 	// Pop the call into a dedicated OS window (FaceTime-style).
 	// Undefined when the affordance isn't applicable to the current
@@ -576,6 +603,20 @@ function ControlBar({
 				iconOff={<MonitorOff className="h-5 w-5" />}
 				label={screenOn ? "Stop sharing" : "Share screen"}
 			/>
+			<button
+				type="button"
+				onClick={toggleBrowser}
+				aria-label={browserOn ? "Stop shared browser" : "Share browser"}
+				title={browserOn ? "Stop shared browser" : "Share browser"}
+				className={cn(
+					"h-11 w-11 rounded-full flex items-center justify-center transition-colors",
+					browserOn
+						? "bg-primary hover:bg-primary/90 text-primary-foreground"
+						: "bg-muted hover:bg-accent text-foreground",
+				)}
+			>
+				<Globe className="h-5 w-5" />
+			</button>
 			{onPopOut && (
 				<button
 					type="button"

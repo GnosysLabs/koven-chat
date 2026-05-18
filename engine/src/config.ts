@@ -202,6 +202,15 @@ export const config = {
 	// webhook registration with a fresh value.
 	cfRealtimeWebhookSecret: process.env.CF_REALTIME_WEBHOOK_SECRET ?? "",
 
+	// ─── Hyperbeam (shared cloud browser in calls) ─────────────────
+	// Spins up a cloud Chromium VM that all call participants can see
+	// and control.  The engine creates sessions via the Hyperbeam REST
+	// API (POST /v0/vm) and passes the embed_url to clients, which
+	// mount it via @hyperbeam/web.  Key comes from hyperbeam.com/dashboard.
+	//
+	// When unset the browser-share button is hidden on the client.
+	hyperbeamApiKey: process.env.HYPERBEAM_API_KEY ?? "",
+
 	// ─── APNs (iOS push notifications) ─────────────────────────────
 	// Path to the .p8 private key file from the Apple Developer portal.
 	// Combined with the key ID and team ID to sign JWTs for the APNs

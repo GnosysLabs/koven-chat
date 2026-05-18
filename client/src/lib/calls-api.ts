@@ -72,13 +72,26 @@ export interface CallParticipant {
 	joinedAt: number;
 }
 
-/** Fetch the live participant list for a room's voice channel.
- * Returns [] when no call is active.  Used by RoomVoiceBar to
- * surface the social-signal avatar stack. */
-export async function listActiveCallParticipants(opts: {
+export interface ActiveBrowserSession {
+	sessionId: string;
+	embedUrl: string;
+	startedBy: string;
+	startedAt: number;
+}
+
+export interface ActiveCallState {
+	participants: CallParticipant[];
+	browserSession: ActiveBrowserSession | null;
+}
+
+/** Fetch the live participant list + browser session for a room's
+ * voice channel.  Returns empty participants and null browser when
+ * no call is active.  Used by RoomVoiceBar to surface the social-
+ * signal avatar stack and by CallView for the shared browser. */
+export async function listActiveCallState(opts: {
 	accessToken: string;
 	roomId: RoomId;
-}): Promise<CallParticipant[]> {
+}): Promise<ActiveCallState> {
 	const r = await fetch(
 		`${ENGINE_URL}/api/calls/${encodeURIComponent(opts.roomId)}/active`,
 		{
@@ -86,10 +99,7 @@ export async function listActiveCallParticipants(opts: {
 		},
 	);
 	if (!r.ok) {
-		// Don't throw — empty list is the right "no call" state and
-		// non-2xx during boot / network flap shouldn't blow up the
-		// chat header.  Caller can re-poll.
-		return [];
+		return { participants: [], browserSession: null };
 	}
 	const body = (await r.json().catch(() => ({}))) as {
 		participants?: Array<{
@@ -98,13 +108,37 @@ export async function listActiveCallParticipants(opts: {
 			avatar_url: string | null;
 			joined_at: number;
 		}>;
+		browser_session?: {
+			session_id: string;
+			embed_url: string;
+			started_by: string;
+			started_at: number;
+		} | null;
 	};
-	return (body.participants ?? []).map(p => ({
+	const participants = (body.participants ?? []).map(p => ({
 		userId: p.user_id,
 		displayName: p.display_name,
 		avatarUrl: p.avatar_url,
 		joinedAt: p.joined_at,
 	}));
+	const bs = body.browser_session;
+	const browserSession = bs ? {
+		sessionId: bs.session_id,
+		embedUrl: bs.embed_url,
+		startedBy: bs.started_by,
+		startedAt: bs.started_at,
+	} : null;
+	return { participants, browserSession };
+}
+
+/** Backwards-compatible wrapper for callers that only need the
+ * participant list. */
+export async function listActiveCallParticipants(opts: {
+	accessToken: string;
+	roomId: RoomId;
+}): Promise<CallParticipant[]> {
+	const state = await listActiveCallState(opts);
+	return state.participants;
 }
 
 /** Tell the engine "I just joined this room's call" — fired

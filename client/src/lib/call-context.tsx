@@ -36,7 +36,7 @@ import {
 	RealtimeKitProvider,
 	useRealtimeKitClient,
 } from "@cloudflare/realtimekit-react";
-import { joinCall, pingCallPresenceJoined, pingCallPresenceLeft } from "@/lib/calls-api";
+import { joinCall, pingCallPresenceJoined, pingCallPresenceLeft, type ActiveBrowserSession } from "@/lib/calls-api";
 import { startRing, stopRing } from "@/lib/callRingtone";
 import {
 	closeCurrentWindow,
@@ -142,6 +142,11 @@ interface CallContextValue {
 	// notifies main, leaves the call window's meeting, then closes
 	// the call window.  Only meaningful inside the call window.
 	popInToMain(): Promise<void>;
+	// Active Hyperbeam shared browser session for the current call's
+	// room.  Updated by the /active poll in RoomVoiceBar.  null when
+	// no shared browser is running.
+	browserSession: ActiveBrowserSession | null;
+	setBrowserSession(s: ActiveBrowserSession | null): void;
 }
 
 const CallContext = createContext<CallContextValue | null>(null);
@@ -159,6 +164,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 	const [phase, setPhase] = useState<CallPhase>("idle");
 	const [error, setError] = useState<string | null>(null);
 	const [spotlitId, setSpotlightState] = useState<string | null>(null);
+	const [browserSession, setBrowserSession] = useState<ActiveBrowserSession | null>(null);
 	const [inCallView, setInCallViewState] = useState<boolean>(false);
 	const [meeting, initMeeting] = useRealtimeKitClient();
 
@@ -691,8 +697,8 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 	}, []);
 
 	const value = useMemo<CallContextValue>(
-		() => ({ activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall, popOutToWindow, popInToMain }),
-		[activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall, popOutToWindow, popInToMain],
+		() => ({ activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall, popOutToWindow, popInToMain, browserSession, setBrowserSession }),
+		[activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall, popOutToWindow, popInToMain, browserSession],
 	);
 
 	// Always render the RealtimeKitProvider — even when meeting is

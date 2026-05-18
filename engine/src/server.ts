@@ -134,6 +134,12 @@ import {
 	isConfigured as callsIsConfigured,
 } from "./calls";
 import {
+	isHyperbeamConfigured,
+	createBrowserSession,
+	destroyBrowserSession,
+	getActiveSession as getActiveBrowserSession,
+} from "./browser";
+import {
 	adminCreateUser,
 	adminDeleteRoom,
 	adminJoinUserToRoom,
@@ -1597,6 +1603,7 @@ export function startServer(): void {
 					return json({ errcode: "M_FORBIDDEN", error: "not a member" }, { status: 403 });
 				}
 				const rows = activeParticipantsFor(roomId);
+				const browserSession = getActiveBrowserSession(roomId);
 				return json({
 					participants: rows.map(r => ({
 						user_id: r.user_id,
@@ -1604,6 +1611,12 @@ export function startServer(): void {
 						avatar_url: r.avatar_url,
 						joined_at: r.joined_at,
 					})),
+					browser_session: browserSession ? {
+						session_id: browserSession.session_id,
+						embed_url: browserSession.embed_url,
+						started_by: browserSession.started_by,
+						started_at: browserSession.started_at,
+					} : null,
 				});
 			}
 
@@ -1920,6 +1933,75 @@ export function startServer(): void {
 						deleted_children: deletedChildren,
 						failed_children: failedChildren,
 					});
+				}
+			}
+
+			// POST /api/calls/:roomId/browser/start
+			// Start a shared Hyperbeam browser session in a room's
+			// active call.  Idempotent: returns the existing session
+			// if one is already running.
+			if (req.method === "POST" && /^\/api\/calls\/[^/]+\/browser\/start$/.test(path)) {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				if (!isHyperbeamConfigured()) {
+					return json({ errcode: "M_NOT_CONFIGURED", error: "Hyperbeam not configured" }, { status: 503 });
+				}
+				const roomId = decodeURIComponent(path.split("/")[3]!);
+				if (!roomId.startsWith("!") || !roomId.includes(":")) {
+					return json({ errcode: "M_INVALID_PARAM", error: "room_id required" }, { status: 400 });
+				}
+				let members: string[] = [];
+				try {
+					members = await getJoinedMembers(roomId);
+				} catch (err) {
+					console.warn(`browser /start: getJoinedMembers(${roomId}) failed`, err);
+					return json({ errcode: "M_UNKNOWN", error: "couldn't verify membership" }, { status: 502 });
+				}
+				if (!members.includes(userId)) {
+					return json({ errcode: "M_FORBIDDEN", error: "not a member" }, { status: 403 });
+				}
+				try {
+					const session = await createBrowserSession({ roomId, userId });
+					return json({
+						session_id: session.sessionId,
+						embed_url: session.embedUrl,
+						started_by: session.startedBy,
+						started_at: session.startedAt,
+					});
+				} catch (err) {
+					const detail = err instanceof Error ? err.message : String(err);
+					console.error(`browser /start: createBrowserSession failed`, err);
+					return json({ errcode: "M_UNKNOWN", error: detail }, { status: 502 });
+				}
+			}
+
+			// POST /api/calls/:roomId/browser/stop
+			// End the active shared browser session.  Idempotent: 200
+			// even if no session was active.
+			if (req.method === "POST" && /^\/api\/calls\/[^/]+\/browser\/stop$/.test(path)) {
+				const userId = await whoami(extractToken(req));
+				if (!userId) return json({ errcode: "M_FORBIDDEN", error: "invalid token" }, { status: 401 });
+				const roomId = decodeURIComponent(path.split("/")[3]!);
+				if (!roomId.startsWith("!") || !roomId.includes(":")) {
+					return json({ errcode: "M_INVALID_PARAM", error: "room_id required" }, { status: 400 });
+				}
+				let members: string[] = [];
+				try {
+					members = await getJoinedMembers(roomId);
+				} catch (err) {
+					console.warn(`browser /stop: getJoinedMembers(${roomId}) failed`, err);
+					return json({ errcode: "M_UNKNOWN", error: "couldn't verify membership" }, { status: 502 });
+				}
+				if (!members.includes(userId)) {
+					return json({ errcode: "M_FORBIDDEN", error: "not a member" }, { status: 403 });
+				}
+				try {
+					await destroyBrowserSession(roomId);
+					return json({ ok: true });
+				} catch (err) {
+					const detail = err instanceof Error ? err.message : String(err);
+					console.error(`browser /stop: destroyBrowserSession failed`, err);
+					return json({ errcode: "M_UNKNOWN", error: detail }, { status: 502 });
 				}
 			}
 

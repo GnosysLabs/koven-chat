@@ -92,6 +92,7 @@ startAllBots().catch(err => console.error("engine: startAllBots failed", err));
 // prod for registration to fire.  Idempotent: lists existing
 // webhooks first and only POSTs if a matching one isn't found.
 import { ensureWebhookRegistered } from "./calls";
+import { reapIdleBrowserSessions } from "./browser";
 ensureWebhookRegistered({
 	publicEngineUrl: process.env.PUBLIC_ENGINE_URL || null,
 }).catch(err => console.error("engine: ensureWebhookRegistered failed", err));
@@ -118,6 +119,9 @@ async function fullTick(): Promise<void> {
 	bootstrapAdminIfNeeded();
 	const reaped = reapStaleCallParticipants();
 	if (reaped > 0) console.log(`engine: reaped ${reaped} stale call participant(s)`);
+	reapIdleBrowserSessions()
+		.then(n => { if (n > 0) console.log(`engine: reaped ${n} idle browser session(s)`); })
+		.catch(err => console.error("engine: browser session reaper failed", err));
 	// MCP scratch-dir janitor.  Cheap (just stat + readdir) but no
 	// reason to run every minute — once an hour is plenty for a
 	// 30-day idle window.

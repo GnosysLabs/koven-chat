@@ -641,6 +641,24 @@ db.exec(`
 	CREATE INDEX IF NOT EXISTS idx_room_call_participants_room
 		ON room_call_participants(room_id);
 
+	-- ─── Hyperbeam shared browser sessions ────────────────────────
+	-- One active session per room at a time (enforced in application
+	-- logic via the ended_at IS NULL predicate).  The embed_url is
+	-- stored so late joiners can connect without another API call.
+	-- ended_at is set when the session is explicitly stopped or the
+	-- idle reaper fires.
+	CREATE TABLE IF NOT EXISTS room_browser_sessions (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		room_id    TEXT NOT NULL,
+		session_id TEXT NOT NULL UNIQUE,
+		embed_url  TEXT NOT NULL,
+		started_by TEXT NOT NULL,
+		started_at INTEGER NOT NULL,
+		ended_at   INTEGER
+	);
+	CREATE INDEX IF NOT EXISTS idx_room_browser_sessions_room
+		ON room_browser_sessions(room_id);
+
 	-- ─── Push tokens for APNs / FCM / Web Push ────────────────────
 	-- One row per (user, device).  The client registers on login and
 	-- clears on sign-out.  The notification fanout reads tokens for
@@ -2193,6 +2211,70 @@ export function reapStaleCallParticipants(): number {
 export function listRoomsWithActiveCalls(): string[] {
 	const rows = listAllActiveCallRoomsStmt.all() as { room_id: string }[];
 	return rows.map(r => r.room_id);
+}
+
+// ─── Hyperbeam shared browser sessions ───────────────────────────────
+
+export interface BrowserSessionRow {
+	id: number;
+	room_id: string;
+	session_id: string;
+	embed_url: string;
+	started_by: string;
+	started_at: number;
+	ended_at: number | null;
+}
+
+const getActiveBrowserSessionStmt = db.prepare(`
+	SELECT id, room_id, session_id, embed_url, started_by, started_at, ended_at
+	FROM room_browser_sessions
+	WHERE room_id = ? AND ended_at IS NULL
+	LIMIT 1
+`);
+
+const insertBrowserSessionStmt = db.prepare(`
+	INSERT INTO room_browser_sessions
+		(room_id, session_id, embed_url, started_by, started_at)
+	VALUES (?, ?, ?, ?, ?)
+`);
+
+const endBrowserSessionStmt = db.prepare(`
+	UPDATE room_browser_sessions
+	SET ended_at = ?
+	WHERE room_id = ? AND ended_at IS NULL
+`);
+
+const listActiveBrowserSessionsStmt = db.prepare(`
+	SELECT id, room_id, session_id, embed_url, started_by, started_at, ended_at
+	FROM room_browser_sessions
+	WHERE ended_at IS NULL
+`);
+
+export function getActiveBrowserSession(roomId: string): BrowserSessionRow | null {
+	return (getActiveBrowserSessionStmt.get(roomId) as BrowserSessionRow | undefined) ?? null;
+}
+
+export function rememberBrowserSession(opts: {
+	roomId: string;
+	sessionId: string;
+	embedUrl: string;
+	startedBy: string;
+}): void {
+	insertBrowserSessionStmt.run(
+		opts.roomId,
+		opts.sessionId,
+		opts.embedUrl,
+		opts.startedBy,
+		Date.now(),
+	);
+}
+
+export function endBrowserSession(roomId: string): void {
+	endBrowserSessionStmt.run(Date.now(), roomId);
+}
+
+export function listActiveBrowserSessions(): BrowserSessionRow[] {
+	return listActiveBrowserSessionsStmt.all() as BrowserSessionRow[];
 }
 
 // ─── User-initiated message deletions ──────────────────────────────

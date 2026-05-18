@@ -22,13 +22,13 @@
 // room's call surfaces a confirm prompt — Discord rule, prevents
 // accidentally splitting your audio across two calls.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Mic, Video } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import {
 	joinCall,
-	listActiveCallParticipants,
+	listActiveCallState,
 	CallApiError,
 	type CallParticipant,
 } from "@/lib/calls-api";
@@ -73,6 +73,20 @@ export function RoomVoiceBar({ roomId, roomName, accessToken, isDm }: RoomVoiceB
 	const inThisRoomsCall = !!call.activeCall && call.activeCall.roomId === roomId && call.phase !== "idle";
 	const inAnotherRoomsCall = !!call.activeCall && call.activeCall.roomId !== roomId && call.phase !== "idle";
 
+	// Push browser session from the /active poll into the call context,
+	// but only when this room is the one we're in a call for.  Uses a
+	// ref to avoid adding call.setBrowserSession to the poll effect's
+	// dependency array (which would restart the interval every render).
+	const inThisRoomsCallRef = useRef(inThisRoomsCall);
+	inThisRoomsCallRef.current = inThisRoomsCall;
+	const setBrowserSessionRef = useRef(call.setBrowserSession);
+	setBrowserSessionRef.current = call.setBrowserSession;
+	const setBrowserSessionFromPoll = useCallback((s: import("@/lib/calls-api").ActiveBrowserSession | null) => {
+		if (inThisRoomsCallRef.current) {
+			setBrowserSessionRef.current(s);
+		}
+	}, []);
+
 	// Presence poll.  Runs on mount + every PRESENCE_POLL_MS; clears
 	// on unmount.  Skipped when not_configured so we don't keep
 	// hammering the engine for nothing.
@@ -81,8 +95,11 @@ export function RoomVoiceBar({ roomId, roomName, accessToken, isDm }: RoomVoiceB
 		let cancelled = false;
 		const tick = async () => {
 			try {
-				const list = await listActiveCallParticipants({ accessToken, roomId });
-				if (!cancelled) setParticipants(list);
+				const active = await listActiveCallState({ accessToken, roomId });
+				if (!cancelled) {
+					setParticipants(active.participants);
+					setBrowserSessionFromPoll(active.browserSession);
+				}
 			} catch {
 				// Network blip.  Leave the previous list visible.
 			}
