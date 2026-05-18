@@ -57,6 +57,23 @@ import {
 	VideoOff,
 } from "lucide-react";
 
+type ParticipantTileEntry = {
+	key: string;
+	participant: RTKParticipant | RTKSelf;
+	isSelf: boolean;
+	mode: "camera" | "screen";
+};
+type BrowserTileEntry = {
+	key: string;
+	mode: "browser";
+	embedUrl: string;
+};
+type TileEntry = ParticipantTileEntry | BrowserTileEntry;
+
+function isBrowserTile(t: TileEntry): t is BrowserTileEntry {
+	return t.mode === "browser";
+}
+
 export interface CallViewProps {
 	roomName: string;
 	onLeaveRequested(): void;
@@ -286,7 +303,7 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 	// so the spotlight pin can address camera + screen
 	// independently.
 	const allTiles = useMemo(() => {
-		const tiles: Array<{ key: string; participant: RTKParticipant | RTKSelf; isSelf: boolean; mode: "camera" | "screen" }> = [
+		const tiles: TileEntry[] = [
 			{ key: meeting.self.id, participant: meeting.self, isSelf: true, mode: "camera" },
 			...remoteParticipants.map(p => ({ key: p.id, participant: p, isSelf: false, mode: "camera" as const })),
 		];
@@ -298,13 +315,17 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 				tiles.push({ key: `${p.id}#screen`, participant: p, isSelf: false, mode: "screen" });
 			}
 		}
+		if (browserSession) {
+			tiles.push({ key: "browser", mode: "browser", embedUrl: browserSession.embedUrl });
+		}
 		return tiles;
 		// participantsTick captures join/leave + per-participant
 		// media-update bumps so this re-derives when anyone toggles
 		// their screen share (or video / audio).
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [meeting.self, remoteParticipants, participantsTick]);
+	}, [meeting.self, remoteParticipants, participantsTick, browserSession]);
 	const totalTiles = allTiles.length;
+	const participantCount = allTiles.filter(t => !isBrowserTile(t)).length;
 
 	// Drop the pin if the pinned participant left the room mid-call.
 	useEffect(() => {
@@ -352,16 +373,13 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 
 	const pinnedTile = pinnedId ? allTiles.find(t => t.key === pinnedId) : null;
 
-	// When the shared browser is active it forces a spotlight layout,
-	// overriding any manual pin.  Participant tiles move to the strip.
 	const hasBrowser = !!browserSession;
-	const effectivePinned = hasBrowser ? true : !!pinnedTile;
 
 	return (
 		<div className="flex-1 flex flex-col min-h-0">
 			<div className="shrink-0 px-4 py-2 border-b border-border text-xs text-muted-foreground text-center">
 				Live in <span className="text-foreground font-medium">{roomName}</span>
-				{" · "}{totalTiles} {totalTiles === 1 ? "person" : "people"}
+				{" · "}{participantCount} {participantCount === 1 ? "person" : "people"}
 				{hasBrowser && <span className="ml-1 text-primary"> · shared browser</span>}
 			</div>
 
@@ -380,16 +398,7 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 			    critical so a wide 16:9 doesn't blow past 85vh. */}
 			<div className="relative flex-1 min-h-0 group bg-background flex flex-col">
 				<div className="relative flex-1 min-h-0 flex items-center justify-center p-4">
-					{hasBrowser ? (
-						/* Shared browser spotlight: the Hyperbeam embed
-						   fills the tile area; participant tiles move to
-						   the thumbnail strip below. */
-						<SharedBrowserTile
-							embedUrl={browserSession!.embedUrl}
-							className="max-h-full max-w-full"
-						/>
-					) : totalTiles === 1 ? (
-						/* Solo case: just self, centered + fit-to-fill. */
+					{totalTiles === 1 ? (
 						<div className="aspect-video max-h-full max-w-full w-auto">
 							<ParticipantTile
 								participant={meeting.self}
@@ -398,8 +407,6 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 							/>
 						</div>
 					) : pinnedTile ? (
-						/* Spotlight: pinned tile fills the tile-area row.
-						   Click it to unpin.  Arrows cycle through. */
 						<>
 							<button
 								type="button"
@@ -408,12 +415,16 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 								aria-label="Unpin (return to grid)"
 								title="Click to return to thumbnail view"
 							>
-								<ParticipantTile
-									participant={pinnedTile.participant}
-									isSelf={pinnedTile.isSelf}
-									isSpeaking={activeSpeakerId === pinnedTile.key}
-									mode={pinnedTile.mode}
-								/>
+								{isBrowserTile(pinnedTile) ? (
+									<SharedBrowserTile embedUrl={pinnedTile.embedUrl} className="w-full h-full" />
+								) : (
+									<ParticipantTile
+										participant={pinnedTile.participant}
+										isSelf={pinnedTile.isSelf}
+										isSpeaking={activeSpeakerId === pinnedTile.key}
+										mode={pinnedTile.mode}
+									/>
+								)}
 							</button>
 							{totalTiles > 1 && (
 								<>
@@ -423,8 +434,6 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 							)}
 						</>
 					) : (
-						/* Default grid: equally-sized thumbnails wrap-
-						   centered.  Click any to spotlight. */
 						<div className="flex flex-wrap items-center justify-center gap-3 max-w-full">
 							{allTiles.map(t => (
 								<button
@@ -432,25 +441,25 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 									type="button"
 									onClick={() => togglePin(t.key)}
 									className="w-[260px] aspect-video"
-									aria-label={`Spotlight ${t.participant.name || (t.isSelf ? "yourself" : "this participant")}`}
+									aria-label={isBrowserTile(t) ? "Spotlight shared browser" : `Spotlight ${t.participant.name || (t.isSelf ? "yourself" : "this participant")}`}
 									title="Click to spotlight"
 								>
-									<ParticipantTile
-										participant={t.participant}
-										isSelf={t.isSelf}
-										isSpeaking={activeSpeakerId === t.key}
-										mode={t.mode}
-									/>
+									{isBrowserTile(t) ? (
+										<SharedBrowserTile embedUrl={t.embedUrl} className="w-full h-full" />
+									) : (
+										<ParticipantTile
+											participant={t.participant}
+											isSelf={t.isSelf}
+											isSpeaking={activeSpeakerId === t.key}
+											mode={t.mode}
+										/>
+									)}
 								</button>
 							))}
 						</div>
 					)}
 
-					{/* Floating control bar — solo + grid modes only.
-					    In spotlight / browser mode the strip below
-					    already consumes chrome space; the inline bar
-					    variant further down handles that case. */}
-					{!effectivePinned && (
+					{!pinnedTile && (
 						<ControlBar
 							floating
 							audioOn={audioOn}
@@ -469,10 +478,7 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 					)}
 				</div>
 
-				{effectivePinned && (
-					/* Spotlight / browser bottom chrome — controls +
-					   thumbnail strip stack inline so they never
-					   overlap. */
+				{pinnedTile && (
 					<div
 						className="shrink-0 flex flex-col items-center gap-2 px-4 pb-3 pt-1"
 						style={
@@ -700,7 +706,7 @@ function ControlButton({
 function ThumbnailStrip({
 	tiles, pinnedId, activeSpeakerId, onTileClick,
 }: {
-	tiles: Array<{ key: string; participant: RTKParticipant | RTKSelf; isSelf: boolean; mode: "camera" | "screen" }>;
+	tiles: TileEntry[];
 	pinnedId: string | null;
 	activeSpeakerId: string | null;
 	onTileClick(id: string): void;
@@ -719,15 +725,22 @@ function ThumbnailStrip({
 							"transition-opacity",
 							isPinned ? "opacity-60" : "opacity-100 hover:opacity-90",
 						)}
-						aria-label={isPinned ? "Unpin (return to grid)" : `Spotlight ${t.participant.name || (t.isSelf ? "yourself" : "this participant")}`}
+						aria-label={isPinned ? "Unpin (return to grid)" : isBrowserTile(t) ? "Spotlight shared browser" : `Spotlight ${t.participant.name || (t.isSelf ? "yourself" : "this participant")}`}
 						title={isPinned ? "Currently spotlit — click to unpin" : "Click to spotlight"}
 					>
-						<ParticipantTile
-							participant={t.participant}
-							isSelf={t.isSelf}
-							isSpeaking={activeSpeakerId === t.key}
-							mode={t.mode}
-						/>
+						{isBrowserTile(t) ? (
+							<div className="w-full h-full rounded-lg bg-muted flex flex-col items-center justify-center gap-1">
+								<Globe className="h-5 w-5 text-primary" />
+								<span className="text-[10px] text-muted-foreground">Browser</span>
+							</div>
+						) : (
+							<ParticipantTile
+								participant={t.participant}
+								isSelf={t.isSelf}
+								isSpeaking={activeSpeakerId === t.key}
+								mode={t.mode}
+							/>
+						)}
 					</button>
 				);
 			})}
