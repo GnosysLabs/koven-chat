@@ -34,7 +34,7 @@ import { ParticipantTile } from "@/components/voice/ParticipantTile";
 import { cn } from "@/lib/utils";
 import { isMobileShell } from "@/lib/mobile";
 import { isCallWindow, isDesktopShell } from "@/lib/native-window";
-import { Globe, Mic, MicOff, PhoneOff, Maximize2, PictureInPicture2, Video, VideoOff } from "lucide-react";
+import { Mic, MicOff, PhoneOff, Maximize2, PictureInPicture2, Video, VideoOff } from "lucide-react";
 import type { RoomId } from "@koven/shared";
 
 export interface CallPipPanelProps {
@@ -95,7 +95,7 @@ function CallPipPanelInner({
 	onLeave(): Promise<void>;
 }) {
 	const { meeting } = useRealtimeKitMeeting();
-	const { spotlitId, popOutToWindow, browserSession } = useCall();
+	const { spotlitId, popOutToWindow } = useCall();
 
 	// Pop-out is only offered in the desktop shell's main window:
 	// the call window doesn't render the PIP at all, and plain
@@ -122,11 +122,9 @@ function CallPipPanelInner({
 		};
 	}, [meeting]);
 
-	const showBrowser = spotlitId === "browser" && !!browserSession;
-
 	let pipParticipant: RTKParticipant | RTKSelf = meeting.self;
 	let pipIsSelf = true;
-	if (!showBrowser && spotlitId && spotlitId !== meeting.self.id) {
+	if (spotlitId && spotlitId !== meeting.self.id) {
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		const joined = meeting.participants.joined as any;
 		const candidate: RTKParticipant | undefined =
@@ -285,18 +283,11 @@ function CallPipPanelInner({
 			aria-label={`Return to Live in ${activeCall.roomName}`}
 			title={`Click to return to Live in ${activeCall.roomName}`}
 		>
-			{showBrowser ? (
-				<div className="w-full h-full bg-muted flex flex-col items-center justify-center gap-1">
-					<Globe className="h-6 w-6 text-primary" />
-					<span className="text-[10px] text-muted-foreground">Shared Browser</span>
-				</div>
-			) : (
-				<ParticipantTile
-					participant={pipParticipant}
-					isSelf={pipIsSelf}
-					isSpeaking={false}
-				/>
-			)}
+			<ParticipantTile
+				participant={pipParticipant}
+				isSelf={pipIsSelf}
+				isSpeaking={false}
+			/>
 
 			{/* Controls overlay.  Critical: the OUTER overlay stays
 			    pointer-events-none always — the individual buttons

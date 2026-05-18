@@ -26,7 +26,7 @@
 // room — leave or background the call to use the room's normal
 // composer.
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRealtimeKitMeeting } from "@cloudflare/realtimekit-react";
 import type { RTKParticipant, RTKSelf } from "@cloudflare/realtimekit-react";
 import { Button } from "@/components/ui/button";
@@ -46,7 +46,6 @@ import {
 	ChevronRight,
 	Globe,
 	Maximize,
-	Minimize2,
 	Mic,
 	MicOff,
 	MonitorUp,
@@ -57,23 +56,6 @@ import {
 	Video,
 	VideoOff,
 } from "lucide-react";
-
-type ParticipantTileEntry = {
-	key: string;
-	participant: RTKParticipant | RTKSelf;
-	isSelf: boolean;
-	mode: "camera" | "screen";
-};
-type BrowserTileEntry = {
-	key: string;
-	mode: "browser";
-	embedUrl: string;
-};
-type TileEntry = ParticipantTileEntry | BrowserTileEntry;
-
-function isBrowserTile(t: TileEntry): t is BrowserTileEntry {
-	return t.mode === "browser";
-}
 
 export interface CallViewProps {
 	roomName: string;
@@ -240,10 +222,10 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 
 	const onLeave = useCallback(() => {
 		// Full teardown (stop screen share, leaveRoom, presence pings)
-		// lives in endCall, reached via onLeaveRequested.  We used to
-		// also call meeting.leaveRoom() directly here, which double-left
-		// and — mid-screenshare — needed a second click to actually
-		// exit (the raw leaveRoom hung until the share was stopped).
+		// lives in endCall, reached via onLeaveRequested.  Calling
+		// meeting.leaveRoom() directly here too double-left and —
+		// mid-screenshare — needed a second click to actually exit
+		// (the raw leaveRoom hung until the share was stopped).
 		onLeaveRequested();
 	}, [onLeaveRequested]);
 
@@ -304,7 +286,7 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 	// so the spotlight pin can address camera + screen
 	// independently.
 	const allTiles = useMemo(() => {
-		const tiles: TileEntry[] = [
+		const tiles: Array<{ key: string; participant: RTKParticipant | RTKSelf; isSelf: boolean; mode: "camera" | "screen" }> = [
 			{ key: meeting.self.id, participant: meeting.self, isSelf: true, mode: "camera" },
 			...remoteParticipants.map(p => ({ key: p.id, participant: p, isSelf: false, mode: "camera" as const })),
 		];
@@ -316,17 +298,13 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 				tiles.push({ key: `${p.id}#screen`, participant: p, isSelf: false, mode: "screen" });
 			}
 		}
-		if (browserSession) {
-			tiles.push({ key: "browser", mode: "browser", embedUrl: browserSession.embedUrl });
-		}
 		return tiles;
 		// participantsTick captures join/leave + per-participant
 		// media-update bumps so this re-derives when anyone toggles
 		// their screen share (or video / audio).
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [meeting.self, remoteParticipants, participantsTick, browserSession]);
+	}, [meeting.self, remoteParticipants, participantsTick]);
 	const totalTiles = allTiles.length;
-	const participantCount = allTiles.filter(t => !isBrowserTile(t)).length;
 
 	// Drop the pin if the pinned participant left the room mid-call.
 	useEffect(() => {
@@ -374,70 +352,16 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 
 	const pinnedTile = pinnedId ? allTiles.find(t => t.key === pinnedId) : null;
 
+	// When the shared browser is active it forces a spotlight layout,
+	// overriding any manual pin.  Participant tiles move to the strip.
 	const hasBrowser = !!browserSession;
-	// True only when the shared browser is the spotlit tile.  Drives
-	// whether the floating embed accepts pointer input (you can click
-	// into the browser and drive it) vs. passes clicks through to the
-	// tile button underneath (clicking a thumbnail spotlights it).
-	const browserFocused = !!pinnedTile && isBrowserTile(pinnedTile);
-
-	// The shared-browser embed is mounted exactly ONCE — far below, as
-	// an absolutely-positioned overlay — so the Hyperbeam WebRTC
-	// session and its audio survive every layout change.  Moving the
-	// embed between React tree positions would remount it (drop the
-	// connection); instead we render an empty slot <div> wherever the
-	// browser tile belongs for the current layout and glue the overlay
-	// on top of that slot.
-	const callBodyRef = useRef<HTMLDivElement | null>(null);
-	const browserSlotRef = useRef<HTMLDivElement | null>(null);
-	const browserOverlayRef = useRef<HTMLDivElement | null>(null);
-
-	const syncBrowserOverlay = useCallback(() => {
-		const body = callBodyRef.current;
-		const slot = browserSlotRef.current;
-		const overlay = browserOverlayRef.current;
-		if (!body || !slot || !overlay) return;
-		const b = body.getBoundingClientRect();
-		const s = slot.getBoundingClientRect();
-		if (s.width === 0 || s.height === 0) {
-			overlay.style.display = "none";
-			return;
-		}
-		overlay.style.display = "";
-		overlay.style.top = `${s.top - b.top}px`;
-		overlay.style.left = `${s.left - b.left}px`;
-		overlay.style.width = `${s.width}px`;
-		overlay.style.height = `${s.height}px`;
-	}, []);
-
-	// Re-glue the overlay after every render — layout-mode changes
-	// (grid ↔ spotlight ↔ strip) all flow through here.  useLayoutEffect
-	// so the reposition lands before paint, no flicker.
-	useLayoutEffect(() => {
-		syncBrowserOverlay();
-	});
-	// And on viewport resize / scroll, which move the slot without
-	// causing a render of their own.
-	useEffect(() => {
-		if (!browserSession) return;
-		const onChange = () => syncBrowserOverlay();
-		window.addEventListener("resize", onChange);
-		// capture=true so a scroll inside the thumbnail strip reaches us.
-		window.addEventListener("scroll", onChange, true);
-		const ro = new ResizeObserver(onChange);
-		if (callBodyRef.current) ro.observe(callBodyRef.current);
-		return () => {
-			window.removeEventListener("resize", onChange);
-			window.removeEventListener("scroll", onChange, true);
-			ro.disconnect();
-		};
-	}, [browserSession, syncBrowserOverlay]);
+	const effectivePinned = hasBrowser ? true : !!pinnedTile;
 
 	return (
 		<div className="flex-1 flex flex-col min-h-0">
 			<div className="shrink-0 px-4 py-2 border-b border-border text-xs text-muted-foreground text-center">
 				Live in <span className="text-foreground font-medium">{roomName}</span>
-				{" · "}{participantCount} {participantCount === 1 ? "person" : "people"}
+				{" · "}{totalTiles} {totalTiles === 1 ? "person" : "people"}
 				{hasBrowser && <span className="ml-1 text-primary"> · shared browser</span>}
 			</div>
 
@@ -454,9 +378,18 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 			    `group` keeps the hover-fade behavior live for the
 			    floating variant.  `min-h-0` on the tile row is
 			    critical so a wide 16:9 doesn't blow past 85vh. */}
-			<div ref={callBodyRef} className="relative flex-1 min-h-0 group bg-background flex flex-col">
+			<div className="relative flex-1 min-h-0 group bg-background flex flex-col">
 				<div className="relative flex-1 min-h-0 flex items-center justify-center p-4">
-					{totalTiles === 1 ? (
+					{hasBrowser ? (
+						/* Shared browser spotlight: the Hyperbeam embed
+						   fills the tile area; participant tiles move to
+						   the thumbnail strip below. */
+						<SharedBrowserTile
+							embedUrl={browserSession!.embedUrl}
+							className="max-h-full max-w-full"
+						/>
+					) : totalTiles === 1 ? (
+						/* Solo case: just self, centered + fit-to-fill. */
 						<div className="aspect-video max-h-full max-w-full w-auto">
 							<ParticipantTile
 								participant={meeting.self}
@@ -465,49 +398,23 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 							/>
 						</div>
 					) : pinnedTile ? (
+						/* Spotlight: pinned tile fills the tile-area row.
+						   Click it to unpin.  Arrows cycle through. */
 						<>
-							{isBrowserTile(pinnedTile) ? (
-								/* Spotlit shared browser.  A plain
-								   container, NOT a click-to-unpin button:
-								   clicks must reach the embed so you can
-								   actually drive the browser.  Unfocus via
-								   the corner button, the ‹ › arrows, or a
-								   strip thumbnail. */
-								<div className="relative h-full aspect-video max-w-full">
-									<div ref={browserSlotRef} className="w-full h-full" />
-									<button
-										type="button"
-										onClick={() => setSpotlight(null)}
-										aria-label="Unfocus shared browser"
-										title="Return to thumbnail view"
-										className={cn(
-											"absolute top-2 right-2 z-30 h-9 w-9 rounded-full",
-											"flex items-center justify-center",
-											"bg-card/95 backdrop-blur-sm border border-border shadow-lg",
-											"text-foreground hover:bg-accent",
-											"opacity-0 group-hover:opacity-100 focus:opacity-100",
-											"transition-opacity duration-150",
-										)}
-									>
-										<Minimize2 className="h-4 w-4" />
-									</button>
-								</div>
-							) : (
-								<button
-									type="button"
-									onClick={() => setSpotlight(null)}
-									className="aspect-video max-h-full max-w-full w-auto"
-									aria-label="Unpin (return to grid)"
-									title="Click to return to thumbnail view"
-								>
-									<ParticipantTile
-										participant={pinnedTile.participant}
-										isSelf={pinnedTile.isSelf}
-										isSpeaking={activeSpeakerId === pinnedTile.key}
-										mode={pinnedTile.mode}
-									/>
-								</button>
-							)}
+							<button
+								type="button"
+								onClick={() => setSpotlight(null)}
+								className="aspect-video max-h-full max-w-full w-auto"
+								aria-label="Unpin (return to grid)"
+								title="Click to return to thumbnail view"
+							>
+								<ParticipantTile
+									participant={pinnedTile.participant}
+									isSelf={pinnedTile.isSelf}
+									isSpeaking={activeSpeakerId === pinnedTile.key}
+									mode={pinnedTile.mode}
+								/>
+							</button>
 							{totalTiles > 1 && (
 								<>
 									<CycleArrow direction="prev" onClick={() => cyclePin(-1)} />
@@ -516,6 +423,8 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 							)}
 						</>
 					) : (
+						/* Default grid: equally-sized thumbnails wrap-
+						   centered.  Click any to spotlight. */
 						<div className="flex flex-wrap items-center justify-center gap-3 max-w-full">
 							{allTiles.map(t => (
 								<button
@@ -523,28 +432,25 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 									type="button"
 									onClick={() => togglePin(t.key)}
 									className="w-[260px] aspect-video"
-									aria-label={isBrowserTile(t) ? "Spotlight shared browser" : `Spotlight ${t.participant.name || (t.isSelf ? "yourself" : "this participant")}`}
+									aria-label={`Spotlight ${t.participant.name || (t.isSelf ? "yourself" : "this participant")}`}
 									title="Click to spotlight"
 								>
-									{isBrowserTile(t) ? (
-										/* Slot the floating browser embed
-										   glues onto — see browserOverlay
-										   below. */
-										<div ref={browserSlotRef} className="w-full h-full" />
-									) : (
-										<ParticipantTile
-											participant={t.participant}
-											isSelf={t.isSelf}
-											isSpeaking={activeSpeakerId === t.key}
-											mode={t.mode}
-										/>
-									)}
+									<ParticipantTile
+										participant={t.participant}
+										isSelf={t.isSelf}
+										isSpeaking={activeSpeakerId === t.key}
+										mode={t.mode}
+									/>
 								</button>
 							))}
 						</div>
 					)}
 
-					{!pinnedTile && (
+					{/* Floating control bar — solo + grid modes only.
+					    In spotlight / browser mode the strip below
+					    already consumes chrome space; the inline bar
+					    variant further down handles that case. */}
+					{!effectivePinned && (
 						<ControlBar
 							floating
 							audioOn={audioOn}
@@ -563,7 +469,10 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 					)}
 				</div>
 
-				{pinnedTile && (
+				{effectivePinned && (
+					/* Spotlight / browser bottom chrome — controls +
+					   thumbnail strip stack inline so they never
+					   overlap. */
 					<div
 						className="shrink-0 flex flex-col items-center gap-2 px-4 pb-3 pt-1"
 						style={
@@ -592,33 +501,14 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 							pinnedId={pinnedId}
 							activeSpeakerId={activeSpeakerId}
 							onTileClick={togglePin}
-							browserSlotRef={browserSlotRef}
 						/>
-					</div>
-				)}
-
-				{/* Shared-browser embed — mounted once, HERE, so the
-				    Hyperbeam session (and its audio) survive every
-				    layout change.  An absolutely-positioned layer that
-				    syncBrowserOverlay glues on top of whichever slot
-				    <div> the browser tile currently occupies.  Pointer
-				    input only when the browser is the spotlit tile;
-				    otherwise clicks fall through to the tile button so
-				    you can spotlight it. */}
-				{browserSession && (
-					<div
-						ref={browserOverlayRef}
-						className="absolute z-20 rounded-lg overflow-hidden"
-						style={{ pointerEvents: browserFocused ? "auto" : "none" }}
-					>
-						<SharedBrowserTile embedUrl={browserSession.embedUrl} className="w-full h-full" />
 					</div>
 				)}
 
 				{/* Errors stack at top-center so they don't fight with
 				    the control bar.  Always visible when present. */}
 				{error && (
-					<div className="absolute z-40 top-3 left-1/2 -translate-x-1/2 max-w-md text-xs text-destructive border border-destructive/40 bg-destructive/10 rounded px-3 py-2">
+					<div className="absolute top-3 left-1/2 -translate-x-1/2 max-w-md text-xs text-destructive border border-destructive/40 bg-destructive/10 rounded px-3 py-2">
 						{error}
 					</div>
 				)}
@@ -667,7 +557,7 @@ function ControlBar({
 				"bg-card/95 backdrop-blur-sm border border-border shadow-lg",
 				floating
 					? cn(
-						"absolute z-30 left-1/2 -translate-x-1/2",
+						"absolute left-1/2 -translate-x-1/2",
 						// Mobile: bar stays visible always (no hover
 						// on touch devices) — the inline style on this
 						// element positions it above the iOS home
@@ -808,15 +698,12 @@ function ControlButton({
  *  the lineup complete reads better than hiding the spotlight's
  *  thumbnail).  Click any thumb to swap the spotlight to it. */
 function ThumbnailStrip({
-	tiles, pinnedId, activeSpeakerId, onTileClick, browserSlotRef,
+	tiles, pinnedId, activeSpeakerId, onTileClick,
 }: {
-	tiles: TileEntry[];
+	tiles: Array<{ key: string; participant: RTKParticipant | RTKSelf; isSelf: boolean; mode: "camera" | "screen" }>;
 	pinnedId: string | null;
 	activeSpeakerId: string | null;
 	onTileClick(id: string): void;
-	// Slot the floating shared-browser embed glues onto when the
-	// browser is a thumbnail here (i.e. some participant is spotlit).
-	browserSlotRef: React.MutableRefObject<HTMLDivElement | null>;
 }) {
 	return (
 		<div className="shrink-0 flex items-center justify-center gap-2 overflow-x-auto">
@@ -832,31 +719,15 @@ function ThumbnailStrip({
 							"transition-opacity",
 							isPinned ? "opacity-60" : "opacity-100 hover:opacity-90",
 						)}
-						aria-label={isPinned ? "Unpin (return to grid)" : isBrowserTile(t) ? "Spotlight shared browser" : `Spotlight ${t.participant.name || (t.isSelf ? "yourself" : "this participant")}`}
+						aria-label={isPinned ? "Unpin (return to grid)" : `Spotlight ${t.participant.name || (t.isSelf ? "yourself" : "this participant")}`}
 						title={isPinned ? "Currently spotlit — click to unpin" : "Click to spotlight"}
 					>
-						{isBrowserTile(t) ? (
-							isPinned ? (
-								/* Browser IS the spotlit tile — its live
-								   embed is up in the spotlight, so the
-								   strip just shows a static marker. */
-								<div className="w-full h-full rounded-lg bg-muted flex flex-col items-center justify-center gap-1">
-									<Globe className="h-5 w-5 text-primary" />
-									<span className="text-[10px] text-muted-foreground">Browser</span>
-								</div>
-							) : (
-								/* Browser is a thumbnail — the live embed
-								   overlay is glued onto this slot. */
-								<div ref={browserSlotRef} className="w-full h-full rounded-lg overflow-hidden" />
-							)
-						) : (
-							<ParticipantTile
-								participant={t.participant}
-								isSelf={t.isSelf}
-								isSpeaking={activeSpeakerId === t.key}
-								mode={t.mode}
-							/>
-						)}
+						<ParticipantTile
+							participant={t.participant}
+							isSelf={t.isSelf}
+							isSpeaking={activeSpeakerId === t.key}
+							mode={t.mode}
+						/>
 					</button>
 				);
 			})}
@@ -883,7 +754,7 @@ function CycleArrow({
 			aria-label={direction === "prev" ? "Previous participant" : "Next participant"}
 			title={direction === "prev" ? "Previous participant" : "Next participant"}
 			className={cn(
-				"absolute z-30 top-1/2 -translate-y-1/2", positionalClass,
+				"absolute top-1/2 -translate-y-1/2", positionalClass,
 				"h-10 w-10 rounded-full flex items-center justify-center",
 				"bg-card/95 backdrop-blur-sm border border-border shadow-lg",
 				"text-foreground hover:bg-accent",
