@@ -13,10 +13,6 @@
 // <video> element here is muted (for self) or has no audio track
 // attached (for remotes, since the SDK separates audio + video
 // tracks and we only bind the video one here).
-//
-// Active-speaker indicator: a primary-colored ring around the tile
-// when this participant is the currently-speaking one.  Driven by
-// the parent (CallView) which subscribes to participants.activeSpeaker.
 
 import { useEffect, useRef } from "react";
 import type { RTKParticipant, RTKSelf } from "@cloudflare/realtimekit-react";
@@ -31,7 +27,6 @@ export interface ParticipantTileProps {
 	// site so we can render self + remote with the same component.
 	participant: RTKParticipant | RTKSelf;
 	isSelf: boolean;
-	isSpeaking: boolean;
 	// "camera" (default) renders the participant's webcam +
 	// avatar fallback.  "screen" renders their active screen-share
 	// stream (object-contain, never mirrored, with a screen-share
@@ -43,7 +38,7 @@ export interface ParticipantTileProps {
 	mode?: "camera" | "screen";
 }
 
-export function ParticipantTile({ participant, isSelf, isSpeaking, mode = "camera" }: ParticipantTileProps) {
+export function ParticipantTile({ participant, isSelf, mode = "camera" }: ParticipantTileProps) {
 	const videoRef = useRef<HTMLVideoElement | null>(null);
 
 	// Pick the right track + enabled flag based on mode.  Camera
@@ -80,12 +75,7 @@ export function ParticipantTile({ participant, isSelf, isSpeaking, mode = "camer
 		|| displayName;
 
 	return (
-		<div
-			className={cn(
-				"relative w-full h-full rounded-lg overflow-hidden bg-muted border-2 transition-colors",
-				isSpeaking ? "border-primary" : "border-transparent",
-			)}
-		>
+		<div className="relative w-full h-full rounded-lg overflow-hidden bg-muted border-2 border-transparent">
 			{/* Video element always present; we toggle visibility via
 			    opacity so the layout doesn't reflow on track changes.
 			    Camera tiles use object-cover (fill the box, crop

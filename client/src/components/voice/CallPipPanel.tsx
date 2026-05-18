@@ -286,7 +286,6 @@ function CallPipPanelInner({
 			<ParticipantTile
 				participant={pipParticipant}
 				isSelf={pipIsSelf}
-				isSpeaking={false}
 			/>
 
 			{/* Controls overlay.  Critical: the OUTER overlay stays

@@ -74,6 +74,7 @@ export function InCallPane({ roomName }: InCallPaneProps) {
 				onCancel={() => { void endCall(); }}
 				isDm={activeCall?.isDm ?? false}
 				isAnsweringRing={activeCall?.isAnsweringRing ?? false}
+				skipRing={activeCall?.skipRing ?? false}
 			/>
 		);
 	}

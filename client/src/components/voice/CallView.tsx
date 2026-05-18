@@ -16,9 +16,6 @@
 //   - meeting.participants.joined → the live map of remote
 //     participants.  We re-derive a snapshot array on every
 //     `participantJoined` / `participantLeft` event.
-//   - meeting.participants.activeSpeaker → the participant id
-//     currently above the volume threshold.  Drives the speaking
-//     border on the matching tile.
 //   - meeting.self media-update events → mirror state for the
 //     control bar's toggle states.
 //
@@ -31,6 +28,7 @@ import { useRealtimeKitMeeting } from "@cloudflare/realtimekit-react";
 import type { RTKParticipant, RTKSelf } from "@cloudflare/realtimekit-react";
 import { Button } from "@/components/ui/button";
 import { ParticipantTile } from "@/components/voice/ParticipantTile";
+import { InCallDeviceMenu } from "@/components/voice/InCallDeviceMenu";
 import { SharedBrowserTile } from "@/components/voice/SharedBrowserTile";
 import { useCall } from "@/lib/call-context";
 import { startBrowserSession, stopBrowserSession } from "@/lib/browser-api";
@@ -90,10 +88,6 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [meeting, participantsTick]);
 
-	// Active-speaker id.  null when no one is currently speaking
-	// (or we haven't received an activeSpeaker event yet).
-	const [activeSpeakerId, setActiveSpeakerId] = useState<string | null>(null);
-
 	// Self events for the control-bar mirrors.
 	useEffect(() => {
 		const onAudio = (p: { audioEnabled: boolean }) => setAudioOn(p.audioEnabled);
@@ -119,7 +113,6 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 	//     screenShareUpdate (so screen-share toggles add/remove a
 	//     screen tile in real time)
 	//   - self's own video/audio/screen-share updates
-	// Also captures the activeSpeaker event for the speaking-border.
 	useEffect(() => {
 		const bump = () => setParticipantsTick(t => t + 1);
 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -168,13 +161,6 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 		meeting.self.on("audioUpdate", bump);
 		meeting.self.on("screenShareUpdate", bump);
 
-		// Active-speaker tracking — sets the speaking-border id.
-		const onSpeaker = (payload: { peerId: string }) => {
-			setActiveSpeakerId(payload.peerId);
-		};
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		(meeting.participants as any).on("activeSpeaker", onSpeaker);
-
 		return () => {
 			try {
 				joined.off("participantJoined", onJoined);
@@ -183,8 +169,6 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 				meeting.self.off("videoUpdate", bump);
 				meeting.self.off("audioUpdate", bump);
 				meeting.self.off("screenShareUpdate", bump);
-				// eslint-disable-next-line @typescript-eslint/no-explicit-any
-				(meeting.participants as any).off("activeSpeaker", onSpeaker);
 			} catch {
 				// SDK already torn down.
 			}
@@ -403,7 +387,6 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 							<ParticipantTile
 								participant={meeting.self}
 								isSelf
-								isSpeaking={activeSpeakerId === meeting.self.id}
 							/>
 						</div>
 					) : pinnedTile ? (
@@ -420,7 +403,6 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 								<ParticipantTile
 									participant={pinnedTile.participant}
 									isSelf={pinnedTile.isSelf}
-									isSpeaking={activeSpeakerId === pinnedTile.key}
 									mode={pinnedTile.mode}
 								/>
 							</button>
@@ -447,7 +429,6 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 									<ParticipantTile
 										participant={t.participant}
 										isSelf={t.isSelf}
-										isSpeaking={activeSpeakerId === t.key}
 										mode={t.mode}
 									/>
 								</button>
@@ -510,7 +491,6 @@ export function CallView({ roomName, onLeaveRequested }: CallViewProps) {
 						<ThumbnailStrip
 							tiles={allTiles}
 							pinnedId={pinnedId}
-							activeSpeakerId={activeSpeakerId}
 							onTileClick={togglePin}
 						/>
 					</div>
@@ -615,6 +595,7 @@ function ControlBar({
 				iconOff={<MonitorOff className="h-5 w-5" />}
 				label={screenOn ? "Stop sharing" : "Share screen"}
 			/>
+			<InCallDeviceMenu />
 			<button
 				type="button"
 				onClick={toggleBrowser}
@@ -713,11 +694,10 @@ function ControlButton({
  *  the lineup complete reads better than hiding the spotlight's
  *  thumbnail).  Click any thumb to swap the spotlight to it. */
 function ThumbnailStrip({
-	tiles, pinnedId, activeSpeakerId, onTileClick,
+	tiles, pinnedId, onTileClick,
 }: {
 	tiles: Array<{ key: string; participant: RTKParticipant | RTKSelf; isSelf: boolean; mode: "camera" | "screen" }>;
 	pinnedId: string | null;
-	activeSpeakerId: string | null;
 	onTileClick(id: string): void;
 }) {
 	return (
@@ -740,7 +720,6 @@ function ThumbnailStrip({
 						<ParticipantTile
 							participant={t.participant}
 							isSelf={t.isSelf}
-							isSpeaking={activeSpeakerId === t.key}
 							mode={t.mode}
 						/>
 					</button>

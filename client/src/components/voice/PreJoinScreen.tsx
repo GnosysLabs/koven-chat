@@ -31,6 +31,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useRealtimeKitMeeting } from "@cloudflare/realtimekit-react";
 import { Button } from "@/components/ui/button";
+import { DeviceRow } from "@/components/voice/DeviceRow";
+import { useCallDevices } from "@/components/voice/useCallDevices";
 import { cn } from "@/lib/utils";
 import { Mic, MicOff, Video, VideoOff, Volume2 } from "lucide-react";
 
@@ -45,56 +47,69 @@ export interface PreJoinScreenProps {
 	// True when the call is a 1:1 DM.  Changes the CTA copy from
 	// "Join Live" to "Ring <peer>" so the user knows clicking it
 	// notifies the other person (versus channel-style joins where
-	// you're entering an open room).  When `isAnsweringRing` is
-	// also true, the copy flips to "Join <peer>" — they're not
-	// initiating a ring, they're picking up an incoming one.
+	// you're entering an open room).  When `isAnsweringRing` or
+	// `skipRing` is also true, the copy flips to "Join <peer>" —
+	// they're not initiating a ring, they're joining a call that
+	// already exists (picking up an incoming ring, or hopping into
+	// a call already in progress).
 	isDm?: boolean;
 	isAnsweringRing?: boolean;
+	// True when hopping into a DM call that already has someone in
+	// it.  Like `isAnsweringRing` for copy purposes: no ring is
+	// being sent, so the CTA reads "Join", not "Ring".
+	skipRing?: boolean;
 }
 
-export function PreJoinScreen({ roomName, onJoined, onCancel, isDm, isAnsweringRing }: PreJoinScreenProps) {
+export function PreJoinScreen({ roomName, onJoined, onCancel, isDm, isAnsweringRing, skipRing }: PreJoinScreenProps) {
 	const { meeting } = useRealtimeKitMeeting();
 	// Local mirrors of self.audioEnabled / videoEnabled so React
-	// re-renders on toggle.  Seed from current state in case the
-	// user had defaults that already enabled either.
+	// re-renders on toggle.  Seeded false: we proactively enable
+	// both devices on mount (see the probe effect), and the
+	// audioUpdate/videoUpdate listeners flip these true once the
+	// hardware is actually acquired — so the UI shows "off" only
+	// for the brief moment before the camera/mic come up, never a
+	// false "on".
 	const [audioOn, setAudioOn] = useState<boolean>(false);
 	const [videoOn, setVideoOn] = useState<boolean>(false);
 	const [joining, setJoining] = useState(false);
 	const [error, setError] = useState<string | null>(null);
-	// Device state — list + current selection per kind.  We re-fetch
-	// when the SDK fires deviceListUpdate (plug/unplug a headset).
-	const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
-	const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
-	const [speakerDevices, setSpeakerDevices] = useState<MediaDeviceInfo[]>([]);
-	const [currentAudioId, setCurrentAudioId] = useState<string>("");
-	const [currentVideoId, setCurrentVideoId] = useState<string>("");
-	const [currentSpeakerId, setCurrentSpeakerId] = useState<string>("");
+	// True once the permission probe below has resolved.  Gates the
+	// device hook so it only enumerates after the browser will
+	// return labeled device names.
+	const [probeDone, setProbeDone] = useState(false);
+	// Device lists + current selection + switch action.  Enumeration
+	// is deferred until `probeDone` so the dropdowns get real names.
+	const devices = useCallDevices(meeting, probeDone);
 
 	// Camera preview <video> ref.  We attach the local video track to
 	// it whenever it changes (toggle on/off, device swap).
 	const previewRef = useRef<HTMLVideoElement | null>(null);
 
-	// Initial device + state hydration.  Runs once when the meeting
-	// is available.
+	// Permission probe + default-on media.  Runs once when the
+	// meeting is available.
 	//
-	// Two-step flow because the browser hides device LABELS (and
-	// often the device list entirely) until permission has been
-	// granted at least once in this session:
-	//   1. Fire a one-shot getUserMedia({audio,video}) probe.  This
-	//      pops the OS / browser permission prompt the moment the
-	//      user lands on the prejoin screen, so the camera/mic
-	//      dropdowns populate with REAL names instead of just
-	//      "Default" placeholders.  Stop the tracks the instant
-	//      permission resolves so we don't hold the hardware open
-	//      while the user is still picking devices — the SDK
-	//      acquires its own when they hit the toggles.
-	//   2. Then ask the SDK for its enumerated lists.  By this
-	//      point the browser will return labeled devices.
+	// Step 1 — probe.  Fire a one-shot getUserMedia({audio,video}).
+	// This pops the OS / browser permission prompt the moment the
+	// user lands on the prejoin screen so the device dropdowns can
+	// populate with REAL names instead of "Default" placeholders
+	// (browsers hide device labels until permission is granted at
+	// least once).  We stop the probe tracks immediately; the SDK
+	// acquires its own in step 2.  `probeDone` then ungates the
+	// useCallDevices hook so it enumerates with labels available.
 	//
-	// If the user denies the prompt, the catch keeps us on the
-	// prejoin screen with empty dropdowns (the existing behavior)
+	// Step 2 — default-on.  Explicitly enable mic + camera so the
+	// user lands on the prejoin screen with a live preview and an
+	// open mic, and opts OUT via the toggle pills rather than having
+	// to opt in.  Each enable is isolated: a denied or absent device
+	// (e.g. a desktop with a mic but no webcam) leaves that one off
+	// without blocking the other or the join.  The audioUpdate /
+	// videoUpdate listeners flip the audioOn / videoOn mirrors once
+	// the hardware is actually acquired.
+	//
+	// If the user denies the prompt, the catches keep us on the
+	// prejoin screen with empty dropdowns and both devices off
 	// rather than blocking the join — they can still join with no
-	// audio/video and turn things on later.
+	// audio/video.
 	useEffect(() => {
 		let cancelled = false;
 		(async () => {
@@ -105,66 +120,31 @@ export function PreJoinScreen({ roomName, onJoined, onCancel, isDm, isAnsweringR
 				});
 				probe.getTracks().forEach(t => t.stop());
 			} catch (err) {
-				// User denied OR the device doesn't exist (e.g. a
-				// desktop with a mic but no webcam).  Either way,
-				// fall through to enumerateDevices — partial
-				// permission still labels whichever device they did
-				// grant.
 				console.warn("PreJoinScreen: permission probe failed", err);
 			}
 			if (cancelled) return;
-			try {
-				const [a, v, s, current] = await Promise.all([
-					meeting.self.getAudioDevices(),
-					meeting.self.getVideoDevices(),
-					meeting.self.getSpeakerDevices(),
-					meeting.self.getCurrentDevices(),
-				]);
-				if (cancelled) return;
-				setAudioDevices(a);
-				setVideoDevices(v);
-				setSpeakerDevices(s);
-				setCurrentAudioId(current.audio?.deviceId ?? "");
-				setCurrentVideoId(current.video?.deviceId ?? "");
-				setCurrentSpeakerId(current.speaker?.deviceId ?? "");
-			} catch (err) {
-				console.warn("PreJoinScreen: device hydration failed", err);
-			}
-			setAudioOn(meeting.self.audioEnabled);
-			setVideoOn(meeting.self.videoEnabled);
+			setProbeDone(true);
+			try { await meeting.self.enableAudio(); }
+			catch (err) { console.warn("PreJoinScreen: enableAudio failed", err); }
+			if (cancelled) return;
+			try { await meeting.self.enableVideo(); }
+			catch (err) { console.warn("PreJoinScreen: enableVideo failed", err); }
 		})();
 		return () => { cancelled = true; };
 	}, [meeting]);
 
 	// Subscribe to SDK events so our mirrors stay accurate.  audioUpdate
 	// + videoUpdate fire after enableX/disableX resolves (or after a
-	// permission denial flips state back).  deviceListUpdate fires when
-	// a device is plugged or unplugged.
+	// permission denial flips state back).
 	useEffect(() => {
 		const onAudio = (p: { audioEnabled: boolean }) => setAudioOn(p.audioEnabled);
 		const onVideo = (p: { videoEnabled: boolean }) => setVideoOn(p.videoEnabled);
-		const onDeviceList = async () => {
-			try {
-				const [a, v, s] = await Promise.all([
-					meeting.self.getAudioDevices(),
-					meeting.self.getVideoDevices(),
-					meeting.self.getSpeakerDevices(),
-				]);
-				setAudioDevices(a);
-				setVideoDevices(v);
-				setSpeakerDevices(s);
-			} catch (err) {
-				console.warn("PreJoinScreen: device-list refresh failed", err);
-			}
-		};
 		meeting.self.on("audioUpdate", onAudio);
 		meeting.self.on("videoUpdate", onVideo);
-		meeting.self.on("deviceListUpdate", onDeviceList);
 		return () => {
 			try {
 				meeting.self.off("audioUpdate", onAudio);
 				meeting.self.off("videoUpdate", onVideo);
-				meeting.self.off("deviceListUpdate", onDeviceList);
 			} catch {
 				// SDK already torn down.
 			}
@@ -207,17 +187,9 @@ export function PreJoinScreen({ roomName, onJoined, onCancel, isDm, isAnsweringR
 	}
 
 	async function pickDevice(kind: "audio" | "video" | "speaker", deviceId: string) {
-		const list =
-			kind === "audio" ? audioDevices
-			: kind === "video" ? videoDevices
-			: speakerDevices;
-		const device = list.find(d => d.deviceId === deviceId);
-		if (!device) return;
+		setError(null);
 		try {
-			await meeting.self.setDevice(device);
-			if (kind === "audio") setCurrentAudioId(deviceId);
-			else if (kind === "video") setCurrentVideoId(deviceId);
-			else setCurrentSpeakerId(deviceId);
+			await devices.pickDevice(kind, deviceId);
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
 		}
@@ -312,22 +284,22 @@ export function PreJoinScreen({ roomName, onJoined, onCancel, isDm, isAnsweringR
 			<div className="w-full max-w-[480px] flex flex-col gap-1.5 shrink-0">
 				<DeviceRow
 					icon={<Mic className="h-3.5 w-3.5" />}
-					devices={audioDevices}
-					currentId={currentAudioId}
+					devices={devices.audioDevices}
+					currentId={devices.currentAudioId}
 					placeholder="Default microphone"
 					onChange={(id) => pickDevice("audio", id)}
 				/>
 				<DeviceRow
 					icon={<Video className="h-3.5 w-3.5" />}
-					devices={videoDevices}
-					currentId={currentVideoId}
+					devices={devices.videoDevices}
+					currentId={devices.currentVideoId}
 					placeholder="Default camera"
 					onChange={(id) => pickDevice("video", id)}
 				/>
 				<DeviceRow
 					icon={<Volume2 className="h-3.5 w-3.5" />}
-					devices={speakerDevices}
-					currentId={currentSpeakerId}
+					devices={devices.speakerDevices}
+					currentId={devices.currentSpeakerId}
 					placeholder="Default speaker"
 					onChange={(id) => pickDevice("speaker", id)}
 				/>
@@ -348,9 +320,9 @@ export function PreJoinScreen({ roomName, onJoined, onCancel, isDm, isAnsweringR
 					className="min-w-[200px]"
 				>
 					{joining
-						? (isDm ? (isAnsweringRing ? "Joining…" : "Ringing…") : "Joining…")
+						? (isDm ? (isAnsweringRing || skipRing ? "Joining…" : "Ringing…") : "Joining…")
 						: (isDm
-							? (isAnsweringRing ? `Join ${roomName}` : `Ring ${roomName}`)
+							? (isAnsweringRing || skipRing ? `Join ${roomName}` : `Ring ${roomName}`)
 							: "Join Live")}
 				</Button>
 				<Button
@@ -401,66 +373,5 @@ function ToggleButton({
 		>
 			{active ? iconOn : iconOff}
 		</button>
-	);
-}
-
-/** Compact device dropdown row.  Icon prefix tells the user which
- *  device kind it controls (mic, cam, speaker) without a wordy
- *  text label, leaving the row short enough to stack three of them
- *  in a tight column.  Native <select> for free keyboard nav,
- *  screen-reader semantics, and long-list scrolling — no extra dep.
- *
- *  Subtle hover/focus styling matches the rest of the app's
- *  inputs.  When the SDK reports zero devices for the kind (e.g.
- *  permissions not yet granted), the placeholder shows so the
- *  control still reads as legible-but-empty rather than broken. */
-function DeviceRow({
-	icon, devices, currentId, placeholder, onChange,
-}: {
-	icon: React.ReactNode;
-	devices: MediaDeviceInfo[];
-	currentId: string;
-	placeholder: string;
-	onChange(deviceId: string): void;
-}) {
-	return (
-		<div className="relative flex items-center">
-			<div className="absolute left-3 text-muted-foreground pointer-events-none">
-				{icon}
-			</div>
-			<select
-				value={currentId}
-				onChange={(e) => onChange(e.target.value)}
-				disabled={devices.length === 0}
-				className={cn(
-					"w-full h-9 pl-9 pr-3 rounded-md border border-border bg-background/50",
-					"text-foreground text-xs focus:outline-none focus:ring-2 focus:ring-primary/40",
-					"disabled:opacity-50 disabled:cursor-not-allowed",
-					"appearance-none cursor-pointer hover:bg-accent/50 transition-colors",
-				)}
-			>
-				{devices.length === 0 ? (
-					<option value="">{placeholder}</option>
-				) : (
-					devices.map(d => (
-						<option key={d.deviceId} value={d.deviceId}>
-							{d.label || placeholder}
-						</option>
-					))
-				)}
-			</select>
-			{/* Custom chevron — the default OS one breaks the visual
-			    consistency of the row and on macOS shows a different
-			    indicator than on Windows/Linux.  appearance-none on
-			    the select hides the native chevron; we draw our own. */}
-			<svg
-				className="absolute right-3 h-3 w-3 text-muted-foreground pointer-events-none"
-				fill="none"
-				viewBox="0 0 24 24"
-				stroke="currentColor"
-			>
-				<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-			</svg>
-		</div>
 	);
 }
