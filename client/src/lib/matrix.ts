@@ -788,8 +788,8 @@ export class MatrixTransport {
 				&& resp.status === 400
 				&& init?.method === "POST"
 			) {
-				const url = typeof input === "string"
-					? input
+				const url = typeof input === "string" ? input
+					: input instanceof URL ? input.href
 					: input instanceof Request ? input.url : "";
 				if (url.includes("/keys/upload")) {
 					try {
