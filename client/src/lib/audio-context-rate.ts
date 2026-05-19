@@ -7,10 +7,10 @@
 // switches to the Hands-Free Profile and the hardware rate collapses
 // to 16 kHz, dragging the whole Web Audio graph down with it.
 //
-// That breaks DeepFilterNet (see noise-suppression.ts): it is a
-// 48 kHz speech model, and fed a 16 kHz context it processes the
-// wrong spectral content and its frame timing drifts, producing
-// mangled, stuttering audio.
+// That breaks RNNoise (see noise-suppression.ts): it is a 48 kHz
+// speech model, and fed a 16 kHz context it processes the wrong
+// spectral content and its frame timing drifts, producing mangled,
+// stuttering audio.
 //
 // Pinning the context to 48 kHz makes the browser's own high-quality
 // resampler upsample the mic into the graph.  The signal is still

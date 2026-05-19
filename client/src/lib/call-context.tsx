@@ -154,9 +154,9 @@ interface CallContextValue {
 	// no shared browser is running.
 	browserSession: ActiveBrowserSession | null;
 	setBrowserSession(s: ActiveBrowserSession | null): void;
-	// DeepFilterNet noise-suppression toggle.  Default on; the user
-	// can disable it from the in-call / pre-join Devices popover
-	// (e.g. musicians who want raw audio).  Persisted across calls.
+	// Noise-suppression toggle.  Default on; the user can disable it
+	// from the in-call / pre-join Devices popover (e.g. musicians who
+	// want raw audio).  Persisted across calls.
 	noiseSuppressionEnabled: boolean;
 	setNoiseSuppressionEnabled(b: boolean): void;
 }
@@ -231,21 +231,22 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 				// Window capture never includes audio.  Nothing to
 				// configure on our side — it's a browser limitation.
 				//
-				// Audio processing: keep echo cancellation and auto
-				// gain control on (they complement, not duplicate,
-				// what comes next), but DISABLE the browser's WebRTC
-				// noise suppressor.  We run DeepFilterNet3 as an audio
-				// middleware instead (see noise-suppression.ts), and
-				// stacking two noise suppressors causes pumping and
-				// artifacts — this is why Discord drops WebRTC NS when
-				// Krisp is on.  DeepFilterNet owns NS now.  NB the
+				// Audio processing: echo cancellation and auto gain
+				// control stay on everywhere.  Native noise suppression
+				// is requested ON here so the mic is never published
+				// raw, even in the brief window before our own engine
+				// is live.  On WebKit native NS stays as the suppressor;
+				// on Chromium / Gecko the RNNoise middleware takes over
+				// and noise-suppression.ts drops native NS off the mic
+				// so the two do not stack (stacking pumps — this is why
+				// Discord drops WebRTC NS when Krisp is on).  NB the
 				// `noiseSupression` key is misspelled in RealtimeKit's
 				// type (one 's'); we have to match that or it gets
 				// silently dropped.
 				mediaConfiguration: {
 					audio: {
 						echoCancellation: true,
-						noiseSupression: false,
+						noiseSupression: true,
 						autoGainControl: true,
 					},
 					screenshare: {
@@ -485,12 +486,13 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 		};
 	}, [meeting, stopRingback]);
 
-	// Register the DeepFilterNet noise-suppression middleware on the
-	// meeting as soon as the SDK client exists.  RealtimeKit applies
-	// audio middlewares when the mic track is (re)published, so doing
-	// this at meeting-init time covers both the pre-join enableAudio
-	// and any later mid-call device switch.  preload() also kicks off
-	// the WASM + model fetch here so it is warm before the user joins.
+	// Bind the noise-suppression engine to the meeting as soon as the
+	// SDK client exists.  attach() picks the engine (RNNoise middleware
+	// on Chromium / Gecko, native NS on WebKit) and, for the middleware
+	// path, RealtimeKit re-applies it whenever the mic track is
+	// (re)published — so this covers both the pre-join enableAudio and
+	// any later mid-call device switch.  preload() kicks off the
+	// RNNoise WASM fetch here so it is warm before the user joins.
 	useEffect(() => {
 		if (!meeting) return;
 		void noiseSuppression.preload();
