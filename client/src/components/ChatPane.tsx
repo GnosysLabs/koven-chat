@@ -46,6 +46,66 @@ import { hapticImpact } from "@/lib/haptics";
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
 import { MobileReactionSheet } from "@/components/MobileReactionSheet";
 
+// Tauri's native file-drop listener returns raw file paths. When the
+// frontend reads the files from the disk, the WebView APIs require a
+// correct MIME type to render the attachment preview. We map the
+// file extensions manually since the native command only reads raw
+// byte arrays without scanning file metadata.
+function getMimeType(filename: string): string {
+	const ext = filename.split(".").pop()?.toLowerCase();
+	switch (ext) {
+		case "png":
+			return "image/png";
+		case "jpg":
+		case "jpeg":
+			return "image/jpeg";
+		case "gif":
+			return "image/gif";
+		case "webp":
+			return "image/webp";
+		case "svg":
+			return "image/svg+xml";
+		case "heic":
+			return "image/heic";
+		case "heif":
+			return "image/heif";
+		case "mp4":
+			return "video/mp4";
+		case "mov":
+			return "video/quicktime";
+		case "webm":
+			return "video/webm";
+		case "ogg":
+			return "video/ogg";
+		case "mp3":
+			return "audio/mpeg";
+		case "wav":
+			return "audio/wav";
+		case "m4a":
+			return "audio/mp4";
+		case "flac":
+			return "audio/flac";
+		case "pdf":
+			return "application/pdf";
+		case "txt":
+			return "text/plain";
+		case "md":
+			return "text/markdown";
+		case "json":
+			return "application/json";
+		case "html":
+			return "text/html";
+		case "css":
+			return "text/css";
+		case "js":
+			return "application/javascript";
+		case "ts":
+			return "application/typescript";
+		default:
+			return "application/octet-stream";
+	}
+}
+
 // Heuristic: does this body have any markdown shape?  Cheap regex
 // pass — looks for headings, lists, fenced code, emphasis, links,
 // blockquotes.  Used to skip the markdown renderer for short
@@ -109,7 +169,7 @@ import {
 	DialogTitle,
 } from "@/components/ui/dialog";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { AlertTriangle, ArrowDown, ArrowUp, BarChart3, Check, CheckCheck, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Images, Lock, Maximize2, MessageSquare as MessageSquareIcon, Minimize2, Paperclip, Pause, Play, Plus, Reply, Scale, Settings, Users, X } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, BarChart3, Check, CheckCheck, CornerDownRight, Download, EyeOff, File as FileIcon, Flag, Images, Lock, Maximize2, MessageSquare as MessageSquareIcon, Minimize2, Paperclip, Pause, Play, Plus, Reply, Scale, Settings, Upload, Users, X } from "lucide-react";
 
 export interface ChatPaneProps {
 	room: Room | null;
@@ -357,6 +417,24 @@ export function ChatPane({
 	const [draft, setDraft] = useState("");
 	const [replyTarget, setReplyTarget] = useState<Message | null>(null);
 
+	// Stable references to prevent drag-and-drop event listeners from
+	// re-registering and creating duplicate event handlers on every render.
+	const pickAttachmentsRef = useRef(pickAttachments);
+	const onSendAttachmentRef = useRef(onSendAttachment);
+	const roomInviteRef = useRef(room?.isInvite);
+
+	useEffect(() => {
+		pickAttachmentsRef.current = pickAttachments;
+	}, [pickAttachments]);
+
+	useEffect(() => {
+		onSendAttachmentRef.current = onSendAttachment;
+	}, [onSendAttachment]);
+
+	useEffect(() => {
+		roomInviteRef.current = room?.isInvite;
+	}, [room?.isInvite]);
+
 	// Typing-indicator throttle.  Matrix's `m.typing` events carry an
 	// embedded timeout (10s, see transport.setMyTyping); we fire
 	// isTyping=true on the first keystroke after an idle period and
@@ -418,6 +496,7 @@ export function ChatPane({
 	// composer button; close on submit (the dialog handles the close
 	// itself once the m.poll.start send resolves).
 	const [pollDialogOpen, setPollDialogOpen] = useState(false);
+	const [isDragging, setIsDragging] = useState(false);
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
 	// Mobile composer collapses paperclip / poll / GIF behind a `+`
 	// button (iMessage app-picker convention).  Open state lives here
@@ -761,6 +840,138 @@ export function ChatPane({
 	}, [scrollToEvent, room, messages, onLoadMoreHistory, onScrolledToEvent, loadOlderHistory]);
 	useEffect(() => () => {
 		if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+	}, []);
+
+	// ─── Drag and Drop ─────────────────────────────────────────────
+	useEffect(() => {
+		console.log("ChatPane Drag System Initialized");
+
+		const handleWindowDragOver = (e: DragEvent) => {
+			e.preventDefault();
+			if ((window as any)._koven_dragging) return;
+			(window as any)._koven_dragging = true;
+
+			console.log("DRAG DETECTED (WEB)", e.dataTransfer?.types);
+			if (!(window as any).__TAURI_INTERNALS__) {
+				setIsDragging(true);
+			}
+			if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+		};
+
+		const handleWindowDragLeave = (e: DragEvent) => {
+			e.preventDefault();
+			if (!e.relatedTarget) {
+				(window as any)._koven_dragging = false;
+				if (!(window as any).__TAURI_INTERNALS__) {
+					setIsDragging(false);
+				}
+			}
+		};
+
+		const handleWindowDrop = (e: DragEvent) => {
+			e.preventDefault();
+			e.stopPropagation();
+			(window as any)._koven_dragging = false;
+			if (!(window as any).__TAURI_INTERNALS__) {
+				setIsDragging(false);
+				const files = e.dataTransfer?.files ? Array.from(e.dataTransfer.files) : [];
+				if (files.length > 0 && !!onSendAttachmentRef.current && !roomInviteRef.current) {
+					void hapticImpact("light");
+					pickAttachmentsRef.current(files);
+				}
+			}
+		};
+
+		window.addEventListener("dragover", handleWindowDragOver, true);
+		window.addEventListener("dragenter", handleWindowDragOver, true);
+		window.addEventListener("dragleave", handleWindowDragLeave, true);
+		window.addEventListener("drop", handleWindowDrop, true);
+
+		// If we're in Tauri, also listen for the native events.
+		let active = true;
+		let unlistenDragOver: (() => void) | undefined;
+		let unlistenDragDrop: (() => void) | undefined;
+		let unlistenDragLeave: (() => void) | undefined;
+
+		if ((window as any).__TAURI_INTERNALS__) {
+			void (async () => {
+				try {
+					const { listen } = await import("@tauri-apps/api/event");
+					if (!active) return;
+
+					const uOver = await listen("tauri://drag-over", () => {
+						console.log("DRAG DETECTED (TAURI)");
+						setIsDragging(true);
+					});
+					if (!active) {
+						uOver();
+						return;
+					}
+					unlistenDragOver = uOver;
+
+					const uLeave = await listen("tauri://drag-leave", () => {
+						setIsDragging(false);
+					});
+					if (!active) {
+						uLeave();
+						return;
+					}
+					unlistenDragLeave = uLeave;
+
+					const uDrop = await listen("tauri://drag-drop", async (event: any) => {
+						console.log("DROP DETECTED (TAURI)", event);
+						setIsDragging(false);
+						(window as any)._koven_dragging = false;
+
+						let paths: string[] = [];
+						const p = event.payload;
+						if (Array.isArray(p)) {
+							paths = p;
+						} else if (p && typeof p === "object") {
+							paths = (p as any).paths || (p as any).data || [];
+						}
+
+						if (paths.length === 0) return;
+
+						if (!onSendAttachmentRef.current || roomInviteRef.current) return;
+
+						try {
+							const { invoke } = await import("@tauri-apps/api/core");
+							const filesData = await invoke<[string, number[]][]>("read_files_from_paths", { paths });
+
+							const files = filesData.map(([name, bytes]) => {
+								return new File([new Uint8Array(bytes)], name, { type: getMimeType(name) });
+							});
+
+							if (files.length > 0) {
+								void hapticImpact("light");
+								pickAttachmentsRef.current(files);
+							}
+						} catch (e) {
+							console.error("Failed to read dropped files via Tauri", e);
+						}
+					});
+					if (!active) {
+						uDrop();
+						return;
+					}
+					unlistenDragDrop = uDrop;
+				} catch (e) {
+					console.warn("Failed to init Tauri drag listeners", e);
+				}
+			})();
+		}
+
+		return () => {
+			active = false;
+			window.removeEventListener("dragover", handleWindowDragOver, true);
+			window.removeEventListener("dragenter", handleWindowDragOver, true);
+			window.removeEventListener("dragleave", handleWindowDragLeave, true);
+			window.removeEventListener("drop", handleWindowDrop, true);
+			if (unlistenDragOver) unlistenDragOver();
+			if (unlistenDragDrop) unlistenDragDrop();
+			if (unlistenDragLeave) unlistenDragLeave();
+		};
 	}, []);
 
 	// Global hover tracking for the message-action toolbar.
@@ -1146,7 +1357,7 @@ export function ChatPane({
 		// telltale "resize fixes it" symptom.  min-h-0 lets the flex
 		// child shrink below content, so flex-1 + overflow-y-auto
 		// constrain to the available height as intended.
-		<div className="flex-1 flex flex-col min-w-0 min-h-0">
+		<div className="flex-1 flex flex-col min-w-0 min-h-0 relative">
 			<div className="shrink-0">
 			{/* Suppress the chat-room header when the call view is on
 			    top — the header relates to the room's chat (name,
@@ -1928,6 +2139,41 @@ export function ChatPane({
 				messages={messages}
 				roomName={room.name}
 			/>
+
+			{isDragging && (
+				<div
+					className="absolute inset-0 z-[100] bg-background/80 backdrop-blur-sm flex flex-col items-center justify-center border-2 border-dashed border-primary/50 m-2 rounded-xl transition-all animate-in fade-in zoom-in duration-200"
+					onDragOver={(e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+					}}
+					onDrop={(e) => {
+						// This captures the drop if it lands directly on the overlay.
+						e.preventDefault();
+						e.stopPropagation();
+						setIsDragging(false);
+						(window as any)._koven_dragging = false;
+
+						if (!(window as any).__TAURI_INTERNALS__) {
+							const files = e.dataTransfer?.files ? Array.from(e.dataTransfer.files) : [];
+							if (files.length > 0 && !!onSendAttachment && !room?.isInvite) {
+								console.log("DROP HANDLED BY OVERLAY (WEB)", files.length);
+								void hapticImpact("light");
+								pickAttachments(files);
+							}
+						}
+					}}
+				>
+					<div className="flex flex-col items-center gap-4 p-8 bg-card border border-border shadow-2xl rounded-2xl scale-110">
+						<Upload className="size-12 text-primary animate-bounce" />
+						<div className="text-center">
+							<p className="text-xl font-bold text-foreground">Drop files to attach</p>
+							<p className="text-sm text-muted-foreground mt-1">Release to add them to your message</p>
+						</div>
+					</div>
+				</div>
+			)}
 		</div>
 	);
 }

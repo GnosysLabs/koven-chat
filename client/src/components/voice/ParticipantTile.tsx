@@ -18,7 +18,8 @@ import { useEffect, useRef } from "react";
 import type { RTKParticipant, RTKSelf } from "@cloudflare/realtimekit-react";
 import { MatrixAvatar } from "@/components/MatrixAvatar";
 import { cn } from "@/lib/utils";
-import { Mic, MicOff, MonitorUp } from "lucide-react";
+import { Mic, MicOff, MonitorUp, Volume2, VolumeX } from "lucide-react";
+import { useCall } from "@/lib/call-context";
 
 export interface ParticipantTileProps {
 	// RTKSelf has the same media-track shape as RTKParticipant for
@@ -40,6 +41,8 @@ export interface ParticipantTileProps {
 
 export function ParticipantTile({ participant, isSelf, mode = "camera" }: ParticipantTileProps) {
 	const videoRef = useRef<HTMLVideoElement | null>(null);
+	const { screenshareVolumes, setScreenshareVolume } = useCall();
+	const volume = screenshareVolumes[participant.id] ?? 1.0;
 
 	// Pick the right track + enabled flag based on mode.  Camera
 	// mode reads videoTrack/videoEnabled; screen mode reads
@@ -112,18 +115,42 @@ export function ParticipantTile({ participant, isSelf, mode = "camera" }: Partic
 			{/* Bottom strip: name + mic OR screen-share badge.  Same
 			    layout regardless of state so the chrome is stable. */}
 			<div className="absolute bottom-0 left-0 right-0 px-3 py-1.5 flex items-center justify-between gap-2 bg-gradient-to-t from-black/70 to-transparent text-white">
-				<span className="text-xs font-medium truncate">
+				<span className="text-xs font-medium truncate flex-1">
 					{isScreen
 						? `${displayName}${isSelf ? " (you)" : ""} — screen`
 						: `${displayName}${isSelf ? " (you)" : ""}`}
 				</span>
-				{isScreen ? (
-					<MonitorUp className="h-3.5 w-3.5 shrink-0 opacity-80" />
-				) : participant.audioEnabled ? (
-					<Mic className="h-3.5 w-3.5 shrink-0 opacity-80" />
-				) : (
-					<MicOff className="h-3.5 w-3.5 shrink-0 text-destructive" />
-				)}
+				<div className="flex items-center gap-2 shrink-0">
+					{isScreen && !isSelf && (
+						<div 
+							className="flex items-center gap-1.5 bg-black/40 hover:bg-black/60 px-2 py-0.5 rounded transition-colors"
+							onClick={(e) => e.stopPropagation()}
+							onMouseDown={(e) => e.stopPropagation()}
+						>
+							{volume === 0 ? (
+								<VolumeX className="h-3.5 w-3.5 text-white/60 shrink-0" />
+							) : (
+								<Volume2 className="h-3.5 w-3.5 text-white/80 shrink-0" />
+							)}
+							<input
+								type="range"
+								min="0"
+								max="1"
+								step="0.05"
+								value={volume}
+								onChange={(e) => setScreenshareVolume(participant.id, parseFloat(e.target.value))}
+								className="w-14 h-1 rounded-lg appearance-none cursor-pointer bg-white/20 accent-white outline-none"
+							/>
+						</div>
+					)}
+					{isScreen ? (
+						<MonitorUp className="h-3.5 w-3.5 shrink-0 opacity-80" />
+					) : participant.audioEnabled ? (
+						<Mic className="h-3.5 w-3.5 shrink-0 opacity-80" />
+					) : (
+						<MicOff className="h-3.5 w-3.5 shrink-0 text-destructive" />
+					)}
+				</div>
 			</div>
 		</div>
 	);

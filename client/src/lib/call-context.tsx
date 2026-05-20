@@ -159,6 +159,10 @@ interface CallContextValue {
 	// want raw audio).  Persisted across calls.
 	noiseSuppressionEnabled: boolean;
 	setNoiseSuppressionEnabled(b: boolean): void;
+	// Volumes for each remote participant's screenshare audio, keyed
+	// by their participant/peer ID.
+	screenshareVolumes: Record<string, number>;
+	setScreenshareVolume(participantId: string, volume: number): void;
 }
 
 const CallContext = createContext<CallContextValue | null>(null);
@@ -181,15 +185,17 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 	const [noiseSuppressionEnabled, setNoiseSuppressionState] = useState<boolean>(
 		noiseSuppression.getNoiseSuppressionPref(),
 	);
+	const [screenshareVolumes, setScreenshareVolumes] = useState<Record<string, number>>({});
 	const [meeting, initMeeting] = useRealtimeKitClient();
 
-	// Reset spotlight + view-flag when the call ends so the next
+	// Reset spotlight + view-flag + screenshare volumes when the call ends so the next
 	// call starts in the default thumbnail-row view + as a fresh
 	// in-call landing.
 	useEffect(() => {
 		if (phase === "idle") {
 			setSpotlightState(null);
 			setInCallViewState(false);
+			setScreenshareVolumes({});
 		}
 	}, [phase]);
 
@@ -508,6 +514,13 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 		setNoiseSuppressionState(next);
 	}, []);
 
+	const setScreenshareVolume = useCallback((participantId: string, volume: number) => {
+		setScreenshareVolumes(prev => ({
+			...prev,
+			[participantId]: volume,
+		}));
+	}, []);
+
 	const startCall = useCallback((opts: ActiveCall) => {
 		// Replace any in-flight call.  Caller is expected to have
 		// confirmed with the user first (single-call rule).  If
@@ -775,8 +788,8 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 	}, []);
 
 	const value = useMemo<CallContextValue>(
-		() => ({ activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall, popOutToWindow, popInToMain, browserSession, setBrowserSession, noiseSuppressionEnabled, setNoiseSuppressionEnabled }),
-		[activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall, popOutToWindow, popInToMain, browserSession, noiseSuppressionEnabled, setNoiseSuppressionEnabled],
+		() => ({ activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall, popOutToWindow, popInToMain, browserSession, setBrowserSession, noiseSuppressionEnabled, setNoiseSuppressionEnabled, screenshareVolumes, setScreenshareVolume }),
+		[activeCall, phase, error, spotlitId, setSpotlight, inCallView, setInCallView, startCall, confirmJoin, endCall, popOutToWindow, popInToMain, browserSession, noiseSuppressionEnabled, setNoiseSuppressionEnabled, screenshareVolumes, setScreenshareVolume],
 	);
 
 	// Always render the RealtimeKitProvider — even when meeting is

@@ -69,6 +69,11 @@ identifier = "allow-pop-in-to-main"
 description = "Hand the call back to the main window: stash fresh params and notify main to take over.  Invoked from the call window's pop-in button."
 commands.allow = ["pop_in_to_main"]
 
+[[permission]]
+identifier = "allow-read-files-from-paths"
+description = "Read file contents from absolute paths; used for drag-and-drop support."
+commands.allow = ["read_files_from_paths"]
+
 [default]
 description = "All locally-defined desktop-shell commands the SPA invokes."
 permissions = [
@@ -81,4 +86,5 @@ permissions = [
   "allow-spawn-call-window",
   "allow-drain-pending-call",
   "allow-pop-in-to-main",
+  "allow-read-files-from-paths",
 ]

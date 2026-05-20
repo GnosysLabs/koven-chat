@@ -217,6 +217,28 @@ fn wipe_local_cache_and_exit(app: tauri::AppHandle) -> Result<(), String> {
 	Ok(())
 }
 
+/// Read the contents of files at the given absolute `paths`.
+///
+/// Returns a list of (filename, bytes) pairs.  Used by the drag-and-drop
+/// logic in ChatPane.tsx to resolve the file paths emitted by Tauri's
+/// native `tauri://drag-drop` event into real File-compatible data.
+#[tauri::command]
+async fn read_files_from_paths(paths: Vec<String>) -> Result<Vec<(String, Vec<u8>)>, String> {
+	println!("read_files_from_paths called with {} paths: {:?}", paths.len(), paths);
+	let mut results = Vec::new();
+	for path_str in paths {
+		let path = std::path::Path::new(&path_str);
+		let name = path
+			.file_name()
+			.map(|n| n.to_string_lossy().into_owned())
+			.unwrap_or_else(|| "unnamed".to_string());
+
+		let bytes = std::fs::read(path).map_err(|e| format!("failed to read {}: {}", path_str, e))?;
+		results.push((name, bytes));
+	}
+	Ok(results)
+}
+
 /// JS injected into every page before the SPA scripts run.  Catches
 /// `<a target="_blank">` clicks and `window.open()` calls and routes
 /// the URL through the WebView's top-level navigation, where the Rust
@@ -709,6 +731,7 @@ pub fn run() {
 					spawn_call_window,
 					drain_pending_call,
 					pop_in_to_main,
+					read_files_from_paths,
 				]
 			}
 			#[cfg(not(target_os = "macos"))]
@@ -720,6 +743,7 @@ pub fn run() {
 					spawn_call_window,
 					drain_pending_call,
 					pop_in_to_main,
+					read_files_from_paths,
 				]
 			}
 		})

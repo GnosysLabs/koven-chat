@@ -16,9 +16,11 @@
 import { useEffect, useRef, useState } from "react";
 import { useRealtimeKitMeeting } from "@cloudflare/realtimekit-react";
 import type { RTKParticipant } from "@cloudflare/realtimekit-react";
+import { useCall } from "@/lib/call-context";
 
 export function CallAudioSink() {
 	const { meeting } = useRealtimeKitMeeting();
+	const { screenshareVolumes } = useCall();
 	// Re-derive on every joined/left tick rather than maintaining a
 	// parallel state copy — the SDK's map is the source of truth.
 	const [tick, setTick] = useState(0);
@@ -65,9 +67,16 @@ export function CallAudioSink() {
 			    with sound).  RealtimeKit splits screen audio from
 			    mic audio into screenShareTracks.audio so we route
 			    them through their own <audio> elements. */}
-			{participants.map(p => (
-				<RemoteScreenAudio key={`screen-${p.id}`} participant={p} />
-			))}
+			{participants.map(p => {
+				const volume = screenshareVolumes[p.id] ?? 1.0;
+				return (
+					<RemoteScreenAudio
+						key={`screen-${p.id}`}
+						participant={p}
+						volume={volume}
+					/>
+				);
+			})}
 		</div>
 	);
 }
@@ -123,7 +132,7 @@ function RemoteAudio({ participant }: { participant: RTKParticipant }) {
  *  silencing the YouTube clip they're sharing.  No-op when the
  *  participant isn't sharing or didn't include audio in the
  *  share. */
-function RemoteScreenAudio({ participant }: { participant: RTKParticipant }) {
+function RemoteScreenAudio({ participant, volume }: { participant: RTKParticipant; volume: number }) {
 	const ref = useRef<HTMLAudioElement | null>(null);
 	const [tick, setTick] = useState(0);
 
@@ -152,6 +161,14 @@ function RemoteScreenAudio({ participant }: { participant: RTKParticipant }) {
 		}
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [participant, tick]);
+
+	// Sync the volume prop to the HTML5 audio element's volume.
+	useEffect(() => {
+		const el = ref.current;
+		if (el) {
+			el.volume = volume;
+		}
+	}, [volume]);
 
 	return <audio ref={ref} autoPlay />;
 }
