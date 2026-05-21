@@ -49,8 +49,8 @@ export function MobileTopBar({ onBack, onMenu, title, rightSlot }: MobileTopBarP
 	return (
 		<div
 			className={cn(
-				"shrink-0 flex items-center px-2",
-				// Translucent material — same recipe as MobileTabBar so
+				"mobile-top-bar shrink-0 flex items-center px-2",
+				// Translucent material: same recipe as MobileTabBar so
 				// the two bars feel like one system.  Theme-aware via
 				// bg-card so light themes get a light translucent bar.
 				// `backdrop-saturate-150` pairs the blur with the
@@ -58,9 +58,7 @@ export function MobileTopBar({ onBack, onMenu, title, rightSlot }: MobileTopBarP
 				// content tinting through reads vivid not washed.
 				"bg-card/70 backdrop-blur-2xl backdrop-saturate-150",
 				"border-b border-foreground/10",
-				"pt-[env(safe-area-inset-top)]",
 			)}
-			style={{ minHeight: "calc(44px + env(safe-area-inset-top))" }}
 		>
 			<div className="w-10 h-10 flex items-center justify-start">
 				{onBack ? (

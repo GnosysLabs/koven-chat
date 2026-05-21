@@ -57,7 +57,7 @@ export function AudiusMiniPlayer({ activeRoomId, onNavigateToRoom }: AudiusMiniP
 	return (
 		<div
 			onClick={handleCardClick}
-			className="group relative grid grid-cols-3 items-center gap-4 px-4 py-2 bg-card border-b border-border/80 text-foreground select-none shrink-0 cursor-pointer h-12"
+			className="audius-miniplayer group relative grid grid-cols-3 items-center gap-4 px-4 py-2 bg-card border-b border-border/80 text-foreground select-none shrink-0 cursor-pointer h-12"
 		>
 			{/* Bottom Progress Bar Indicator */}
 			<div className="absolute bottom-0 left-0 right-0 h-[2px] bg-border/40">

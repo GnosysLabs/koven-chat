@@ -1183,3 +1183,40 @@
 		transition: padding-bottom 250ms ease-out;
 	}
 }
+
+/* Mobile safe area layout and Audius player offsets */
+.mobile-top-bar,
+.mobile-nav-bar {
+	padding-top: env(safe-area-inset-top);
+	min-height: calc(44px + env(safe-area-inset-top));
+}
+
+.mobile-me-overlay {
+	top: 0;
+}
+
+.mobile-spaces-overlay {
+	top: calc(env(safe-area-inset-top) + 44px);
+}
+
+.mobile-shell .audius-miniplayer {
+	position: fixed;
+	top: calc(env(safe-area-inset-top) + 44px);
+	left: 0;
+	right: 0;
+	z-index: 35;
+}
+
+.mobile-shell .audius-miniplayer ~ [data-mobile-view] {
+	padding-top: 48px;
+}
+
+.mobile-shell .audius-miniplayer ~ .mobile-spaces-overlay {
+	top: calc(env(safe-area-inset-top) + 44px + 48px);
+}
+
+.mobile-shell .audius-miniplayer ~ .mobile-me-overlay .mobile-top-bar + *,
+.mobile-shell .audius-miniplayer ~ .mobile-me-overlay .mobile-nav-bar + * {
+	padding-top: 48px;
+}
+

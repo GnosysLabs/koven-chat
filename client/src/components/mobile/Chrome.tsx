@@ -31,12 +31,10 @@ export function NavBar({
 	return (
 		<div
 			className={cn(
-				"shrink-0 flex items-center px-2",
+				"mobile-nav-bar shrink-0 flex items-center px-2",
 				"bg-card/70 backdrop-blur-2xl backdrop-saturate-150",
 				"border-b border-foreground/10",
-				"pt-[env(safe-area-inset-top)]",
 			)}
-			style={{ minHeight: "calc(44px + env(safe-area-inset-top))" }}
 		>
 			<div className="min-w-[88px] h-11 flex items-center justify-start">{left}</div>
 			<div className="flex-1 flex items-center justify-center min-w-0 px-2">

@@ -3594,23 +3594,22 @@ export default function App() {
 				// on top of bg-background so this overlay has the same
 				// coloured aura every other mobile screen has.
 				//
-				// Top:0 (no offset for MobileTopBar) — the Me tab hides
+				// Top:0 (no offset for MobileTopBar): the Me tab hides
 				// the brand top bar and provides its own iOS-native nav
 				// chrome instead (large title at the root, nav bar with
 				// back chevron on push views).  Bottom stops above the
 				// tab bar so navigation stays visible during pushes.
-				<div className="fixed inset-x-0 z-30 flex flex-col bg-background border-b border-foreground/10 overflow-hidden"
-				     data-push-host
-				     style={{
-				         top: 0,
-				         bottom: "calc(env(safe-area-inset-bottom) + 49px)",
-				         backgroundImage: "var(--bg-gradient)",
-				         backgroundAttachment: "fixed",
-				         backgroundRepeat: "no-repeat",
-				         backgroundSize: "cover",
-				     }}
+				<div className="mobile-me-overlay fixed inset-x-0 z-30 flex flex-col bg-background border-b border-foreground/10 overflow-hidden"
+					data-push-host
+					style={{
+						bottom: "calc(env(safe-area-inset-bottom) + 49px)",
+						backgroundImage: "var(--bg-gradient)",
+						backgroundAttachment: "fixed",
+						backgroundRepeat: "no-repeat",
+						backgroundSize: "cover",
+					}}
 				>
-					{/* Root Me view — always mounted underneath so the
+					{/* Root Me view: always mounted underneath so the
 					    push views fade in over it (and the user sees
 					    the root revealed when a push is popped).
 					    `pt-[env(safe-area-inset-top)]` lifts the root
@@ -3710,32 +3709,31 @@ export default function App() {
 			    Selecting a room from inside SpaceHome dispatches
 			    set_active_room, which clears the tab bar and lets
 			    the ChatPane (z=40 in main pane CSS) fade in over
-			    the top of THIS overlay — we stay mounted so that
+			    the top of THIS overlay, we stay mounted so that
 			    when the user pops the chat back, it fades out to
 			    reveal SpaceHomeMobile underneath rather than
 			    re-mounting the overlay on top of the chat's exit
 			    animation. */}
 			{isMobileShell && mobileSpacesOpen && (
-				<div className="fixed inset-x-0 z-30 flex flex-col bg-background border-b border-foreground/10"
-				     data-push-host
-				     style={{
-				         top: "calc(env(safe-area-inset-top) + 44px)",
-				         bottom: "calc(env(safe-area-inset-bottom) + 49px)",
-				         backgroundImage: "var(--bg-gradient)",
-				         backgroundAttachment: "fixed",
-				         backgroundRepeat: "no-repeat",
-				         backgroundSize: "cover",
-				         // Non-interactive while a chat is on top of
-				         // this overlay (chat sits at z=40, we're at
-				         // z=30).  Explicit pointer-events:none is
-				         // belt-and-braces — z-stacking should already
-				         // route events to the chat, but this prevents
-				         // any margin/inset gap from leaking a tap
-				         // through to a now-non-visible spaces row.
-				         pointerEvents: state.activeRoomId ? "none" : undefined,
-				     }}
+				<div className="mobile-spaces-overlay fixed inset-x-0 z-30 flex flex-col bg-background border-b border-foreground/10"
+					data-push-host
+					style={{
+						bottom: "calc(env(safe-area-inset-bottom) + 49px)",
+						backgroundImage: "var(--bg-gradient)",
+						backgroundAttachment: "fixed",
+						backgroundRepeat: "no-repeat",
+						backgroundSize: "cover",
+						// Non-interactive while a chat is on top of
+						// this overlay (chat sits at z=40, we're at
+						// z=30).  Explicit pointer-events:none is
+						// belt-and-braces: z-stacking should already
+						// route events to the chat, but this prevents
+						// any margin/inset gap from leaking a tap
+						// through to a now-non-visible spaces row.
+						pointerEvents: state.activeRoomId ? "none" : undefined,
+					}}
 				>
-					{/* Underlayer — spaces list, always rendered so the
+					{/* Underlayer (spaces list), always rendered so the
 					    PushSlot below has something to reveal as
 					    SpaceHomeMobile fades in over it.  `is-pushed`
 					    toggles via `mobileSelectedSpaceId`. */}
