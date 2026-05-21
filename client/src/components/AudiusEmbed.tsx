@@ -36,7 +36,8 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 	const [progress, setProgress] = useState(0);
 	const [currentTime, setCurrentTime] = useState(0);
 	const [loading, setLoading] = useState(true);
-	const [hasError, setHasError] = useState(false);
+	const [resolveError, setResolveError] = useState(false);
+	const [playbackError, setPlaybackError] = useState<string | null>(null);
 	const [showAllTracks, setShowAllTracks] = useState(false);
 
 	const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -56,7 +57,8 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 		setProgress(0);
 		setCurrentTime(0);
 		setLoading(true);
-		setHasError(false);
+		setResolveError(false);
+		setPlaybackError(null);
 
 		const resolveUrl = `https://api.audius.co/v1/resolve?url=${encodeURIComponent(trackUrl)}&app_name=koven`;
 
@@ -75,7 +77,12 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 						setPlaylistName(playlistObj.playlist_name);
 						setCuratorName(playlistObj.user?.name || "Unknown Creator");
 						setCoverArtUrl(playlistObj.artwork?.["150x150"]);
-						setTracks(playlistObj.tracks || []);
+						// Filter out tracks that are deleted or unavailable to prevent playback failures.
+						const rawTracks = playlistObj.tracks || [];
+						const filteredTracks = rawTracks.filter(
+							(t: any) => t.is_delete !== true && t.is_available !== false
+						);
+						setTracks(filteredTracks);
 					} else {
 						const trackObj = res.data;
 						setIsPlaylist(false);
@@ -83,7 +90,9 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 						setPlaylistName(trackObj.title);
 						setCuratorName(trackObj.user?.name || "Unknown Artist");
 						setCoverArtUrl(trackObj.artwork?.["150x150"]);
-						setTracks([trackObj]);
+						// Filter out single track if it is deleted or unavailable.
+						const isDeleted = trackObj.is_delete === true || trackObj.is_available === false;
+						setTracks(isDeleted ? [] : [trackObj]);
 					}
 					setLoading(false);
 				} else {
@@ -92,7 +101,7 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 			})
 			.catch(() => {
 				if (active) {
-					setHasError(true);
+					setResolveError(true);
 					setLoading(false);
 				}
 			});
@@ -132,6 +141,7 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 		setCurrentTrackIndex(index);
 		setProgress(0);
 		setCurrentTime(0);
+		setPlaybackError(null);
 
 		if (shouldStartPlaying) {
 			const streamUrl = `https://api.audius.co/v1/tracks/${targetTrack.id}/stream?app_name=koven`;
@@ -161,17 +171,19 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 			});
 
 			audio.addEventListener("error", () => {
-				setHasError(true);
+				// Show error status instead of crashing the entire component.
+				setPlaybackError("Playback failed: track unavailable");
 				setIsPlaying(false);
 			});
 
 			audio.play()
 				.then(() => {
+					setPlaybackError(null);
 					setIsPlaying(true);
 				})
 				.catch((err) => {
 					console.error("Audio playback failed:", err);
-					setHasError(true);
+					setPlaybackError("Playback failed: track unavailable");
 					setIsPlaying(false);
 				});
 		} else {
@@ -189,9 +201,10 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 		} else {
 			if (audioRef.current) {
 				audioRef.current.play().then(() => {
+					setPlaybackError(null);
 					setIsPlaying(true);
 				}).catch(() => {
-					setHasError(true);
+					setPlaybackError("Playback failed: track unavailable");
 				});
 			} else {
 				playTrack(currentTrackIndex, true);
@@ -257,7 +270,7 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 		);
 	}
 
-	if (hasError || tracks.length === 0) {
+	if (resolveError || tracks.length === 0) {
 		return (
 			<div className="w-[420px] max-w-full rounded-xl border border-red-900/30 bg-red-950/20 backdrop-blur-md p-3.5 flex items-center gap-3 text-red-400">
 				<AlertTriangle className="w-5 h-5 flex-shrink-0" />
@@ -334,10 +347,17 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 
 				{/* Progress Slider */}
 				<div className="flex-1 flex flex-col gap-1 min-w-0">
-					{isPlaylist && tracks[currentTrackIndex] && (
-						<div className="text-[10px] text-zinc-300 truncate font-medium mb-0.5">
-							Playing: {tracks[currentTrackIndex].title}
+					{playbackError ? (
+						<div className="text-[10px] text-red-400 truncate font-medium mb-0.5 flex items-center gap-1">
+							<AlertTriangle className="w-3 h-3 flex-shrink-0 text-red-400" />
+							<span>{playbackError}</span>
 						</div>
+					) : (
+						isPlaylist && tracks[currentTrackIndex] && (
+							<div className="text-[10px] text-zinc-300 truncate font-medium mb-0.5">
+								Playing: {tracks[currentTrackIndex].title}
+							</div>
+						)
 					)}
 					<div
 						ref={progressBarRef}
