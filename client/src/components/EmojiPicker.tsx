@@ -13,7 +13,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import data from "@emoji-mart/data";
-import Picker from "@emoji-mart/react";
+import { Picker } from "emoji-mart";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 export interface EmojiPickerProps {
@@ -143,7 +143,9 @@ export function InlineEmojiPicker({
 				theme={theme}
 				value={value}
 				onPick={(selection) => {
-					if (selection?.native) onPick(selection.native);
+					if (selection?.native) {
+						onPick(selection.native);
+					}
 				}}
 			/>
 		</div>
@@ -200,28 +202,61 @@ function EmojiMartWrapper({
 	value?: string;
 	onPick(selection: EmojiSelection): void;
 }) {
-	const ref = useRef<HTMLDivElement | null>(null);
+	const containerRef = useRef<HTMLDivElement | null>(null);
+	const onPickRef = useRef(onPick);
+	onPickRef.current = onPick;
+
+	useEffect(() => {
+		if (!containerRef.current) return;
+
+		// Clean up any existing children first to avoid double instantiation
+		containerRef.current.innerHTML = "";
+
+		const picker = new (Picker as any)({
+			data,
+			theme,
+			set: "native",
+			// Hide the preview row at the bottom to save vertical space
+			previewPosition: "none",
+			skinTonePosition: "search",
+			navPosition: "top",
+			perLine: 9,
+			maxFrequentRows: 2,
+			emojiButtonRadius: "6px",
+			autoFocus: true,
+			dynamicWidth: false,
+			onEmojiSelect: (selection: any) => {
+				if (selection) {
+					onPickRef.current(selection);
+				}
+			},
+		});
+
+		containerRef.current.appendChild(picker as unknown as Node);
+
+		return () => {
+			if (containerRef.current) {
+				containerRef.current.innerHTML = "";
+			}
+		};
+	}, [theme]);
+
+	// Prevent click propagation outside the picker so parent popovers
+	// or sheets do not interpret clicks inside the picker as outside clicks
+	// and close prematurely or block interaction.
+	const stopProp = (e: React.SyntheticEvent | Event) => {
+		e.stopPropagation();
+	};
+
 	return (
-		<div ref={ref} className="emoji-mart-host">
-			<Picker
-				data={data}
-				onEmojiSelect={onPick}
-				theme={theme}
-				// Native unicode glyphs (no spritesheet download).
-				set="native"
-				// Hide the preview row at the bottom — saves vertical
-				// space in our compact dialog.
-				previewPosition="none"
-				skinTonePosition="search"
-				navPosition="top"
-				perLine={9}
-				maxFrequentRows={2}
-				// Highlight the current value if it matches a known emoji.
-				emojiButtonRadius="6px"
-				autoFocus
-				// Used as the search input's id; helps a11y.
-				dynamicWidth={false}
-			/>
+		<div
+			ref={containerRef}
+			className="emoji-mart-host"
+			onClick={stopProp}
+			onMouseDown={stopProp}
+			onPointerDown={stopProp}
+			onTouchStart={stopProp}
+		>
 			{value && (
 				<input type="hidden" data-current-emoji={value} />
 			)}
