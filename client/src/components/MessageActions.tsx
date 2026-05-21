@@ -11,7 +11,7 @@ import {
 	PopoverTrigger,
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-import { Flag, Reply, Shield, SmilePlus, Trash2 } from "lucide-react";
+import { Flag, Reply, Shield, SmilePlus, Trash2, Pencil } from "lucide-react";
 import { InlineEmojiPicker } from "@/components/EmojiPicker";
 
 export interface MessageActionsProps {
@@ -22,13 +22,14 @@ export interface MessageActionsProps {
 	// false in DM rooms where the consensus-flag mechanism doesn't
 	// apply (a 1-on-1 chat has no community to vote with you).
 	showFlag?: boolean;
+	onEdit?(): void;
 	// Self-delete affordance.  When provided, a trash icon appears at
-	// the end of the toolbar — clicking it fires this handler, which
+	// the end of the toolbar: clicking it fires this handler, which
 	// is expected to OPEN the confirmation dialog (not perform the
 	// redaction directly).  Confirmation + the actual network call
 	// live at the row level (see ChatPane's MessageRow) so the
 	// dialog stays mounted when the user moves their cursor off the
-	// message to interact with it — a Dialog inside MessageActions
+	// message to interact with it: a Dialog inside MessageActions
 	// would unmount the moment the toolbar's hover state cleared.
 	onDelete?(): void;
 	// Admin redact affordance.  Distinct from `onDelete` (which is
@@ -51,7 +52,7 @@ export interface MessageActionsProps {
 }
 
 export function MessageActions({
-	onReact, onReply, onFlagClick, showFlag = true, onDelete, onAdminRedact, className,
+	onReact, onReply, onFlagClick, showFlag = true, onEdit, onDelete, onAdminRedact, className,
 	reactOpen: reactOpenProp, onReactOpenChange,
 }: MessageActionsProps) {
 	const [internalReactOpen, setInternalReactOpen] = useState(false);
@@ -119,6 +120,18 @@ export function MessageActions({
 					aria-label="Flag"
 				>
 					<Flag className="h-3.5 w-3.5" />
+				</button>
+			)}
+
+			{onEdit && (
+				<button
+					type="button"
+					onClick={onEdit}
+					className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+					title="Edit"
+					aria-label="Edit"
+				>
+					<Pencil className="h-3.5 w-3.5" />
 				</button>
 			)}
 

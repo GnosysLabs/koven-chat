@@ -2469,6 +2469,24 @@ export class MatrixTransport {
 		return res.event_id as EventId;
 	}
 
+	/** Edit an existing message by sending a replacement event. */
+	async editText(roomId: RoomId, targetEventId: EventId, body: string): Promise<EventId> {
+		const c = this.requireClient();
+		const res = await c.sendEvent(roomId, "m.room.message" as any, {
+			msgtype: "m.text",
+			body: `* ${body}`,
+			"m.new_content": {
+				msgtype: "m.text",
+				body,
+			},
+			"m.relates_to": {
+				rel_type: "m.replace",
+				event_id: targetEventId,
+			},
+		} as any);
+		return res.event_id as EventId;
+	}
+
 	/** Send a text message that replies to an existing one. */
 	/**
 	 * Tell the homeserver this user is typing (or stopped typing) in

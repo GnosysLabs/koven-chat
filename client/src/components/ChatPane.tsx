@@ -230,6 +230,7 @@ export interface ChatPaneProps {
 	// omitted, the trash icon is never shown (e.g. logged-out, DM
 	// with limited capabilities, etc.).
 	onDeleteMessage?(eventId: EventId): Promise<void>;
+	onEditMessage?(eventId: EventId, body: string): Promise<void>;
 	// Admin-redact handler.  Distinct from `onDeleteMessage` (which is
 	// authored-by-viewer or owned-bot-message only): this fires for
 	// admins (PL ≥ 50) acting on someone else's content.  Should
@@ -383,6 +384,7 @@ export function ChatPane({
 	serviceMxids,
 	myOwnedBotMxids,
 	onDeleteMessage,
+	onEditMessage,
 	onAdminRedactMessage,
 	canModerateRoom,
 	messagesLoaded,
@@ -1343,6 +1345,8 @@ export function ChatPane({
 								? () => onAdminRedactMessage(m.id)
 								: undefined
 					}
+					onEdit={onEditMessage ? (eventId, body) => onEditMessage(eventId, body) : undefined}
+					hasReplies={messages.some(msg => msg.replyTo?.eventId === m.id)}
 				/>
 			</div>
 		);
@@ -2211,7 +2215,7 @@ export function ChatPane({
 function MessageRowComponent({
 	message, avatarMxc, continuesGroup, isFirst, flaggable, roomEncrypted,
 	reactions, flags, onReact, onReply, onFlag, onToggleReactionPill, isBot,
-	isOwnedBot, isFlashing, onDelete, onAdminRedact,
+	isOwnedBot, isFlashing, onDelete, onAdminRedact, onEdit, hasReplies,
 	isDm, isBotDm, receiptsVersion, memberAvatars, memberNames, mentionsViewer, onMentionClick, botMxids, serviceMxids,
 	pollAggregate, viewerUserId, onPollVote, onPollEnd,
 	roomId, onSendDmToSender, onBlockSender,
@@ -2222,6 +2226,8 @@ function MessageRowComponent({
 	continuesGroup: boolean;
 	isFirst: boolean;
 	flaggable: boolean;
+	onEdit?(eventId: EventId, body: string): Promise<void>;
+	hasReplies?: boolean;
 	// Whether the room is end-to-end encrypted.  Drives URL-preview
 	// suppression: previewing in encrypted rooms would leak the URL
 	// to Synapse via /preview_url, defeating part of the encryption
@@ -2328,6 +2334,53 @@ function MessageRowComponent({
 	onOpenSenderProfile?(userId: UserId): void;
 }) {
 	const [flagDialogOpen, setFlagDialogOpen] = useState(false);
+	const [isEditing, setIsEditing] = useState(false);
+	const [editText, setEditText] = useState(message.text);
+	const [isSaving, setIsSaving] = useState(false);
+
+	const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+	// Synchronize the edit text with the server state if the message
+	// is modified from another client or if the user cancels editing.
+	useEffect(() => {
+		if (!isEditing) {
+			setEditText(message.text);
+		}
+	}, [message.text, isEditing]);
+
+	// Automatically focus the input and position the cursor at the end
+	// to enable immediate typing.
+	useEffect(() => {
+		if (isEditing && textareaRef.current) {
+			textareaRef.current.focus();
+			const len = textareaRef.current.value.length;
+			textareaRef.current.setSelectionRange(len, len);
+		}
+	}, [isEditing]);
+
+	const handleSave = async () => {
+		const trimmed = editText.trim();
+		if (!trimmed || trimmed === message.text) {
+			setIsEditing(false);
+			return;
+		}
+		setIsSaving(true);
+		try {
+			if (onEdit) {
+				await onEdit(message.id, trimmed);
+			}
+			setIsEditing(false);
+		} catch (err) {
+			console.error("Failed to edit message:", err);
+		} finally {
+			setIsSaving(false);
+		}
+	};
+
+	const hasRepliesCheck = !!hasReplies;
+	const isEditableKind = message.kind === "text" || message.kind === "emote";
+	const isWithinTenMins = Date.now() - message.timestamp < 10 * 60 * 1000;
+	const canEdit = !!onEdit && !!message.isSelf && isEditableKind && !message.pending && isWithinTenMins && !hasRepliesCheck;
 	// Right-click context menu state.  Cursor-positioned, dismissed
 	// via the generic ContextMenu primitive's outside-mousedown handler.
 	const [ctxMenuPos, setCtxMenuPos] = useState<{ x: number; y: number } | null>(null);
@@ -2551,7 +2604,7 @@ function MessageRowComponent({
 			/>
 				<div className="flex-1 min-w-0 pt-1 text-sm italic text-muted-foreground flex items-center gap-2">
 					<span>* <span className="text-foreground/80">{message.senderDisplayName}</span> {message.text}</span>
-					{/* Always-mounted to avoid React commits on hover —
+					{/* Always-mounted to avoid React commits on hover:
 					    visibility is driven by the row's data-row-hovered
 					    attribute via CSS (see .actions-slot rule in
 					    index.css).  See the comment near the document-
@@ -2564,6 +2617,7 @@ function MessageRowComponent({
 								onReply={onReply}
 								onFlagClick={() => setFlagDialogOpen(true)}
 								showFlag={canFlag}
+								onEdit={canEdit ? () => setIsEditing(true) : undefined}
 								onDelete={handleDelete}
 								onAdminRedact={handleAdminRedact}
 								reactOpen={reactOpen}
@@ -2713,22 +2767,65 @@ function MessageRowComponent({
 					    messages where flex would otherwise stretch the
 					    column wider. */}
 					<div className="relative w-fit flex flex-col min-w-0">
-						<MessageBubble
-							message={message}
-							memberNames={memberNames}
-							memberAvatars={memberAvatars}
-							onMentionClick={onMentionClick}
-							pollAggregate={pollAggregate}
-							viewerUserId={viewerUserId}
-							onPollVote={onPollVote}
-							onPollEnd={onPollEnd}
-							isBot={isBot}
-						/>
-						{message.kind === "text" && !roomEncrypted && (
+						{isEditing ? (
+							<div className="flex flex-col gap-1.5 w-full min-w-[280px] max-w-md p-1 bg-card rounded-md border border-border">
+								<textarea
+									ref={textareaRef}
+									value={editText}
+									disabled={isSaving}
+									onChange={(e) => setEditText(e.target.value)}
+									onKeyDown={(e) => {
+										if (e.key === "Enter" && !e.shiftKey) {
+											e.preventDefault();
+											void handleSave();
+										} else if (e.key === "Escape") {
+											e.preventDefault();
+											setIsEditing(false);
+										}
+									}}
+									className={cn(
+										"w-full min-h-[60px] max-h-[200px] resize-none bg-transparent p-2 text-sm outline-none border-0 focus:ring-0 focus:outline-none placeholder:text-muted-foreground text-foreground whitespace-pre-wrap",
+										"md:text-sm",
+									)}
+									placeholder="Edit message..."
+								/>
+								<div className="flex items-center justify-end gap-1.5 px-2 pb-1.5">
+									<button
+										type="button"
+										disabled={isSaving}
+										onClick={() => setIsEditing(false)}
+										className="px-2.5 py-1 text-[11px] font-medium rounded hover:bg-accent hover:text-foreground text-muted-foreground transition-colors"
+									>
+										Cancel
+									</button>
+									<button
+										type="button"
+										disabled={isSaving || !editText.trim() || editText === message.text}
+										onClick={handleSave}
+										className="px-2.5 py-1 text-[11px] font-medium rounded bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+									>
+										{isSaving ? "Saving..." : "Save"}
+									</button>
+								</div>
+							</div>
+						) : (
+							<MessageBubble
+								message={message}
+								memberNames={memberNames}
+								memberAvatars={memberAvatars}
+								onMentionClick={onMentionClick}
+								pollAggregate={pollAggregate}
+								viewerUserId={viewerUserId}
+								onPollVote={onPollVote}
+								onPollEnd={onPollEnd}
+								isBot={isBot}
+							/>
+						)}
+						{!isEditing && message.kind === "text" && !roomEncrypted && (
 							// Link preview rides under the bubble for plain text
 							// messages only.  Skipped on attachments / emotes
 							// to keep those layouts clean.  Also skipped in
-							// encrypted rooms — see roomEncrypted prop above.
+							// encrypted rooms (see roomEncrypted prop above).
 							<UrlPreviewSlot text={message.text} />
 						)}
 						{/* Desktop: reactions float absolute beneath the
@@ -2823,7 +2920,7 @@ function MessageRowComponent({
 						    gutter between bubbles stays consistent
 						    whether the toolbar is visible or not.
 						    Mobile gets the actions via long-press
-						    menu instead — the slot would bloat every
+						    menu instead: the slot would bloat every
 						    mobile row by 32px so we skip it. */}
 						{!isMobileShell && (
 							<div className="actions-slot min-h-8 flex items-start opacity-0 pointer-events-none">
@@ -2832,6 +2929,7 @@ function MessageRowComponent({
 									onReply={onReply}
 									onFlagClick={() => setFlagDialogOpen(true)}
 									showFlag={canFlag}
+									onEdit={canEdit ? () => setIsEditing(true) : undefined}
 									onDelete={handleDelete}
 									onAdminRedact={handleAdminRedact}
 									reactOpen={reactOpen}
@@ -2895,7 +2993,7 @@ function MessageRowComponent({
 					}}
 					// Suppress "Copy message link" inside DMs.  A DM
 					// permalink necessarily identifies both parties to
-					// anyone it's pasted in front of — and unlike room
+					// anyone it's pasted in front of, and unlike room
 					// permalinks (where the room is the context), there's
 					// no meaningful "click to navigate to that
 					// conversation" UX for non-participants either, since
@@ -2904,9 +3002,10 @@ function MessageRowComponent({
 					onCopyLink={isDm ? undefined : () => {
 						void navigator.clipboard.writeText(buildMessageUrl(roomId, message.id));
 					}}
+					onEdit={canEdit ? () => { setIsEditing(true); setCtxMenuPos(null); } : undefined}
 					onDelete={onDelete && !message.pending ? () => setDeleteDialogOpen(true) : undefined}
 					onFlag={canFlag ? () => setFlagDialogOpen(true) : undefined}
-					// "Send DM to sender" is meaningless inside a DM —
+					// "Send DM to sender" is meaningless inside a DM:
 					// you ARE the DM with them.  Suppress so the menu
 					// doesn't suggest opening another conversation
 					// when this one already exists.
@@ -2978,6 +3077,7 @@ function messageRowPropsEqual(
 	if (prev.pollAggregate !== next.pollAggregate) return false;
 	if (prev.viewerUserId !== next.viewerUserId) return false;
 	if (prev.roomId !== next.roomId) return false;
+	if (prev.hasReplies !== next.hasReplies) return false;
 	// `reactions` empty-case is reference-stable (EMPTY_REACTIONS), but
 	// the non-empty path can still receive a freshly-built array from
 	// the parent.  Length + per-element identity captures the cases
@@ -2989,6 +3089,7 @@ function messageRowPropsEqual(
 	// Optional callbacks: presence matters, identity does not.
 	if (!!prev.onDelete !== !!next.onDelete) return false;
 	if (!!prev.onAdminRedact !== !!next.onAdminRedact) return false;
+	if (!!prev.onEdit !== !!next.onEdit) return false;
 	if (!!prev.onSendDmToSender !== !!next.onSendDmToSender) return false;
 	if (!!prev.onBlockSender !== !!next.onBlockSender) return false;
 	if (!!prev.onOpenSenderProfile !== !!next.onOpenSenderProfile) return false;
@@ -3257,7 +3358,7 @@ function MessageBubble({
 	const editedBadge = showEdited ? (
 		<span className={cn(
 			"ml-1.5 text-[10px]",
-			message.isSelf ? "text-primary-foreground/60" : "text-muted-foreground",
+			message.isSelf ? "text-primary-foreground/60 dark:text-muted-foreground" : "text-muted-foreground",
 		)}>
 			(edited)
 		</span>

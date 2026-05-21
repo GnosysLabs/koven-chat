@@ -8,7 +8,7 @@
 import { useMemo } from "react";
 import { ContextMenu, type ContextMenuItem } from "@/components/ui/context-menu";
 import {
-	Copy, Flag, Link2, Reply, Smile, Trash2, UserX, MessageSquare,
+	Copy, Flag, Link2, Reply, Smile, Trash2, UserX, MessageSquare, Pencil,
 } from "lucide-react";
 import type { Message } from "@koven/shared";
 
@@ -34,6 +34,7 @@ export interface MessageContextMenuProps {
 	// to a DM anyway).  When undefined the "Copy message link" item
 	// is suppressed from the menu entirely.
 	onCopyLink?(): void;
+	onEdit?(): void;
 	onDelete?(): void;
 	onFlag?(): void;
 	onBlockSender?(): void;
@@ -44,7 +45,7 @@ export interface MessageContextMenuProps {
 export function MessageContextMenu({
 	x, y, message, isSelf, flaggable,
 	onReply, onReact, onCopyText, onCopyLink,
-	onDelete, onFlag, onBlockSender, onSendDmToSender,
+	onEdit, onDelete, onFlag, onBlockSender, onSendDmToSender,
 	onClose,
 }: MessageContextMenuProps) {
 	const hasText = !!message.text && message.kind !== "image" && message.kind !== "video"
@@ -82,14 +83,27 @@ export function MessageContextMenu({
 		}
 
 		// Self vs other actions.
-		if (isSelf && onDelete) {
-			out.push({ kind: "divider" });
-			out.push({
-				label: "Delete message",
-				icon: <Trash2 className="h-4 w-4" />,
-				danger: true,
-				onClick: onDelete,
-			});
+		if (isSelf) {
+			const selfItems: ContextMenuItem[] = [];
+			if (onEdit) {
+				selfItems.push({
+					label: "Edit message",
+					icon: <Pencil className="h-4 w-4" />,
+					onClick: onEdit,
+				});
+			}
+			if (onDelete) {
+				selfItems.push({
+					label: "Delete message",
+					icon: <Trash2 className="h-4 w-4" />,
+					danger: true,
+					onClick: onDelete,
+				});
+			}
+			if (selfItems.length > 0) {
+				out.push({ kind: "divider" });
+				for (const a of selfItems) out.push(a);
+			}
 		}
 		if (!isSelf) {
 			const otherActions: ContextMenuItem[] = [];
@@ -125,7 +139,7 @@ export function MessageContextMenu({
 	}, [
 		hasText, isSelf, flaggable,
 		onReply, onReact, onCopyText, onCopyLink,
-		onDelete, onFlag, onBlockSender, onSendDmToSender,
+		onEdit, onDelete, onFlag, onBlockSender, onSendDmToSender,
 	]);
 
 	return <ContextMenu x={x} y={y} items={items} onClose={onClose} />;

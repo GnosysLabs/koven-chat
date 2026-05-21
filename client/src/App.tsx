@@ -2926,19 +2926,28 @@ export default function App() {
 							throw new Error("Not connected");
 						}
 						// Let errors bubble up to MessageActions's DeleteAction
-						// dialog — it shows them inline next to the buttons
+						// dialog: it shows them inline next to the buttons
 						// so the user can see exactly why the redaction
 						// failed (403 "not your bot", 404 "event gone",
 						// 502 redaction-side failure, network drop).
 						// Synapse emits the successful redaction back
 						// through sync, matrix-js-sdk applies it, and the
 						// row re-renders as a redacted stub on the next
-						// reducer pass — no manual state update needed.
+						// reducer pass: no manual state update needed.
 						await deleteOwnMessage(
 							creds.access_token,
 							state.activeRoomId,
 							eventId,
 						);
+					}}
+					onEditMessage={async (eventId, body) => {
+						if (!transport || !state.activeRoomId) {
+							throw new Error("Not connected");
+						}
+						// The edit is sent to Synapse as a replacement event.
+						// The local room timeline is updated reactively once
+						// Synapse syncs the replacement back.
+						await transport.editText(state.activeRoomId, eventId, body);
 					}}
 					canModerateRoom={canModerateActiveRoom}
 					onAdminRedactMessage={async (eventId) => {

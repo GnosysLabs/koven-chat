@@ -1,7 +1,7 @@
 [package]
 name = "koven-desktop"
-version = "0.22.4"
-description = "Koven desktop shell — Tauri WebView wrapping client.koven.chat with native window chrome, OS-routed external links, and a minisign-signed in-app updater."
+version = "0.22.5"
+description = "Koven desktop shell: Tauri WebView wrapping client.koven.chat with native window chrome, OS-routed external links, and a minisign-signed in-app updater."
 authors = ["Gnosys Labs"]
 edition = "2021"
 rust-version = "1.77"
