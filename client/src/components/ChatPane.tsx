@@ -35,7 +35,9 @@ import { firstLink, linkify } from "@/lib/linkify";
 import { renderWithMentions } from "@/lib/mentionRender";
 import { buildMessageUrl, parseShareLinkUrl } from "@/lib/inviteLink";
 import { findYouTubeMatches, isYouTubeUrl, stripYouTubeUrls } from "@/lib/youtube";
+import { findAudiusMatches, isAudiusUrl, stripAudiusUrls } from "@/lib/audius";
 import { YouTubeEmbed } from "@/components/YouTubeEmbed";
+import { AudiusEmbed } from "@/components/AudiusEmbed";
 import { MediaPicker } from "@/components/MediaPicker";
 import { PollCard } from "@/components/PollCard";
 import { CreatePollDialog } from "@/components/CreatePollDialog";
@@ -3238,12 +3240,19 @@ function MessageBubble({
 	const isMarkdown = looksLikeMarkdown(message.text);
 	const firstUrl = isMarkdown ? null : firstLink(message.text);
 	const firstUrlIsYouTube = !!firstUrl && isYouTubeUrl(firstUrl);
+	const firstUrlIsAudius = !!firstUrl && isAudiusUrl(firstUrl);
 	const youtubeMatches = firstUrlIsYouTube
 		? findYouTubeMatches(message.text)  // capped at 1 by MAX_INLINE_EMBEDS
 		: [];
-	const strippedText = youtubeMatches.length > 0
-		? stripYouTubeUrls(message.text, youtubeMatches)
-		: message.text;
+	const audiusMatches = firstUrlIsAudius
+		? findAudiusMatches(message.text)   // capped at 1 by MAX_INLINE_EMBEDS
+		: [];
+	let strippedText = message.text;
+	if (youtubeMatches.length > 0) {
+		strippedText = stripYouTubeUrls(message.text, youtubeMatches);
+	} else if (audiusMatches.length > 0) {
+		strippedText = stripAudiusUrls(message.text, audiusMatches);
+	}
 	const hasBubbleContent = strippedText.length > 0;
 	const editedBadge = showEdited ? (
 		<span className={cn(
@@ -3284,8 +3293,14 @@ function MessageBubble({
 					startSeconds={m.startSeconds}
 				/>
 			))}
+			{audiusMatches.map((m, i) => (
+				<AudiusEmbed
+					key={`${m.trackSlug}-${i}`}
+					trackUrl={m.url}
+				/>
+			))}
 			{!hasBubbleContent && !isMarkdown && showEdited && (
-				// All-YouTube body with no surviving text still wants
+				// All-YouTube/Audius body with no surviving text still wants
 				// the (edited) badge somewhere, tuck it under the
 				// last embed.
 				<span className="text-[10px] text-muted-foreground self-start">
@@ -4068,13 +4083,14 @@ function PendingAttachmentThumb({
 // no flicker, no empty cards.
 //
 // Embed-slot competition: only the FIRST URL in source order gets an
-// embed.  If that first URL is YouTube, MessageBubble already rendered
-// the iframe player; this slot suppresses to keep the rule "one embed
-// per message".  If the first URL is non-YouTube, we preview it here
-// (and any later YouTube URLs in the same message stay as plain links).
+// embed.  If that first URL is YouTube or Audius, MessageBubble already rendered
+// the player; this slot suppresses to keep the rule "one embed
+// per message".  If the first URL is non-YouTube and non-Audius, we preview it here
+// (and any later embeds in the same message stay as plain links).
 function UrlPreviewSlot({ text }: { text: string }) {
 	const url = firstLink(text);
 	const firstUrlIsYouTube = !!url && isYouTubeUrl(url);
+	const firstUrlIsAudius = !!url && isAudiusUrl(url);
 	// Skip the OG card for share URLs the message body already
 	// rendered as an inline room-mention pill.  The pill conveys
 	// the target's name + scope, an extra card showing "Koven /
@@ -4083,12 +4099,12 @@ function UrlPreviewSlot({ text }: { text: string }) {
 	// URL the share-link parser recognises as "already pilled" and
 	// suppress the preview slot entirely.
 	const firstUrlIsShareLink = !!url && parseShareLinkUrl(url) !== null;
-	// Pass null to useUrlPreview when YouTube or our own share link
+	// Pass null to useUrlPreview when YouTube, Audius, or our own share link
 	// wins the slot so we don't spend a Synapse OG-preview round-
 	// trip we'd just discard.
-	const preview = useUrlPreview(firstUrlIsYouTube || firstUrlIsShareLink ? null : url);
+	const preview = useUrlPreview(firstUrlIsYouTube || firstUrlIsAudius || firstUrlIsShareLink ? null : url);
 	const imageUrl = useMatrixMedia(preview?.imageMxc);
-	if (!url || firstUrlIsYouTube || firstUrlIsShareLink || !preview) return null;
+	if (!url || firstUrlIsYouTube || firstUrlIsAudius || firstUrlIsShareLink || !preview) return null;
 
 	const host = (() => {
 		try { return new URL(preview.url).hostname.replace(/^www\./, ""); }
