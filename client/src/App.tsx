@@ -107,6 +107,8 @@ import { CallPipPanel } from "@/components/voice/CallPipPanel";
 import { IncomingRingListener } from "@/components/voice/IncomingRingListener";
 import { CallToastListener } from "@/components/voice/CallToastListener";
 import { useCall } from "@/lib/call-context";
+import { AudiusPlayerProvider } from "@/lib/audiusPlayerContext";
+import { AudiusMiniPlayer } from "@/components/AudiusMiniPlayer";
 
 // Escape a string for safe interpolation into a RegExp.  Used to
 // build the @localpart mention matcher in the notification path —
@@ -2373,7 +2375,8 @@ export default function App() {
 	return (
 		<TransportContext.Provider value={transport}>
 		<ShareIntentProvider value={shareIntentContextValue}>
-		<div className="h-full flex flex-col">
+		<AudiusPlayerProvider>
+			<div className="h-full flex flex-col">
 			{/* Hidden audio sinks for every joined remote participant.
 			    Lives at the App level so audio survives navigation
 			    (the participant tiles unmount when you leave the
@@ -2445,6 +2448,10 @@ export default function App() {
 					{bootError ? `Connection error: ${bootError}` : `Sync: ${state.syncState}`}
 				</div>
 			)}
+			<AudiusMiniPlayer
+				activeRoomId={state.activeRoomId}
+				onNavigateToRoom={(roomId) => dispatch({ type: "set_active_room", roomId })}
+			/>
 			<PendingInvitesPill
 				invites={state.spaceInvites}
 				onOpen={() => setPendingInvitesOpen(true)}
@@ -4366,7 +4373,8 @@ export default function App() {
 					transport={transport}
 				/>
 			)}
-		</div>
+			</div>
+		</AudiusPlayerProvider>
 		</ShareIntentProvider>
 		</TransportContext.Provider>
 	);

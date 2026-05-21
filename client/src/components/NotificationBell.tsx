@@ -459,7 +459,7 @@ function ChatbotPanel({
 				zIndex: 41, // one above the FAB so it can't sit behind
 				transform: mounted ? "translateY(0)" : "translateY(8px)",
 				opacity: mounted ? 1 : 0,
-				transition: "transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 180ms",
+				transition: "transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 180ms, bottom 150ms ease",
 			}}
 			className={cn(
 				"flex flex-col rounded-2xl overflow-hidden",

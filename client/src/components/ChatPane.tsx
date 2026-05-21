@@ -3421,6 +3421,7 @@ function MessageBubble({
 				<AudiusEmbed
 					key={`${m.trackSlug}-${i}`}
 					trackUrl={m.url}
+					roomId={message.roomId}
 				/>
 			))}
 			{!hasBubbleContent && !isMarkdown && showEdited && (

@@ -10,9 +10,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Play, Pause, SkipForward, SkipBack, ListMusic, ChevronDown, ChevronUp, Music, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useAudiusPlayer } from "@/lib/audiusPlayerContext";
 
 interface AudiusEmbedProps {
 	trackUrl: string;
+	roomId?: string;
 }
 
 interface TrackMetadata {
@@ -23,7 +25,23 @@ interface TrackMetadata {
 	duration: number;
 }
 
-export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
+export function AudiusEmbed({ trackUrl, roomId }: AudiusEmbedProps) {
+	const {
+		activeTrackUrl,
+		currentTrackIndex: contextTrackIndex,
+		isPlaying: contextIsPlaying,
+		progress: contextProgress,
+		currentTime: contextTime,
+		duration: contextDuration,
+		playbackError: contextPlaybackError,
+		play: contextPlay,
+		togglePlay: contextTogglePlay,
+		next: contextNext,
+		prev: contextPrev,
+		seek: contextSeek,
+		playTrack: contextPlayTrack,
+	} = useAudiusPlayer();
+
 	const [tracks, setTracks] = useState<TrackMetadata[]>([]);
 	const [playlistName, setPlaylistName] = useState("");
 	const [curatorName, setCuratorName] = useState("");
@@ -32,16 +50,19 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 	const [isAlbum, setIsAlbum] = useState(false);
 
 	const [currentTrackIndex, setCurrentTrackIndex] = useState(0);
-	const [isPlaying, setIsPlaying] = useState(false);
-	const [progress, setProgress] = useState(0);
-	const [currentTime, setCurrentTime] = useState(0);
 	const [loading, setLoading] = useState(true);
 	const [resolveError, setResolveError] = useState(false);
-	const [playbackError, setPlaybackError] = useState<string | null>(null);
 	const [showAllTracks, setShowAllTracks] = useState(false);
 
-	const audioRef = useRef<HTMLAudioElement | null>(null);
 	const progressBarRef = useRef<HTMLDivElement | null>(null);
+
+	const isCurrentActive = activeTrackUrl === trackUrl;
+	const displayTrackIndex = isCurrentActive ? contextTrackIndex : currentTrackIndex;
+	const displayIsPlaying = isCurrentActive ? contextIsPlaying : false;
+	const displayProgress = isCurrentActive ? contextProgress : 0;
+	const displayCurrentTime = isCurrentActive ? contextTime : 0;
+	const displayDuration = isCurrentActive ? contextDuration : (tracks[displayTrackIndex]?.duration || 0);
+	const displayPlaybackError = isCurrentActive ? contextPlaybackError : null;
 
 	// Fetch metadata from Audius Resolve API.
 	useEffect(() => {
@@ -53,12 +74,8 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 		setIsPlaylist(false);
 		setIsAlbum(false);
 		setCurrentTrackIndex(0);
-		setIsPlaying(false);
-		setProgress(0);
-		setCurrentTime(0);
 		setLoading(true);
 		setResolveError(false);
-		setPlaybackError(null);
 
 		const resolveUrl = `https://api.audius.co/v1/resolve?url=${encodeURIComponent(trackUrl)}&app_name=koven`;
 
@@ -77,7 +94,6 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 						setPlaylistName(playlistObj.playlist_name);
 						setCuratorName(playlistObj.user?.name || "Unknown Creator");
 						setCoverArtUrl(playlistObj.artwork?.["150x150"]);
-						// Filter out tracks that are deleted or unavailable to prevent playback failures.
 						const rawTracks = playlistObj.tracks || [];
 						const filteredTracks = rawTracks.filter(
 							(t: any) => t.is_delete !== true && t.is_available !== false
@@ -90,7 +106,6 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 						setPlaylistName(trackObj.title);
 						setCuratorName(trackObj.user?.name || "Unknown Artist");
 						setCoverArtUrl(trackObj.artwork?.["150x150"]);
-						// Filter out single track if it is deleted or unavailable.
 						const isDeleted = trackObj.is_delete === true || trackObj.is_available === false;
 						setTracks(isDeleted ? [] : [trackObj]);
 					}
@@ -108,151 +123,78 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 
 		return () => {
 			active = false;
-			if (audioRef.current) {
-				audioRef.current.pause();
-				audioRef.current.src = "";
-				try {
-					audioRef.current.load();
-				} catch (e) {
-					// Ignore potential errors during abort load.
-				}
-				audioRef.current = null;
-			}
 		};
 	}, [trackUrl]);
 
 	// Play track at index.
-	const playTrack = (index: number, shouldStartPlaying = true) => {
-		const targetTrack = tracks[index];
-		if (!targetTrack) return;
-
-		// Clean up existing audio instance.
-		if (audioRef.current) {
-			audioRef.current.pause();
-			audioRef.current.src = "";
-			try {
-				audioRef.current.load();
-			} catch (e) {
-				// Ignore load abort errors.
-			}
-			audioRef.current = null;
-		}
-
-		setCurrentTrackIndex(index);
-		setProgress(0);
-		setCurrentTime(0);
-		setPlaybackError(null);
-
-		if (shouldStartPlaying) {
-			const streamUrl = `https://api.audius.co/v1/tracks/${targetTrack.id}/stream?app_name=koven`;
-			const audio = new Audio(streamUrl);
-			audioRef.current = audio;
-			const fallbackDuration = targetTrack.duration;
-
-			audio.addEventListener("timeupdate", () => {
-				if (audioRef.current) {
-					const cur = audioRef.current.currentTime;
-					const dur = audioRef.current.duration || fallbackDuration || 0;
-					setCurrentTime(cur);
-					setProgress(dur > 0 ? (cur / dur) * 100 : 0);
-				}
-			});
-
-			audio.addEventListener("ended", () => {
-				// Auto-advance.
-				const nextIndex = index + 1;
-				if (nextIndex < tracks.length) {
-					playTrack(nextIndex, true);
-				} else {
-					setIsPlaying(false);
-					setProgress(0);
-					setCurrentTime(0);
-				}
-			});
-
-			audio.addEventListener("error", () => {
-				// Show error status instead of crashing the entire component.
-				setPlaybackError("Playback failed: track unavailable");
-				setIsPlaying(false);
-			});
-
-			audio.play()
-				.then(() => {
-					setPlaybackError(null);
-					setIsPlaying(true);
-				})
-				.catch((err) => {
-					console.error("Audio playback failed:", err);
-					setPlaybackError("Playback failed: track unavailable");
-					setIsPlaying(false);
-				});
+	const playTrack = (index: number) => {
+		if (isCurrentActive) {
+			contextPlayTrack(index, true);
 		} else {
-			setIsPlaying(false);
+			setCurrentTrackIndex(index);
+			contextPlay({
+				trackUrl,
+				roomId: roomId || "",
+				tracks,
+				playlistName,
+				curatorName,
+				coverArtUrl,
+				isPlaylist,
+				isAlbum,
+				initialTrackIndex: index,
+			});
 		}
 	};
 
 	// Play / Pause toggler.
 	const togglePlay = () => {
-		if (isPlaying) {
-			if (audioRef.current) {
-				audioRef.current.pause();
-			}
-			setIsPlaying(false);
+		if (isCurrentActive) {
+			contextTogglePlay();
 		} else {
-			if (audioRef.current) {
-				audioRef.current.play().then(() => {
-					setPlaybackError(null);
-					setIsPlaying(true);
-				}).catch(() => {
-					setPlaybackError("Playback failed: track unavailable");
-				});
-			} else {
-				playTrack(currentTrackIndex, true);
-			}
+			contextPlay({
+				trackUrl,
+				roomId: roomId || "",
+				tracks,
+				playlistName,
+				curatorName,
+				coverArtUrl,
+				isPlaylist,
+				isAlbum,
+				initialTrackIndex: currentTrackIndex,
+			});
 		}
 	};
 
 	// Next / Prev track handlers.
 	const handleNext = () => {
-		if (currentTrackIndex + 1 < tracks.length) {
-			playTrack(currentTrackIndex + 1, isPlaying);
+		if (isCurrentActive) {
+			contextNext();
+		} else {
+			const nextIdx = currentTrackIndex + 1;
+			if (nextIdx < tracks.length) {
+				setCurrentTrackIndex(nextIdx);
+			}
 		}
 	};
 
 	const handlePrev = () => {
-		if (audioRef.current && audioRef.current.currentTime > 3) {
-			audioRef.current.currentTime = 0;
-			setCurrentTime(0);
-			setProgress(0);
-		} else if (currentTrackIndex - 1 >= 0) {
-			playTrack(currentTrackIndex - 1, isPlaying);
-		} else if (audioRef.current) {
-			audioRef.current.currentTime = 0;
-			setCurrentTime(0);
-			setProgress(0);
+		if (isCurrentActive) {
+			contextPrev();
+		} else {
+			if (currentTrackIndex - 1 >= 0) {
+				setCurrentTrackIndex(currentTrackIndex - 1);
+			}
 		}
 	};
 
 	// Click to seek handler.
 	const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
-		if (!audioRef.current) return;
-		const activeTrack = tracks[currentTrackIndex];
-		if (!activeTrack) return;
-
-		const dur = audioRef.current.duration || activeTrack.duration || 0;
-		if (dur <= 0) return;
-
-		const rect = e.currentTarget.getBoundingClientRect();
-		const clickX = e.clientX - rect.left;
-		const width = rect.width;
-		const pct = Math.max(0, Math.min(1, clickX / width));
-
-		try {
-			audioRef.current.currentTime = pct * dur;
-			setProgress(pct * 100);
-			setCurrentTime(pct * dur);
-		} catch (err) {
-			console.warn("Failed to seek audio:", err);
+		if (isCurrentActive) {
+			const rect = e.currentTarget.getBoundingClientRect();
+			const clickX = e.clientX - rect.left;
+			const width = rect.width;
+			const pct = Math.max(0, Math.min(1, clickX / width));
+			contextSeek(pct);
 		}
 	};
 
@@ -330,9 +272,9 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 					<button
 						onClick={togglePlay}
 						className="w-9 h-9 rounded-full bg-gradient-to-tr from-violet-600 to-fuchsia-600 text-white flex items-center justify-center shadow-lg hover:shadow-fuchsia-500/20 hover:scale-105 active:scale-95 transition-all duration-200"
-						title={isPlaying ? "Pause" : "Play"}
+						title={displayIsPlaying ? "Pause" : "Play"}
 					>
-						{isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
+						{displayIsPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
 					</button>
 
 					<button
@@ -347,15 +289,15 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 
 				{/* Progress Slider */}
 				<div className="flex-1 flex flex-col gap-1 min-w-0">
-					{playbackError ? (
+					{displayPlaybackError ? (
 						<div className="text-[10px] text-red-400 truncate font-medium mb-0.5 flex items-center gap-1">
 							<AlertTriangle className="w-3 h-3 flex-shrink-0 text-red-400" />
-							<span>{playbackError}</span>
+							<span>{displayPlaybackError}</span>
 						</div>
 					) : (
-						isPlaylist && tracks[currentTrackIndex] && (
+						isPlaylist && tracks[displayTrackIndex] && (
 							<div className="text-[10px] text-zinc-300 truncate font-medium mb-0.5">
-								Playing: {tracks[currentTrackIndex].title}
+								Playing: {tracks[displayTrackIndex].title}
 							</div>
 						)
 					)}
@@ -366,12 +308,12 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 					>
 						<div
 							className="h-full bg-gradient-to-r from-violet-500 to-fuchsia-500 rounded-full"
-							style={{ width: `${progress}%` }}
+							style={{ width: `${displayProgress}%` }}
 						/>
 					</div>
 					<div className="flex justify-between text-[10px] text-zinc-500">
-						<span>{formatTime(currentTime)}</span>
-						<span>{formatTime(tracks[currentTrackIndex]?.duration || 0)}</span>
+						<span>{formatTime(displayCurrentTime)}</span>
+						<span>{formatTime(displayDuration)}</span>
 					</div>
 				</div>
 			</div>
@@ -391,11 +333,11 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 
 						<div className="flex flex-col gap-0.5 max-h-48 overflow-y-auto pr-0.5 scrollbar-thin">
 							{visibleTracks.map((t, i) => {
-								const isActive = i === currentTrackIndex;
+								const isActive = i === displayTrackIndex;
 								return (
 									<div
 										key={`${t.id}-${i}`}
-										onClick={() => playTrack(i, true)}
+										onClick={() => playTrack(i)}
 										className={cn(
 											"hover:bg-zinc-800/40 cursor-pointer rounded-md p-1.5 flex justify-between items-center text-xs transition-colors duration-150",
 											isActive 
@@ -405,7 +347,7 @@ export function AudiusEmbed({ trackUrl }: AudiusEmbedProps) {
 									>
 										<div className="flex items-center gap-2 min-w-0">
 											<span className="text-[10px] text-zinc-500 w-4 text-right flex-shrink-0">
-												{isActive && isPlaying ? (
+												{isActive && displayIsPlaying ? (
 													<span className="flex gap-0.5 justify-center items-end h-2 w-2.5">
 														<span className="w-[1.5px] bg-violet-400 animate-bounce h-2" style={{ animationDelay: "0.1s" }} />
 														<span className="w-[1.5px] bg-violet-400 animate-bounce h-1.5" style={{ animationDelay: "0.3s" }} />
