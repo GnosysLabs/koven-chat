@@ -23,6 +23,7 @@ import { fetchIntegrationsStatus, type IntegrationsStatus } from "@/lib/klipy";
 export interface InstanceAdminSectionProps {
 	accessToken: string;
 	transport: MatrixTransport | null;
+	onConfigChange?: (config: InstanceConfig) => void;
 }
 
 interface PublicSpaceOption {
@@ -31,12 +32,14 @@ interface PublicSpaceOption {
 	memberCount: number;
 }
 
-export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSectionProps) {
+export function InstanceAdminSection({ accessToken, transport, onConfigChange }: InstanceAdminSectionProps) {
 	const [loading, setLoading] = useState(true);
 	const [config, setConfig] = useState<InstanceConfig>({});
 	const [name, setName] = useState("");
 	const [tagline, setTagline] = useState("");
 	const [defaultSpaceId, setDefaultSpaceId] = useState<string>("");
+	const [allowCommentEditWhenReply, setAllowCommentEditWhenReply] = useState<string>("false");
+	const [allowEditForMinutes, setAllowEditForMinutes] = useState<string>("default");
 	const [publicSpaces, setPublicSpaces] = useState<PublicSpaceOption[]>([]);
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
@@ -76,8 +79,10 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 			setName(cfg.name ?? "");
 			setTagline(cfg.login_tagline ?? "");
 			setDefaultSpaceId(cfg.default_space_id ?? "");
-			// Public config exposes the Turnstile site key — it's
-			// embedded in the login HTML so it's not a secret.  Pre-
+			setAllowCommentEditWhenReply(cfg.allow_comment_edit_when_reply ?? "false");
+			setAllowEditForMinutes(cfg.allow_edit_for_minutes ?? "default");
+			// Public config exposes the Turnstile site key: it's
+			// embedded in the login HTML so it's not a secret. Pre-
 			// fill the input so admins can see what's set without
 			// re-pasting from Cloudflare.
 			setTurnstileSiteDraft((cfg as { turnstile_site_key?: string }).turnstile_site_key ?? "");
@@ -103,6 +108,8 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 				name: name.trim() || null,
 				login_tagline: tagline.trim() || null,
 				default_space_id: defaultSpaceId || null,
+				allow_comment_edit_when_reply: allowCommentEditWhenReply,
+				allow_edit_for_minutes: allowEditForMinutes,
 			};
 			// Only write the Klipy key when the admin has typed
 			// something, never overwrite an existing key with empty
@@ -123,6 +130,7 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 			}
 			const next = await updateInstanceConfig(accessToken, patch);
 			setConfig(next);
+			onConfigChange?.(next);
 			const wroteIntegration = !!(
 				klipyKeyDraft.trim() || turnstileSecretDraft.trim() || trimmedSite !== currentSite
 			);
@@ -133,7 +141,7 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 				setIntegrations(integ);
 				setKlipyKeyDraft("");
 				setTurnstileSecretDraft("");
-				// Site key is left in-place — pre-fills from the freshly-
+				// Site key is left in-place, pre-fills from the freshly
 				// loaded config below.
 				setTurnstileSiteDraft(
 					(next as { turnstile_site_key?: string }).turnstile_site_key ?? "",
@@ -154,6 +162,7 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 		try {
 			const next = await uploadLoginBackground(accessToken, file);
 			setConfig(next);
+			onConfigChange?.(next);
 			setInfo("Background updated.");
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
@@ -169,6 +178,7 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 		try {
 			const next = await updateInstanceConfig(accessToken, { login_background_url: null });
 			setConfig(next);
+			onConfigChange?.(next);
 			setInfo("Background removed.");
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
@@ -184,6 +194,7 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 		try {
 			const next = await uploadLogo(accessToken, file);
 			setConfig(next);
+			onConfigChange?.(next);
 			setInfo("Logo updated.");
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
@@ -197,7 +208,9 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 		setError(null);
 		setInfo(null);
 		try {
-			await updateInstanceConfig(accessToken, { klipy_api_key: null });
+			const nextConfig = await updateInstanceConfig(accessToken, { klipy_api_key: null });
+			setConfig(nextConfig);
+			onConfigChange?.(nextConfig);
 			const next = await fetchIntegrationsStatus(accessToken);
 			setIntegrations(next);
 			setKlipyKeyDraft("");
@@ -214,16 +227,17 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 		setError(null);
 		setInfo(null);
 		try {
-			// Clearing wipes BOTH keys — leaving one half configured
+			// Clearing wipes BOTH keys, leaving one half configured
 			// produces a half-broken state where the engine refuses
 			// requests but the login HTML doesn't render the widget,
 			// so users hit captcha_required errors with nothing to
-			// solve.  Atomic clear keeps the state coherent.
+			// solve. Atomic clear keeps the state coherent.
 			const next = await updateInstanceConfig(accessToken, {
 				turnstile_site_key: null,
 				turnstile_secret_key: null,
 			});
 			setConfig(next);
+			onConfigChange?.(next);
 			const integ = await fetchIntegrationsStatus(accessToken);
 			setIntegrations(integ);
 			setTurnstileSiteDraft("");
@@ -243,6 +257,7 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 		try {
 			const next = await updateInstanceConfig(accessToken, { logo_url: null });
 			setConfig(next);
+			onConfigChange?.(next);
 			setInfo("Logo removed.");
 		} catch (err) {
 			setError(err instanceof Error ? err.message : String(err));
@@ -258,6 +273,8 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 		name.trim() !== (config.name ?? "") ||
 		tagline.trim() !== (config.login_tagline ?? "") ||
 		defaultSpaceId !== (config.default_space_id ?? "") ||
+		allowCommentEditWhenReply !== (config.allow_comment_edit_when_reply ?? "false") ||
+		allowEditForMinutes !== (config.allow_edit_for_minutes ?? "default") ||
 		klipyKeyDraft.trim() !== "" ||
 		turnstileSiteDraft.trim() !== currentTurnstileSite ||
 		turnstileSecretDraft.trim() !== "";
@@ -370,6 +387,42 @@ export function InstanceAdminSection({ accessToken, transport }: InstanceAdminSe
 					</select>
 					<p className="text-[10px] text-muted-foreground leading-snug">
 						New users are auto-joined to this space (and its public rooms) on signup. Only public spaces are listed.
+					</p>
+				</div>
+
+				<div className="space-y-1.5">
+					<Label htmlFor="instance-allow-comment-edit-when-reply">Allow comment edit when reply</Label>
+					<select
+						id="instance-allow-comment-edit-when-reply"
+						value={allowCommentEditWhenReply}
+						onChange={(e) => setAllowCommentEditWhenReply(e.target.value)}
+						className="flex h-9 w-full rounded-md border border-foreground/15 bg-transparent px-3 py-1 text-sm shadow-sm transition-colors hover:border-foreground/25 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:border-ring"
+					>
+						<option value="false">No</option>
+						<option value="true">Yes</option>
+					</select>
+					<p className="text-[10px] text-muted-foreground leading-snug">
+						Controls whether users are allowed to edit a comment after it has replies.
+					</p>
+				</div>
+
+				<div className="space-y-1.5">
+					<Label htmlFor="instance-allow-edit-for-minutes">Allow edit for</Label>
+					<select
+						id="instance-allow-edit-for-minutes"
+						value={allowEditForMinutes}
+						onChange={(e) => setAllowEditForMinutes(e.target.value)}
+						className="flex h-9 w-full rounded-md border border-foreground/15 bg-transparent px-3 py-1 text-sm shadow-sm transition-colors hover:border-foreground/25 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:border-ring"
+					>
+						<option value="default">Default (10 minutes)</option>
+						<option value="5">5 minutes</option>
+						<option value="15">15 minutes</option>
+						<option value="30">30 minutes</option>
+						<option value="60">1 hour</option>
+						<option value="infinite">Infinite</option>
+					</select>
+					<p className="text-[10px] text-muted-foreground leading-snug">
+						The time window after posting during which a user is allowed to edit their comment.
 					</p>
 				</div>
 

@@ -18,7 +18,7 @@ import { AdminManagementSection } from "@/components/AdminManagementSection";
 import { BannedUsersSection } from "@/components/BannedUsersSection";
 import { AccountSection } from "@/components/AccountSection";
 import { SessionsSection } from "@/components/SessionsSection";
-import { fetchAdminStatus } from "@/lib/instance";
+import { fetchAdminStatus, type InstanceConfig } from "@/lib/instance";
 import type { MatrixTransport } from "@/lib/matrix";
 import type { UserId } from "@koven/shared";
 
@@ -38,6 +38,7 @@ export interface AppSettingsSheetProps {
 	ignoredUsers?: Set<UserId>;
 	// Self-deactivation success → drop credentials in the parent.
 	onSignedOut?(): void;
+	onConfigChange?: (config: InstanceConfig) => void;
 }
 
 interface TabDef {
@@ -46,7 +47,7 @@ interface TabDef {
 	icon: LucideIcon;
 }
 
-export function AppSettingsSheet({ open, onOpenChange, settings, onSettingsChange, accessToken, transport, currentUserId, ignoredUsers, onSignedOut }: AppSettingsSheetProps) {
+export function AppSettingsSheet({ open, onOpenChange, settings, onSettingsChange, accessToken, transport, currentUserId, ignoredUsers, onSignedOut, onConfigChange }: AppSettingsSheetProps) {
 	const [activeTab, setActiveTab] = useState("appearance");
 	const [isAdmin, setIsAdmin] = useState(false);
 
@@ -180,7 +181,11 @@ export function AppSettingsSheet({ open, onOpenChange, settings, onSettingsChang
 
 							{activeTab === "instance" && accessToken && (
 								<div className="space-y-8">
-									<InstanceAdminSection accessToken={accessToken} transport={transport ?? null} />
+									<InstanceAdminSection
+										accessToken={accessToken}
+										transport={transport ?? null}
+										onConfigChange={onConfigChange}
+									/>
 									{currentUserId && (
 										<AdminManagementSection
 											accessToken={accessToken}

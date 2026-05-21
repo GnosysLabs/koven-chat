@@ -269,6 +269,8 @@ const ALLOWED_CONFIG_KEYS = new Set([
 	// is in SENSITIVE_CONFIG_KEYS below.
 	"turnstile_site_key",
 	"turnstile_secret_key",
+	"allow_comment_edit_when_reply",
+	"allow_edit_for_minutes",
 ]);
 
 // Keys that hold credentials / secrets.  Stripped from the public

@@ -78,6 +78,8 @@ import {
 	flagRoom,
 	recordModAction,
 	type AdminReport,
+	type InstanceConfig,
+	fetchInstanceConfig,
 } from "@/lib/instance";
 import { AdminList, type AdminSelection } from "@/components/AdminList";
 import { AdminPane } from "@/components/AdminPane";
@@ -157,6 +159,17 @@ export default function App() {
 		} : null;
 	}, [accounts, activeUserId]);
 	const [state, dispatch] = useReducer(reduce, initialState);
+	const [instanceConfig, setInstanceConfig] = useState<InstanceConfig>({});
+
+	useEffect(() => {
+		fetchInstanceConfig()
+			.then(setInstanceConfig)
+			.catch((err) => console.warn("App: fetchInstanceConfig failed", err));
+	}, []);
+
+	const handleConfigChange = useCallback((cfg: InstanceConfig) => {
+		setInstanceConfig(cfg);
+	}, []);
 	// In-app notification bell.  Polls /api/notifications/unread-count
 	// every ~30s; full list is fetched on bell open.  Hook is a no-op
 	// until creds resolve, so it's safe to mount unconditionally.
@@ -3148,6 +3161,7 @@ export default function App() {
 							dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
 						}
 					}}
+					instanceConfig={instanceConfig}
 				/>
 					);
 					return isMobileShell ? (
@@ -3677,6 +3691,7 @@ export default function App() {
 								setMeStack("root");
 								handleSignOut();
 							}}
+							onConfigChange={handleConfigChange}
 						/>
 					</PushSlot>
 				</div>
@@ -4233,6 +4248,7 @@ export default function App() {
 				currentUserId={creds.user_id}
 				ignoredUsers={ignoredUsers}
 				onSignedOut={handleSignOut}
+				onConfigChange={handleConfigChange}
 			/>
 			<NsfwAcceptDialog
 				open={!!nsfwGate}

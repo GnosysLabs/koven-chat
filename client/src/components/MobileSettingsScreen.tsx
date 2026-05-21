@@ -28,7 +28,7 @@ import { MobileLinkDeviceScreen } from "@/components/MobileLinkDeviceScreen";
 import { InstanceAdminSection } from "@/components/InstanceAdminSection";
 import { AdminManagementSection } from "@/components/AdminManagementSection";
 import { BannedUsersSection } from "@/components/BannedUsersSection";
-import { fetchAdminStatus } from "@/lib/instance";
+import { fetchAdminStatus, type InstanceConfig } from "@/lib/instance";
 import { fetchUserProfile, updateMyProfileData } from "@/lib/profile";
 import { hapticImpact } from "@/lib/haptics";
 import { isCapacitor } from "@/lib/nativeShell";
@@ -53,6 +53,7 @@ export interface MobileSettingsScreenProps {
 	onBack(): void;
 	onSignOut(): void;
 	onSignedOut(): void;
+	onConfigChange?: (config: InstanceConfig) => void;
 }
 
 type SubScreen =
@@ -73,6 +74,7 @@ export function MobileSettingsScreen({
 	onBack,
 	onSignOut,
 	onSignedOut,
+	onConfigChange,
 }: MobileSettingsScreenProps) {
 	const [sub, setSub] = useState<SubScreen | null>(null);
 	const [isAdmin, setIsAdmin] = useState(false);
@@ -283,6 +285,7 @@ export function MobileSettingsScreen({
 									<InstanceAdminSection
 										accessToken={accessToken}
 										transport={transport ?? null}
+										onConfigChange={onConfigChange}
 									/>
 								)}
 							</div>

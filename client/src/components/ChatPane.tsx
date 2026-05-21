@@ -164,6 +164,7 @@ import { useUrlPreview } from "@/lib/useUrlPreview";
 import type { UrlPreview } from "@/lib/matrix";
 import { useTransport } from "@/lib/transportContext";
 import { messageMentionsUser } from "@/lib/mention";
+import type { InstanceConfig } from "@/lib/instance";
 import {
 	Dialog,
 	DialogContent,
@@ -338,6 +339,7 @@ export interface ChatPaneProps {
 	// active room first and ChatPane's next mount sees the target.
 	scrollToEvent?: { roomId: RoomId; eventId: EventId } | null;
 	onScrolledToEvent?(): void;
+	instanceConfig?: InstanceConfig;
 }
 
 // Threshold for "this message is part of the same group as the
@@ -406,6 +408,7 @@ export function ChatPane({
 	onTypingChange,
 	scrollToEvent,
 	onScrolledToEvent,
+	instanceConfig,
 }: ChatPaneProps) {
 	// Reporting only works where the engine can read messages:
 	//   - DMs are 1-on-1 — there's no admin to forward a report to.
@@ -1347,6 +1350,7 @@ export function ChatPane({
 					}
 					onEdit={onEditMessage ? (eventId, body) => onEditMessage(eventId, body) : undefined}
 					hasReplies={messages.some(msg => msg.replyTo?.eventId === m.id)}
+					instanceConfig={instanceConfig}
 				/>
 			</div>
 		);
@@ -2220,6 +2224,7 @@ function MessageRowComponent({
 	pollAggregate, viewerUserId, onPollVote, onPollEnd,
 	roomId, onSendDmToSender, onBlockSender,
 	onOpenSenderProfile,
+	instanceConfig,
 }: {
 	message: Message;
 	avatarMxc: string | undefined;
@@ -2332,6 +2337,7 @@ function MessageRowComponent({
 	// because some embedding contexts (e.g. read-only previews) may
 	// not want clickable identities.
 	onOpenSenderProfile?(userId: UserId): void;
+	instanceConfig?: InstanceConfig;
 }) {
 	const [flagDialogOpen, setFlagDialogOpen] = useState(false);
 	const [isEditing, setIsEditing] = useState(false);
@@ -2377,10 +2383,23 @@ function MessageRowComponent({
 		}
 	};
 
-	const hasRepliesCheck = !!hasReplies;
+	const hasRepliesCheck = instanceConfig?.allow_comment_edit_when_reply === "true" ? false : !!hasReplies;
 	const isEditableKind = message.kind === "text" || message.kind === "emote";
-	const isWithinTenMins = Date.now() - message.timestamp < 10 * 60 * 1000;
-	const canEdit = !!onEdit && !!message.isSelf && isEditableKind && !message.pending && isWithinTenMins && !hasRepliesCheck;
+
+	let isWithinTimeLimit = true;
+	const timeLimitOption = instanceConfig?.allow_edit_for_minutes ?? "default";
+	if (timeLimitOption !== "infinite") {
+		let limitMinutes = 10;
+		if (timeLimitOption !== "default") {
+			const parsed = parseInt(timeLimitOption, 10);
+			if (!isNaN(parsed)) {
+				limitMinutes = parsed;
+			}
+		}
+		isWithinTimeLimit = Date.now() - message.timestamp < limitMinutes * 60 * 1000;
+	}
+
+	const canEdit = !!onEdit && !!message.isSelf && isEditableKind && !message.pending && isWithinTimeLimit && !hasRepliesCheck;
 	// Right-click context menu state.  Cursor-positioned, dismissed
 	// via the generic ContextMenu primitive's outside-mousedown handler.
 	const [ctxMenuPos, setCtxMenuPos] = useState<{ x: number; y: number } | null>(null);
@@ -3078,6 +3097,10 @@ function messageRowPropsEqual(
 	if (prev.viewerUserId !== next.viewerUserId) return false;
 	if (prev.roomId !== next.roomId) return false;
 	if (prev.hasReplies !== next.hasReplies) return false;
+	if (prev.instanceConfig !== next.instanceConfig) {
+		if (prev.instanceConfig?.allow_comment_edit_when_reply !== next.instanceConfig?.allow_comment_edit_when_reply) return false;
+		if (prev.instanceConfig?.allow_edit_for_minutes !== next.instanceConfig?.allow_edit_for_minutes) return false;
+	}
 	// `reactions` empty-case is reference-stable (EMPTY_REACTIONS), but
 	// the non-empty path can still receive a freshly-built array from
 	// the parent.  Length + per-element identity captures the cases
